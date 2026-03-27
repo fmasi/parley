@@ -79,47 +79,63 @@ class TranscriptionApp(rumps.App):
             on_error=self._on_pipeline_error,
         )
 
+        self._record_item = rumps.MenuItem("Start Recording", callback=self.start_recording)
         self.menu = [
-            rumps.MenuItem("Start Recording", callback=self.start_recording),
+            self._record_item,
             None,
             rumps.MenuItem("Settings", callback=self.open_settings),
             rumps.MenuItem("View Logs", callback=self.open_logs),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
+        log.info("TranscriptionApp ready — state: IDLE")
 
     def start_recording(self, sender):
+        log.info("start_recording triggered — prompting for name")
         recording_name = self._prompt_recording_name()
         if not recording_name:
+            log.info("Recording cancelled by user")
             return
 
         output_path = self._build_output_path(recording_name)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        log.info(f"Output path: {output_path}")
 
         self._capture = AudioCapture(output_path=output_path)
+        log.info("AudioCapture created — calling start()")
         self._capture.start()
+        log.info("AudioCapture.start() returned — state: RECORDING")
 
         self.title = ICON_RECORDING
-        self.menu["Start Recording"].title = "Stop Recording"
-        self.menu["Start Recording"].set_callback(self.stop_recording)
+        self._record_item.title = "Stop Recording"
+        self._record_item.set_callback(self.stop_recording)
 
         if self._cm.config.silence_detection_enabled:
+            log.info("Silence detection enabled — starting monitor")
             self._start_silence_monitor()
+        else:
+            log.info("Silence detection disabled")
 
-        log.info(f"Recording started: {output_path}")
+        log.info(f"Recording started: {output_path.name}")
 
     def stop_recording(self, sender):
+        log.info("stop_recording triggered — stopping capture")
         self._stop_silence_monitor()
 
         if self._capture:
+            log.info("Flushing audio buffer to disk...")
             audio_path = self._capture.stop()
             self._capture = None
+            log.info(f"Audio written: {audio_path.name} — queuing transcription")
             self.title = ICON_PROCESSING
             self._pipeline.on_recording_complete(audio_path)
-            log.info(f"Recording stopped, transcription queued: {audio_path.name}")
+            log.info("Transcription job enqueued — state: TRANSCRIBING")
+        else:
+            log.warning("stop_recording called but no active capture")
 
-        self.menu["Stop Recording"].title = "Start Recording"
-        self.menu["Stop Recording"].set_callback(self.start_recording)
+        self._record_item.title = "Start Recording"
+        self._record_item.set_callback(self.start_recording)
+        log.info("Menu reset to IDLE state")
 
     def _start_silence_monitor(self):
         cfg = self._cm.config
@@ -180,6 +196,7 @@ class TranscriptionApp(rumps.App):
 
     def _prompt_recording_name(self):
         suggested = self._calendar.get_current_event_title() or "Recording"
+        log.info(f"Prompting for recording name (suggested: '{suggested}')")
         response = rumps.Window(
             message="Recording name:",
             title="Start Recording",
@@ -197,4 +214,4 @@ class TranscriptionApp(rumps.App):
         date_folder = datetime.now().strftime("%Y-%m-%d")
         timestamp = datetime.now().strftime("%H%M%S")
         safe_name = name.replace(" ", "_").replace("/", "_")
-        return base / date_folder / f"{timestamp}_{safe_name}.m4a"
+        return base / date_folder / f"{timestamp}_{safe_name}.wav"
