@@ -1,11 +1,13 @@
-"""Captures microphone audio using AVAudioEngine (CoreAudio via PyObjC).
+"""Captures microphone audio using sounddevice (PortAudio / CoreAudio).
 
-Records from the default input device (built-in mic, AirPods, external mic, etc.).
-Note: System audio capture (meeting participants playing through speakers) requires
-ScreenCaptureKit which has no PyObjC bindings yet. Mic-only captures your voice
-and any audio playing through the room — sufficient for in-person and most remote meetings.
+sounddevice wraps PortAudio which talks directly to CoreAudio, so no
+PyObjC / ctypes juggling required. Records from the default input device
+(built-in mic, AirPods mic, external USB mic, etc.).
+
+Note: System audio capture (Zoom participants via headphones) requires a
+virtual loopback device (e.g. BlackHole). Without one, only the microphone
+input is captured.
 """
-import ctypes
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -14,104 +16,97 @@ import numpy as np
 
 from service.logger import get_logger
 
+log = get_logger("audio_capture")
+
+try:
+    import sounddevice as sd
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    sd = None  # type: ignore[assignment]
+    SOUNDDEVICE_AVAILABLE = False
+    log.warning("sounddevice not available — audio capture disabled")
+
 try:
     import soundfile as sf
     SOUNDFILE_AVAILABLE = True
 except ImportError:
     sf = None  # type: ignore[assignment]
     SOUNDFILE_AVAILABLE = False
-
-log = get_logger("audio_capture")
-
-try:
-    import objc
-    import AVFoundation as AVF
-    AVFOUNDATION_AVAILABLE = True
-except ImportError:
-    AVFOUNDATION_AVAILABLE = False
-    log.warning("AVFoundation not available — audio capture disabled")
+    log.warning("soundfile not available — cannot write audio files")
 
 
-SAMPLE_RATE = 16000
-BUFFER_SIZE = 4096
+SAMPLE_RATE = 16_000
+CHANNELS = 1
 
 
 class AudioCapture:
-    """Records mic + system audio simultaneously using AVAudioEngine.
+    """Records microphone input to a WAV file using sounddevice.
 
-    Interface contract (for future refactoring):
+    Interface:
         capture = AudioCapture(output_path)
-        capture.start()
-        # ... time passes ...
-        path = capture.stop()  # returns Path to written file
-
-    Internal methods prefixed with _ are replaceable without changing callers.
+        capture.start()          # non-blocking
+        path = capture.stop()    # blocks briefly, returns Path to WAV file
     """
 
     def __init__(self, output_path: Path):
         self._output_path = output_path
-        self._mic_chunks: List[np.ndarray] = []
+        self._chunks: List[np.ndarray] = []
         self._lock = threading.Lock()
-        self._engine: Optional[object] = None
+        self._stream: Optional[object] = None
 
     def start(self) -> None:
-        """Begin capturing audio. Non-blocking."""
-        self._mic_chunks.clear()
-        if AVFOUNDATION_AVAILABLE:
-            self._start_engine()
-        else:
-            log.error("Cannot start: AVFoundation not available")
+        """Begin capturing mic audio. Non-blocking."""
+        if not SOUNDDEVICE_AVAILABLE:
+            log.error("Cannot start: sounddevice not installed")
+            return
 
-    def stop(self) -> Path:
-        """Stop capture and write mixed audio to output_path."""
-        if AVFOUNDATION_AVAILABLE:
-            self._stop_engine()
-        return self._write_output()
+        self._chunks.clear()
 
-    def _start_engine(self) -> None:
-        self._engine = AVF.AVAudioEngine.alloc().init()
-        fmt = self._engine.inputNode().outputFormatForBus_(0)
-
-        def mic_tap(buffer, time):
+        def _callback(indata, frames, time, status):
+            if status:
+                log.warning(f"sounddevice status: {status}")
             with self._lock:
-                self._mic_chunks.append(self._buffer_to_numpy(buffer))
+                self._chunks.append(indata.copy())
 
-        self._engine.inputNode().installTapOnBus_bufferSize_format_block_(
-            0, BUFFER_SIZE, fmt, mic_tap
+        self._stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype="float32",
+            callback=_callback,
+        )
+        self._stream.start()
+        log.info(
+            f"Recording started — device: {sd.query_devices(kind='input')['name']}, "
+            f"{SAMPLE_RATE} Hz mono"
         )
 
-        log.info("Recording mic input only (system audio capture requires ScreenCaptureKit)")
-        error = objc.nil
-        success = self._engine.startAndReturnError_(error)
-        if not success:
-            log.error("AVAudioEngine failed to start — check Microphone permission in System Settings")
+    def stop(self) -> Path:
+        """Stop capture and write audio to output_path. Returns path to WAV file."""
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+            log.info("sounddevice stream stopped")
 
-    def _stop_engine(self) -> None:
-        if self._engine:
-            self._engine.inputNode().removeTapOnBus_(0)
-            self._engine.stop()
-
-    @staticmethod
-    def _buffer_to_numpy(buffer) -> np.ndarray:
-        """Extract float32 PCM samples from AVAudioPCMBuffer."""
-        frame_count = int(buffer.frameLength())
-        channel_data = buffer.floatChannelData()
-        if channel_data is None or frame_count == 0:
-            return np.array([], dtype=np.float32)
-        ptr = ctypes.cast(channel_data[0], ctypes.POINTER(ctypes.c_float))
-        return np.ctypeslib.as_array(ptr, shape=(frame_count,)).copy()
+        return self._write_output()
 
     def _write_output(self) -> Path:
         with self._lock:
-            audio = np.concatenate(self._mic_chunks) if self._mic_chunks else np.array([], dtype=np.float32)
+            audio = (
+                np.concatenate(self._chunks, axis=0)
+                if self._chunks
+                else np.zeros((SAMPLE_RATE, CHANNELS), dtype=np.float32)
+            )
 
-        if len(audio) == 0:
-            log.warning("No audio captured — writing silent file")
-            audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        duration = len(audio) / SAMPLE_RATE
+        if duration < 0.5:
+            log.warning("Very short recording (<0.5s) — writing anyway")
 
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
+
         if not SOUNDFILE_AVAILABLE:
-            raise RuntimeError("soundfile package is required to write audio files")
+            raise RuntimeError("soundfile is required to write audio files")
+
         sf.write(str(self._output_path), audio, SAMPLE_RATE)
-        log.info(f"Audio written: {self._output_path} ({len(audio)/SAMPLE_RATE:.1f}s)")
+        log.info(f"Audio written: {self._output_path.name} ({duration:.1f}s)")
         return self._output_path
