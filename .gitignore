@@ -10,6 +10,7 @@
 # Transcript outputs (generated, not source)
 *.txt
 *.srt
+!requirements*.txt
 
 # Python
 __pycache__/
