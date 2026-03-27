@@ -1,8 +1,9 @@
-"""Captures microphone + system audio using AVAudioEngine (CoreAudio via PyObjC).
+"""Captures microphone audio using AVAudioEngine (CoreAudio via PyObjC).
 
-Requires macOS 12.0+ and Screen Recording permission.
-System audio capture via outputNode tap works with Screen Recording permission
-granted at OS level — no virtual audio device (BlackHole) needed.
+Records from the default input device (built-in mic, AirPods, external mic, etc.).
+Note: System audio capture (meeting participants playing through speakers) requires
+ScreenCaptureKit which has no PyObjC bindings yet. Mic-only captures your voice
+and any audio playing through the room — sufficient for in-person and most remote meetings.
 """
 import ctypes
 import threading
@@ -50,14 +51,12 @@ class AudioCapture:
     def __init__(self, output_path: Path):
         self._output_path = output_path
         self._mic_chunks: List[np.ndarray] = []
-        self._sys_chunks: List[np.ndarray] = []
         self._lock = threading.Lock()
         self._engine: Optional[object] = None
 
     def start(self) -> None:
         """Begin capturing audio. Non-blocking."""
         self._mic_chunks.clear()
-        self._sys_chunks.clear()
         if AVFOUNDATION_AVAILABLE:
             self._start_engine()
         else:
@@ -77,26 +76,19 @@ class AudioCapture:
             with self._lock:
                 self._mic_chunks.append(self._buffer_to_numpy(buffer))
 
-        def sys_tap(buffer, time):
-            with self._lock:
-                self._sys_chunks.append(self._buffer_to_numpy(buffer))
-
         self._engine.inputNode().installTapOnBus_bufferSize_format_block_(
             0, BUFFER_SIZE, fmt, mic_tap
         )
-        self._engine.outputNode().installTapOnBus_bufferSize_format_block_(
-            0, BUFFER_SIZE, fmt, sys_tap
-        )
 
+        log.info("Recording mic input only (system audio capture requires ScreenCaptureKit)")
         error = objc.nil
         success = self._engine.startAndReturnError_(error)
         if not success:
-            log.error("AVAudioEngine failed to start — check Screen Recording permission")
+            log.error("AVAudioEngine failed to start — check Microphone permission in System Settings")
 
     def _stop_engine(self) -> None:
         if self._engine:
             self._engine.inputNode().removeTapOnBus_(0)
-            self._engine.outputNode().removeTapOnBus_(0)
             self._engine.stop()
 
     @staticmethod
@@ -109,31 +101,17 @@ class AudioCapture:
         ptr = ctypes.cast(channel_data[0], ctypes.POINTER(ctypes.c_float))
         return np.ctypeslib.as_array(ptr, shape=(frame_count,)).copy()
 
-    def _mix_streams(
-        self, mic: np.ndarray, sys: np.ndarray
-    ) -> np.ndarray:
-        """Mix two audio streams. Handles mismatched lengths and empty streams."""
-        if len(mic) == 0:
-            return sys
-        if len(sys) == 0:
-            return mic
-        min_len = min(len(mic), len(sys))
-        return ((mic[:min_len] + sys[:min_len]) / 2.0).astype(np.float32)
-
     def _write_output(self) -> Path:
         with self._lock:
-            mic = np.concatenate(self._mic_chunks) if self._mic_chunks else np.array([], dtype=np.float32)
-            sys = np.concatenate(self._sys_chunks) if self._sys_chunks else np.array([], dtype=np.float32)
+            audio = np.concatenate(self._mic_chunks) if self._mic_chunks else np.array([], dtype=np.float32)
 
-        mixed = self._mix_streams(mic, sys)
-
-        if len(mixed) == 0:
+        if len(audio) == 0:
             log.warning("No audio captured — writing silent file")
-            mixed = np.zeros(SAMPLE_RATE, dtype=np.float32)
+            audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
 
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
         if not SOUNDFILE_AVAILABLE:
             raise RuntimeError("soundfile package is required to write audio files")
-        sf.write(str(self._output_path), mixed, SAMPLE_RATE)
-        log.info(f"Audio written: {self._output_path} ({len(mixed)/SAMPLE_RATE:.1f}s)")
+        sf.write(str(self._output_path), audio, SAMPLE_RATE)
+        log.info(f"Audio written: {self._output_path} ({len(audio)/SAMPLE_RATE:.1f}s)")
         return self._output_path
