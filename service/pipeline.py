@@ -45,10 +45,19 @@ class Pipeline:
         self._queue.enqueue(job)
 
     def _run_transcription(self, job: TranscriptionJob) -> None:
-        """Worker: runs transcribe.py as subprocess."""
+        """Worker: runs transcribe.py as subprocess, logging its output."""
         cmd = self._build_transcribe_command(job.audio_path)
         log.info(f"Running: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            if line.strip():
+                log.info(f"[transcribe] {line}")
 
     def _build_transcribe_command(self, audio_path: Path) -> list[str]:
         return [

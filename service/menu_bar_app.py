@@ -207,6 +207,9 @@ class TranscriptionApp(rumps.App):
         try:
             import AppKit
             AppKit.NSApp.activateIgnoringOtherApps_(True)
+            # Also raise all existing windows (covers the alert NSPanel)
+            for win in AppKit.NSApp.windows():
+                win.orderFrontRegardless()
         except Exception as e:
             log.warning(f"Could not activate app: {e}")
         response = rumps.Window(
