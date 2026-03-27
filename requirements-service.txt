@@ -8,4 +8,5 @@ sounddevice>=0.4.0
 numpy>=1.24.0
 watchdog>=3.0.0
 torch>=2.0.0
+torchaudio>=2.0.0
 silero-vad>=4.0
