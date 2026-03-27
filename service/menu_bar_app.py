@@ -156,6 +156,11 @@ class TranscriptionApp(rumps.App):
             time.sleep(10)
 
     def _prompt_stop_on_silence(self):
+        try:
+            import AppKit
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
         response = rumps.alert(
             title="No Audio Detected",
             message="No speech detected for several minutes. Stop recording?",
@@ -197,6 +202,13 @@ class TranscriptionApp(rumps.App):
     def _prompt_recording_name(self):
         suggested = self._calendar.get_current_event_title() or "Recording"
         log.info(f"Prompting for recording name (suggested: '{suggested}')")
+        # Bring app to front so the dialog appears above other windows.
+        # Menu bar apps are background agents by default and won't auto-focus.
+        try:
+            import AppKit
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception as e:
+            log.warning(f"Could not activate app: {e}")
         response = rumps.Window(
             message="Recording name:",
             title="Start Recording",
