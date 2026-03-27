@@ -1,0 +1,30 @@
+# Audio files
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.ogg
+*.aac
+*.wma
+
+# Transcript outputs (generated, not source)
+*.txt
+*.srt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Conda
+.conda/
+
+# macOS
+.DS_Store
+
+# Secrets
+.env
+*.token
