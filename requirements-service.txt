@@ -1,0 +1,10 @@
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-AVFoundation>=10.0
+pyobjc-framework-EventKit>=10.0
+pyobjc-framework-ScreenSaver>=10.0
+rumps>=0.4.0
+soundfile>=0.12.0
+sounddevice>=0.4.0
+numpy>=1.24.0
+watchdog>=3.0.0
+torch>=2.0.0
