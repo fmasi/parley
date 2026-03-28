@@ -100,6 +100,7 @@ class TranscriptionApp(rumps.App):
             config=self._cm.config,
             on_rename_ready=self._on_rename_ready,
             on_error=self._on_pipeline_error,
+            on_warning=self._on_pipeline_warning,
         )
 
         self._record_item = rumps.MenuItem("Start Recording", callback=self.start_recording)
@@ -274,6 +275,14 @@ class TranscriptionApp(rumps.App):
         log.error(f"Pipeline error: {message}")
         rumps.notification(
             title="Transcription Failed",
+            subtitle="",
+            message=message,
+        )
+
+    def _on_pipeline_warning(self, message):
+        log.warning(f"Pipeline warning: {message}")
+        rumps.notification(
+            title="Audio Transcribe",
             subtitle="",
             message=message,
         )

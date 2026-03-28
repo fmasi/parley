@@ -270,3 +270,97 @@ def test_pipeline_does_not_override_env_when_no_hf_token(tmp_path):
     # so the subprocess inherits the parent environment naturally
     env = mock_run.call_args.kwargs.get("env")
     assert env is None
+
+
+def test_pipeline_warns_on_no_speakers_without_hf_token(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt")
+    warnings = []
+
+    with patch("service.pipeline.subprocess.run") as mock_run:
+        def fake_transcribe(*args, **kwargs):
+            audio_path = Path(args[0][3])
+            json_path = audio_path.with_suffix(".json")
+            json_path.write_text(json.dumps({
+                "segments": [{"start": 0, "end": 1, "text": "hello"}],
+                "metadata": {}
+            }))
+            return MagicMock(returncode=0, stdout="")
+        mock_run.side_effect = fake_transcribe
+
+        pipeline = Pipeline(
+            config=config,
+            on_rename_ready=MagicMock(),
+            on_warning=lambda msg: warnings.append(msg),
+        )
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        pipeline.on_recording_complete(audio_file)
+        pipeline._queue.wait_all()
+
+    assert len(warnings) == 1
+    assert "HuggingFace token" in warnings[0]
+
+
+def test_pipeline_no_warning_when_hf_token_set(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt", hf_token="hf_abc")
+    warnings = []
+
+    with patch("service.pipeline.subprocess.run") as mock_run:
+        def fake_transcribe(*args, **kwargs):
+            audio_path = Path(args[0][3])
+            json_path = audio_path.with_suffix(".json")
+            json_path.write_text(json.dumps({
+                "segments": [{"start": 0, "end": 1, "text": "hello"}],
+                "metadata": {}
+            }))
+            return MagicMock(returncode=0, stdout="")
+        mock_run.side_effect = fake_transcribe
+
+        pipeline = Pipeline(
+            config=config,
+            on_rename_ready=MagicMock(),
+            on_warning=lambda msg: warnings.append(msg),
+        )
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        pipeline.on_recording_complete(audio_file)
+        pipeline._queue.wait_all()
+
+    assert len(warnings) == 0
+
+
+def test_pipeline_no_warning_when_speakers_detected(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt")
+    warnings = []
+
+    with patch("service.pipeline.subprocess.run") as mock_run:
+        def fake_transcribe(*args, **kwargs):
+            audio_path = Path(args[0][3])
+            json_path = audio_path.with_suffix(".json")
+            json_path.write_text(json.dumps({
+                "segments": [{"start": 0, "end": 1, "text": "hello", "speaker": "SPEAKER_00"}],
+                "metadata": {}
+            }))
+            return MagicMock(returncode=0, stdout="")
+        mock_run.side_effect = fake_transcribe
+
+        pipeline = Pipeline(
+            config=config,
+            on_rename_ready=MagicMock(),
+            on_warning=lambda msg: warnings.append(msg),
+        )
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        pipeline.on_recording_complete(audio_file)
+        pipeline._queue.wait_all()
+
+    assert len(warnings) == 0
