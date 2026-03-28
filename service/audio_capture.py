@@ -44,7 +44,7 @@ class AudioCapture:
             FFMPEG,
             "-y",                          # overwrite without prompting
             "-f", "avfoundation",
-            "-i", ":default",              # default audio input device
+            "-i", ":0",                    # first/default audio input device
             "-ar", str(SAMPLE_RATE),
             "-ac", str(CHANNELS),
             str(self._output_path),

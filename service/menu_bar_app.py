@@ -122,20 +122,25 @@ class TranscriptionApp(rumps.App):
         log.info("stop_recording triggered — stopping capture")
         self._stop_silence_monitor()
 
-        if self._capture:
-            log.info("Flushing audio buffer to disk...")
-            audio_path = self._capture.stop()
+        try:
+            if self._capture:
+                log.info("Flushing audio buffer to disk...")
+                audio_path = self._capture.stop()
+                self._capture = None
+                log.info(f"Audio written: {audio_path.name} — queuing transcription")
+                self.title = ICON_PROCESSING
+                self._pipeline.on_recording_complete(audio_path)
+                log.info("Transcription job enqueued — state: TRANSCRIBING")
+            else:
+                log.warning("stop_recording called but no active capture")
+        except Exception as e:
+            log.error(f"Error stopping recording: {e}")
             self._capture = None
-            log.info(f"Audio written: {audio_path.name} — queuing transcription")
-            self.title = ICON_PROCESSING
-            self._pipeline.on_recording_complete(audio_path)
-            log.info("Transcription job enqueued — state: TRANSCRIBING")
-        else:
-            log.warning("stop_recording called but no active capture")
-
-        self._record_item.title = "Start Recording"
-        self._record_item.set_callback(self.start_recording)
-        log.info("Menu reset to IDLE state")
+            self.title = ICON_IDLE
+        finally:
+            self._record_item.title = "Start Recording"
+            self._record_item.set_callback(self.start_recording)
+            log.info("Menu reset to IDLE state")
 
     def _start_silence_monitor(self):
         cfg = self._cm.config
