@@ -60,12 +60,21 @@ def run_rename_dialog(json_path: Path) -> None:
 
     segments = data.get("segments", [])
     metadata = data.get("metadata", {})
-    audio_path = Path(metadata.get("audio_path", ""))
     fmt = metadata.get("output_format", "txt")
 
-    if not audio_path.exists():
-        log.error(f"Audio file not found for rename: {audio_path}")
-        _show_error(f"Audio file not found:\n{audio_path}\n\nCannot play samples.")
+    audio_paths = metadata.get("audio_paths", [])
+    # Build source→audio_path mapping for dual-stream recordings
+    audio_path_map = {}
+    if len(audio_paths) >= 2:
+        audio_path_map["remote"] = Path(audio_paths[0])
+        audio_path_map["local"] = Path(audio_paths[1])
+    elif len(audio_paths) == 1:
+        audio_path_map["remote"] = Path(audio_paths[0])
+        audio_path_map["local"] = Path(audio_paths[0])
+
+    if not any(p.exists() for p in audio_path_map.values()):
+        log.error(f"No audio files found for rename: {audio_paths}")
+        _show_error(f"Audio files not found:\n{audio_paths}\n\nCannot play samples.")
         return
 
     speaker_samples = find_speaker_samples(segments)
@@ -75,6 +84,8 @@ def run_rename_dialog(json_path: Path) -> None:
 
     name_map = {}
     for speaker, sample in sorted(speaker_samples.items()):
+        source = sample.get("source", "remote")
+        audio_path = audio_path_map.get(source, audio_path_map.get("remote"))
         name = _prompt_speaker(speaker, sample, str(audio_path))
         name_map[speaker] = name if name else speaker
 
@@ -95,42 +106,75 @@ def run_rename_dialog(json_path: Path) -> None:
 
 
 def _prompt_speaker(speaker: str, sample: dict, audio_path: str) -> Optional[str]:
-    """Show an NSAlert dialog asking user to name a speaker."""
+    """Show an NSAlert dialog asking user to name a speaker.
+
+    Dialog shows sample text immediately with a Play Sample button for
+    optional non-blocking audio playback.
+    """
     if not APPKIT_AVAILABLE:
         log.warning("AppKit not available — skipping GUI prompt for %s", speaker)
         return None
 
-    # Play audio sample
-    try:
-        _play_sample(audio_path, sample["start"], sample["end"])
-    except Exception as e:
-        log.warning(f"Could not play sample: {e}")
-
-    alert = NSAlert.alloc().init()
-    alert.setMessageText_(f"Who is {speaker}?")
-    alert.setInformationalText_(
-        f'Sample: "{sample["text"][:100]}"\n'
-        f"({sample['start']:.0f}s - {sample['end']:.0f}s)"
-    )
-    alert.setAlertStyle_(NSInformationalAlertStyle)
-    alert.addButtonWithTitle_("OK")
-    alert.addButtonWithTitle_("Skip")
+    # Pre-extract the audio clip so playback is instant when requested
+    sample_file = _extract_sample(audio_path, sample["start"], sample["end"])
 
     input_field = NSTextField.alloc().initWithFrame_(((0, 0), (300, 24)))
     input_field.setPlaceholderString_(speaker)
-    alert.setAccessoryView_(input_field)
 
-    response = alert.runModal()
-    entered = str(input_field.stringValue()).strip()
+    playback_proc = None
 
-    if response == 1000 and entered:  # OK clicked with text
-        return entered
-    return None
+    while True:
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Who is {speaker}?")
+        alert.setInformativeText_(
+            f'"{sample["text"][:120]}"\n'
+            f"({sample['start']:.0f}s – {sample['end']:.0f}s)"
+        )
+        alert.setAlertStyle_(NSInformationalAlertStyle)
+        alert.addButtonWithTitle_("OK")          # 1000
+        alert.addButtonWithTitle_("Skip")        # 1001
+        alert.addButtonWithTitle_("Play Sample") # 1002
+        alert.setAccessoryView_(input_field)
+        # Focus the text field so user can type immediately
+        alert.window().setInitialFirstResponder_(input_field)
+
+        response = alert.runModal()
+
+        if response == 1002:  # Play Sample
+            # Kill any previous playback, start new one non-blocking
+            if playback_proc and playback_proc.poll() is None:
+                playback_proc.terminate()
+            if sample_file:
+                playback_proc = subprocess.Popen(
+                    ["afplay", sample_file],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            continue  # Re-show the dialog
+
+        # Stop any ongoing playback on OK/Skip
+        if playback_proc and playback_proc.poll() is None:
+            playback_proc.terminate()
+
+        # Clean up temp file
+        if sample_file:
+            try:
+                Path(sample_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        entered = str(input_field.stringValue()).strip()
+        if response == 1000 and entered:  # OK clicked with text
+            return entered
+        return None
 
 
-def _play_sample(audio_path: str, start: float, end: float) -> None:
+def _extract_sample(audio_path: str, start: float, end: float) -> Optional[str]:
+    """Extract an audio clip to a temp file. Returns path or None on failure."""
     duration = end - start
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    try:
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -143,7 +187,14 @@ def _play_sample(audio_path: str, start: float, end: float) -> None:
             capture_output=True,
             check=True,
         )
-        subprocess.run(["afplay", tmp.name], check=True)
+        return tmp.name
+    except Exception as e:
+        log.warning(f"Could not extract sample: {e}")
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
 
 
 def _show_error(message: str) -> None:
@@ -153,5 +204,5 @@ def _show_error(message: str) -> None:
 
     alert = NSAlert.alloc().init()
     alert.setMessageText_("Transcription Service Error")
-    alert.setInformationalText_(message)
+    alert.setInformativeText_(message)
     alert.runModal()

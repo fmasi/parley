@@ -32,7 +32,7 @@ def test_full_pipeline_flow(tmp_path):
                 {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "text": "Hello"},
             ],
             "metadata": {
-                "audio_path": str(audio_path),
+                "audio_paths": [str(audio_path)],
                 "output_format": "txt",
             }
         }))
