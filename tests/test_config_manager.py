@@ -70,3 +70,18 @@ def test_config_update_persists_multiple_fields(tmp_path):
     assert cm2.config.output_format == "json"
     assert cm2.config.silence_timeout_minutes == 15
     assert cm2.config.log_level == "debug"
+
+
+def test_config_default_hf_token_is_empty(tmp_path):
+    from service.config_manager import ConfigManager
+    cm = ConfigManager(config_path=tmp_path / "config.json")
+    assert cm.config.hf_token == ""
+
+
+def test_config_saves_and_reloads_hf_token(tmp_path):
+    from service.config_manager import ConfigManager
+    path = tmp_path / "config.json"
+    cm = ConfigManager(config_path=path)
+    cm.update(hf_token="hf_test_token_123")
+    cm2 = ConfigManager(config_path=path)
+    assert cm2.config.hf_token == "hf_test_token_123"
