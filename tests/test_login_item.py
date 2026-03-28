@@ -54,3 +54,17 @@ def test_set_login_item_returns_false_when_sm_unavailable():
     with patch.object(li, "is_app_bundle", return_value=True), \
          patch.object(li, "_SM_AVAILABLE", False):
         assert li.set_login_item(True) is False
+
+
+def test_set_login_item_returns_false_on_failure():
+    """Returns False when SMAppService reports registration failed."""
+    mock_service = MagicMock()
+    mock_service.registerAndReturnError_.return_value = (False, "Permission denied")
+    mock_sma = MagicMock()
+    mock_sma.mainApp.return_value = mock_service
+
+    with patch.object(li, "is_app_bundle", return_value=True), \
+         patch.object(li, "_SM_AVAILABLE", True), \
+         patch.object(li, "SMAppService", mock_sma, create=True):
+        assert li.set_login_item(True) is False
+        mock_service.registerAndReturnError_.assert_called_once_with(None)
