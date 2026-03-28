@@ -80,7 +80,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .audio else { return }
+        // macOS 15 delivers microphone audio as .microphone, system audio as .audio.
+        guard type == .audio || type == .microphone else { return }
 
         // SCStream delivers Float32 interleaved PCM in CMSampleBuffer.
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
@@ -162,6 +163,11 @@ SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false)
         try stream.addStreamOutput(
             handler, type: .audio,
             sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
+        )
+        // Microphone audio arrives as .microphone on macOS 15+.
+        try stream.addStreamOutput(
+            handler, type: .microphone,
+            sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
         )
         // Screen output is required by SCStream; we discard the video frames in the handler.
         try stream.addStreamOutput(
