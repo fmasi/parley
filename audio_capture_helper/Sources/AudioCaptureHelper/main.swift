@@ -80,10 +80,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        // macOS 15 delivers microphone audio as .microphone, system audio as .audio.
+        // Accept system audio (.audio) and microphone (.microphone); discard video (.screen).
         guard type == .audio || type == .microphone else { return }
 
-        // SCStream delivers Float32 interleaved PCM in CMSampleBuffer.
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
         var lengthAtOffset = 0
@@ -126,77 +125,55 @@ do {
     exit(1)
 }
 
-// Request shareable content — triggers the permission prompt on first run.
+// Keep handler alive as a global so SCStream delegate/output refs are not deallocated.
+var captureHandler: AudioOutputHandler?
 var captureStream: SCStream?
-let ready = DispatchSemaphore(value: 0)
-var captureStartError: Error?
 
-SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { content, error in
-    if let error = error {
-        fputs("audio-capture-helper: ScreenCaptureKit permission denied: \(error)\n", stderr)
-        exit(2)
-    }
-    guard let display = content?.displays.first else {
+// Use async/await entry point for cleaner ScreenCaptureKit interaction.
+func startCapture() async throws {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+
+    guard let display = content.displays.first else {
         fputs("audio-capture-helper: no display found\n", stderr)
         exit(1)
     }
-
     let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
     let config = SCStreamConfiguration()
-    // Audio capture: system audio output + microphone (macOS 15.0+)
     config.capturesAudio = true
     config.captureMicrophone = true
     config.excludesCurrentProcessAudio = true
     config.sampleRate = Int(sampleRate)
     config.channelCount = 1
-    // SCStream requires a video configuration even for audio-only capture.
-    // Use the smallest valid size to minimise CPU overhead.
+    // Minimal video config — SCStream requires it even for audio-only.
     config.width = 2
     config.height = 2
-    config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 fps
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
     let handler = AudioOutputHandler(writer: writer)
+    captureHandler = handler  // prevent deallocation
+
     let stream = SCStream(filter: filter, configuration: config, delegate: handler)
 
-    do {
-        try stream.addStreamOutput(
-            handler, type: .audio,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
-        )
-        // Microphone audio arrives as .microphone on macOS 15+.
-        try stream.addStreamOutput(
-            handler, type: .microphone,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
-        )
-        // Screen output is required by SCStream; we discard the video frames in the handler.
-        try stream.addStreamOutput(
-            handler, type: .screen,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.screen")
-        )
-    } catch {
-        fputs("audio-capture-helper: addStreamOutput failed: \(error)\n", stderr)
-        exit(1)
-    }
+    try stream.addStreamOutput(
+        handler, type: .audio,
+        sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
+    )
+    try stream.addStreamOutput(
+        handler, type: .microphone,
+        sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
+    )
+    try stream.addStreamOutput(
+        handler, type: .screen,
+        sampleHandlerQueue: DispatchQueue(label: "audio-capture.screen")
+    )
 
     captureStream = stream
-    stream.startCapture { err in
-        captureStartError = err
-        ready.signal()
-    }
+
+    try await stream.startCapture()
 }
 
-ready.wait()
-if let err = captureStartError {
-    fputs("audio-capture-helper: startCapture failed: \(err)\n", stderr)
-    exit(1)
-}
-
-fputs("audio-capture-helper: recording → \(outputPath)\n", stderr)
-
-// Signal handlers for clean shutdown:
-// Python sends SIGTERM when the user stops recording.
-// We stop the stream, finalize the WAV, then exit 0.
+// Signal handlers for clean shutdown.
 let stopAndExit: @convention(c) (Int32) -> Void = { _ in
     captureStream?.stopCapture { _ in }
     writer.finalize()
@@ -205,5 +182,20 @@ let stopAndExit: @convention(c) (Int32) -> Void = { _ in
 signal(SIGTERM, stopAndExit)
 signal(SIGINT, stopAndExit)
 
-// Block this thread forever — audio arrives on a dispatch queue.
+// Launch capture on a Task, then keep the process alive via dispatchMain().
+Task {
+    do {
+        try await startCapture()
+        fputs("audio-capture-helper: recording → \(outputPath)\n", stderr)
+    } catch {
+        fputs("audio-capture-helper: capture failed: \(error)\n", stderr)
+        // Check if this is a permission error
+        let desc = "\(error)"
+        if desc.contains("permission") || desc.contains("denied") || desc.contains("notAuthorized") {
+            exit(2)
+        }
+        exit(1)
+    }
+}
+
 dispatchMain()
