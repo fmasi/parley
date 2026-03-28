@@ -1,5 +1,7 @@
 """Validation tests for packaging artifacts."""
+import os
 import plistlib
+import stat
 from pathlib import Path
 
 PACKAGING_DIR = Path(__file__).parent.parent / "packaging"
@@ -67,9 +69,41 @@ def test_launcher_uses_exec():
 
 
 def test_launcher_is_executable():
-    import os, stat
     st = (PACKAGING_DIR / "launcher.sh").stat()
     assert st.st_mode & stat.S_IXUSR
+
+
+def test_build_script_exists():
+    assert (PACKAGING_DIR / "build_app.sh").exists()
+
+
+def test_build_script_is_executable():
+    path = PACKAGING_DIR / "build_app.sh"
+    assert os.access(path, os.X_OK)
+
+
+def test_build_script_uses_set_euo_pipefail():
+    content = (PACKAGING_DIR / "build_app.sh").read_text()
+    assert "set -euo pipefail" in content
+
+
+def test_build_script_creates_app_structure():
+    """Checks the script creates the expected directory layout."""
+    content = (PACKAGING_DIR / "build_app.sh").read_text()
+    assert "Contents/MacOS" in content
+    assert "Contents/Resources" in content
+
+
+def test_build_script_copies_source_and_binary():
+    content = (PACKAGING_DIR / "build_app.sh").read_text()
+    assert "audio-capture-helper" in content
+    assert "service/" in content
+    assert "transcribe.py" in content
+
+
+def test_build_script_signs_bundle():
+    content = (PACKAGING_DIR / "build_app.sh").read_text()
+    assert "codesign" in content
 
 
 def _load_plist():
