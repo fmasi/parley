@@ -33,7 +33,9 @@ class Pipeline:
         self._on_error = on_error or (lambda msg: log.error(msg))
         self._queue = JobQueue(worker_fn=self._run_transcription)
 
-    def on_recording_complete(self, audio_path: Path) -> None:
+    def on_recording_complete(
+        self, audio_path: Path, mic_path: Path | None = None
+    ) -> None:
         """Call this when a recording finishes. Enqueues transcription job."""
         log.info(f"Recording complete, queuing transcription: {audio_path.name}")
         job = TranscriptionJob(
@@ -41,12 +43,13 @@ class Pipeline:
             output_format=self._config.output_format,
             on_complete=self._handle_complete,
             on_error=self._handle_error,
+            mic_path=mic_path,
         )
         self._queue.enqueue(job)
 
     def _run_transcription(self, job: TranscriptionJob) -> None:
         """Worker: runs transcribe.py as subprocess, logging its output."""
-        cmd = self._build_transcribe_command(job.audio_path)
+        cmd = self._build_transcribe_command(job)
         log.info(f"Running: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
@@ -60,13 +63,16 @@ class Pipeline:
         if result.returncode != 0:
             raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout)
 
-    def _build_transcribe_command(self, audio_path: Path) -> list[str]:
-        return [
+    def _build_transcribe_command(self, job: TranscriptionJob) -> list[str]:
+        cmd = [
             sys.executable,
             str(TRANSCRIBE_SCRIPT),
-            "-i", str(audio_path),
-            "-f", self._config.output_format,
+            "-i", str(job.audio_path),
         ]
+        if job.mic_path and job.mic_path.exists():
+            cmd += ["-i", str(job.mic_path)]
+        cmd += ["-f", self._config.output_format]
+        return cmd
 
     def _handle_complete(self, job: TranscriptionJob) -> None:
         json_path = job.audio_path.with_suffix(".json")

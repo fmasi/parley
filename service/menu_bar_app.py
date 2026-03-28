@@ -134,11 +134,13 @@ class TranscriptionApp(rumps.App):
         try:
             if self._capture:
                 log.info("Flushing audio buffer to disk...")
-                audio_path = self._capture.stop()
+                audio_paths = self._capture.stop()
                 self._capture = None
-                log.info(f"Audio written: {audio_path.name} — queuing transcription")
+                log.info(f"Audio written: {audio_paths.system.name} — queuing transcription")
                 self.title = ICON_PROCESSING
-                self._pipeline.on_recording_complete(audio_path)
+                self._pipeline.on_recording_complete(
+                    audio_paths.system, mic_path=audio_paths.mic
+                )
                 log.info("Transcription job enqueued — state: TRANSCRIBING")
             else:
                 log.warning("stop_recording called but no active capture")
