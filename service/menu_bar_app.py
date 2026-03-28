@@ -202,25 +202,9 @@ class TranscriptionApp(rumps.App):
     def _prompt_recording_name(self):
         suggested = self._calendar.get_current_event_title() or "Recording"
         log.info(f"Prompting for recording name (suggested: '{suggested}')")
-        # Bring app to front so the dialog appears above other windows.
-        # Menu bar apps are background agents and won't auto-focus.
-        # We schedule a repeated raise on a short timer because rumps.Window
-        # creates the NSPanel internally during .run() — we can't raise it before.
         try:
             import AppKit
-            import threading
-
-            def _keep_raising():
-                for _ in range(10):
-                    import time; time.sleep(0.1)
-                    try:
-                        AppKit.NSApp.activateIgnoringOtherApps_(True)
-                        for win in AppKit.NSApp.windows():
-                            win.orderFrontRegardless()
-                    except Exception:
-                        pass
-
-            threading.Thread(target=_keep_raising, daemon=True).start()
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
         except Exception as e:
             log.warning(f"Could not activate app: {e}")
 
