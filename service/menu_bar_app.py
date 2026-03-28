@@ -45,7 +45,7 @@ except ImportError:
                     text = ""
                 return R()
 
-from service.audio_capture import AudioCapture
+from service.audio_capture import AudioCapture, CaptureMode
 from service.calendar_lookup import CalendarLookup
 from service.config_manager import ConfigManager
 from service.logger import get_logger
@@ -59,6 +59,7 @@ log = get_logger("menu_bar_app")
 ICON_IDLE = "🎙"
 ICON_RECORDING = "🔴"
 ICON_PROCESSING = "⏳"
+ICON_DEGRADED = "🎙⚠"  # recording attempted but helper unavailable
 
 
 class TranscriptionApp(rumps.App):
@@ -103,9 +104,17 @@ class TranscriptionApp(rumps.App):
 
         self._capture = AudioCapture(output_path=output_path)
         log.info("AudioCapture created — calling start()")
-        self._capture.start()
-        log.info("AudioCapture.start() returned — state: RECORDING")
+        mode = self._capture.start()
 
+        if mode == CaptureMode.UNAVAILABLE:
+            log.warning("Audio capture unavailable — helper binary missing")
+            self._capture = None
+            self.title = ICON_DEGRADED
+            self._show_capture_warning()
+            self.title = ICON_IDLE
+            return
+
+        log.info("AudioCapture.start() returned — state: RECORDING")
         self.title = ICON_RECORDING
         self._record_item.title = "Stop Recording"
         self._record_item.set_callback(self.stop_recording)
@@ -184,6 +193,31 @@ class TranscriptionApp(rumps.App):
             subtitle=json_path.stem,
             message="Speaker names saved.",
         )
+
+    def _show_capture_warning(self):
+        """Alert the user that recording is unavailable (helper binary missing)."""
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        rumps.alert(
+            title="Audio Capture Unavailable",
+            message=(
+                "The audio capture helper binary is missing.\n\n"
+                "To enable recording:\n"
+                "1. Run: cd audio_capture_helper && bash build.sh\n"
+                "2. Grant 'Screen & System Audio Recording' in\n"
+                "   System Settings → Privacy & Security"
+            ),
+            ok="OK",
+        )
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
 
     def _on_pipeline_error(self, message):
         self.title = ICON_IDLE

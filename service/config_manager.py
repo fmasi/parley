@@ -14,6 +14,7 @@ class Config:
     output_format: str = "txt"
     launch_on_startup: bool = True
     log_level: str = "info"
+    suppress_capture_warning: bool = False
 
 
 class ConfigManager:
