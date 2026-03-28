@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.audio-transcribe.app</string>
+
+    <key>CFBundleName</key>
+    <string>Audio Transcribe</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Audio Transcribe</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+
+    <key>CFBundleExecutable</key>
+    <string>AudioTranscribe</string>
+
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Audio Transcribe needs Screen Recording permission to capture system audio from meetings.</string>
+
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Audio Transcribe needs microphone access to record your voice.</string>
+</dict>
+</plist>
