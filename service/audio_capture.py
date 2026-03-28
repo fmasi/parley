@@ -66,7 +66,13 @@ class AudioCapture:
         )
         self._log_thread.start()
 
-        log.info(f"Recording started — {SAMPLE_RATE} Hz mono via AVFoundation")
+        # Give ffmpeg 1 second to either start capturing or fail
+        import time
+        time.sleep(1)
+        if self._process.poll() is not None:
+            log.error(f"ffmpeg exited immediately with code {self._process.returncode} — check [ffmpeg] lines above")
+        else:
+            log.info(f"Recording started — {SAMPLE_RATE} Hz mono via AVFoundation")
 
     def stop(self) -> Path:
         """Stop capture and flush WAV file. Returns path to written file."""
@@ -102,4 +108,4 @@ class AudioCapture:
         for raw in self._process.stderr:
             line = raw.decode("utf-8", errors="replace").rstrip()
             if line:
-                log.debug(f"[ffmpeg] {line}")
+                log.info(f"[ffmpeg] {line}")
