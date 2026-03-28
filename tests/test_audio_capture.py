@@ -145,3 +145,10 @@ def test_stop_is_noop_when_not_started(tmp_path):
     ac = AudioCapture(output_path=out)
     result = ac.stop()
     assert result.system == out
+
+
+def test_mic_path_derivation(tmp_path):
+    """Verify AudioCapture derives mic path by appending _mic to the stem."""
+    from service.audio_capture import AudioCapture
+    ac = AudioCapture(output_path=tmp_path / "recording.wav")
+    assert ac._mic_path == tmp_path / "recording_mic.wav"
