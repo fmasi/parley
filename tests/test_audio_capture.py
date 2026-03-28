@@ -1,46 +1,47 @@
-import numpy as np
+"""Tests for service/audio_capture.py.
+
+AVFoundation is macOS-only; on other platforms the class degrades gracefully.
+Tests that require AVFoundation are marked with @pytest.mark.macos.
+"""
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-def test_audio_capture_creates_output_file(tmp_path):
+def test_audio_capture_instantiates(tmp_path):
+    """AudioCapture can be constructed on any platform."""
     from service.audio_capture import AudioCapture
-    output = tmp_path / "test_recording.m4a"
-    ac = AudioCapture(output_path=output)
-    with patch.object(ac, "_start_engine"), patch.object(ac, "_stop_engine"):
-        with patch.object(ac, "_write_output", return_value=output) as mock_write:
-            ac.start()
-            result = ac.stop()
-            mock_write.assert_called_once()
-    assert result == output
+    ac = AudioCapture(output_path=tmp_path / "out.wav")
+    assert ac is not None
 
 
-def test_audio_capture_mixes_two_streams(tmp_path):
+def test_audio_capture_start_noop_without_avfoundation(tmp_path):
+    """start() is a no-op (logs error) when AVFoundation is unavailable."""
     from service.audio_capture import AudioCapture
-    output = tmp_path / "mixed.m4a"
-    ac = AudioCapture(output_path=output)
-    mic = np.sin(np.linspace(0, 1, 16000)).astype(np.float32)
-    sys = np.cos(np.linspace(0, 1, 16000)).astype(np.float32)
-    mixed = ac._mix_streams(mic, sys)
-    assert len(mixed) == 16000
-    expected = (mic + sys) / 2.0
-    np.testing.assert_array_almost_equal(mixed, expected)
+    with patch("service.audio_capture.AVFOUNDATION_AVAILABLE", False):
+        ac = AudioCapture(output_path=tmp_path / "out.wav")
+        ac.start()  # Should not raise
+        assert ac._recorder is None
 
 
-def test_audio_capture_handles_mismatched_lengths(tmp_path):
+def test_audio_capture_stop_raises_when_no_output(tmp_path):
+    """stop() raises RuntimeError when no output file was produced."""
     from service.audio_capture import AudioCapture
-    ac = AudioCapture(output_path=tmp_path / "out.m4a")
-    mic = np.ones(10000, dtype=np.float32)
-    sys = np.ones(12000, dtype=np.float32)
-    mixed = ac._mix_streams(mic, sys)
-    assert len(mixed) == 10000  # truncates to shortest
+    ac = AudioCapture(output_path=tmp_path / "nonexistent.wav")
+    with pytest.raises(RuntimeError, match="did not produce output"):
+        ac.stop()
 
 
-def test_audio_capture_handles_missing_stream(tmp_path):
-    from service.audio_capture import AudioCapture
-    ac = AudioCapture(output_path=tmp_path / "out.m4a")
-    mic = np.ones(10000, dtype=np.float32)
-    mixed = ac._mix_streams(mic, np.array([], dtype=np.float32))
-    assert len(mixed) == 10000
-    np.testing.assert_array_equal(mixed, mic)
+@pytest.mark.macos
+def test_audio_capture_records_to_wav(tmp_path):
+    """start()/stop() round-trip with real AVFoundation writes a WAV file."""
+    from service.audio_capture import AudioCapture, AVFOUNDATION_AVAILABLE
+    if not AVFOUNDATION_AVAILABLE:
+        pytest.skip("AVFoundation not available")
+    import time
+    ac = AudioCapture(output_path=tmp_path / "rec.wav")
+    ac.start()
+    time.sleep(0.5)
+    result = ac.stop()
+    assert result.exists()
+    assert result.stat().st_size > 0

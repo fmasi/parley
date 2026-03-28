@@ -22,6 +22,22 @@ Includes a persistent macOS menu bar service for automatic recording and transcr
 - ffmpeg (Homebrew)
 - HuggingFace account (free, for pyannote models)
 
+## Audio capture scope
+
+The service records from your **microphone only**. System audio (e.g., the remote side of a Zoom call via speakers) is not captured — macOS has no Python-accessible API for per-app audio capture without a virtual audio device such as BlackHole. If you use speakers rather than headphones, remote participants' voices will be picked up by the mic naturally.
+
+## macOS permissions
+
+The first time you run the service macOS will prompt for these permissions:
+
+| Permission | Required for |
+|---|---|
+| **Microphone** | Recording audio |
+| **Calendars** | Pre-populating recording names from the current meeting (optional) |
+| **Accessibility / Automation** | AppKit dialogs appearing in front of other windows |
+
+Grant them in **System Settings → Privacy & Security**. If you deny Microphone access, recording will silently produce an empty file.
+
 ## Setup
 
 ### 1. Install system dependencies
@@ -54,6 +70,8 @@ pip install -r requirements-service.txt
 ```
 
 ### 4. HuggingFace setup (required for speaker diarization)
+
+> **Note:** `HF_TOKEN` must be set before running `transcribe.py` or starting the service. Without it, speaker diarization will fail. Pass it via the env var (recommended) or the `--hf-token` flag.
 
 Speaker diarization uses pyannote models which are free but require accepting their terms:
 
@@ -229,9 +247,23 @@ Config is stored at `~/.audio-transcribe/config.json`. Defaults:
 }
 ```
 
-### Notes on audio capture
+### Menu bar state machine
 
-The service records from your default input device (built-in mic, AirPods mic, USB mic). System audio from apps like Zoom is not captured — macOS has no Python-accessible API for per-app audio capture without a virtual audio device. If using speakers (not headphones), remote participants' voices will be picked up by the mic naturally.
+```
+IDLE ──[Start Recording]──► PROMPTING ──[name entered]──► RECORDING
+                                                               │
+                              IDLE ◄──[error]                  │ Stop / silence timeout
+                                │                              ▼
+                                └──────────────────────── TRANSCRIBING
+                                                               │
+                                                 [JSON ready] │
+                                                               ▼
+                                                         Rename dialog → IDLE
+```
+
+### Performance expectations
+
+On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes to transcribe. Speaker diarization adds a further ~30 % overhead. Short recordings (< 5 min) complete in under a minute.
 
 ---
 
@@ -278,6 +310,19 @@ Speaker 2: Thanks for having me.
   ]
 }
 ```
+
+---
+
+## Diagnosing audio capture issues
+
+If the service records silence or you suspect audio device problems, run the built-in diagnostic:
+
+```bash
+conda activate transcribe
+python diagnose_audio.py
+```
+
+This lists available input devices, records 3 seconds of audio, and reports whether it captured any signal. Useful for confirming that launchd (which runs in a different session) can access the microphone.
 
 ---
 

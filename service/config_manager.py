@@ -29,10 +29,13 @@ class ConfigManager:
 
     def _load(self) -> Config:
         if self._path.exists():
-            with open(self._path, encoding="utf-8") as f:
-                data = json.load(f)
-            valid = {f.name for f in fields(Config)}
-            return Config(**{k: v for k, v in data.items() if k in valid})
+            try:
+                with open(self._path, encoding="utf-8") as f:
+                    data = json.load(f)
+                valid = {f.name for f in fields(Config)}
+                return Config(**{k: v for k, v in data.items() if k in valid})
+            except json.JSONDecodeError:
+                pass  # Corrupted config — fall back to defaults
         return Config()
 
     def save(self):

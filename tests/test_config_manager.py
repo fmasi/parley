@@ -39,3 +39,34 @@ def test_config_creates_parent_dirs(tmp_path):
     cm = ConfigManager(config_path=nested)
     cm.save()
     assert nested.exists()
+
+
+def test_config_invalid_json_falls_back_to_defaults(tmp_path):
+    from service.config_manager import ConfigManager
+    path = tmp_path / "config.json"
+    path.write_text("not valid json {{{")
+    cm = ConfigManager(config_path=path)
+    # Should not raise; defaults should be used
+    assert cm.config.output_format == "txt"
+    assert cm.config.silence_timeout_minutes == 5
+
+
+def test_config_partial_file_merges_with_defaults(tmp_path):
+    import json
+    from service.config_manager import ConfigManager
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"output_format": "srt"}))
+    cm = ConfigManager(config_path=path)
+    assert cm.config.output_format == "srt"
+    assert cm.config.silence_timeout_minutes == 5  # default preserved
+
+
+def test_config_update_persists_multiple_fields(tmp_path):
+    from service.config_manager import ConfigManager
+    path = tmp_path / "config.json"
+    cm = ConfigManager(config_path=path)
+    cm.update(output_format="json", silence_timeout_minutes=15, log_level="debug")
+    cm2 = ConfigManager(config_path=path)
+    assert cm2.config.output_format == "json"
+    assert cm2.config.silence_timeout_minutes == 15
+    assert cm2.config.log_level == "debug"
