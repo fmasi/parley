@@ -5,6 +5,7 @@ Designed for modularity:
 - _run_transcription() is the worker function. Swap in parallel executor later.
 - on_rename_ready callback decouples GUI from pipeline logic.
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,11 +52,18 @@ class Pipeline:
         """Worker: runs transcribe.py as subprocess, logging its output."""
         cmd = self._build_transcribe_command(job)
         log.info(f"Running: {' '.join(cmd)}")
+
+        env = None
+        if self._config.hf_token:
+            env = os.environ.copy()
+            env["HF_TOKEN"] = self._config.hf_token
+
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
         )
         for line in result.stdout.splitlines():
             if line.strip():
