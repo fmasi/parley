@@ -25,6 +25,7 @@ from service.config_manager import ConfigManager
 from service.logger import get_logger
 
 log = get_logger("settings_window")
+from service.login_item import is_app_bundle, set_login_item
 
 
 class SettingsWindowController(NSObject):
@@ -55,7 +56,7 @@ class SettingsWindowController(NSObject):
 
     def _build_window(self):
         cfg = self._cm.config
-        rect = NSMakeRect(100, 100, 420, 320)
+        rect = NSMakeRect(100, 100, 420, 440)
         style = NSTitledWindowMask | NSClosableWindowMask | NSResizableWindowMask
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, NSBackingStoreBuffered, False
@@ -63,7 +64,7 @@ class SettingsWindowController(NSObject):
         self._window.setTitle_("Transcription Service — Settings")
 
         view = self._window.contentView()
-        y = 260
+        y = 380
 
         # Recording directory
         self._add_label(view, "Recording Directory:", (20, y))
@@ -95,11 +96,28 @@ class SettingsWindowController(NSObject):
 
         # Audio capture status (read-only)
         if HELPER_BINARY.exists():
-            capture_status = "Full audio capture: Active ✓  (mic + system audio)"
+            capture_status = "Full audio capture: Active \u2713  (mic + system audio)"
         else:
-            capture_status = "Full audio capture: Unavailable — run audio_capture_helper/build.sh ⚠"
+            capture_status = "Full audio capture: Unavailable — run audio_capture_helper/build.sh \u26a0"
         self._add_label(view, capture_status, (20, y))
-        y -= 30
+        y -= 40
+
+        # HuggingFace token
+        self._add_label(view, "HuggingFace Token (for speaker diarization):", (20, y))
+        self._hf_token_field = self._add_text_field(view, cfg.hf_token, (20, y - 28), width=380)
+        y -= 60
+
+        # Launch at login (only shown when running inside .app bundle)
+        if is_app_bundle():
+            self._add_label(view, "Launch at Login:", (20, y))
+            self._login_toggle = NSButton.alloc().initWithFrame_(NSMakeRect(160, y - 4, 120, 22))
+            self._login_toggle.setButtonType_(NSSwitchButton)
+            self._login_toggle.setTitle_("Enabled")
+            self._login_toggle.setState_(1 if cfg.launch_on_startup else 0)
+            view.addSubview_(self._login_toggle)
+        else:
+            self._login_toggle = None
+        y -= 40
 
         # Save button
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(310, 20, 90, 32))
@@ -119,7 +137,15 @@ class SettingsWindowController(NSObject):
             output_format=str(self._format_popup.titleOfSelectedItem()),
             silence_detection_enabled=bool(self._silence_toggle.state()),
             silence_timeout_minutes=timeout,
+            hf_token=str(self._hf_token_field.stringValue()).strip(),
         )
+
+        # Update login item if toggle is present (only in .app bundle)
+        if self._login_toggle is not None:
+            enabled = bool(self._login_toggle.state())
+            self._cm.update(launch_on_startup=enabled)
+            set_login_item(enabled)
+
         log.info("Settings saved")
         self._window.close()
 
