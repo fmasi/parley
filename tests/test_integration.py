@@ -21,7 +21,7 @@ def test_full_pipeline_flow(tmp_path):
     )
     rename_calls = []
 
-    def fake_subprocess_run(cmd, check=True):
+    def fake_subprocess_run(cmd, **kwargs):
         # Extract audio_path from command: ['python', 'transcribe.py', '-i', '<path>', '-f', '<fmt>']
         i_idx = cmd.index("-i")
         audio_path = Path(cmd[i_idx + 1])
@@ -36,6 +36,7 @@ def test_full_pipeline_flow(tmp_path):
                 "output_format": "txt",
             }
         }))
+        return MagicMock(returncode=0, stdout="")
 
     pipeline = Pipeline(
         config=config,
@@ -88,12 +89,13 @@ def test_sequential_jobs_run_in_order(tmp_path):
     config = Config(recording_directory=str(tmp_path), output_format="txt")
     completed = []
 
-    def fake_subprocess_run(cmd, check=True):
+    def fake_subprocess_run(cmd, **kwargs):
         time.sleep(0.02)
         i_idx = cmd.index("-i")
         audio_path = Path(cmd[i_idx + 1])
         json_path = audio_path.with_suffix(".json")
         json_path.write_text(json.dumps({"segments": [], "metadata": {}}))
+        return MagicMock(returncode=0, stdout="")
 
     pipeline = Pipeline(
         config=config,
