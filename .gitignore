@@ -37,3 +37,6 @@ com.audio-transcribe.plist
 # Swift build artifacts (binary is built locally via audio_capture_helper/build.sh)
 audio_capture_helper/.build/
 bin/audio-capture-helper
+
+# Build output
+dist/
