@@ -41,6 +41,31 @@ def test_info_plist_has_microphone_description():
     assert len(plist["NSMicrophoneUsageDescription"]) > 10
 
 
+def test_launcher_exists():
+    assert (PACKAGING_DIR / "launcher.sh").exists()
+
+
+def test_launcher_has_bash_shebang():
+    content = (PACKAGING_DIR / "launcher.sh").read_text()
+    assert content.startswith("#!/bin/bash")
+
+
+def test_launcher_sets_pythonhome():
+    content = (PACKAGING_DIR / "launcher.sh").read_text()
+    assert "PYTHONHOME" in content
+
+
+def test_launcher_sets_pythonpath():
+    content = (PACKAGING_DIR / "launcher.sh").read_text()
+    assert "PYTHONPATH" in content
+
+
+def test_launcher_uses_exec():
+    """exec replaces the shell so Python IS the app process for TCC."""
+    content = (PACKAGING_DIR / "launcher.sh").read_text()
+    assert "\nexec " in content
+
+
 def _load_plist():
     with open(PACKAGING_DIR / "Info.plist", "rb") as f:
         return plistlib.load(f)
