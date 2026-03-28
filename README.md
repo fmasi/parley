@@ -127,18 +127,16 @@ On first recording macOS will prompt for *"Screen & System Audio Recording"* per
 For the CLI tools only:
 
 ```bash
-pip install mlx-whisper "pyannote.audio>=3.1" torch torchaudio soundfile
+pip install -r requirements-transcribe.txt soundfile
 ```
 
 For the menu bar service (includes all CLI dependencies):
 
 ```bash
-pip install -r requirements-service.txt
+pip install -r requirements-service.txt -r requirements-transcribe.txt
 ```
 
 ### 5. HuggingFace setup (required for speaker diarization)
-
-> **Note:** `HF_TOKEN` must be set before running `transcribe.py` or starting the service. Without it, speaker diarization will fail. Pass it via the env var (recommended) or the `--hf-token` flag.
 
 Speaker diarization uses pyannote models which are free but require accepting their terms:
 
@@ -147,11 +145,13 @@ Speaker diarization uses pyannote models which are free but require accepting th
    - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
    - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 3. Create an access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-4. Add to your shell profile:
+
+For the **menu bar service**: enter your token in **Settings → HuggingFace Token**. It is saved to `~/.audio-transcribe/config.json`.
+
+For **CLI usage**: pass via env var or flag:
 
 ```bash
-echo 'export HF_TOKEN=your_token_here' >> ~/.zshrc
-source ~/.zshrc
+export HF_TOKEN=your_token_here   # or pass --hf-token flag
 ```
 
 After first run, models are cached locally and work fully offline.
@@ -239,48 +239,31 @@ The service runs persistently in the background as a macOS menu bar agent. It re
 
 ### Service Setup
 
-**1. Build the audio capture helper** (if not done in setup step 3 above):
+**Option A: Build the .app bundle (recommended)**
+
+The app runs as a proper macOS `.app` so Screen Recording permission persists across reboots.
 
 ```bash
-cd audio_capture_helper
-bash build.sh
+# Prerequisites: python.org Python 3.11 (not conda), relocatable-python, Swift binary built
+pip install relocatable-python
+cd audio_capture_helper && bash build.sh && cd ..
+bash packaging/build_app.sh
 ```
 
-**2. Create the plist from the template:**
+This produces `dist/AudioTranscribe.app` and `dist/AudioTranscribe.dmg`.
+
+Move the app to `/Applications`, then double-click to launch. macOS will prompt for *Screen & System Audio Recording* permission — grant it in **System Settings → Privacy & Security**. The permission is tied to the app's bundle ID and persists permanently.
+
+Enter your HuggingFace token in **Settings → HuggingFace Token**. Optionally enable **Launch at Login** in Settings.
+
+**Option B: Run from source (development)**
 
 ```bash
-cp com.audio-transcribe.plist.template com.audio-transcribe.plist
+conda activate transcribe
+python service/main.py
 ```
 
-**3. Edit `com.audio-transcribe.plist` and replace the three placeholders:**
-
-| Placeholder | Replace with |
-|---|---|
-| `REPLACE_WITH_REPO_PATH` | Full path to this repo, e.g. `/Users/you/Git/Transcriber` |
-| `REPLACE_WITH_USERNAME` | Your macOS username |
-| `REPLACE_WITH_HF_TOKEN` | Your HuggingFace token |
-
-**4. Create logs directory:**
-
-```bash
-mkdir -p ~/.audio-transcribe/logs
-```
-
-**5. Fix rumps notification center (one-time):**
-
-```bash
-/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string "rumps"' \
-  /opt/miniconda3/envs/transcribe/bin/Info.plist
-```
-
-**6. Install and start:**
-
-```bash
-cp com.audio-transcribe.plist ~/Library/LaunchAgents/com.audio-transcribe.plist
-launchctl load ~/Library/LaunchAgents/com.audio-transcribe.plist
-```
-
-The menu bar icon appears within a few seconds.
+The menu bar icon appears. Note: when running from Terminal, Screen Recording permission is granted to Terminal.app, not to the Python process directly — this works for development but will fail if launched as a background service.
 
 ### Service Usage
 
@@ -288,30 +271,20 @@ Click the menu bar icon to access:
 
 - **Start Recording** — prompts for a name (pre-filled from current calendar event if available), then starts dual-stream recording (system audio + mic)
 - **Stop Recording** — stops recording and queues transcription automatically
-- **Settings** — change recordings directory, output format, silence detection
+- **Settings** — change recordings directory, output format, silence detection, HuggingFace token, Launch at Login
 - **View Logs** — opens the log file
-- **Quit** — stops the service (launchd restarts it on next login)
+- **Quit** — stops the service
 
 When transcription completes, a native dialog prompts you to name each speaker.
 
 ### Service Management
 
-```bash
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.plist
-
-# Start
-launchctl load ~/Library/LaunchAgents/com.audio-transcribe.plist
-
-# Uninstall completely
-launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.plist
-rm ~/Library/LaunchAgents/com.audio-transcribe.plist
-```
+When running as a `.app` bundle, use the **Quit** menu item to stop. Launch at Login is managed from **Settings → Launch at Login**.
 
 ### Watch live logs
 
 ```bash
-tail -f ~/.audio-transcribe/logs/stderr.log
+tail -f ~/.audio-transcribe/logs/transcribe-service.log
 ```
 
 ### Service configuration
@@ -325,7 +298,8 @@ Config is stored at `~/.audio-transcribe/config.json`. Defaults:
   "silence_detection_enabled": true,
   "output_format": "txt",
   "launch_on_startup": true,
-  "log_level": "info"
+  "log_level": "info",
+  "hf_token": ""
 }
 ```
 
@@ -419,10 +393,11 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a full log of issues 
 |---|---|
 | `No module named mlx_whisper` | `conda activate transcribe` |
 | `ffmpeg not found` | `brew install ffmpeg` |
-| Diarization token error | Set `HF_TOKEN` and accept both model terms on HuggingFace |
+| Diarization token error | Set HuggingFace token in Settings (or `HF_TOKEN` env var for CLI); accept both model terms on HuggingFace |
+| No speakers detected | Set HuggingFace token in Settings — diarization requires it |
 | Slow first run | Whisper model (~1.6GB) downloads once then is cached |
-| Service not starting | Check `~/.audio-transcribe/logs/stderr.log` |
+| Service not starting | Check `~/.audio-transcribe/logs/transcribe-service.log` |
 | Dialog doesn't appear | Look behind other windows; it may be hidden |
-| `Failed to setup notification center` | Run the PlistBuddy command in step 5 of service setup |
-| Helper exits with code 2 | Grant "Screen & System Audio Recording" in System Settings > Privacy & Security |
+| Helper exits with code 2 | Grant "Screen & System Audio Recording" in System Settings → Privacy & Security — must be granted to `AudioTranscribe.app`, not Terminal |
+| TCC permission not persisting | Run as `.app` bundle (not from Terminal) so macOS ties the grant to the bundle ID |
 | 0-byte WAV files | Rebuild helper (`cd audio_capture_helper && bash build.sh`) — likely a stale binary |
