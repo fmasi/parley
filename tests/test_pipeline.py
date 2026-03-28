@@ -143,3 +143,79 @@ def test_pipeline_build_command_uses_sys_executable(tmp_path):
     )
     cmd = pipeline._build_transcribe_command(job)
     assert cmd[0] == sys.executable
+
+
+def test_pipeline_build_command_includes_mic_path(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+    from service.job_queue import TranscriptionJob
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt")
+    pipeline = Pipeline(config=config, on_rename_ready=MagicMock())
+
+    mic_file = tmp_path / "recording_mic.wav"
+    mic_file.write_bytes(b"fake mic audio")
+
+    job = TranscriptionJob(
+        audio_path=tmp_path / "recording.wav",
+        output_format="txt",
+        on_complete=MagicMock(),
+        on_error=MagicMock(),
+        mic_path=mic_file,
+    )
+    cmd = pipeline._build_transcribe_command(job)
+    # Should have two -i flags
+    i_indices = [idx for idx, v in enumerate(cmd) if v == "-i"]
+    assert len(i_indices) == 2
+    assert cmd[i_indices[1] + 1] == str(mic_file)
+
+
+def test_pipeline_build_command_skips_missing_mic_path(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+    from service.job_queue import TranscriptionJob
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt")
+    pipeline = Pipeline(config=config, on_rename_ready=MagicMock())
+
+    job = TranscriptionJob(
+        audio_path=tmp_path / "recording.wav",
+        output_format="txt",
+        on_complete=MagicMock(),
+        on_error=MagicMock(),
+        mic_path=tmp_path / "nonexistent_mic.wav",  # does not exist
+    )
+    cmd = pipeline._build_transcribe_command(job)
+    i_indices = [idx for idx, v in enumerate(cmd) if v == "-i"]
+    assert len(i_indices) == 1
+
+
+def test_pipeline_on_recording_complete_with_mic_path(tmp_path):
+    from service.pipeline import Pipeline
+    from service.config_manager import Config
+
+    config = Config(recording_directory=str(tmp_path), output_format="txt")
+    on_rename = MagicMock()
+
+    with patch("service.pipeline.subprocess.run") as mock_run:
+        def fake_transcribe(*args, **kwargs):
+            audio_path = Path(args[0][3])
+            json_path = audio_path.with_suffix(".json")
+            json_path.write_text(json.dumps({"segments": [], "metadata": {}}))
+            return MagicMock(returncode=0, stdout="")
+        mock_run.side_effect = fake_transcribe
+
+        pipeline = Pipeline(config=config, on_rename_ready=on_rename)
+        audio_file = tmp_path / "recording.wav"
+        audio_file.write_bytes(b"fake audio")
+        mic_file = tmp_path / "recording_mic.wav"
+        mic_file.write_bytes(b"fake mic audio")
+
+        pipeline.on_recording_complete(audio_file, mic_path=mic_file)
+        pipeline._queue.wait_all()
+
+    # Verify the subprocess command included the mic path
+    actual_cmd = mock_run.call_args[0][0]
+    i_indices = [idx for idx, v in enumerate(actual_cmd) if v == "-i"]
+    assert len(i_indices) == 2
+    assert str(mic_file) in actual_cmd

@@ -7,6 +7,7 @@ Includes a persistent macOS menu bar service for automatic recording and transcr
 ## Features
 
 - Transcribes audio files via CLI (`transcribe.py`)
+- Dual-stream audio capture — system audio and microphone are recorded as separate files for cleaner transcription and automatic Local/Remote speaker attribution
 - Speaker diarization — labels who said what
 - Interactive speaker renaming with audio playback (`rename_speakers.py`)
 - macOS menu bar service — records, transcribes, and prompts for speaker names automatically
@@ -17,10 +18,47 @@ Includes a persistent macOS menu bar service for automatic recording and transcr
 
 ## Requirements
 
-- macOS 14.0+ (Sonoma) with Apple Silicon (M1/M2/M3/M4/M5)
+- macOS 15.0+ (Sequoia) with Apple Silicon (M1/M2/M3/M4/M5)
 - Python 3.10+ in a conda environment
+- Xcode Command Line Tools (`xcode-select --install`)
 - ffmpeg (Homebrew)
 - HuggingFace account (free, for pyannote models)
+
+## Architecture
+
+Audio capture uses a **two-process design**:
+
+1. **Swift helper** (`audio_capture_helper/`) — uses ScreenCaptureKit to capture two separate audio streams: system audio (`.audio`) and microphone (`.microphone`). Writes two WAV files:
+   - `<base>.wav` — system/remote audio (sample rate follows config)
+   - `<base>_mic.wav` — local microphone (at device native rate, e.g. 48kHz with speakers, 24kHz with some headphones)
+2. **Python wrapper** (`audio_capture.py`) — thin subprocess wrapper that launches/stops the Swift helper via SIGTERM.
+3. **Transcriber** (`transcribe.py`) — accepts dual `-i` flags, transcribes each stream independently, tags segments as `Local Speaker X` / `Remote Speaker X`, and merges them chronologically.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Python (audio_capture.py)                              │
+│    └── subprocess: audio-capture-helper                 │
+│          ├── SCStream (.audio)       → base.wav         │
+│          └── SCStream (.microphone)  → base_mic.wav     │
+│                                                         │
+│  Python (transcribe.py -i base.wav -i base_mic.wav)     │
+│    ├── Whisper (base.wav)      → Remote Speaker 1, 2…   │
+│    ├── Whisper (base_mic.wav)  → Local Speaker 1, 2…    │
+│    └── merge chronologically   → final transcript       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Key technical decisions
+
+1. **macOS 15.0+ minimum** — `captureMicrophone` and `SCStreamOutputType.microphone` were added in macOS 15.0 (Sequoia), not 14.0 as initially assumed. The Package.swift uses `.macOS("15.0")` string syntax because the `.v15` enum requires swift-tools-version 6.0.
+
+2. **Two separate files, no mixing** — ScreenCaptureKit delivers `.audio` (system) and `.microphone` (mic) as separate streams at different sample rates. There is no Apple API to get a pre-mixed stream (confirmed via SDK headers through macOS 15.4 and macOS 26). Apps like Granola and Muesli also capture two streams. Keeping them separate gives Whisper cleaner audio and enables automatic Local vs Remote speaker attribution.
+
+3. **async/await + global handler** — The original callback-based approach produced 0-byte WAV files because: (a) the AudioOutputHandler was a local variable that got deallocated before frames arrived, and (b) the callback-based SCShareableContent/startCapture API didn't reliably deliver stream output callbacks. Switching to async/await and storing the handler as a global fixed both issues.
+
+4. **Native sample rates** — The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some headphones). The Swift code auto-detects the rate from the first CMSampleBuffer's format description and writes it to the WAV header on finalize(). No resampling is done — Whisper handles any sample rate.
+
+5. **No virtual audio devices needed** — Unlike BlackHole/Loopback solutions, ScreenCaptureKit captures system audio natively. Only a single macOS permission is required.
 
 ## Audio capture
 
@@ -28,7 +66,15 @@ The service captures **both your microphone and system audio** (Zoom, Teams, Goo
 
 - With **headphones**: your mic captures your voice; system audio captures the remote side
 - With **speakers**: both sides are captured by the mic naturally, and system audio also captures the remote side — both paths work
-- Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, …)
+- Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, ...)
+
+### Known constraints
+
+- macOS 15.0+ (Sequoia) required — earlier versions lack `SCStreamOutputType.microphone`
+- Swift CLI must be ad-hoc signed with `com.apple.security.screen-capture` entitlement
+- `.screen` output type must be registered even for audio-only capture (SCStream requirement)
+- The helper process must stay alive — Python sends SIGTERM to stop it gracefully
+- Exit code 2 from the helper = permission denied
 
 ## macOS permissions
 
@@ -36,11 +82,13 @@ The first time you run the service macOS will prompt for these permissions:
 
 | Permission | Required for |
 |---|---|
-| **Screen & System Audio Recording** | Recording both microphone and system audio via ScreenCaptureKit |
+| **Screen & System Audio Recording** | Recording both microphone and system audio via ScreenCaptureKit (covers both streams with a single permission) |
 | **Calendars** | Pre-populating recording names from the current meeting (optional) |
 | **Accessibility / Automation** | AppKit dialogs appearing in front of other windows |
 
-Grant them in **System Settings → Privacy & Security**. If Screen & System Audio Recording is denied the service will show a warning and recording will be unavailable.
+Permission is granted to the **host app** (Terminal.app or the menu bar app), not to the helper binary itself.
+
+Grant them in **System Settings > Privacy & Security**. If Screen & System Audio Recording is denied the helper exits with code 2 and the service will show a warning.
 
 ## Setup
 
@@ -61,13 +109,16 @@ conda activate transcribe
 
 ### 3. Build the audio capture helper
 
-This Swift component captures both microphone and system audio via ScreenCaptureKit:
+The Swift helper captures both microphone and system audio via ScreenCaptureKit. Requires Xcode Command Line Tools.
 
 ```bash
-cd audio_capture_helper && bash build.sh && cd ..
+cd audio_capture_helper
+bash build.sh
 ```
 
-On first recording macOS will prompt for *"Screen & System Audio Recording"* permission — grant it in System Settings → Privacy & Security.
+This produces `bin/audio-capture-helper` (ad-hoc signed with the screen-capture entitlement).
+
+On first recording macOS will prompt for *"Screen & System Audio Recording"* permission — grant it in System Settings > Privacy & Security.
 
 > **Requires Xcode command-line tools:** `xcode-select --install`
 
@@ -115,6 +166,14 @@ After first run, models are cached locally and work fully offline.
 python transcribe.py -i meeting.mp3
 ```
 
+### Dual-stream transcription (meeting with separate system/mic audio)
+
+```bash
+python transcribe.py -i meeting.wav -i meeting_mic.wav
+```
+
+This transcribes each stream independently, tags segments as `Local Speaker X` (from mic) and `Remote Speaker X` (from system audio), and merges them chronologically.
+
 ### Specify speakers and language
 
 ```bash
@@ -134,11 +193,11 @@ python transcribe.py -i call.wav -f json
 python transcribe.py -i audio.mp3 --no-diarize
 ```
 
-### CLI Reference — transcribe.py
+### CLI Reference -- transcribe.py
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--input` | `-i` | required | Path to audio file |
+| `--input` | `-i` | required | Path to audio file (pass twice for dual-stream) |
 | `--output` | `-o` | auto | Output file path |
 | `--format` | `-f` | `txt` | Output format: `txt`, `srt`, `json` |
 | `--speakers` | `-s` | auto | Number of speakers (omit to auto-detect) |
@@ -163,7 +222,7 @@ python rename_speakers.py -i meeting.json -a meeting.mp3
 The tool plays a ~10s audio sample per speaker, shows what they said, and asks for their name.
 Press Enter to keep the generic label, `r` to replay the clip.
 
-### CLI Reference — rename_speakers.py
+### CLI Reference -- rename_speakers.py
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
@@ -183,7 +242,8 @@ The service runs persistently in the background as a macOS menu bar agent. It re
 **1. Build the audio capture helper** (if not done in setup step 3 above):
 
 ```bash
-cd audio_capture_helper && bash build.sh && cd ..
+cd audio_capture_helper
+bash build.sh
 ```
 
 **2. Create the plist from the template:**
@@ -226,7 +286,7 @@ The menu bar icon appears within a few seconds.
 
 Click the menu bar icon to access:
 
-- **Start Recording** — prompts for a name (pre-filled from current calendar event if available), then starts mic recording
+- **Start Recording** — prompts for a name (pre-filled from current calendar event if available), then starts dual-stream recording (system audio + mic)
 - **Stop Recording** — stops recording and queues transcription automatically
 - **Settings** — change recordings directory, output format, silence detection
 - **View Logs** — opens the log file
@@ -272,20 +332,20 @@ Config is stored at `~/.audio-transcribe/config.json`. Defaults:
 ### Menu bar state machine
 
 ```
-IDLE ──[Start Recording]──► PROMPTING ──[name entered]──► RECORDING
-                                                               │
-                              IDLE ◄──[error]                  │ Stop / silence timeout
-                                │                              ▼
-                                └──────────────────────── TRANSCRIBING
-                                                               │
-                                                 [JSON ready] │
-                                                               ▼
-                                                         Rename dialog → IDLE
+IDLE --[Start Recording]--> PROMPTING --[name entered]--> RECORDING
+                                                               |
+                              IDLE <--[error]                  | Stop / silence timeout
+                                |                              v
+                                +------------------------ TRANSCRIBING
+                                                               |
+                                                 [JSON ready]  |
+                                                               v
+                                                         Rename dialog --> IDLE
 ```
 
 ### Performance expectations
 
-On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes to transcribe. Speaker diarization adds a further ~30 % overhead. Short recordings (< 5 min) complete in under a minute.
+On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes to transcribe. Speaker diarization adds a further ~30% overhead. Short recordings (< 5 min) complete in under a minute.
 
 ---
 
@@ -294,8 +354,8 @@ On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 3
 ### Plain text (default)
 
 ```
-[00:00:02] Speaker 1: Good morning, thanks for joining.
-[00:00:05] Speaker 2: Thanks for having me.
+[00:00:02] Remote Speaker 1: Good morning, thanks for joining.
+[00:00:05] Local Speaker 1: Thanks for having me.
 ```
 
 ### SRT
@@ -303,11 +363,11 @@ On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 3
 ```
 1
 00:00:02,000 --> 00:00:04,500
-Speaker 1: Good morning, thanks for joining.
+Remote Speaker 1: Good morning, thanks for joining.
 
 2
 00:00:05,100 --> 00:00:06,800
-Speaker 2: Thanks for having me.
+Local Speaker 1: Thanks for having me.
 ```
 
 ### JSON
@@ -315,8 +375,9 @@ Speaker 2: Thanks for having me.
 ```json
 {
   "metadata": {
-    "audio_file": "meeting.mp3",
-    "audio_path": "/full/path/to/meeting.mp3",
+    "audio_file": "meeting.wav",
+    "audio_path": "/full/path/to/meeting.wav",
+    "mic_file": "meeting_mic.wav",
     "language": "en",
     "num_speakers": 2,
     "diarization": true,
@@ -326,7 +387,7 @@ Speaker 2: Thanks for having me.
     {
       "start": 2.0,
       "end": 4.5,
-      "speaker": "Speaker 1",
+      "speaker": "Remote Speaker 1",
       "text": "Good morning, thanks for joining."
     }
   ]
@@ -362,4 +423,6 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a full log of issues 
 | Slow first run | Whisper model (~1.6GB) downloads once then is cached |
 | Service not starting | Check `~/.audio-transcribe/logs/stderr.log` |
 | Dialog doesn't appear | Look behind other windows; it may be hidden |
-| `Failed to setup notification center` | Run the PlistBuddy command in step 4 of service setup |
+| `Failed to setup notification center` | Run the PlistBuddy command in step 5 of service setup |
+| Helper exits with code 2 | Grant "Screen & System Audio Recording" in System Settings > Privacy & Security |
+| 0-byte WAV files | Rebuild helper (`cd audio_capture_helper && bash build.sh`) — likely a stale binary |
