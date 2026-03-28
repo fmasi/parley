@@ -49,10 +49,10 @@ fi
 #   See: https://github.com/gregneagle/relocatable-python
 #   Verify exact CLI invocation against their docs — syntax may differ.
 echo "--- Creating relocatable Python (this takes a few minutes) ---"
+# Note: --pip-requirements can be specified multiple times (argparse action=append)
 python3 -m relocatable_python \
     --destination "$PYTHON_DEST" \
     --python-version 3.11.9 \
-    # Note: --pip-requirements can be specified multiple times (argparse action=append)
     --pip-requirements "$PROJECT_ROOT/requirements-service.txt" \
     --pip-requirements "$PROJECT_ROOT/requirements-transcribe.txt"
 
