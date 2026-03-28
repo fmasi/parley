@@ -23,9 +23,9 @@ except ImportError:
 from service.audio_capture import HELPER_BINARY
 from service.config_manager import ConfigManager
 from service.logger import get_logger
+from service.login_item import is_app_bundle, set_login_item
 
 log = get_logger("settings_window")
-from service.login_item import is_app_bundle, set_login_item
 
 
 class SettingsWindowController(NSObject):
@@ -132,18 +132,21 @@ class SettingsWindowController(NSObject):
         except ValueError:
             timeout = 5
 
-        self._cm.update(
+        enabled = bool(self._login_toggle.state()) if self._login_toggle is not None else None
+
+        update_kwargs = dict(
             recording_directory=str(self._dir_field.stringValue()),
             output_format=str(self._format_popup.titleOfSelectedItem()),
             silence_detection_enabled=bool(self._silence_toggle.state()),
             silence_timeout_minutes=timeout,
             hf_token=str(self._hf_token_field.stringValue()).strip(),
         )
+        if enabled is not None:
+            update_kwargs["launch_on_startup"] = enabled
 
-        # Update login item if toggle is present (only in .app bundle)
-        if self._login_toggle is not None:
-            enabled = bool(self._login_toggle.state())
-            self._cm.update(launch_on_startup=enabled)
+        self._cm.update(**update_kwargs)
+
+        if enabled is not None:
             set_login_item(enabled)
 
         log.info("Settings saved")
