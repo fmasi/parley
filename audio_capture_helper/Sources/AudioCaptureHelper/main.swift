@@ -80,8 +80,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        // Accept system audio (.audio) and microphone (.microphone); discard video (.screen).
-        guard type == .audio || type == .microphone else { return }
+        // Only write .audio frames — with captureMicrophone=true, the mic is already
+        // mixed into the .audio stream at the configured sample rate.
+        guard type == .audio else { return }
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
@@ -159,10 +160,7 @@ func startCapture() async throws {
         handler, type: .audio,
         sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
     )
-    try stream.addStreamOutput(
-        handler, type: .microphone,
-        sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
-    )
+    // .screen output is required by SCStream even for audio-only capture.
     try stream.addStreamOutput(
         handler, type: .screen,
         sampleHandlerQueue: DispatchQueue(label: "audio-capture.screen")
