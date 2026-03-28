@@ -204,6 +204,9 @@ class TranscriptionApp(rumps.App):
         log.info(f"Prompting for recording name (suggested: '{suggested}')")
         try:
             import AppKit
+            # Switch to Regular policy so macOS routes keyboard events to this app.
+            # Accessory (menu-bar-only) apps don't receive keyboard focus by default.
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
             AppKit.NSApp.activateIgnoringOtherApps_(True)
         except Exception as e:
             log.warning(f"Could not activate app: {e}")
@@ -216,6 +219,11 @@ class TranscriptionApp(rumps.App):
             cancel="Cancel",
             dimensions=(300, 24),
         ).run()
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
         if response.clicked == 1 and response.text.strip():
             return response.text.strip()
         return None

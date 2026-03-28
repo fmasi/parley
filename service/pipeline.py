@@ -50,7 +50,6 @@ class Pipeline:
         log.info(f"Running: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
-            check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -58,6 +57,8 @@ class Pipeline:
         for line in result.stdout.splitlines():
             if line.strip():
                 log.info(f"[transcribe] {line}")
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout)
 
     def _build_transcribe_command(self, audio_path: Path) -> list[str]:
         return [
