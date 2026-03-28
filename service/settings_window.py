@@ -152,8 +152,8 @@ class SettingsWindowController(NSObject):
         log.info("Settings saved")
         self._window.close()
 
-    def _add_label(self, view, text, pos):
-        label = NSTextField.alloc().initWithFrame_(NSMakeRect(pos[0], pos[1], 220, 20))
+    def _add_label(self, view, text, pos, width=380):
+        label = NSTextField.alloc().initWithFrame_(NSMakeRect(pos[0], pos[1], width, 20))
         label.setStringValue_(text)
         label.setEditable_(False)
         label.setBezeled_(False)
