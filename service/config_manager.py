@@ -15,6 +15,7 @@ class Config:
     launch_on_startup: bool = True
     log_level: str = "info"
     suppress_capture_warning: bool = False
+    hf_token: str = ""
 
 
 class ConfigManager:

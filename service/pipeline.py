@@ -5,6 +5,8 @@ Designed for modularity:
 - _run_transcription() is the worker function. Swap in parallel executor later.
 - on_rename_ready callback decouples GUI from pipeline logic.
 """
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,10 +29,12 @@ class Pipeline:
         config: Config,
         on_rename_ready: Callable[[Path], None],
         on_error: Optional[Callable[[str], None]] = None,
+        on_warning: Optional[Callable[[str], None]] = None,
     ):
         self._config = config
         self._on_rename_ready = on_rename_ready
         self._on_error = on_error or (lambda msg: log.error(msg))
+        self._on_warning = on_warning or (lambda msg: log.warning(msg))
         self._queue = JobQueue(worker_fn=self._run_transcription)
 
     def on_recording_complete(
@@ -51,11 +55,18 @@ class Pipeline:
         """Worker: runs transcribe.py as subprocess, logging its output."""
         cmd = self._build_transcribe_command(job)
         log.info(f"Running: {' '.join(cmd)}")
+
+        env = None
+        if self._config.hf_token:
+            env = os.environ.copy()
+            env["HF_TOKEN"] = self._config.hf_token
+
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
         )
         for line in result.stdout.splitlines():
             if line.strip():
@@ -78,9 +89,30 @@ class Pipeline:
         json_path = job.audio_path.with_suffix(".json")
         if json_path.exists():
             log.info(f"Transcription complete: {json_path.name}")
+            self._check_diarization(json_path)
             self._on_rename_ready(json_path)
         else:
             self._on_error(f"Transcription finished but JSON not found: {json_path}")
+
+    def _check_diarization(self, json_path: Path) -> None:
+        """Warn if no speakers detected and no HF token configured."""
+        if self._config.hf_token:
+            return
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+            speakers = {
+                s.get("speaker")
+                for s in data.get("segments", [])
+                if s.get("speaker")
+            }
+            if not speakers:
+                self._on_warning(
+                    "No speakers detected. Set a HuggingFace token in Settings "
+                    "to enable speaker diarization."
+                )
+        except (json.JSONDecodeError, KeyError, OSError):
+            pass
 
     def _handle_error(self, job: TranscriptionJob) -> None:
         msg = f"Transcription failed for {job.audio_path.name}: {job.error}"
