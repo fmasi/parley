@@ -48,6 +48,7 @@ def find_speaker_samples(segments: list[dict], sample_duration: float = 10.0) ->
                 "start": seg["start"],
                 "end": min(seg["start"] + sample_duration, seg["end"]),
                 "text": seg["text"],
+                "source": seg.get("source"),
             }
     return speakers
 
@@ -174,8 +175,8 @@ def main():
     # Resolve audio path: flag > JSON metadata > error
     if args.audio:
         audio_path = Path(args.audio)
-    elif metadata.get("audio_path"):
-        audio_path = Path(metadata["audio_path"])
+    elif metadata.get("audio_paths"):
+        audio_path = Path(metadata["audio_paths"][0])
     else:
         print("Error: audio file not specified and not found in JSON metadata.")
         print("Pass it with --audio.")

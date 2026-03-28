@@ -56,6 +56,28 @@ from service.silence_detector import SilenceDetector
 
 log = get_logger("menu_bar_app")
 
+# Helper to dispatch a Python callable to the main thread via ObjC runtime.
+try:
+    import objc
+    from Foundation import NSObject as _NSObject
+
+    class _MainThreadHelper(_NSObject):
+        callback = objc.ivar()
+
+        def invoke_(self, _sender):
+            if self.callback:
+                self.callback()
+except ImportError:
+    # Fallback: call directly (tests / environments without PyObjC)
+    class _MainThreadHelper:  # type: ignore
+        callback = None
+        def alloc(self): return self
+        def init(self): return self
+        def performSelectorOnMainThread_withObject_waitUntilDone_(self, *a):
+            if self.callback:
+                self.callback()
+
+
 ICON_IDLE = "🎙"
 ICON_RECORDING = "🔴"
 ICON_PROCESSING = "⏳"
@@ -187,9 +209,35 @@ class TranscriptionApp(rumps.App):
             self.stop_recording(None)
 
     def _on_rename_ready(self, json_path):
+        """Called from worker thread — dispatch to main thread for AppKit UI."""
         self.title = ICON_IDLE
         log.info(f"Transcription complete, launching rename dialog: {json_path.name}")
+
+        # AppKit UI (NSAlert/NSWindow) must run on the main thread.
+        # Use a helper NSObject to dispatch via performSelectorOnMainThread.
+        helper = _MainThreadHelper.alloc().init()
+        helper.callback = lambda: self._run_rename_dialog(json_path)
+        helper.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "invoke:", None, False
+        )
+
+    def _run_rename_dialog(self, json_path):
+        """Runs on main thread — safe to create AppKit UI."""
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception as e:
+            log.warning(f"Could not activate app for rename dialog: {e}")
+
         run_rename_dialog(json_path)
+
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
+
         rumps.notification(
             title="Transcription Complete",
             subtitle=json_path.stem,

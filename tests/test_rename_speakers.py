@@ -62,6 +62,20 @@ def test_find_speaker_samples_empty():
     assert find_speaker_samples([]) == {}
 
 
+def test_find_speaker_samples_preserves_source(dual_stream_segments):
+    from rename_speakers import find_speaker_samples
+    samples = find_speaker_samples(dual_stream_segments)
+    assert samples["Local Speaker"]["source"] == "local"
+    assert samples["Remote Speaker"]["source"] == "remote"
+
+
+def test_find_speaker_samples_source_none_when_missing():
+    from rename_speakers import find_speaker_samples
+    segs = [{"start": 0.0, "end": 3.0, "speaker": "Speaker 1", "text": "hi"}]
+    samples = find_speaker_samples(segs)
+    assert samples["Speaker 1"]["source"] is None
+
+
 # ---------------------------------------------------------------------------
 # apply_names
 # ---------------------------------------------------------------------------
@@ -137,9 +151,9 @@ def test_main_renames_and_writes_txt(tmp_path, sample_json_transcript, sample_se
     # Create a fake audio file referenced by the JSON
     audio = tmp_path / "meeting.wav"
     audio.write_bytes(b"fake")
-    # Patch the audio_path in the JSON metadata to point to our fake file
+    # Patch audio_paths in JSON metadata to point to our fake file
     data = json.loads(sample_json_transcript.read_text())
-    data["metadata"]["audio_path"] = str(audio)
+    data["metadata"]["audio_paths"] = [str(audio)]
     sample_json_transcript.write_text(json.dumps(data))
 
     with patch("rename_speakers.find_speaker_samples") as mock_samples, \
@@ -176,21 +190,180 @@ def test_main_no_speakers_exits(tmp_path, sample_json_transcript):
     # Remove all speaker labels so find_speaker_samples returns empty
     for seg in data["segments"]:
         seg["speaker"] = "Unknown"
-    data["metadata"]["audio_path"] = str(audio)
+    data["metadata"]["audio_paths"] = [str(audio)]
     sample_json_transcript.write_text(json.dumps(data))
 
     with patch("sys.argv", ["rename_speakers.py", "-i", str(sample_json_transcript)]):
         with pytest.raises(SystemExit):
             main()
+
+
+def test_rename_dialog_reads_transcribe_metadata_format(tmp_path):
+    """Contract test: rename_dialog must correctly parse metadata as written by transcribe.py."""
+    from service.rename_dialog import run_rename_dialog
+
+    audio = tmp_path / "system.wav"
+    audio.write_bytes(b"fake")
+
+    # This is the exact metadata format transcribe.py writes (lines 369-377)
+    transcript = tmp_path / "recording.json"
+    transcript.write_text(json.dumps({
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker": "Remote SPEAKER_00", "text": "Hello"},
+        ],
+        "metadata": {
+            "audio_files": ["system.wav", "mic.wav"],
+            "audio_paths": [str(audio), str(tmp_path / "mic.wav")],
+            "output_format": "txt",
+            "language": "en",
+            "dual_stream": True,
+        },
+    }))
+
+    # Should resolve audio_paths[0] and find the file — not crash with "." path
+    with patch("service.rename_dialog.find_speaker_samples") as mock_samples, \
+         patch("service.rename_dialog._prompt_speaker") as mock_prompt:
+        mock_samples.return_value = {
+            "Remote SPEAKER_00": {"start": 0.0, "end": 3.0, "text": "Hello"},
+        }
+        mock_prompt.return_value = "Alice"
+        run_rename_dialog(transcript)
+
+    # Verify JSON was updated with speaker names
+    result = json.loads(transcript.read_text())
+    assert result["metadata"]["speaker_names"] == {"Remote SPEAKER_00": "Alice"}
 
 
 def test_main_missing_audio(tmp_path, sample_json_transcript):
     from rename_speakers import main
-    # audio_path in metadata points to a file that does not exist
+    # audio_paths in metadata points to a file that does not exist
     data = json.loads(sample_json_transcript.read_text())
-    data["metadata"]["audio_path"] = str(tmp_path / "missing.wav")
+    data["metadata"]["audio_paths"] = [str(tmp_path / "missing.wav")]
     sample_json_transcript.write_text(json.dumps(data))
 
     with patch("sys.argv", ["rename_speakers.py", "-i", str(sample_json_transcript)]):
         with pytest.raises(SystemExit):
             main()
+
+
+# ---------------------------------------------------------------------------
+# rename_dialog — dual-stream audio routing
+# ---------------------------------------------------------------------------
+
+def test_rename_dialog_routes_local_speaker_to_mic_file(tmp_path):
+    """Local-source speakers must use audio_paths[1] (mic file)."""
+    from service.rename_dialog import run_rename_dialog
+
+    system_wav = tmp_path / "system.wav"
+    mic_wav = tmp_path / "mic.wav"
+    system_wav.write_bytes(b"fake")
+    mic_wav.write_bytes(b"fake")
+
+    transcript = tmp_path / "recording.json"
+    transcript.write_text(json.dumps({
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker": "Local Speaker", "text": "hi", "source": "local"},
+        ],
+        "metadata": {
+            "audio_files": ["system.wav", "mic.wav"],
+            "audio_paths": [str(system_wav), str(mic_wav)],
+            "output_format": "txt",
+            "language": "en",
+            "dual_stream": True,
+        },
+    }))
+
+    captured_paths = []
+    with patch("service.rename_dialog._prompt_speaker", side_effect=lambda spk, sample, path: captured_paths.append(path) or "Alice"):
+        run_rename_dialog(transcript)
+
+    assert len(captured_paths) == 1
+    assert captured_paths[0] == str(mic_wav)
+
+
+def test_rename_dialog_routes_remote_speaker_to_system_file(tmp_path):
+    """Remote-source speakers must use audio_paths[0] (system audio file)."""
+    from service.rename_dialog import run_rename_dialog
+
+    system_wav = tmp_path / "system.wav"
+    mic_wav = tmp_path / "mic.wav"
+    system_wav.write_bytes(b"fake")
+    mic_wav.write_bytes(b"fake")
+
+    transcript = tmp_path / "recording.json"
+    transcript.write_text(json.dumps({
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker": "Remote Speaker", "text": "hello", "source": "remote"},
+        ],
+        "metadata": {
+            "audio_files": ["system.wav", "mic.wav"],
+            "audio_paths": [str(system_wav), str(mic_wav)],
+            "output_format": "txt",
+            "language": "en",
+            "dual_stream": True,
+        },
+    }))
+
+    captured_paths = []
+    with patch("service.rename_dialog._prompt_speaker", side_effect=lambda spk, sample, path: captured_paths.append(path) or "Bob"):
+        run_rename_dialog(transcript)
+
+    assert len(captured_paths) == 1
+    assert captured_paths[0] == str(system_wav)
+
+
+def test_rename_dialog_single_stream_uses_same_file_for_all(tmp_path):
+    """With only one audio file, all speakers use it regardless of source."""
+    from service.rename_dialog import run_rename_dialog
+
+    audio = tmp_path / "recording.wav"
+    audio.write_bytes(b"fake")
+
+    transcript = tmp_path / "recording.json"
+    transcript.write_text(json.dumps({
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker": "Speaker A", "text": "hi", "source": "local"},
+            {"start": 3.0, "end": 6.0, "speaker": "Speaker B", "text": "hey", "source": "remote"},
+        ],
+        "metadata": {
+            "audio_files": ["recording.wav"],
+            "audio_paths": [str(audio)],
+            "output_format": "txt",
+            "language": "en",
+            "dual_stream": False,
+        },
+    }))
+
+    captured_paths = []
+    with patch("service.rename_dialog._prompt_speaker", side_effect=lambda spk, sample, path: captured_paths.append(path) or spk):
+        run_rename_dialog(transcript)
+
+    assert len(captured_paths) == 2
+    assert all(p == str(audio) for p in captured_paths)
+
+
+def test_rename_dialog_source_defaults_to_remote_when_missing(tmp_path):
+    """Segments without a source field fall back to the system audio file."""
+    from service.rename_dialog import run_rename_dialog
+
+    system_wav = tmp_path / "system.wav"
+    mic_wav = tmp_path / "mic.wav"
+    system_wav.write_bytes(b"fake")
+    mic_wav.write_bytes(b"fake")
+
+    transcript = tmp_path / "recording.json"
+    transcript.write_text(json.dumps({
+        "segments": [
+            {"start": 0.0, "end": 3.0, "speaker": "Speaker X", "text": "hi"},  # no source
+        ],
+        "metadata": {
+            "audio_paths": [str(system_wav), str(mic_wav)],
+            "output_format": "txt",
+        },
+    }))
+
+    captured_paths = []
+    with patch("service.rename_dialog._prompt_speaker", side_effect=lambda spk, sample, path: captured_paths.append(path) or "X"):
+        run_rename_dialog(transcript)
+
+    assert captured_paths[0] == str(system_wav)
