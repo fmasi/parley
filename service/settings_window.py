@@ -20,6 +20,7 @@ except ImportError:
     _APPKIT_AVAILABLE = False
     NSObject = object
 
+from service.audio_capture import HELPER_BINARY
 from service.config_manager import ConfigManager
 from service.logger import get_logger
 
@@ -91,6 +92,14 @@ class SettingsWindowController(NSObject):
         self._add_label(view, "Silence Timeout (minutes):", (20, y))
         self._timeout_field = self._add_text_field(view, str(cfg.silence_timeout_minutes), (260, y - 4), width=60)
         y -= 50
+
+        # Audio capture status (read-only)
+        if HELPER_BINARY.exists():
+            capture_status = "Full audio capture: Active ✓  (mic + system audio)"
+        else:
+            capture_status = "Full audio capture: Unavailable — run audio_capture_helper/build.sh ⚠"
+        self._add_label(view, capture_status, (20, y))
+        y -= 30
 
         # Save button
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(310, 20, 90, 32))

@@ -17,14 +17,18 @@ Includes a persistent macOS menu bar service for automatic recording and transcr
 
 ## Requirements
 
-- macOS 12.0+ with Apple Silicon (M1/M2/M3/M4/M5)
+- macOS 14.0+ (Sonoma) with Apple Silicon (M1/M2/M3/M4/M5)
 - Python 3.10+ in a conda environment
 - ffmpeg (Homebrew)
 - HuggingFace account (free, for pyannote models)
 
-## Audio capture scope
+## Audio capture
 
-The service records from your **microphone only**. System audio (e.g., the remote side of a Zoom call via speakers) is not captured — macOS has no Python-accessible API for per-app audio capture without a virtual audio device such as BlackHole. If you use speakers rather than headphones, remote participants' voices will be picked up by the mic naturally.
+The service captures **both your microphone and system audio** (Zoom, Teams, Google Meet, etc.) simultaneously using ScreenCaptureKit — no virtual audio devices required.
+
+- With **headphones**: your mic captures your voice; system audio captures the remote side
+- With **speakers**: both sides are captured by the mic naturally, and system audio also captures the remote side — both paths work
+- Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, …)
 
 ## macOS permissions
 
@@ -32,11 +36,11 @@ The first time you run the service macOS will prompt for these permissions:
 
 | Permission | Required for |
 |---|---|
-| **Microphone** | Recording audio |
+| **Screen & System Audio Recording** | Recording both microphone and system audio via ScreenCaptureKit |
 | **Calendars** | Pre-populating recording names from the current meeting (optional) |
 | **Accessibility / Automation** | AppKit dialogs appearing in front of other windows |
 
-Grant them in **System Settings → Privacy & Security**. If you deny Microphone access, recording will silently produce an empty file.
+Grant them in **System Settings → Privacy & Security**. If Screen & System Audio Recording is denied the service will show a warning and recording will be unavailable.
 
 ## Setup
 
@@ -55,7 +59,19 @@ conda activate transcribe
 
 > **Important:** Never install packages on the host machine. Always use the conda env.
 
-### 3. Install Python packages
+### 3. Build the audio capture helper
+
+This Swift component captures both microphone and system audio via ScreenCaptureKit:
+
+```bash
+cd audio_capture_helper && bash build.sh && cd ..
+```
+
+On first recording macOS will prompt for *"Screen & System Audio Recording"* permission — grant it in System Settings → Privacy & Security.
+
+> **Requires Xcode command-line tools:** `xcode-select --install`
+
+### 4. Install Python packages
 
 For the CLI tools only:
 
@@ -69,7 +85,7 @@ For the menu bar service (includes all CLI dependencies):
 pip install -r requirements-service.txt
 ```
 
-### 4. HuggingFace setup (required for speaker diarization)
+### 5. HuggingFace setup (required for speaker diarization)
 
 > **Note:** `HF_TOKEN` must be set before running `transcribe.py` or starting the service. Without it, speaker diarization will fail. Pass it via the env var (recommended) or the `--hf-token` flag.
 
@@ -164,13 +180,19 @@ The service runs persistently in the background as a macOS menu bar agent. It re
 
 ### Service Setup
 
-**1. Create the plist from the template:**
+**1. Build the audio capture helper** (if not done in setup step 3 above):
+
+```bash
+cd audio_capture_helper && bash build.sh && cd ..
+```
+
+**2. Create the plist from the template:**
 
 ```bash
 cp com.audio-transcribe.plist.template com.audio-transcribe.plist
 ```
 
-**2. Edit `com.audio-transcribe.plist` and replace the three placeholders:**
+**3. Edit `com.audio-transcribe.plist` and replace the three placeholders:**
 
 | Placeholder | Replace with |
 |---|---|
@@ -178,20 +200,20 @@ cp com.audio-transcribe.plist.template com.audio-transcribe.plist
 | `REPLACE_WITH_USERNAME` | Your macOS username |
 | `REPLACE_WITH_HF_TOKEN` | Your HuggingFace token |
 
-**3. Create logs directory:**
+**4. Create logs directory:**
 
 ```bash
 mkdir -p ~/.audio-transcribe/logs
 ```
 
-**4. Fix rumps notification center (one-time):**
+**5. Fix rumps notification center (one-time):**
 
 ```bash
 /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string "rumps"' \
   /opt/miniconda3/envs/transcribe/bin/Info.plist
 ```
 
-**5. Install and start:**
+**6. Install and start:**
 
 ```bash
 cp com.audio-transcribe.plist ~/Library/LaunchAgents/com.audio-transcribe.plist
