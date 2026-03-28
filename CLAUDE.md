@@ -21,8 +21,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### Core Modules
 - `service/audio_capture.py` -- thin Python subprocess wrapper around the Swift binary
 - `service/pipeline.py` + `service/job_queue.py` -- orchestration, runs transcribe.py as subprocess
-- `service/config_manager.py` -- JSON config at `~/.audio-transcribe/config.json`
-- `service/settings_window.py` -- PyObjC native settings window
+- `service/config_manager.py` -- JSON config at `~/.audio-transcribe/config.json` (fields: recording_directory, silence_timeout_minutes, silence_detection_enabled, output_format, launch_on_startup, log_level, suppress_capture_warning, hf_token)
+- `service/settings_window.py` -- PyObjC native settings window (includes HF Token field + Launch at Login toggle)
+- `service/login_item.py` -- SMAppService wrapper for login item registration (no-ops outside .app bundle)
 
 ### Swift Audio Capture
 - `audio_capture_helper/` -- Swift Package Manager project using ScreenCaptureKit
@@ -50,7 +51,7 @@ cd audio_capture_helper && bash build.sh
 ```bash
 # Activate conda env first!
 python -m pytest tests/ -q
-# 76 tests; ignore test_silence_detector.py if torch not installed
+# 126 tests; ignore test_silence_detector.py if torch not installed
 ```
 
 ## Key Gotchas
@@ -58,10 +59,15 @@ python -m pytest tests/ -q
 2. PackageDescription `.v15` requires swift-tools-version 6.0; use `.macOS("15.0")` string syntax with 5.9
 3. Mic sample rate varies by device -- auto-detect from CMSampleBuffer format description, don't hardcode
 4. ScreenCaptureKit requires `.screen` output registration even for audio-only capture
-5. TCC permission is granted to the host app (Terminal), not the binary
+5. TCC permission is granted to the host app — when running as .app bundle this is the bundle (CFBundleIdentifier: com.audio-transcribe.app); when running from Terminal it's Terminal.app (doesn't persist as a service)
 6. The `suppress_capture_warning` config field exists but is not yet wired up in UI
+
+## Packaging
+- `packaging/Info.plist` -- bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
+- `packaging/launcher.sh` -- sets PYTHONHOME/PYTHONPATH, exec's embedded Python (TCC flows to subprocesses)
+- `packaging/build_app.sh` -- assembles .app, embeds relocatable Python, ad-hoc signs, creates DMG
 
 ## Branches
 - `main` -- stable
-- `feature/full-audio-capture` -- dual-stream capture + transcription (PR #2)
+- `feature/full-audio-capture` -- .app bundle packaging + HF token UI + login item (PR #2)
 - `claude/review-docs-tests-sRRO3` -- docs + test improvements (merged)
