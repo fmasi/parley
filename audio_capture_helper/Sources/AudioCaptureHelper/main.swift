@@ -143,7 +143,7 @@ SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false)
     let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
     let config = SCStreamConfiguration()
-    // Audio capture: system audio output + microphone (macOS 14.0+)
+    // Audio capture: system audio output + microphone (macOS 15.0+)
     config.capturesAudio = true
     config.captureMicrophone = true
     config.excludesCurrentProcessAudio = true
