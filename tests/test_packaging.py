@@ -106,6 +106,12 @@ def test_build_script_signs_bundle():
     assert "codesign" in content
 
 
+def test_build_script_validates_python_environment():
+    content = (PACKAGING_DIR / "build_app.sh").read_text()
+    assert "import rumps" in content
+    assert "import soundfile" in content
+
+
 def _load_plist():
     with open(PACKAGING_DIR / "Info.plist", "rb") as f:
         return plistlib.load(f)

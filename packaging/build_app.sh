@@ -52,8 +52,14 @@ echo "--- Creating relocatable Python (this takes a few minutes) ---"
 python3 -m relocatable_python \
     --destination "$PYTHON_DEST" \
     --python-version 3.11.9 \
+    # Note: --pip-requirements can be specified multiple times (argparse action=append)
     --pip-requirements "$PROJECT_ROOT/requirements-service.txt" \
     --pip-requirements "$PROJECT_ROOT/requirements-transcribe.txt"
+
+# Validate that key packages were installed correctly
+echo "--- Validating Python environment ---"
+"$PYTHON_DEST/bin/python3" -c "import rumps; import soundfile; import numpy" \
+    || { echo "ERROR: Service dependencies missing from embedded Python"; exit 1; }
 
 # Step 6: Copy application source (mirrors repo layout for path resolution)
 cp "$PROJECT_ROOT/transcribe.py" "$APP_DEST/"
@@ -70,6 +76,7 @@ cp "$PROJECT_ROOT/bin/audio-capture-helper" "$APP_DEST/bin/"
 
 # Step 8: Ad-hoc code sign (replace '-' with Developer ID for distribution)
 echo "--- Signing bundle ---"
+# TODO: For Developer ID distribution, remove --deep and sign each binary individually
 codesign --force --deep --sign - "$APP_DIR"
 
 echo "=== Built: $APP_DIR ==="
