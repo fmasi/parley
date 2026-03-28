@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Launcher for AudioTranscribe.app
 # Sets up the embedded Python environment and exec's the service.
 # exec replaces this shell — Python becomes the app process,

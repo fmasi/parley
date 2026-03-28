@@ -66,6 +66,12 @@ def test_launcher_uses_exec():
     assert "\nexec " in content
 
 
+def test_launcher_is_executable():
+    import os, stat
+    st = (PACKAGING_DIR / "launcher.sh").stat()
+    assert st.st_mode & stat.S_IXUSR
+
+
 def _load_plist():
     with open(PACKAGING_DIR / "Info.plist", "rb") as f:
         return plistlib.load(f)
