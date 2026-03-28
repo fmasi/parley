@@ -60,10 +60,17 @@ def test_pipeline_calls_on_error_on_transcription_failure(tmp_path):
 def test_pipeline_generates_correct_filename(tmp_path):
     from service.pipeline import Pipeline
     from service.config_manager import Config
+    from service.job_queue import TranscriptionJob
 
     config = Config(recording_directory=str(tmp_path), output_format="srt")
     pipeline = Pipeline(config=config, on_rename_ready=MagicMock())
-    cmd = pipeline._build_transcribe_command(tmp_path / "meeting.m4a")
+    job = TranscriptionJob(
+        audio_path=tmp_path / "meeting.m4a",
+        output_format="srt",
+        on_complete=MagicMock(),
+        on_error=MagicMock(),
+    )
+    cmd = pipeline._build_transcribe_command(job)
     assert "-i" in cmd
     assert str(tmp_path / "meeting.m4a") in cmd
     assert "-f" in cmd
@@ -124,8 +131,15 @@ def test_pipeline_build_command_uses_sys_executable(tmp_path):
     import sys
     from service.pipeline import Pipeline
     from service.config_manager import Config
+    from service.job_queue import TranscriptionJob
 
     config = Config(recording_directory=str(tmp_path), output_format="json")
     pipeline = Pipeline(config=config, on_rename_ready=MagicMock())
-    cmd = pipeline._build_transcribe_command(tmp_path / "audio.wav")
+    job = TranscriptionJob(
+        audio_path=tmp_path / "audio.wav",
+        output_format="json",
+        on_complete=MagicMock(),
+        on_error=MagicMock(),
+    )
+    cmd = pipeline._build_transcribe_command(job)
     assert cmd[0] == sys.executable

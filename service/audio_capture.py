@@ -1,17 +1,18 @@
 """Captures microphone + system audio using the audio-capture-helper Swift binary.
 
-The helper uses ScreenCaptureKit (macOS 14.0+) with:
-  - capturesAudio     = true  → system audio (Zoom, Teams, Meet, speakers…)
-  - captureMicrophone = true  → local microphone
+The helper uses ScreenCaptureKit (macOS 15.0+) to capture two separate streams:
+  - System audio (Zoom, Teams, Meet, speakers…) → <base>.wav
+  - Local microphone → <base>_mic.wav
 
-Both streams are delivered by a single SCStream into one WAV file.
-Python only manages the subprocess lifecycle — no audio processing here.
+Each file is written at its native sample rate. The downstream transcription
+pipeline processes them separately for better speaker attribution.
 
 Requires 'Screen & System Audio Recording' permission in
 System Settings → Privacy & Security (macOS prompts on first use).
 """
 import signal
 import subprocess
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -28,18 +29,29 @@ class CaptureMode(Enum):
     UNAVAILABLE = "unavailable" # helper binary not found — cannot record
 
 
+@dataclass
+class AudioPaths:
+    """Paths to the captured audio files."""
+    system: Path   # remote/system audio
+    mic: Path      # local microphone
+
+
 class AudioCapture:
-    """Records microphone + system audio to a WAV file via the Swift helper.
+    """Records microphone + system audio to WAV files via the Swift helper.
 
     Interface:
         capture = AudioCapture(output_path)
-        mode = capture.start()    # non-blocking; returns CaptureMode
-        path = capture.stop()     # blocks until helper exits; returns Path
+        mode = capture.start()
+        paths = capture.stop()   # returns AudioPaths with .system and .mic
     """
 
     def __init__(self, output_path: Path):
         self._output_path = output_path
         self._process: Optional[subprocess.Popen] = None
+
+    @property
+    def _mic_path(self) -> Path:
+        return self._output_path.with_stem(self._output_path.stem + "_mic")
 
     def start(self) -> CaptureMode:
         """Begin recording. Non-blocking. Returns CaptureMode."""
@@ -59,8 +71,8 @@ class AudioCapture:
         )
         return CaptureMode.FULL
 
-    def stop(self) -> Path:
-        """Stop recording. Returns path to WAV file."""
+    def stop(self) -> AudioPaths:
+        """Stop recording. Returns AudioPaths with system and mic WAV files."""
         if self._process is not None:
             log.info("Stopping audio capture (SIGTERM)...")
             self._process.send_signal(signal.SIGTERM)
@@ -81,11 +93,18 @@ class AudioCapture:
             finally:
                 self._process = None
 
-        if not self._output_path.exists():
+        paths = AudioPaths(system=self._output_path, mic=self._mic_path)
+
+        for label, p in [("system", paths.system), ("mic", paths.mic)]:
+            if p.exists():
+                size_kb = p.stat().st_size // 1024
+                log.info(f"Audio [{label}]: {p.name} ({size_kb} KB)")
+            else:
+                log.warning(f"Audio [{label}]: {p.name} not found")
+
+        if not paths.system.exists() and not paths.mic.exists():
             raise RuntimeError(
-                f"audio-capture-helper did not produce output: {self._output_path}"
+                f"audio-capture-helper produced no output files"
             )
 
-        size_kb = self._output_path.stat().st_size // 1024
-        log.info(f"Audio written: {self._output_path.name} ({size_kb} KB)")
-        return self._output_path
+        return paths

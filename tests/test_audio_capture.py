@@ -76,7 +76,7 @@ def test_stop_raises_permission_error_on_exit_code_2(tmp_path):
             ac.stop()
 
 
-def test_stop_raises_when_no_output_file(tmp_path):
+def test_stop_raises_when_no_output_files(tmp_path):
     from service.audio_capture import AudioCapture
     fake_bin = tmp_path / "audio-capture-helper"
     fake_bin.write_bytes(b"")
@@ -89,12 +89,37 @@ def test_stop_raises_when_no_output_file(tmp_path):
          patch("service.audio_capture.subprocess.Popen", return_value=mock_proc):
         ac = AudioCapture(output_path=tmp_path / "out.wav")
         ac.start()
-        with pytest.raises(RuntimeError, match="did not produce output"):
+        with pytest.raises(RuntimeError, match="no output files"):
             ac.stop()
 
 
-def test_stop_returns_output_path_on_success(tmp_path):
-    from service.audio_capture import AudioCapture
+def test_stop_returns_audio_paths_on_success(tmp_path):
+    from service.audio_capture import AudioCapture, AudioPaths
+    fake_bin = tmp_path / "audio-capture-helper"
+    fake_bin.write_bytes(b"")
+    out = tmp_path / "out.wav"
+    out.write_bytes(b"RIFF")
+    mic = tmp_path / "out_mic.wav"
+    mic.write_bytes(b"RIFF")
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate.return_value = ("", "")
+
+    with patch("service.audio_capture.HELPER_BINARY", fake_bin), \
+         patch("service.audio_capture.subprocess.Popen", return_value=mock_proc):
+        ac = AudioCapture(output_path=out)
+        ac.start()
+        result = ac.stop()
+
+    assert isinstance(result, AudioPaths)
+    assert result.system == out
+    assert result.mic == mic
+
+
+def test_stop_succeeds_with_only_system_audio(tmp_path):
+    """If only system audio file exists (no mic), stop should still succeed."""
+    from service.audio_capture import AudioCapture, AudioPaths
     fake_bin = tmp_path / "audio-capture-helper"
     fake_bin.write_bytes(b"")
     out = tmp_path / "out.wav"
@@ -110,7 +135,7 @@ def test_stop_returns_output_path_on_success(tmp_path):
         ac.start()
         result = ac.stop()
 
-    assert result == out
+    assert result.system == out
 
 
 def test_stop_is_noop_when_not_started(tmp_path):
@@ -118,6 +143,5 @@ def test_stop_is_noop_when_not_started(tmp_path):
     out = tmp_path / "out.wav"
     out.write_bytes(b"RIFF")
     ac = AudioCapture(output_path=out)
-    # stop() without start() should not raise
     result = ac.stop()
-    assert result == out
+    assert result.system == out
