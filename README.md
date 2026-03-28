@@ -2,12 +2,25 @@
 
 On-device audio transcription with speaker diarization for Apple Silicon Macs.
 Uses MLX-optimized Whisper (large-v3) and pyannote.audio for speaker detection.
+Includes a persistent macOS menu bar service for automatic recording and transcription.
+
+## Features
+
+- Transcribes audio files via CLI (`transcribe.py`)
+- Speaker diarization — labels who said what
+- Interactive speaker renaming with audio playback (`rename_speakers.py`)
+- macOS menu bar service — records, transcribes, and prompts for speaker names automatically
+- Silence detection via Silero VAD — stops recording when no one is speaking
+- Apple Calendar integration — pre-populates recording names from current meeting
+- Outputs: plain text, SRT subtitles, JSON (always saved as master copy)
+- Fully on-device, free after model download
 
 ## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3/M4/M5)
-- Python 3.10+
-- ffmpeg (for speaker renaming tool)
+- macOS 12.0+ with Apple Silicon (M1/M2/M3/M4/M5)
+- Python 3.10+ in a conda environment
+- ffmpeg (Homebrew)
+- HuggingFace account (free, for pyannote models)
 
 ## Setup
 
@@ -17,125 +30,210 @@ Uses MLX-optimized Whisper (large-v3) and pyannote.audio for speaker detection.
 brew install ffmpeg
 ```
 
-### 2. Create a virtual environment (recommended)
+### 2. Create conda environment
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+conda create -n transcribe python=3.11 -y
+conda activate transcribe
 ```
+
+> **Important:** Never install packages on the host machine. Always use the conda env.
 
 ### 3. Install Python packages
 
+For the CLI tools only:
+
 ```bash
-pip install mlx-whisper "pyannote.audio>=3.1" torch torchaudio
+pip install mlx-whisper "pyannote.audio>=3.1" torch torchaudio soundfile
 ```
 
-### 4. HuggingFace setup (one-time, required for speaker diarization)
+For the menu bar service (includes all CLI dependencies):
+
+```bash
+pip install -r requirements-service.txt
+```
+
+### 4. HuggingFace setup (required for speaker diarization)
 
 Speaker diarization uses pyannote models which are free but require accepting their terms:
 
 1. Create a free account at [huggingface.co](https://huggingface.co/join)
-2. Accept the terms for these two models:
+2. Accept the terms for:
    - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
    - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 3. Create an access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-4. Set the token in your shell profile:
+4. Add to your shell profile:
 
 ```bash
-echo 'export HF_TOKEN=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' >> ~/.zshrc
+echo 'export HF_TOKEN=your_token_here' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-After the first run, models are cached locally and work fully offline.
+After first run, models are cached locally and work fully offline.
 
-## Usage
+---
 
-### Basic transcription (plain text with timestamps + speakers)
+## CLI Usage
+
+### Basic transcription
 
 ```bash
 python transcribe.py -i meeting.mp3
 ```
 
-### Specify number of speakers and language
+### Specify speakers and language
 
 ```bash
 python transcribe.py -i interview.m4a -s 2 -l en
 ```
 
-### Output as SRT subtitles
+### Output formats
 
 ```bash
 python transcribe.py -i call.wav -f srt
+python transcribe.py -i call.wav -f json
 ```
 
-### Output as JSON (for LLM processing)
-
-```bash
-python transcribe.py -i recording.mp3 -f json -o transcript.json
-```
-
-### Fast mode (no speaker detection)
+### Skip speaker detection (faster)
 
 ```bash
 python transcribe.py -i audio.mp3 --no-diarize
 ```
 
-### Custom output path
-
-```bash
-python transcribe.py -i meeting.mp3 -o /path/to/output.txt
-```
-
-## Speaker Renaming
-
-After transcription, you can replace generic labels (Speaker 1, Speaker 2) with real names. This requires a JSON transcript as input.
-
-### Step 1: Transcribe to JSON
-
-```bash
-python transcribe.py -i meeting.mp3 -f json
-```
-
-### Step 2: Rename speakers interactively
-
-```bash
-python rename_speakers.py -i meeting.json -a meeting.mp3
-```
-
-The tool will:
-1. Play a ~10 second audio sample of each speaker
-2. Show you a snippet of what they said
-3. Ask you to type their name (or press Enter to keep the generic label, or 'r' to replay)
-
-### Output renamed transcript in different formats
-
-```bash
-python rename_speakers.py -i meeting.json -a meeting.mp3 -f srt
-python rename_speakers.py -i meeting.json -a meeting.mp3 -f json
-```
-
-## CLI Reference
-
-### transcribe.py
+### CLI Reference — transcribe.py
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--input` | `-i` | required | Path to audio file |
 | `--output` | `-o` | auto | Output file path |
 | `--format` | `-f` | `txt` | Output format: `txt`, `srt`, `json` |
-| `--speakers` | `-s` | auto | Number of speakers |
+| `--speakers` | `-s` | auto | Number of speakers (omit to auto-detect) |
 | `--language` | `-l` | auto | Language code (e.g. `en`, `it`, `es`) |
 | `--no-diarize` | | off | Skip speaker detection |
 | `--hf-token` | | `$HF_TOKEN` | HuggingFace token |
 
-### rename_speakers.py
+---
+
+## Speaker Renaming
+
+After transcription, replace generic labels (SPEAKER_00, SPEAKER_01) with real names.
+
+```bash
+# Rename interactively — reads audio path from JSON metadata automatically
+python rename_speakers.py -i meeting.json
+
+# Or specify audio explicitly
+python rename_speakers.py -i meeting.json -a meeting.mp3
+```
+
+The tool plays a ~10s audio sample per speaker, shows what they said, and asks for their name.
+Press Enter to keep the generic label, `r` to replay the clip.
+
+### CLI Reference — rename_speakers.py
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--input` | `-i` | required | JSON transcript file |
-| `--audio` | `-a` | required | Original audio file |
+| `--audio` | `-a` | from JSON | Original audio file |
 | `--output` | `-o` | auto | Output file path |
-| `--format` | `-f` | `txt` | Output format: `txt`, `srt`, `json` |
+| `--format` | `-f` | from JSON | Output format: `txt`, `srt`, `json` |
+
+---
+
+## Menu Bar Service
+
+The service runs persistently in the background as a macOS menu bar agent. It records audio on demand, auto-transcribes when you stop, and prompts for speaker names via native dialogs.
+
+### Service Setup
+
+**1. Create the plist from the template:**
+
+```bash
+cp com.audio-transcribe.plist.template com.audio-transcribe.plist
+```
+
+**2. Edit `com.audio-transcribe.plist` and replace the three placeholders:**
+
+| Placeholder | Replace with |
+|---|---|
+| `REPLACE_WITH_REPO_PATH` | Full path to this repo, e.g. `/Users/you/Git/Transcriber` |
+| `REPLACE_WITH_USERNAME` | Your macOS username |
+| `REPLACE_WITH_HF_TOKEN` | Your HuggingFace token |
+
+**3. Create logs directory:**
+
+```bash
+mkdir -p ~/.audio-transcribe/logs
+```
+
+**4. Fix rumps notification center (one-time):**
+
+```bash
+/usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string "rumps"' \
+  /opt/miniconda3/envs/transcribe/bin/Info.plist
+```
+
+**5. Install and start:**
+
+```bash
+cp com.audio-transcribe.plist ~/Library/LaunchAgents/com.audio-transcribe.plist
+launchctl load ~/Library/LaunchAgents/com.audio-transcribe.plist
+```
+
+The menu bar icon appears within a few seconds.
+
+### Service Usage
+
+Click the menu bar icon to access:
+
+- **Start Recording** — prompts for a name (pre-filled from current calendar event if available), then starts mic recording
+- **Stop Recording** — stops recording and queues transcription automatically
+- **Settings** — change recordings directory, output format, silence detection
+- **View Logs** — opens the log file
+- **Quit** — stops the service (launchd restarts it on next login)
+
+When transcription completes, a native dialog prompts you to name each speaker.
+
+### Service Management
+
+```bash
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.plist
+
+# Start
+launchctl load ~/Library/LaunchAgents/com.audio-transcribe.plist
+
+# Uninstall completely
+launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.plist
+rm ~/Library/LaunchAgents/com.audio-transcribe.plist
+```
+
+### Watch live logs
+
+```bash
+tail -f ~/.audio-transcribe/logs/stderr.log
+```
+
+### Service configuration
+
+Config is stored at `~/.audio-transcribe/config.json`. Defaults:
+
+```json
+{
+  "recording_directory": "~/Documents/Recordings",
+  "silence_timeout_minutes": 5,
+  "silence_detection_enabled": true,
+  "output_format": "txt",
+  "launch_on_startup": true,
+  "log_level": "info"
+}
+```
+
+### Notes on audio capture
+
+The service records from your default input device (built-in mic, AirPods mic, USB mic). System audio from apps like Zoom is not captured — macOS has no Python-accessible API for per-app audio capture without a virtual audio device. If using speakers (not headphones), remote participants' voices will be picked up by the mic naturally.
+
+---
 
 ## Output Examples
 
@@ -164,9 +262,11 @@ Speaker 2: Thanks for having me.
 {
   "metadata": {
     "audio_file": "meeting.mp3",
+    "audio_path": "/full/path/to/meeting.mp3",
     "language": "en",
     "num_speakers": 2,
-    "diarization": true
+    "diarization": true,
+    "output_format": "txt"
   },
   "segments": [
     {
@@ -179,9 +279,20 @@ Speaker 2: Thanks for having me.
 }
 ```
 
+---
+
 ## Troubleshooting
 
-- **"No module named mlx_whisper"** — activate your venv: `source venv/bin/activate`
-- **Diarization token error** — make sure `HF_TOKEN` is set and you accepted both model terms
-- **ffmpeg not found** — install with `brew install ffmpeg`
-- **Slow first run** — the Whisper model (~1.6GB) downloads on first use, then is cached
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a full log of issues encountered during development and their solutions.
+
+**Quick reference:**
+
+| Symptom | Fix |
+|---|---|
+| `No module named mlx_whisper` | `conda activate transcribe` |
+| `ffmpeg not found` | `brew install ffmpeg` |
+| Diarization token error | Set `HF_TOKEN` and accept both model terms on HuggingFace |
+| Slow first run | Whisper model (~1.6GB) downloads once then is cached |
+| Service not starting | Check `~/.audio-transcribe/logs/stderr.log` |
+| Dialog doesn't appear | Look behind other windows; it may be hidden |
+| `Failed to setup notification center` | Run the PlistBuddy command in step 4 of service setup |
