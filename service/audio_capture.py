@@ -1,112 +1,105 @@
-"""Captures microphone audio using sounddevice (PortAudio / CoreAudio).
+"""Captures microphone audio using ffmpeg with the AVFoundation backend.
 
-sounddevice wraps PortAudio which talks directly to CoreAudio, so no
-PyObjC / ctypes juggling required. Records from the default input device
-(built-in mic, AirPods mic, external USB mic, etc.).
+ffmpeg's AVFoundation input works correctly in launchd agent contexts where
+PortAudio/sounddevice returns silence due to CoreAudio session differences.
+Recording runs as a background ffmpeg subprocess; stop() terminates it.
 
 Note: System audio capture (Zoom participants via headphones) requires a
 virtual loopback device (e.g. BlackHole). Without one, only the microphone
 input is captured.
 """
+import subprocess
 import threading
 from pathlib import Path
-from typing import List, Optional
-
-import numpy as np
+from typing import Optional
 
 from service.logger import get_logger
 
 log = get_logger("audio_capture")
 
-try:
-    import sounddevice as sd
-    SOUNDDEVICE_AVAILABLE = True
-except ImportError:
-    sd = None  # type: ignore[assignment]
-    SOUNDDEVICE_AVAILABLE = False
-    log.warning("sounddevice not available — audio capture disabled")
-
-try:
-    import soundfile as sf
-    SOUNDFILE_AVAILABLE = True
-except ImportError:
-    sf = None  # type: ignore[assignment]
-    SOUNDFILE_AVAILABLE = False
-    log.warning("soundfile not available — cannot write audio files")
-
-
 SAMPLE_RATE = 16_000
 CHANNELS = 1
+FFMPEG = "ffmpeg"
 
 
 class AudioCapture:
-    """Records microphone input to a WAV file using sounddevice.
+    """Records microphone input to a WAV file via ffmpeg AVFoundation.
 
     Interface:
         capture = AudioCapture(output_path)
         capture.start()          # non-blocking
-        path = capture.stop()    # blocks briefly, returns Path to WAV file
+        path = capture.stop()    # blocks until ffmpeg flushes, returns Path
     """
 
     def __init__(self, output_path: Path):
         self._output_path = output_path
-        self._chunks: List[np.ndarray] = []
-        self._lock = threading.Lock()
-        self._stream: Optional[object] = None
+        self._process: Optional[subprocess.Popen] = None
+        self._log_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         """Begin capturing mic audio. Non-blocking."""
-        if not SOUNDDEVICE_AVAILABLE:
-            log.error("Cannot start: sounddevice not installed")
-            return
-
-        self._chunks.clear()
-
-        def _callback(indata, frames, time, status):
-            if status:
-                log.warning(f"sounddevice status: {status}")
-            with self._lock:
-                self._chunks.append(indata.copy())
-
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            callback=_callback,
-        )
-        self._stream.start()
-        log.info(
-            f"Recording started — device: {sd.query_devices(kind='input')['name']}, "
-            f"{SAMPLE_RATE} Hz mono"
-        )
-
-    def stop(self) -> Path:
-        """Stop capture and write audio to output_path. Returns path to WAV file."""
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-            log.info("sounddevice stream stopped")
-
-        return self._write_output()
-
-    def _write_output(self) -> Path:
-        with self._lock:
-            audio = (
-                np.concatenate(self._chunks, axis=0)
-                if self._chunks
-                else np.zeros((SAMPLE_RATE, CHANNELS), dtype=np.float32)
-            )
-
-        duration = len(audio) / SAMPLE_RATE
-        if duration < 0.5:
-            log.warning("Very short recording (<0.5s) — writing anyway")
-
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not SOUNDFILE_AVAILABLE:
-            raise RuntimeError("soundfile is required to write audio files")
+        cmd = [
+            FFMPEG,
+            "-y",                          # overwrite without prompting
+            "-f", "avfoundation",
+            "-i", ":default",              # default audio input device
+            "-ar", str(SAMPLE_RATE),
+            "-ac", str(CHANNELS),
+            str(self._output_path),
+        ]
 
-        sf.write(str(self._output_path), audio, SAMPLE_RATE)
-        log.info(f"Audio written: {self._output_path.name} ({duration:.1f}s)")
+        log.info(f"Starting ffmpeg AVFoundation capture → {self._output_path.name}")
+        log.debug(f"Command: {' '.join(cmd)}")
+
+        self._process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # Drain ffmpeg's stderr in background so it doesn't block
+        self._log_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True
+        )
+        self._log_thread.start()
+
+        log.info(f"Recording started — {SAMPLE_RATE} Hz mono via AVFoundation")
+
+    def stop(self) -> Path:
+        """Stop capture and flush WAV file. Returns path to written file."""
+        if self._process is not None:
+            log.info("Stopping ffmpeg (sending 'q')...")
+            try:
+                # ffmpeg stops cleanly when it receives 'q' on stdin,
+                # but we used DEVNULL so we send SIGTERM instead.
+                self._process.terminate()
+                self._process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                log.warning("ffmpeg did not stop in time — killing")
+                self._process.kill()
+                self._process.wait()
+            self._process = None
+
+        if self._log_thread is not None:
+            self._log_thread.join(timeout=5)
+            self._log_thread = None
+
+        if not self._output_path.exists():
+            log.error(f"Expected output file not found: {self._output_path}")
+            raise RuntimeError(f"ffmpeg did not produce output: {self._output_path}")
+
+        size = self._output_path.stat().st_size
+        log.info(f"Audio written: {self._output_path.name} ({size // 1024} KB)")
         return self._output_path
+
+    def _drain_stderr(self) -> None:
+        """Read ffmpeg stderr and forward lines to the service logger."""
+        if self._process is None:
+            return
+        for raw in self._process.stderr:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                log.debug(f"[ffmpeg] {line}")
