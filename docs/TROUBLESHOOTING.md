@@ -257,6 +257,60 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ---
 
+---
+
+## 21. `relocatable-python` not installable via pip
+
+**Symptom:** `ERROR: No matching distribution found for relocatable-python`
+
+**Root cause:** Greg Neagle's `relocatable-python` is a standalone script — it has no `setup.py` or `pyproject.toml` and is not published to PyPI.
+
+**Fix:** `build_app.sh` now auto-clones the repo to `/tmp/relocatable-python` and invokes the script directly. No manual install step needed.
+
+---
+
+## 22. Python 3.11 `.pkg` download returns 404
+
+**Symptom:** `curl: (56) The requested URL returned error: 404` when `build_app.sh` tries to download `python-3.11.9-macosx10.9.pkg`.
+
+**Root cause:** python.org dropped the `macosx10.9` pkg naming for Python 3.11+. The current installer is named `python-3.11.9-macos11.pkg`.
+
+**Fix:** Added `--os-version 11` to the `make_relocatable_python_framework.py` invocation in `build_app.sh`.
+
+---
+
+## 23. Only `requirements-transcribe.txt` packages installed — service deps missing
+
+**Symptom:** Build validates successfully but `import rumps` fails; service deps (`rumps`, `sounddevice`, etc.) are absent from the embedded Python.
+
+**Root cause:** `make_relocatable_python_framework.py` uses Python's `optparse` with `action="store"` (default) for `--pip-requirements`. Passing the flag twice means the second value silently overwrites the first — only `requirements-transcribe.txt` was installed.
+
+**Fix:** `build_app.sh` now merges both requirements files into a single temp file and passes it as one `--pip-requirements` argument.
+
+---
+
+## 24. Embedded Python not found at expected path in launcher
+
+**Symptom:** App crashes immediately at launch; `No such file or directory: .../Resources/python/bin/python3`.
+
+**Root cause:** `make_relocatable_python_framework.py` installs Python into `$DESTINATION/Python.framework/Versions/3.11/bin/python3`, not `$DESTINATION/bin/python3`. Both `launcher.sh` and the validation step in `build_app.sh` had the wrong path.
+
+**Fix:** Updated both files to use the full framework path:
+- `launcher.sh`: `PYTHON_FRAMEWORK="$RESOURCES/python/Python.framework/Versions/3.11"`
+- `build_app.sh` validation: `"$PYTHON_DEST/Python.framework/Versions/3.11/bin/python3"`
+
+---
+
+## 25. App launches but menu bar icon is invisible
+
+**Symptom:** Double-clicking `AudioTranscribe.app` shows the "verifying" spinner, then nothing appears. The app is actually running — `pgrep -la python | grep menu_bar` confirms the process is alive.
+
+**Root cause:** On MacBooks with a notch, macOS hides menu bar icons that overflow. The AudioTranscribe icon appears to the left of the notch (outside the visible area) when the menu bar is full.
+
+**Fix:** Hold `Cmd` and drag other menu bar icons to the right to make space. Alternatively install [Ice](https://github.com/jordanbaird/Ice) (free) or Bartender to manage menu bar overflow.
+
+---
+
 ## Architecture Decisions & Rationale
 
 ### Why sounddevice instead of AVAudioEngine?
