@@ -8,15 +8,16 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CONTENTS="$DIR/.."
 RESOURCES="$CONTENTS/Resources"
-PYTHON="$RESOURCES/python/bin/python3"
+PYTHON_FRAMEWORK="$RESOURCES/python/Python.framework/Versions/3.11"
+PYTHON="$PYTHON_FRAMEWORK/bin/python3"
 APP_ROOT="$RESOURCES/app"
 
 # Embedded Python uses only bundled stdlib + site-packages
-export PYTHONHOME="$RESOURCES/python"
+export PYTHONHOME="$PYTHON_FRAMEWORK"
 export PYTHONPATH="$APP_ROOT"
 export PYTHONDONTWRITEBYTECODE=1
 
-# Minimal PATH for runtime
-export PATH="$RESOURCES/python/bin:/usr/bin:/bin"
+# Include Homebrew so ffmpeg (required by mlx_whisper) is found
+export PATH="$PYTHON_FRAMEWORK/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 exec "$PYTHON" "$APP_ROOT/service/main.py"

@@ -32,8 +32,11 @@ mkdir -p "$MACOS" "$RESOURCES" "$APP_DEST/bin" "$APP_DEST/service"
 # Step 2: Copy Info.plist
 cp "$SCRIPT_DIR/Info.plist" "$CONTENTS/Info.plist"
 
-# Step 3: Copy launcher
-cp "$SCRIPT_DIR/launcher.sh" "$MACOS/$APP_NAME"
+# Step 3: Compile and install the binary launcher
+# macOS LaunchServices requires a Mach-O binary as CFBundleExecutable —
+# a shell script is silently rejected when launching via Finder or `open`.
+clang -Wall -o "$MACOS/$APP_NAME" "$SCRIPT_DIR/launcher.c" \
+    || { echo "ERROR: failed to compile launcher.c"; exit 1; }
 chmod +x "$MACOS/$APP_NAME"
 
 # Step 4: Copy app icon (optional — skip if not present)
@@ -49,17 +52,27 @@ fi
 #   See: https://github.com/gregneagle/relocatable-python
 #   Verify exact CLI invocation against their docs — syntax may differ.
 echo "--- Creating relocatable Python (this takes a few minutes) ---"
-# Note: --pip-requirements can be specified multiple times (argparse action=append)
-python3 -m relocatable_python \
+# Clone relocatable-python tool if not already present
+RELOC_PYTHON_TOOL="/tmp/relocatable-python"
+if [ ! -f "$RELOC_PYTHON_TOOL/make_relocatable_python_framework.py" ]; then
+    git clone --quiet https://github.com/gregneagle/relocatable-python.git "$RELOC_PYTHON_TOOL"
+fi
+# Merge both requirements files — tool's --pip-requirements only accepts one file
+COMBINED_REQS="$(mktemp)"
+cat "$PROJECT_ROOT/requirements-service.txt" "$PROJECT_ROOT/requirements-transcribe.txt" > "$COMBINED_REQS"
+/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+    "$RELOC_PYTHON_TOOL/make_relocatable_python_framework.py" \
     --destination "$PYTHON_DEST" \
     --python-version 3.11.9 \
-    --pip-requirements "$PROJECT_ROOT/requirements-service.txt" \
-    --pip-requirements "$PROJECT_ROOT/requirements-transcribe.txt"
+    --os-version 11 \
+    --pip-requirements "$COMBINED_REQS"
+rm -f "$COMBINED_REQS"
 
 # Validate that key packages were installed correctly
 echo "--- Validating Python environment ---"
-"$PYTHON_DEST/bin/python3" -c "import rumps; import soundfile; import numpy" \
+"$PYTHON_DEST/Python.framework/Versions/3.11/bin/python3" -c "import rumps; import soundfile; import numpy" \
     || { echo "ERROR: Service dependencies missing from embedded Python"; exit 1; }
+
 
 # Step 6: Copy application source (mirrors repo layout for path resolution)
 cp "$PROJECT_ROOT/transcribe.py" "$APP_DEST/"

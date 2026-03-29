@@ -19,7 +19,8 @@ Includes a persistent macOS menu bar service for automatic recording and transcr
 ## Requirements
 
 - macOS 15.0+ (Sequoia) with Apple Silicon (M1/M2/M3/M4/M5)
-- Python 3.10+ in a conda environment
+- Python 3.11 in a conda environment (development / CLI)
+- **python.org Python 3.11** framework build — required to produce the `.app` bundle (not conda, not Homebrew)
 - Xcode Command Line Tools (`xcode-select --install`)
 - ffmpeg (Homebrew)
 - HuggingFace account (free, for pyannote models)
@@ -95,6 +96,7 @@ Grant them in **System Settings > Privacy & Security**. If Screen & System Audio
 ### 1. Install system dependencies
 
 ```bash
+xcode-select --install   # Xcode Command Line Tools (needed for Swift build)
 brew install ffmpeg
 ```
 
@@ -107,34 +109,31 @@ conda activate transcribe
 
 > **Important:** Never install packages on the host machine. Always use the conda env.
 
-### 3. Build the audio capture helper
+### 3. Install Python packages
 
-The Swift helper captures both microphone and system audio via ScreenCaptureKit. Requires Xcode Command Line Tools.
-
-```bash
-cd audio_capture_helper
-bash build.sh
-```
-
-This produces `bin/audio-capture-helper` (ad-hoc signed with the screen-capture entitlement).
-
-On first recording macOS will prompt for *"Screen & System Audio Recording"* permission — grant it in System Settings > Privacy & Security.
-
-> **Requires Xcode command-line tools:** `xcode-select --install`
-
-### 4. Install Python packages
-
-For the CLI tools only:
-
-```bash
-pip install -r requirements-transcribe.txt soundfile
-```
-
-For the menu bar service (includes all CLI dependencies):
+For the menu bar service and CLI tools:
 
 ```bash
 pip install -r requirements-service.txt -r requirements-transcribe.txt
 ```
+
+For CLI tools only (no menu bar service):
+
+```bash
+pip install -r requirements-transcribe.txt
+```
+
+### 4. Build the Swift audio capture helper
+
+The Swift helper captures both microphone and system audio via ScreenCaptureKit.
+
+```bash
+cd audio_capture_helper
+bash build.sh
+cd ..
+```
+
+This produces `bin/audio-capture-helper` (ad-hoc signed with the screen-capture entitlement).
 
 ### 5. HuggingFace setup (required for speaker diarization)
 
@@ -241,18 +240,44 @@ The service runs persistently in the background as a macOS menu bar agent. It re
 
 **Option A: Build the .app bundle (recommended)**
 
-The app runs as a proper macOS `.app` so Screen Recording permission persists across reboots.
+The app runs as a proper macOS `.app` so Screen Recording permission persists across reboots. The build embeds a standalone Python 3.11 — no conda required at runtime.
+
+**Prerequisites (one-time):**
+
+1. Install **python.org Python 3.11** — download the `.pkg` from [python.org/downloads](https://www.python.org/downloads/) and run the installer. This installs to `/Library/Frameworks/Python.framework/Versions/3.11/`. Conda and Homebrew Python will not work here.
+
+   Verify:
+   ```bash
+   /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 --version
+   # Python 3.11.x
+   ```
+
+2. Ensure the Swift binary is built (Step 4 above).
+
+**Build:**
 
 ```bash
-# Prerequisites: python.org Python 3.11 (not conda), relocatable-python, Swift binary built
-pip install relocatable-python
-cd audio_capture_helper && bash build.sh && cd ..
 bash packaging/build_app.sh
 ```
 
-This produces `dist/AudioTranscribe.app` and `dist/AudioTranscribe.dmg`.
+This will:
+- Clone `gregneagle/relocatable-python` automatically (no manual install needed)
+- Download and embed a standalone Python 3.11 with all dependencies
+- Ad-hoc codesign the bundle
+- Produce `dist/AudioTranscribe.app` and `dist/AudioTranscribe.dmg`
 
-Move the app to `/Applications`, then double-click to launch. macOS will prompt for *Screen & System Audio Recording* permission — grant it in **System Settings → Privacy & Security**. The permission is tied to the app's bundle ID and persists permanently.
+Takes 5–15 minutes on first run (downloads ~45 MB Python framework + installs ML packages).
+
+**Launch:**
+
+```bash
+open dist/AudioTranscribe.app
+# or move to /Applications first: cp -r dist/AudioTranscribe.app /Applications/
+```
+
+macOS will prompt for *Screen & System Audio Recording* — grant it in **System Settings → Privacy & Security**. The permission is tied to the bundle ID and persists permanently.
+
+> **Menu bar icon not visible?** On MacBooks with a notch, icons can be pushed off-screen. Hold `Cmd` and drag other icons to make space, or use [Ice](https://github.com/jordanbaird/Ice) (free) to manage menu bar overflow.
 
 Enter your HuggingFace token in **Settings → HuggingFace Token**. Optionally enable **Launch at Login** in Settings.
 
@@ -383,6 +408,70 @@ This lists available input devices, records 3 seconds of audio, and reports whet
 
 ---
 
+## Clean Rebuild
+
+Use this when code changes aren't reflected in the running app, or when the build is in a broken state.
+
+### After Python source changes only (no dep changes)
+
+```bash
+# Quit the running app first (menu bar → Quit), then:
+bash packaging/build_app.sh
+open dist/AudioTranscribe.app
+```
+
+The build script wipes and recreates `dist/AudioTranscribe.app` on every run.
+
+### After Swift changes
+
+```bash
+cd audio_capture_helper && bash build.sh && cd ..
+bash packaging/build_app.sh
+open dist/AudioTranscribe.app
+```
+
+### After requirements*.txt changes
+
+Same as above — the build script recreates the embedded Python env from scratch each run.
+
+### Full clean (something is broken, start fresh)
+
+```bash
+# 1. Quit the running app (menu bar → Quit)
+
+# 2. Remove the app and DMG output
+rm -rf dist/
+
+# 3. Remove the cached relocatable-python clone (forces re-download)
+rm -rf /tmp/relocatable-python
+
+# 4. Rebuild
+bash packaging/build_app.sh
+open dist/AudioTranscribe.app
+```
+
+### Reset the conda dev environment
+
+Only needed if the dev environment is broken (for CLI / `python service/main.py` usage):
+
+```bash
+conda deactivate
+conda env remove -n transcribe -y
+conda create -n transcribe python=3.11 -y
+conda activate transcribe
+pip install -r requirements-service.txt -r requirements-transcribe.txt
+```
+
+### Reset macOS permissions (TCC)
+
+If you change `CFBundleIdentifier` in `packaging/Info.plist`, macOS treats it as a new app and you must re-grant permissions:
+
+1. Go to **System Settings → Privacy & Security → Screen & System Audio Recording**
+2. Remove the old entry for AudioTranscribe
+3. Launch the new build — macOS will prompt again
+
+---
+
 ## Troubleshooting
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a full log of issues encountered during development and their solutions.
@@ -401,3 +490,5 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for a full log of issues 
 | Helper exits with code 2 | Grant "Screen & System Audio Recording" in System Settings → Privacy & Security — must be granted to `AudioTranscribe.app`, not Terminal |
 | TCC permission not persisting | Run as `.app` bundle (not from Terminal) so macOS ties the grant to the bundle ID |
 | 0-byte WAV files | Rebuild helper (`cd audio_capture_helper && bash build.sh`) — likely a stale binary |
+| `build_app.sh` fails with 404 downloading Python | Fixed — `--os-version 11` is now set in the script |
+| Menu bar icon not visible after launch | App is running but icon is hidden by notch overflow — hold Cmd and drag other icons to make space, or use [Ice](https://github.com/jordanbaird/Ice) |

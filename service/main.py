@@ -9,6 +9,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Hide the Python Dock icon — the forked child process is associated with
+# Python.app which shows in the Dock by default.  Setting the activation
+# policy to Accessory keeps the NSStatusBar (menu bar icon) but removes
+# the Dock icon.  Must run before rumps/AppKit creates NSApplication.
+try:
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+    NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+except Exception:
+    pass
+
 from service.config_manager import ConfigManager
 from service.logger import get_logger
 from service.menu_bar_app import TranscriptionApp
