@@ -9,8 +9,7 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         newConnection.exportedInterface = NSXPCInterface(
             with: AudioCaptureProtocol.self
         )
-        // AudioCaptureService will be implemented in Task 4
-        // newConnection.exportedObject = AudioCaptureService()
+        newConnection.exportedObject = AudioCaptureService()
         newConnection.resume()
         return true
     }
