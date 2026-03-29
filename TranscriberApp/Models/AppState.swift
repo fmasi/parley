@@ -11,8 +11,8 @@ final class AppState {
 
     var phase: Phase = .idle
     var lastTranscriptPath: String?
+    var lastJsonPath: String?
     var errorMessage: String?
-    var showRenameSheet = false
 
     var isIdle: Bool {
         if case .idle = phase { return true }

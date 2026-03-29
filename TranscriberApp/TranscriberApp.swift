@@ -7,15 +7,15 @@ struct TranscriberApp: App {
     private let captureClient = AudioCaptureClient()
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
+    private let calendarService = CalendarService()
 
     init() {
-        // UNUserNotificationCenter requires a bundled app with CFBundleIdentifier.
-        // Guard so the bare binary can still launch during development.
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().requestAuthorization(
                 options: [.alert, .sound]
             ) { _, _ in }
         }
+        calendarService.requestAccess()
     }
 
     var body: some Scene {
@@ -24,7 +24,8 @@ struct TranscriberApp: App {
                 appState: appState,
                 captureClient: captureClient,
                 transcriptionRunner: transcriptionRunner,
-                configManager: configManager
+                configManager: configManager,
+                calendarService: calendarService
             )
         }
         .menuBarExtraStyle(.menu)

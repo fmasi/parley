@@ -5,6 +5,8 @@ public enum CalendarEventPicker {
     /// Filters out all-day events and declined events.
     /// Tiebreaker: most recently started.
     public static func bestCurrentEvent(from events: [EKEvent]) -> EKEvent? {
-        nil // TDD — will implement after tests
+        events
+            .filter { !$0.isAllDay }
+            .max { $0.startDate < $1.startDate }
     }
 }

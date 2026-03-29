@@ -38,5 +38,8 @@
 
     <key>NSMicrophoneUsageDescription</key>
     <string>Audio Transcribe needs microphone access to record your voice.</string>
+
+    <key>NSCalendarsUsageDescription</key>
+    <string>Audio Transcribe uses your calendar to suggest a name for the recording based on your current meeting.</string>
 </dict>
 </plist>

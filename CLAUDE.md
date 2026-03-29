@@ -20,9 +20,13 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
 - `TranscriberApp/Services/TranscriptionRunner.swift` -- launches transcribe.py via Process
+- `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
+- `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
+- `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
 - `TranscriberApp/Views/MenuView.swift` -- menu bar dropdown content
 - `TranscriberApp/Views/SettingsView.swift` -- settings Form
 - `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet
+- `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol via ScreenCaptureKit
@@ -32,6 +36,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### Shared Protocol (AudioCaptureProtocol target)
 - `AudioCaptureProtocol/AudioCaptureProtocol.swift` -- @objc XPC protocol + service name constant
+
+### Shared Logic (TranscriberCore target)
+- `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 
 ### Python CLI (unchanged)
 - `transcribe.py` -- CLI tool, mlx-whisper + pyannote diarization, supports dual-stream input (`-i system.wav -i mic.wav`)
@@ -59,6 +66,10 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ```bash
 swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
+
+swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
+# Runs Swift tests (uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools)
+# Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
 
 ### Swift (standalone CLI helper -- legacy)
@@ -83,9 +94,11 @@ python -m pytest tests/ -q
 6. XPC services only work inside .app bundles -- the bare binary will get an XPC connection error
 7. UNUserNotificationCenter requires a bundled app -- guarded with `Bundle.main.bundleIdentifier != nil`
 8. Use `remoteObjectProxyWithErrorHandler` for XPC calls to prevent continuation leaks
+9. MenuBarExtra with `.menu` style cannot present sheets -- use NSPanel via window controllers
+10. Calendar access requires `NSCalendarsUsageDescription` in Info.plist and `requestFullAccessToEvents()` at launch
 
 ## Packaging
-- `Package.swift` -- SPM workspace with 3 targets (TranscriberApp, AudioCaptureHelperXPC, AudioCaptureProtocol)
+- `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
 - `packaging/AudioCaptureHelper-Info.plist` -- XPC service plist (ServiceType: Application)
 - `packaging/embed_python.sh` -- embeds conda Python + scripts into .app Resources

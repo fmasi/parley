@@ -7,6 +7,7 @@ struct MenuView: View {
     let captureClient: AudioCaptureClient
     let transcriptionRunner: TranscriptionRunner
     let configManager: ConfigManager
+    let calendarService: CalendarService
 
     var body: some View {
         Button(appState.recordingToggleLabel) {
@@ -22,9 +23,11 @@ struct MenuView: View {
         }
 
         Button("Rename Speakers...") {
-            appState.showRenameSheet = true
+            if let jsonPath = appState.lastJsonPath {
+                RenameWindowController.shared.show(jsonPath: URL(fileURLWithPath: jsonPath))
+            }
         }
-        .disabled(!appState.isIdle)
+        .disabled(!appState.isIdle || appState.lastJsonPath == nil)
 
         SettingsLink {
             Text("Settings...")
@@ -44,11 +47,26 @@ struct MenuView: View {
         if appState.isRecording {
             await stopRecording()
         } else if appState.isIdle {
-            await startRecording()
+            promptAndStartRecording()
         }
     }
 
-    private func startRecording() async {
+    private func promptAndStartRecording() {
+        let suggestedName = calendarService.currentEventTitle()
+        SessionNameWindowController.shared.show(suggestedName: suggestedName) { sessionName in
+            Task { await startRecording(sessionName: sessionName) }
+        }
+    }
+
+    private func sanitizeFilename(_ name: String) -> String {
+        var sanitized = name
+        for char in ["/", ":", "\0"] {
+            sanitized = sanitized.replacingOccurrences(of: char, with: "")
+        }
+        return sanitized
+    }
+
+    private func startRecording(sessionName: String) async {
         let config = configManager.config
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
@@ -56,7 +74,10 @@ struct MenuView: View {
 
         let timeFormatter = DateFormatter()
         timeFormatter.dateFormat = "HHmmss"
-        let baseName = timeFormatter.string(from: Date())
+        let timestamp = timeFormatter.string(from: Date())
+
+        let sanitized = sanitizeFilename(sessionName)
+        let baseName = sanitized.isEmpty ? timestamp : "\(timestamp)-\(sanitized)"
 
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
             .appendingPathComponent(dayDir)
@@ -86,8 +107,13 @@ struct MenuView: View {
             )
 
             appState.lastTranscriptPath = result.outputPath.path
+            appState.lastJsonPath = result.jsonPath?.path
             appState.phase = .idle
             sendNotification(path: result.outputPath)
+
+            if let jsonPath = result.jsonPath {
+                RenameWindowController.shared.show(jsonPath: jsonPath)
+            }
         } catch {
             appState.errorMessage = error.localizedDescription
             appState.phase = .idle
