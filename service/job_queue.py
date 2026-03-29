@@ -27,6 +27,7 @@ class TranscriptionJob:
     output_format: str
     on_complete: Callable[["TranscriptionJob"], None]
     on_error: Callable[["TranscriptionJob"], None]
+    mic_path: Optional[Path] = None  # second stream for dual-stream capture
     status: JobStatus = field(default=JobStatus.PENDING, init=False)
     error: Optional[str] = field(default=None, init=False)
 

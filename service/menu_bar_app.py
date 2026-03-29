@@ -45,7 +45,7 @@ except ImportError:
                     text = ""
                 return R()
 
-from service.audio_capture import AudioCapture
+from service.audio_capture import AudioCapture, CaptureMode
 from service.calendar_lookup import CalendarLookup
 from service.config_manager import ConfigManager
 from service.logger import get_logger
@@ -56,9 +56,32 @@ from service.silence_detector import SilenceDetector
 
 log = get_logger("menu_bar_app")
 
+# Helper to dispatch a Python callable to the main thread via ObjC runtime.
+try:
+    import objc
+    from Foundation import NSObject as _NSObject
+
+    class _MainThreadHelper(_NSObject):
+        callback = objc.ivar()
+
+        def invoke_(self, _sender):
+            if self.callback:
+                self.callback()
+except ImportError:
+    # Fallback: call directly (tests / environments without PyObjC)
+    class _MainThreadHelper:  # type: ignore
+        callback = None
+        def alloc(self): return self
+        def init(self): return self
+        def performSelectorOnMainThread_withObject_waitUntilDone_(self, *a):
+            if self.callback:
+                self.callback()
+
+
 ICON_IDLE = "🎙"
 ICON_RECORDING = "🔴"
 ICON_PROCESSING = "⏳"
+ICON_DEGRADED = "🎙⚠"  # recording attempted but helper unavailable
 
 
 class TranscriptionApp(rumps.App):
@@ -77,6 +100,7 @@ class TranscriptionApp(rumps.App):
             config=self._cm.config,
             on_rename_ready=self._on_rename_ready,
             on_error=self._on_pipeline_error,
+            on_warning=self._on_pipeline_warning,
         )
 
         self._record_item = rumps.MenuItem("Start Recording", callback=self.start_recording)
@@ -103,9 +127,17 @@ class TranscriptionApp(rumps.App):
 
         self._capture = AudioCapture(output_path=output_path)
         log.info("AudioCapture created — calling start()")
-        self._capture.start()
-        log.info("AudioCapture.start() returned — state: RECORDING")
+        mode = self._capture.start()
 
+        if mode == CaptureMode.UNAVAILABLE:
+            log.warning("Audio capture unavailable — helper binary missing")
+            self._capture = None
+            self.title = ICON_DEGRADED
+            self._show_capture_warning()
+            self.title = ICON_IDLE
+            return
+
+        log.info("AudioCapture.start() returned — state: RECORDING")
         self.title = ICON_RECORDING
         self._record_item.title = "Stop Recording"
         self._record_item.set_callback(self.stop_recording)
@@ -125,11 +157,13 @@ class TranscriptionApp(rumps.App):
         try:
             if self._capture:
                 log.info("Flushing audio buffer to disk...")
-                audio_path = self._capture.stop()
+                audio_paths = self._capture.stop()
                 self._capture = None
-                log.info(f"Audio written: {audio_path.name} — queuing transcription")
+                log.info(f"Audio written: {audio_paths.system.name} — queuing transcription")
                 self.title = ICON_PROCESSING
-                self._pipeline.on_recording_complete(audio_path)
+                self._pipeline.on_recording_complete(
+                    audio_paths.system, mic_path=audio_paths.mic
+                )
                 log.info("Transcription job enqueued — state: TRANSCRIBING")
             else:
                 log.warning("stop_recording called but no active capture")
@@ -176,20 +210,79 @@ class TranscriptionApp(rumps.App):
             self.stop_recording(None)
 
     def _on_rename_ready(self, json_path):
+        """Called from worker thread — dispatch to main thread for AppKit UI."""
         self.title = ICON_IDLE
         log.info(f"Transcription complete, launching rename dialog: {json_path.name}")
+
+        # AppKit UI (NSAlert/NSWindow) must run on the main thread.
+        # Use a helper NSObject to dispatch via performSelectorOnMainThread.
+        helper = _MainThreadHelper.alloc().init()
+        helper.callback = lambda: self._run_rename_dialog(json_path)
+        helper.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "invoke:", None, False
+        )
+
+    def _run_rename_dialog(self, json_path):
+        """Runs on main thread — safe to create AppKit UI."""
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception as e:
+            log.warning(f"Could not activate app for rename dialog: {e}")
+
         run_rename_dialog(json_path)
+
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
+
         rumps.notification(
             title="Transcription Complete",
             subtitle=json_path.stem,
             message="Speaker names saved.",
         )
 
+    def _show_capture_warning(self):
+        """Alert the user that recording is unavailable (helper binary missing)."""
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        rumps.alert(
+            title="Audio Capture Unavailable",
+            message=(
+                "The audio capture helper binary is missing.\n\n"
+                "To enable recording:\n"
+                "1. Run: cd audio_capture_helper && bash build.sh\n"
+                "2. Grant 'Screen & System Audio Recording' in\n"
+                "   System Settings → Privacy & Security"
+            ),
+            ok="OK",
+        )
+        try:
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
+
     def _on_pipeline_error(self, message):
         self.title = ICON_IDLE
         log.error(f"Pipeline error: {message}")
         rumps.notification(
             title="Transcription Failed",
+            subtitle="",
+            message=message,
+        )
+
+    def _on_pipeline_warning(self, message):
+        log.warning(f"Pipeline warning: {message}")
+        rumps.notification(
+            title="Audio Transcribe",
             subtitle="",
             message=message,
         )

@@ -1,14 +1,19 @@
-"""Captures microphone audio using AVAudioRecorder via PyObjC.
+"""Captures microphone + system audio using the audio-capture-helper Swift binary.
 
-AVAudioRecorder runs inside the service process (python3.14) which already
-holds the microphone TCC permission. This avoids the launchd subprocess
-permission issue where ffmpeg/sounddevice fail to access audio hardware
-when spawned indirectly from launchd.
+The helper uses ScreenCaptureKit (macOS 15.0+) to capture two separate streams:
+  - System audio (Zoom, Teams, Meet, speakers…) → <base>.wav
+  - Local microphone → <base>_mic.wav
 
-Note: System audio capture (Zoom via headphones) requires a virtual loopback
-device (BlackHole). Without one, only the microphone input is captured.
+Each file is written at its native sample rate. The downstream transcription
+pipeline processes them separately for better speaker attribution.
+
+Requires 'Screen & System Audio Recording' permission in
+System Settings → Privacy & Security (macOS prompts on first use).
 """
-import threading
+import signal
+import subprocess
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -16,110 +21,90 @@ from service.logger import get_logger
 
 log = get_logger("audio_capture")
 
-try:
-    import objc
-    import AVFoundation as AVF
-    import Foundation as F
-    AVFOUNDATION_AVAILABLE = True
-except ImportError:
-    AVFOUNDATION_AVAILABLE = False
-    log.warning("AVFoundation not available — audio capture disabled")
+HELPER_BINARY = Path(__file__).parent.parent / "bin" / "audio-capture-helper"
+
+
+class CaptureMode(Enum):
+    FULL = "full"               # mic + system audio via Swift helper
+    UNAVAILABLE = "unavailable" # helper binary not found — cannot record
+
+
+@dataclass
+class AudioPaths:
+    """Paths to the captured audio files."""
+    system: Path   # remote/system audio
+    mic: Path      # local microphone
 
 
 class AudioCapture:
-    """Records microphone to a WAV file using AVAudioRecorder (PyObjC).
+    """Records microphone + system audio to WAV files via the Swift helper.
 
     Interface:
         capture = AudioCapture(output_path)
-        capture.start()          # non-blocking
-        path = capture.stop()    # stops and returns Path to WAV file
+        mode = capture.start()
+        paths = capture.stop()   # returns AudioPaths with .system and .mic
     """
 
     def __init__(self, output_path: Path):
         self._output_path = output_path
-        self._recorder = None
-        self._run_loop_thread: Optional[threading.Thread] = None
-        self._run_loop = None
+        self._process: Optional[subprocess.Popen] = None
 
-    def start(self) -> None:
-        """Begin recording. Non-blocking."""
-        if not AVFOUNDATION_AVAILABLE:
-            log.error("Cannot start: AVFoundation not available")
-            return
+    @property
+    def _mic_path(self) -> Path:
+        return self._output_path.with_stem(self._output_path.stem + "_mic")
+
+    def start(self) -> CaptureMode:
+        """Begin recording. Non-blocking. Returns CaptureMode."""
+        if not HELPER_BINARY.exists():
+            log.error(
+                f"audio-capture-helper not found at {HELPER_BINARY}. "
+                "Run: cd audio_capture_helper && bash build.sh"
+            )
+            return CaptureMode.UNAVAILABLE
 
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        url = F.NSURL.fileURLWithPath_(str(self._output_path))
-
-        settings = {
-            AVF.AVFormatIDKey: int(AVF.kAudioFormatLinearPCM),
-            AVF.AVSampleRateKey: 16000.0,
-            AVF.AVNumberOfChannelsKey: 1,
-            AVF.AVLinearPCMBitDepthKey: 16,
-            AVF.AVLinearPCMIsBigEndianKey: False,
-            AVF.AVLinearPCMIsFloatKey: False,
-        }
-
-        recorder, error = AVF.AVAudioRecorder.alloc().initWithURL_settings_error_(
-            url, settings, None
+        log.info(f"Starting audio capture → {self._output_path.name}")
+        self._process = subprocess.Popen(
+            [str(HELPER_BINARY), str(self._output_path)],
+            stderr=subprocess.PIPE,
+            text=True,
         )
+        return CaptureMode.FULL
 
-        if error is not None:
-            log.error(f"AVAudioRecorder init failed: {error}")
-            return
+    def stop(self) -> AudioPaths:
+        """Stop recording. Returns AudioPaths with system and mic WAV files."""
+        if self._process is not None:
+            log.info("Stopping audio capture (SIGTERM)...")
+            self._process.send_signal(signal.SIGTERM)
+            try:
+                _, stderr = self._process.communicate(timeout=10)
+                if stderr:
+                    for line in stderr.strip().splitlines():
+                        log.info(f"[audio-capture-helper] {line}")
+                if self._process.returncode == 2:
+                    raise PermissionError(
+                        "Screen & System Audio Recording permission denied. "
+                        "Grant it in System Settings → Privacy & Security."
+                    )
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.communicate()
+                log.error("audio-capture-helper did not exit within 10 s — killed")
+            finally:
+                self._process = None
 
-        if recorder is None:
-            log.error("AVAudioRecorder init returned None")
-            return
+        paths = AudioPaths(system=self._output_path, mic=self._mic_path)
 
-        self._recorder = recorder
+        for label, p in [("system", paths.system), ("mic", paths.mic)]:
+            if p.exists():
+                size_kb = p.stat().st_size // 1024
+                log.info(f"Audio [{label}]: {p.name} ({size_kb} KB)")
+            else:
+                log.warning(f"Audio [{label}]: {p.name} not found")
 
-        # AVAudioRecorder needs a run loop — spin one up on a background thread
-        self._run_loop_thread = threading.Thread(
-            target=self._run_loop_worker, daemon=True
-        )
-        self._run_loop_thread.start()
-
-    def stop(self) -> Path:
-        """Stop recording and return path to WAV file."""
-        if self._recorder is not None:
-            log.info("Stopping AVAudioRecorder...")
-            self._recorder.stop()
-            self._recorder = None
-
-        if self._run_loop is not None:
-            self._run_loop.performSelector_withObject_afterDelay_(
-                b"stop", None, 0
+        if not paths.system.exists() and not paths.mic.exists():
+            raise RuntimeError(
+                f"audio-capture-helper produced no output files"
             )
-            self._run_loop = None
 
-        if self._run_loop_thread is not None:
-            self._run_loop_thread.join(timeout=5)
-            self._run_loop_thread = None
-
-        if not self._output_path.exists():
-            log.error(f"Output file not found after stop: {self._output_path}")
-            raise RuntimeError(f"AVAudioRecorder did not produce output: {self._output_path}")
-
-        size = self._output_path.stat().st_size
-        log.info(f"Audio written: {self._output_path.name} ({size // 1024} KB)")
-        return self._output_path
-
-    def _run_loop_worker(self) -> None:
-        """Run an NSRunLoop on this thread so AVAudioRecorder can deliver callbacks."""
-        import Foundation as F
-        run_loop = F.NSRunLoop.currentRunLoop()
-        self._run_loop = run_loop
-
-        # Prepare and start recording once the run loop is live
-        self._recorder.prepareToRecord()
-        success = self._recorder.record()
-        if success:
-            log.info("AVAudioRecorder recording started")
-        else:
-            log.error("AVAudioRecorder.record() returned False — check microphone permission")
-
-        # Run until stop() calls performSelector to break the loop
-        run_loop.runUntilDate_(
-            F.NSDate.dateWithTimeIntervalSinceNow_(3600)  # max 1 hour
-        )
+        return paths

@@ -15,11 +15,21 @@ def sample_segments():
 
 
 @pytest.fixture
+def dual_stream_segments():
+    """Transcript segments with source field (local=mic, remote=system audio)."""
+    return [
+        {"start": 0.0, "end": 5.0, "speaker": "Local Speaker", "text": "I am on the mic.", "source": "local"},
+        {"start": 5.1, "end": 9.0, "speaker": "Remote Speaker", "text": "I am on the system audio.", "source": "remote"},
+        {"start": 9.1, "end": 11.0, "speaker": "Local Speaker", "text": "Back to me.", "source": "local"},
+    ]
+
+
+@pytest.fixture
 def sample_metadata():
     """Typical metadata block written by transcribe.py."""
     return {
-        "audio_file": "meeting.wav",
-        "audio_path": "/tmp/meeting.wav",
+        "audio_files": ["meeting.wav"],
+        "audio_paths": ["/tmp/meeting.wav"],
         "output_format": "txt",
         "language": "en",
         "num_speakers": 2,

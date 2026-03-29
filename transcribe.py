@@ -211,11 +211,77 @@ def write_json(segments: list[dict], output_path: str, metadata: dict) -> None:
         json.dump(output, f, indent=2, ensure_ascii=False)
 
 
+def transcribe_dual_stream(
+    system_path: str,
+    mic_path: str,
+    hf_token: str | None,
+    num_speakers: int | None,
+    language: str | None,
+    no_diarize: bool,
+) -> list[dict]:
+    """Transcribe two audio streams (system + mic) and merge by timestamp.
+
+    Each stream is transcribed and diarized independently. Segments are tagged
+    with a source prefix (Local/Remote) so speakers from different streams
+    are distinguishable.
+    """
+    all_segments: list[dict] = []
+    detected_language = None
+
+    for audio_path, source_label in [(system_path, "Remote"), (mic_path, "Local")]:
+        if not Path(audio_path).exists():
+            print(f"Skipping {source_label} stream — file not found: {audio_path}")
+            continue
+        if Path(audio_path).stat().st_size <= 44:
+            print(f"Skipping {source_label} stream — empty file: {audio_path}")
+            continue
+
+        print(f"\n--- Transcribing {source_label} stream: {audio_path} ---")
+        result = transcribe_audio(audio_path, language=language or detected_language)
+        if detected_language is None:
+            detected_language = result.get("language")
+        whisper_segments = result.get("segments", [])
+
+        if not no_diarize and hf_token:
+            speaker_segments = diarize_audio(
+                audio_path, hf_token, num_speakers=num_speakers
+            )
+            segments = assign_speakers(whisper_segments, speaker_segments)
+        else:
+            segments = [
+                {
+                    "start": s["start"],
+                    "end": s["end"],
+                    "speaker": "",
+                    "text": s["text"].strip(),
+                }
+                for s in whisper_segments
+            ]
+
+        # Tag each segment with its source
+        for seg in segments:
+            speaker = seg.get("speaker", "")
+            if speaker and speaker != "Unknown":
+                seg["speaker"] = f"{source_label} {speaker}"
+            elif speaker != "Unknown":
+                seg["speaker"] = f"{source_label}"
+            seg["source"] = source_label.lower()
+
+        all_segments.extend(segments)
+
+    # Sort all segments chronologically
+    all_segments.sort(key=lambda s: s["start"])
+    return all_segments
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="On-device audio transcription with speaker diarization."
     )
-    parser.add_argument("-i", "--input", required=True, help="Path to audio file")
+    parser.add_argument(
+        "-i", "--input", required=True, action="append",
+        help="Path to audio file (can be specified twice for dual-stream: system + mic)",
+    )
     parser.add_argument(
         "-o", "--output", help="Output file path (default: auto from input name)"
     )
@@ -245,16 +311,19 @@ def main():
 
     args = parser.parse_args()
 
-    audio_path = Path(args.input)
-    if not audio_path.exists():
-        print(f"Error: audio file not found: {audio_path}")
-        sys.exit(1)
+    # Validate inputs exist
+    audio_paths = [Path(p) for p in args.input]
+    primary_path = audio_paths[0]
+    for p in audio_paths:
+        if not p.exists():
+            print(f"Error: audio file not found: {p}")
+            sys.exit(1)
 
     # Determine output path
     if args.output:
         output_path = args.output
     else:
-        output_path = str(audio_path.with_suffix(f".{args.format}"))
+        output_path = str(primary_path.with_suffix(f".{args.format}"))
 
     # Validate diarization requirements
     if not args.no_diarize and not args.hf_token:
@@ -263,39 +332,52 @@ def main():
         print("Or use --no-diarize to skip speaker detection.")
         sys.exit(1)
 
-    # Step 1: Transcribe
-    result = transcribe_audio(str(audio_path), language=args.language)
-    whisper_segments = result.get("segments", [])
-
-    # Step 2: Diarize (optional)
-    if not args.no_diarize:
-        speaker_segments = diarize_audio(
-            str(audio_path), args.hf_token, num_speakers=args.speakers
+    # Dual-stream mode: two inputs = system + mic
+    if len(audio_paths) == 2:
+        segments = transcribe_dual_stream(
+            system_path=str(audio_paths[0]),
+            mic_path=str(audio_paths[1]),
+            hf_token=args.hf_token,
+            num_speakers=args.speakers,
+            language=args.language,
+            no_diarize=args.no_diarize,
         )
-        segments = assign_speakers(whisper_segments, speaker_segments)
+        detected_language = "auto"
     else:
-        segments = [
-            {
-                "start": s["start"],
-                "end": s["end"],
-                "speaker": "",
-                "text": s["text"].strip(),
-            }
-            for s in whisper_segments
-        ]
+        # Single-file mode (backward compatible)
+        result = transcribe_audio(str(primary_path), language=args.language)
+        whisper_segments = result.get("segments", [])
+        detected_language = result.get("language", "auto")
 
-    # Step 3: Write output
+        if not args.no_diarize:
+            speaker_segments = diarize_audio(
+                str(primary_path), args.hf_token, num_speakers=args.speakers
+            )
+            segments = assign_speakers(whisper_segments, speaker_segments)
+        else:
+            segments = [
+                {
+                    "start": s["start"],
+                    "end": s["end"],
+                    "speaker": "",
+                    "text": s["text"].strip(),
+                }
+                for s in whisper_segments
+            ]
+
+    # Write output
     metadata = {
-        "audio_file": str(audio_path.name),
-        "audio_path": str(audio_path.resolve()),
+        "audio_files": [str(p.name) for p in audio_paths],
+        "audio_paths": [str(p.resolve()) for p in audio_paths],
         "output_format": args.format,
-        "language": result.get("language", "auto"),
+        "language": detected_language,
         "num_speakers": args.speakers or "auto",
         "diarization": not args.no_diarize,
+        "dual_stream": len(audio_paths) == 2,
     }
 
     # Always write JSON as the master copy so the expensive run never needs repeating.
-    json_path = str(audio_path.with_suffix(".json"))
+    json_path = str(primary_path.with_suffix(".json"))
     write_json(segments, json_path, metadata)
 
     if args.format == "txt":
