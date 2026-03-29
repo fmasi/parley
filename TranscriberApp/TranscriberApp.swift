@@ -9,9 +9,13 @@ struct TranscriberApp: App {
     private let configManager = ConfigManager.shared
 
     init() {
-        UNUserNotificationCenter.current().requestAuthorization(
-            options: [.alert, .sound]
-        ) { _, _ in }
+        // UNUserNotificationCenter requires a bundled app with CFBundleIdentifier.
+        // Guard so the bare binary can still launch during development.
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().requestAuthorization(
+                options: [.alert, .sound]
+            ) { _, _ in }
+        }
     }
 
     var body: some Scene {

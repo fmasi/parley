@@ -21,6 +21,11 @@ struct MenuView: View {
             NSWorkspace.shared.open(dir)
         }
 
+        Button("Rename Speakers...") {
+            appState.showRenameSheet = true
+        }
+        .disabled(!appState.isIdle)
+
         SettingsLink {
             Text("Settings...")
         } preAction: {
@@ -90,6 +95,7 @@ struct MenuView: View {
     }
 
     private func sendNotification(path: URL) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = "Transcription Complete"
         content.body = path.lastPathComponent
