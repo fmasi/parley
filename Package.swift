@@ -16,15 +16,24 @@ let package = Package(
             name: "AudioCaptureProtocol",
             path: "AudioCaptureProtocol"
         ),
+        .target(
+            name: "TranscriberCore",
+            path: "TranscriberCore"
+        ),
         .executableTarget(
             name: "TranscriberApp",
-            dependencies: ["AudioCaptureProtocol", "SettingsAccess"],
+            dependencies: ["AudioCaptureProtocol", "SettingsAccess", "TranscriberCore"],
             path: "TranscriberApp"
         ),
         .executableTarget(
             name: "AudioCaptureHelperXPC",
             dependencies: ["AudioCaptureProtocol"],
             path: "AudioCaptureHelper/XPC"
+        ),
+        .testTarget(
+            name: "TranscriberTests",
+            dependencies: ["TranscriberCore"],
+            path: "SwiftTests/TranscriberTests"
         ),
     ]
 )

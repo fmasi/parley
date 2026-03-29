@@ -68,7 +68,7 @@ final class TranscriptionRunner {
 
         return try await withCheckedThrowingContinuation { cont in
             process.terminationHandler = { proc in
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
                 if proc.terminationStatus != 0 {
@@ -79,26 +79,17 @@ final class TranscriptionRunner {
                     return
                 }
 
-                // transcribe.py outputs JSON to stdout with output path info
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                // Parse the JSON output path from stdout
-                if let data = stdout.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let outputFile = json["output_file"] as? String {
-                    let jsonFile = json["json_file"] as? String
-                    cont.resume(returning: TranscriptionResult(
-                        outputPath: URL(fileURLWithPath: outputFile),
-                        jsonPath: jsonFile.map { URL(fileURLWithPath: $0) }
-                    ))
-                } else {
-                    // Fallback: derive output path from input
-                    let baseName = systemAudio.deletingPathExtension().lastPathComponent
-                    let outputFile = outputDirectory
-                        .appendingPathComponent(baseName + "." + outputFormat)
-                    cont.resume(returning: TranscriptionResult(
-                        outputPath: outputFile, jsonPath: nil
-                    ))
-                }
+                // transcribe.py always writes <baseName>.json (master) + <baseName>.<format>
+                // Derive both paths from the system audio input — no stdout parsing needed.
+                let baseName = systemAudio.deletingPathExtension().lastPathComponent
+                let outputFile = outputDirectory
+                    .appendingPathComponent(baseName + "." + outputFormat)
+                let jsonFile = outputDirectory
+                    .appendingPathComponent(baseName + ".json")
+                cont.resume(returning: TranscriptionResult(
+                    outputPath: outputFile,
+                    jsonPath: jsonFile
+                ))
             }
 
             do {

@@ -1,273 +1,138 @@
 # Audio Transcription Tool
 
-On-device audio transcription with speaker diarization for Apple Silicon Macs.
-Uses MLX-optimized Whisper (large-v3) and pyannote.audio for speaker detection.
-Includes a native macOS SwiftUI menu bar app for automatic recording and transcription.
+On-device meeting transcription with speaker diarization for Apple Silicon Macs. Records both system audio and microphone simultaneously — no virtual audio devices required. Transcribes using MLX-optimized Whisper and labels who said what with pyannote.audio.
 
-## Features
+Comes as a native macOS menu bar app, with a Python CLI available for standalone use.
 
-- Transcribes audio files via CLI (`transcribe.py`)
-- Dual-stream audio capture — system audio and microphone are recorded as separate files for cleaner transcription and automatic Local/Remote speaker attribution
-- Speaker diarization — labels who said what
-- Interactive speaker renaming with audio playback (`rename_speakers.py`)
-- Native SwiftUI menu bar app — records, transcribes, and prompts for speaker names automatically
-- Apple Calendar integration — pre-populates recording names from current meeting
-- Outputs: plain text, SRT subtitles, JSON (always saved as master copy)
-- Fully on-device, free after model download
+---
+
+## Quick Start
+
+> **Pre-built app coming soon.** Download `AudioTranscribe.app`, drag to `/Applications`, launch, and grant Screen & System Audio Recording permission when prompted.
+>
+> For now, follow the [Setup](#setup) and [Build & Install](#build--install) steps below.
+
+---
 
 ## Requirements
 
 - macOS 15.0+ (Sequoia) with Apple Silicon (M1/M2/M3/M4/M5)
-- Python 3.11 in a conda environment (for transcription engine and CLI)
-- Xcode Command Line Tools (`xcode-select --install`)
+- [Miniconda](https://docs.anaconda.com/miniconda/) — use Miniconda, not full Anaconda
+- Xcode Command Line Tools
 - ffmpeg (Homebrew)
-- HuggingFace account (free, for pyannote models)
+- HuggingFace account (free, for pyannote diarization models)
 
-## Architecture
-
-The app has three layers:
-
-1. **SwiftUI app** (`TranscriberApp/`) — native macOS menu bar app using `MenuBarExtra`. Manages the UI, settings, and orchestrates recording and transcription.
-
-2. **XPC audio capture service** (`AudioCaptureHelper/XPC/`) — uses ScreenCaptureKit to capture two separate audio streams: system audio (`.audio`) and microphone (`.microphone`). Writes two WAV files:
-   - `<base>.wav` — system/remote audio
-   - `<base>_mic.wav` — local microphone (at device native rate)
-
-3. **Python transcription** (`transcribe.py`) — launched as a subprocess by the Swift app. Accepts dual `-i` flags, transcribes each stream independently, tags segments as `Local Speaker X` / `Remote Speaker X`, and merges them chronologically.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  SwiftUI App (MenuBarExtra)                             │
-│    ├── AudioCaptureClient ──XPC──┐                      │
-│    │                             v                      │
-│    │               AudioCaptureService (XPC)            │
-│    │                 ├── SCStream (.audio)  → base.wav   │
-│    │                 └── SCStream (.mic)    → base_mic…  │
-│    │                                                     │
-│    └── TranscriptionRunner                               │
-│          └── Process: python transcribe.py               │
-│                ├── Whisper (base.wav)    → Remote 1, 2…  │
-│                ├── Whisper (base_mic…)   → Local 1, 2…   │
-│                └── merge chronologically → transcript    │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Key technical decisions
-
-1. **macOS 15.0+ minimum** — `captureMicrophone` and `SCStreamOutputType.microphone` were added in macOS 15.0 (Sequoia). The Package.swift uses `.macOS("15.0")` string syntax because the `.v15` enum requires swift-tools-version 6.0.
-
-2. **Two separate files, no mixing** — ScreenCaptureKit delivers `.audio` (system) and `.microphone` (mic) as separate streams at different sample rates. There is no Apple API to get a pre-mixed stream (confirmed via SDK headers through macOS 26). Keeping them separate gives Whisper cleaner audio and enables automatic Local vs Remote speaker attribution.
-
-3. **XPC service for audio capture** — Audio capture runs in a separate XPC service process. This provides process isolation and allows the TCC permission grant to be scoped to the app bundle.
-
-4. **Native sample rates** — The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some headphones). The Swift code auto-detects the rate from the first CMSampleBuffer's format description and writes it to the WAV header on finalize(). No resampling is done — Whisper handles any sample rate.
-
-5. **No virtual audio devices needed** — Unlike BlackHole/Loopback solutions, ScreenCaptureKit captures system audio natively. Only a single macOS permission is required.
-
-## Audio capture
-
-The app captures **both your microphone and system audio** (Zoom, Teams, Google Meet, etc.) simultaneously using ScreenCaptureKit — no virtual audio devices required.
-
-- With **headphones**: your mic captures your voice; system audio captures the remote side
-- With **speakers**: both sides are captured by the mic naturally, and system audio also captures the remote side — both paths work
-- Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, ...)
-
-### Known constraints
-
-- macOS 15.0+ (Sequoia) required — earlier versions lack `SCStreamOutputType.microphone`
-- `.screen` output type must be registered even for audio-only capture (SCStream requirement)
-- XPC service only works when embedded in a `.app` bundle
-- Exit code 2 from the capture service = permission denied
-
-## macOS permissions
-
-The first time you run the app, macOS will prompt for these permissions:
-
-| Permission | Required for |
-|---|---|
-| **Screen & System Audio Recording** | Recording both microphone and system audio via ScreenCaptureKit (covers both streams with a single permission) |
-| **Calendars** | Pre-populating recording names from the current meeting (optional) |
-
-Permission is granted to the **app bundle** (CFBundleIdentifier: `com.audio-transcribe.app`).
-
-Grant them in **System Settings > Privacy & Security**. If Screen & System Audio Recording is denied the capture service will report a permission error.
+---
 
 ## Setup
 
 ### 1. Install system dependencies
 
 ```bash
-xcode-select --install   # Xcode Command Line Tools (needed for Swift build)
+xcode-select --install
 brew install ffmpeg
 ```
 
-### 2. Create conda environment
+### 2. Create conda environments
+
+Two environments — one for development and CLI use, one lean environment for embedding into the app bundle:
 
 ```bash
+# Development (includes pytest and dev tools)
 conda create -n transcribe python=3.11 -y
 conda activate transcribe
-```
-
-> **Important:** Never install packages on the host machine. Always use the conda env.
-
-### 3. Install Python packages
-
-```bash
 pip install -r requirements-transcribe.txt
+
+# Bundle (runtime only — keeps the embedded app small)
+conda create -n transcribe-bundle python=3.11 -y
+conda activate transcribe-bundle
+pip install -r requirements-bundle.txt
 ```
 
-### 4. Build the SwiftUI app
+> Never install packages directly on the host machine — always use a conda env.
 
-```bash
-swift build
-```
+### 3. HuggingFace setup (required for speaker diarization)
 
-This produces two binaries in `.build/debug/`:
-- `AudioTranscribe` — the SwiftUI menu bar app
-- `audio-capture-helper-xpc` — the XPC audio capture service
-
-### 5. HuggingFace setup (required for speaker diarization)
-
-Speaker diarization uses pyannote models which are free but require accepting their terms:
+Pyannote models are free but require accepting their terms:
 
 1. Create a free account at [huggingface.co](https://huggingface.co/join)
-2. Accept the terms for:
-   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+2. Accept terms for [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) and [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
 3. Create an access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 
-For the **menu bar app**: enter your token in **Settings > HuggingFace Token**. It is saved to `~/.audio-transcribe/config.json`.
+For the **menu bar app**: enter the token in **Settings > HuggingFace Token** — saved to `~/.audio-transcribe/config.json`.
 
-For **CLI usage**: pass via env var or flag:
+For **CLI use**: pass via env var or flag:
 
 ```bash
-export HF_TOKEN=your_token_here   # or pass --hf-token flag
+export HF_TOKEN=your_token_here   # or --hf-token flag
 ```
 
 After first run, models are cached locally and work fully offline.
 
 ---
 
-## CLI Usage
+## Build & Install
 
-### Basic transcription
+`package_app.sh` builds the Swift targets, assembles the `.app` bundle with the XPC service, and ad-hoc signs everything.
 
-```bash
-python transcribe.py -i meeting.mp3
-```
-
-### Dual-stream transcription (meeting with separate system/mic audio)
+The full build requires the `transcribe-bundle` conda env so that Python can be embedded into the app:
 
 ```bash
-python transcribe.py -i meeting.wav -i meeting_mic.wav
+conda activate transcribe-bundle
+bash package_app.sh --embed-python --install
 ```
 
-This transcribes each stream independently, tags segments as `Local Speaker X` (from mic) and `Remote Speaker X` (from system audio), and merges them chronologically.
-
-### Specify speakers and language
+This produces `dist/AudioTranscribe.app`, embeds the Python runtime from the active conda env, and copies it to `/Applications`. Launch it:
 
 ```bash
-python transcribe.py -i interview.m4a -s 2 -l en
+open /Applications/AudioTranscribe.app
 ```
 
-### Output formats
+macOS will prompt for **Screen & System Audio Recording** permission on first launch. Grant it in **System Settings > Privacy & Security**.
+
+> **Swift-only build (no Python embed):** If you're only working on Swift code and don't need transcription to work, you can skip the conda env entirely: `bash package_app.sh`
+
+| Flag | Description |
+|---|---|
+| `--release` | Build in release mode (default: debug) |
+| `--embed-python` | Embed the active conda env into the bundle |
+| `--install` | Copy finished app to `/Applications` |
+
+### Uninstalling
 
 ```bash
-python transcribe.py -i call.wav -f srt
-python transcribe.py -i call.wav -f json
+rm -rf /Applications/AudioTranscribe.app
+rm -rf ~/.audio-transcribe   # optional — removes config and recordings
 ```
 
-### Skip speaker detection (faster)
-
-```bash
-python transcribe.py -i audio.mp3 --no-diarize
-```
-
-### CLI Reference -- transcribe.py
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--input` | `-i` | required | Path to audio file (pass twice for dual-stream) |
-| `--output` | `-o` | auto | Output file path |
-| `--format` | `-f` | `txt` | Output format: `txt`, `srt`, `json` |
-| `--speakers` | `-s` | auto | Number of speakers (omit to auto-detect) |
-| `--language` | `-l` | auto | Language code (e.g. `en`, `it`, `es`) |
-| `--no-diarize` | | off | Skip speaker detection |
-| `--hf-token` | | `$HF_TOKEN` | HuggingFace token |
-
----
-
-## Speaker Renaming
-
-After transcription, replace generic labels (SPEAKER_00, SPEAKER_01) with real names.
-
-```bash
-# Rename interactively — reads audio path from JSON metadata automatically
-python rename_speakers.py -i meeting.json
-
-# Or specify audio explicitly
-python rename_speakers.py -i meeting.json -a meeting.mp3
-```
-
-The tool plays a ~10s audio sample per speaker, shows what they said, and asks for their name.
-Press Enter to keep the generic label, `r` to replay the clip.
-
-### CLI Reference -- rename_speakers.py
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--input` | `-i` | required | JSON transcript file |
-| `--audio` | `-a` | from JSON | Original audio file |
-| `--output` | `-o` | auto | Output file path |
-| `--format` | `-f` | from JSON | Output format: `txt`, `srt`, `json` |
+Also remove leftover permissions: **System Settings > Privacy & Security > Screen & System Audio Recording** → find AudioTranscribe → click minus.
 
 ---
 
 ## Menu Bar App
 
-The SwiftUI app runs as a native macOS menu bar agent. It records audio on demand, auto-transcribes when you stop, and prompts for speaker names.
-
-### Running during development
-
-```bash
-swift build
-.build/debug/AudioTranscribe
-```
-
-Note: the XPC audio capture service requires a `.app` bundle to function. Running the bare binary will show the menu bar UI but recording will report an XPC connection error. For full end-to-end testing, build the `.app` bundle.
-
-### Building the .app bundle
-
-```bash
-swift build
-conda activate transcribe
-bash packaging/embed_python.sh
-```
-
-This embeds the conda Python environment and scripts into the app bundle's Resources directory.
-
-### App Usage
-
 Click the menu bar icon to access:
 
-- **Start Recording** — starts dual-stream recording (system audio + mic)
-- **Stop Recording** — stops recording and starts transcription automatically
-- **Open Recordings Folder** — opens the recordings directory in Finder
-- **Rename Speakers...** — rename detected speakers in the latest transcript
-- **Settings** — change recordings directory, output format, silence detection, HuggingFace token, Launch at Login
-- **Quit** — stops the app
+| Action | Description |
+|---|---|
+| **Start Recording** | Starts dual-stream recording (system audio + mic) |
+| **Stop Recording** | Stops recording and starts transcription automatically |
+| **Open Recordings Folder** | Opens the recordings directory in Finder |
+| **Rename Speakers…** | Rename detected speakers in the latest transcript |
+| **Settings** | Configure recordings directory, output format, HuggingFace token, Launch at Login |
+| **Quit** | Stops the app |
 
 When transcription completes, a notification is sent.
 
 ### State machine
 
 ```
-IDLE --[Start Recording]--> RECORDING --[Stop Recording]--> TRANSCRIBING --> IDLE
+IDLE → [Start Recording] → RECORDING → [Stop Recording] → TRANSCRIBING → IDLE
 ```
 
-### Service configuration
+### Configuration
 
-Config is stored at `~/.audio-transcribe/config.json`. Defaults:
+Config is stored at `~/.audio-transcribe/config.json` and shared between the app and Python CLI:
 
 ```json
 {
@@ -281,15 +146,77 @@ Config is stored at `~/.audio-transcribe/config.json`. Defaults:
 }
 ```
 
-This config file is shared between the SwiftUI app and the Python CLI tools — both read/write the same format with snake_case JSON keys.
+### Audio capture
 
-### Performance expectations
+The app records **both your microphone and system audio** simultaneously — no virtual audio devices required:
 
-On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes to transcribe. Speaker diarization adds a further ~30% overhead. Short recordings (< 5 min) complete in under a minute.
+- **With headphones**: mic captures your voice; system audio captures the remote side
+- **With speakers**: both sides are captured by the mic, and system audio also captures the remote side — both paths work
+- Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, …)
+
+### Performance
+
+On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes. Speaker diarization adds ~30% overhead. Short recordings (< 5 min) complete in under a minute.
 
 ---
 
-## Output Examples
+## CLI Usage
+
+### transcribe.py
+
+```bash
+conda activate transcribe
+
+# Single file
+python transcribe.py -i meeting.mp3
+
+# Dual-stream (system audio + mic recorded separately)
+python transcribe.py -i meeting.wav -i meeting_mic.wav
+
+# Specify speakers and language
+python transcribe.py -i interview.m4a -s 2 -l en
+
+# Output as SRT or JSON
+python transcribe.py -i call.wav -f srt
+
+# Skip speaker detection (faster)
+python transcribe.py -i audio.mp3 --no-diarize
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--input` | `-i` | required | Audio file path (pass twice for dual-stream) |
+| `--output` | `-o` | auto | Output file path |
+| `--format` | `-f` | `txt` | Output format: `txt`, `srt`, `json` |
+| `--speakers` | `-s` | auto | Number of speakers (omit to auto-detect) |
+| `--language` | `-l` | auto | Language code (`en`, `it`, `es`, …) |
+| `--no-diarize` | | off | Skip speaker detection |
+| `--hf-token` | | `$HF_TOKEN` | HuggingFace token |
+
+### rename_speakers.py
+
+Replace generic labels (SPEAKER_00, SPEAKER_01) with real names after transcription. Plays a ~10s audio sample per speaker and asks for their name. Press Enter to keep the generic label, `r` to replay.
+
+```bash
+conda activate transcribe
+
+# Audio path is read from the JSON metadata automatically
+python rename_speakers.py -i meeting.json
+
+# Or specify audio explicitly
+python rename_speakers.py -i meeting.json -a meeting.mp3
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--input` | `-i` | required | JSON transcript file |
+| `--audio` | `-a` | from JSON | Original audio file |
+| `--output` | `-o` | auto | Output file path |
+| `--format` | `-f` | from JSON | Output format: `txt`, `srt`, `json` |
+
+---
+
+## Output Formats
 
 ### Plain text (default)
 
@@ -316,7 +243,6 @@ Local Speaker 1: Thanks for having me.
 {
   "metadata": {
     "audio_file": "meeting.wav",
-    "audio_path": "/full/path/to/meeting.wav",
     "mic_file": "meeting_mic.wav",
     "language": "en",
     "num_speakers": 2,
@@ -336,50 +262,63 @@ Local Speaker 1: Thanks for having me.
 
 ---
 
-## Clean Rebuild
-
-### After Swift changes
-
-```bash
-swift build
-```
-
-### After Python dependency changes
-
-```bash
-conda activate transcribe
-pip install -r requirements-transcribe.txt
-bash packaging/embed_python.sh   # re-embed into .app bundle
-```
-
-### Full clean
-
-```bash
-swift package clean
-swift build
-```
-
-### Reset macOS permissions (TCC)
-
-If you change `CFBundleIdentifier` in `packaging/Info.plist`, macOS treats it as a new app and you must re-grant permissions:
-
-1. Go to **System Settings > Privacy & Security > Screen & System Audio Recording**
-2. Remove the old entry for AudioTranscribe
-3. Launch the new build — macOS will prompt again
-
----
-
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
+| "damaged or incomplete" on launch | Bundle built with old launcher — run `bash package_app.sh` to rebuild |
 | `No module named mlx_whisper` | `conda activate transcribe` |
 | `ffmpeg not found` | `brew install ffmpeg` |
-| Diarization token error | Set HuggingFace token in Settings (or `HF_TOKEN` env var for CLI); accept both model terms on HuggingFace |
-| No speakers detected | Set HuggingFace token in Settings — diarization requires it |
-| Slow first run | Whisper model (~1.6GB) downloads once then is cached |
+| Diarization token error | Set HuggingFace token in Settings (or `HF_TOKEN` env var); accept both model terms on HuggingFace |
+| No speakers detected | HuggingFace token missing — diarization requires it |
+| Slow first run | Whisper model (~1.6GB) downloads once and is cached |
 | XPC connection failed | Run as `.app` bundle — XPC services don't work with bare binaries |
-| Helper exits with code 2 | Grant "Screen & System Audio Recording" in System Settings > Privacy & Security |
+| Exit code 2 from capture service | Grant "Screen & System Audio Recording" in System Settings > Privacy & Security |
 | TCC permission not persisting | Run as `.app` bundle so macOS ties the grant to the bundle ID |
-| 0-byte WAV files | Rebuild (`swift build`) — likely a stale binary |
+| 0-byte WAV files | Rebuild (`bash package_app.sh`) — likely a stale binary |
 | Menu bar icon not visible | On MacBooks with a notch, icons can be pushed off-screen. Hold Cmd and drag other icons to make space, or use [Ice](https://github.com/jordanbaird/Ice) |
+
+---
+
+## Development
+
+### Running without installing
+
+```bash
+swift build
+.build/debug/AudioTranscribe
+```
+
+The XPC audio capture service requires a `.app` bundle — the bare binary will show the menu UI but recording will report an XPC connection error. Use `package_app.sh` for full end-to-end testing.
+
+### Rebuilding after changes
+
+```bash
+# After Swift changes only (no conda env needed)
+bash package_app.sh
+
+# After Python dependency changes
+conda activate transcribe-bundle
+pip install -r requirements-bundle.txt
+bash package_app.sh --embed-python
+
+# Full clean (no conda env needed)
+swift package clean && bash package_app.sh
+```
+
+### Resetting macOS permissions
+
+If you change `CFBundleIdentifier` in `packaging/Info.plist`, macOS treats it as a new app:
+
+1. Go to **System Settings > Privacy & Security > Screen & System Audio Recording**
+2. Remove the old AudioTranscribe entry
+3. Launch the new build — macOS will prompt again
+
+### Running tests
+
+```bash
+conda activate transcribe
+python -m pytest tests/ -q   # 79 tests
+```
+
+For deeper technical detail — architecture decisions, XPC design, ScreenCaptureKit constraints — see [ARCHITECTURE.md](ARCHITECTURE.md).

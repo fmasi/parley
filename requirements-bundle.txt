@@ -1,3 +1,2 @@
 mlx-whisper>=0.3.0
 pyannote.audio>=3.1.0
-pytest>=7.0.0

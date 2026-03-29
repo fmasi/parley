@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="16" y="16" width="480" height="480" rx="112" ry="112"/>
+    </clipPath>
+    <!-- Warm-to-cool gradient background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0%" stop-color="#1a0a30"/>
+      <stop offset="50%" stop-color="#101835"/>
+      <stop offset="100%" stop-color="#081028"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="white" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0.04"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.4" r="0.45">
+      <stop offset="0%" stop-color="#a855f7" stop-opacity="0.3"/>
+      <stop offset="50%" stop-color="#6366f1" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#1e1b4b" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Frosted glass mic body -->
+    <linearGradient id="micBody" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="white" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="white" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="micStroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="white" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0.15"/>
+    </linearGradient>
+    <!-- Ring colors -->
+    <linearGradient id="ring1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ring2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#818cf8" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#c084fc" stop-opacity="0.3"/>
+    </linearGradient>
+    <filter id="blur1"><feGaussianBlur stdDeviation="30"/></filter>
+    <filter id="softglow"><feGaussianBlur stdDeviation="8"/></filter>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="16" y="16" width="480" height="480" fill="url(#bg)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glow)" filter="url(#blur1)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glass)"/>
+
+    <!-- Broadcast rings -->
+    <circle cx="256" cy="230" r="170" fill="none" stroke="url(#ring2)" stroke-width="1.5" opacity="0.25"/>
+    <circle cx="256" cy="230" r="130" fill="none" stroke="url(#ring2)" stroke-width="2" opacity="0.35"/>
+    <circle cx="256" cy="230" r="90" fill="none" stroke="url(#ring1)" stroke-width="2.5" opacity="0.45"/>
+    <!-- Ring glow -->
+    <circle cx="256" cy="230" r="90" fill="none" stroke="#c084fc" stroke-width="8" opacity="0.1" filter="url(#softglow)"/>
+
+    <!-- Glass microphone -->
+    <rect x="218" y="130" width="76" height="170" rx="38" fill="url(#micBody)" stroke="url(#micStroke)" stroke-width="2"/>
+    <!-- Mic inner reflection -->
+    <rect x="230" y="140" width="24" height="70" rx="12" fill="white" opacity="0.1"/>
+    <!-- Mic grille lines -->
+    <line x1="230" y1="180" x2="282" y2="180" stroke="white" stroke-opacity="0.1" stroke-width="1"/>
+    <line x1="230" y1="196" x2="282" y2="196" stroke="white" stroke-opacity="0.1" stroke-width="1"/>
+    <line x1="230" y1="212" x2="282" y2="212" stroke="white" stroke-opacity="0.1" stroke-width="1"/>
+    <line x1="230" y1="228" x2="282" y2="228" stroke="white" stroke-opacity="0.1" stroke-width="1"/>
+    <line x1="230" y1="244" x2="282" y2="244" stroke="white" stroke-opacity="0.1" stroke-width="1"/>
+
+    <!-- Mic cradle arc -->
+    <path d="M194 300 Q194 380 256 380 Q318 380 318 300" fill="none" stroke="url(#micStroke)" stroke-width="5" stroke-linecap="round"/>
+    <!-- Stand -->
+    <line x1="256" y1="380" x2="256" y2="420" stroke="white" stroke-opacity="0.3" stroke-width="5" stroke-linecap="round"/>
+    <line x1="226" y1="420" x2="286" y2="420" stroke="white" stroke-opacity="0.3" stroke-width="5" stroke-linecap="round"/>
+
+    <ellipse cx="256" cy="70" rx="180" ry="50" fill="white" opacity="0.04"/>
+  </g>
+
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="none" stroke="white" stroke-opacity="0.15" stroke-width="1.5"/>
+</svg>

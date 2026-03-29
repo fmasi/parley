@@ -8,17 +8,23 @@ struct SpeakerEntry: Identifiable {
 }
 
 struct RenameDialog: View {
-    @Environment(\.dismiss) private var dismiss
     @State private var speakers: [SpeakerEntry]
     @State private var audioPlayer: AVAudioPlayer?
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
+    let onCancel: () -> Void
 
-    init(jsonPath: URL, speakers: [SpeakerEntry], onSave: @escaping ([String: String]) -> Void) {
+    init(
+        jsonPath: URL,
+        speakers: [SpeakerEntry],
+        onSave: @escaping ([String: String]) -> Void,
+        onCancel: @escaping () -> Void = {}
+    ) {
         self.jsonPath = jsonPath
         self._speakers = State(initialValue: speakers)
         self.onSave = onSave
+        self.onCancel = onCancel
     }
 
     var body: some View {
@@ -48,7 +54,7 @@ struct RenameDialog: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     var mapping: [String: String] = [:]
@@ -58,7 +64,6 @@ struct RenameDialog: View {
                         }
                     }
                     onSave(mapping)
-                    dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
             }
