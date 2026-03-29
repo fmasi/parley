@@ -22,8 +22,14 @@ final class AudioCaptureClient {
     }
 
     func start(outputDirectory: URL, baseName: String) async throws {
-        let proxy = try proxy()
+        let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { error in
+                cont.resume(throwing: CaptureError.startFailed(
+                    "XPC connection failed: \(error.localizedDescription)"
+                ))
+            } as! AudioCaptureProtocol
+
             proxy.startCapture(
                 outputDirectory: outputDirectory.path,
                 baseName: baseName
@@ -40,8 +46,14 @@ final class AudioCaptureClient {
     }
 
     func stop() async throws -> AudioPaths {
-        let proxy = try proxy()
+        let conn = try getConnection()
         return try await withCheckedThrowingContinuation { cont in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { error in
+                cont.resume(throwing: CaptureError.stopFailed(
+                    "XPC connection failed: \(error.localizedDescription)"
+                ))
+            } as! AudioCaptureProtocol
+
             proxy.stopCapture { systemPath, micPath, errorMessage in
                 if let sys = systemPath, let mic = micPath {
                     cont.resume(returning: AudioPaths(
@@ -57,15 +69,12 @@ final class AudioCaptureClient {
         }
     }
 
-    private func proxy() throws -> AudioCaptureProtocol {
+    private func getConnection() throws -> NSXPCConnection {
         if connection == nil { connect() }
         guard let conn = connection else {
             throw CaptureError.notConnected
         }
-        guard let proxy = conn.remoteObjectProxy as? AudioCaptureProtocol else {
-            throw CaptureError.notConnected
-        }
-        return proxy
+        return conn
     }
 }
 
@@ -76,7 +85,7 @@ enum CaptureError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notConnected: return "XPC connection not available"
+        case .notConnected: return "XPC connection not available — run as .app bundle"
         case .startFailed(let msg): return msg
         case .stopFailed(let msg): return msg
         }
