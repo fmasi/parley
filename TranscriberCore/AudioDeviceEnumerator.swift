@@ -26,6 +26,9 @@ public enum AudioDeviceEnumerator {
             position: .unspecified
         )
         for device in discovery.devices {
+            // Filter out virtual aggregate devices (e.g. CADefaultDeviceAggregate)
+            // created internally by CoreAudio — they're not real mics and can hang.
+            if device.uniqueID.contains("Aggregate") { continue }
             result.append(AudioInputDevice(id: device.uniqueID, name: device.localizedName))
         }
         return result
