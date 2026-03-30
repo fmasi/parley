@@ -2,10 +2,12 @@ import SwiftUI
 import AVFoundation
 
 struct SpeakerEntry: Identifiable {
-    let id: String  // "speaker_0", "speaker_1", etc.
+    let id: String  // "Local Speaker 1", "Remote Speaker 1", etc.
     var displayName: String
     let sampleText: String
-    let samplePath: URL?
+    let sampleAudioFile: URL?  // source WAV file containing this speaker
+    let sampleStart: TimeInterval  // start time in the source WAV
+    let sampleEnd: TimeInterval    // end time in the source WAV
 }
 
 struct RenameDialog: View {
@@ -43,9 +45,13 @@ struct RenameDialog: View {
                         TextField("Name", text: $speaker.displayName)
                             .textFieldStyle(.roundedBorder)
 
-                        if speaker.samplePath != nil {
+                        if speaker.sampleAudioFile != nil {
                             Button {
-                                playSample(speaker.samplePath!)
+                                playSample(
+                                    speaker.sampleAudioFile!,
+                                    from: speaker.sampleStart,
+                                    to: speaker.sampleEnd
+                                )
                             } label: {
                                 Image(systemName: "play.circle")
                             }
@@ -82,9 +88,17 @@ struct RenameDialog: View {
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
     }
 
-    private func playSample(_ url: URL) {
+    @State private var stopTimer: Timer?
+
+    private func playSample(_ url: URL, from start: TimeInterval, to end: TimeInterval) {
         audioPlayer?.stop()
+        stopTimer?.invalidate()
         audioPlayer = try? AVAudioPlayer(contentsOf: url)
+        audioPlayer?.currentTime = start
         audioPlayer?.play()
+        let duration = end - start
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+            audioPlayer?.stop()
+        }
     }
 }

@@ -25,7 +25,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Views/MenuView.swift` -- menu bar dropdown content
 - `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section
 - `TranscriberApp/Views/SetupView.swift` -- permission setup window content (shown at first launch)
-- `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet
+- `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet with sample text and audio playback from source WAV timestamps
 - `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording (includes mic picker)
 - `TranscriberApp/Views/MicrophonePicker.swift` -- mic device dropdown + live level meter (used in SessionNameDialog)
 
@@ -114,7 +114,10 @@ python -m pytest tests/ -q
 17. CADefaultDeviceAggregate is a virtual CoreAudio device -- filter it from device lists (`uniqueID.contains("Aggregate")`) to avoid hangs
 18. `SCStreamConfiguration.microphoneCaptureDeviceID` (macOS 15+) overrides the default mic for ScreenCaptureKit capture -- set it to the AVCaptureDevice uniqueID
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
-20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`, and SwiftUI content applies `.glassEffect()` on a `RoundedRectangle` background (with `.regularMaterial` fallback for macOS 15). The `#available(macOS 26.0, *)` guard means no deployment-target bump is required — the glass is a progressive enhancement. To require macOS 26 as the hard minimum, bump `Package.swift` to `.macOS("26.0")`.
+20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
+21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
+22. **TranscriptionRunner environment:** `process.environment = [...]` replaces ALL env vars. Must include `HOME`, `TMPDIR`, embedded python `bin/` in PATH (for ffmpeg), and `/opt/homebrew/bin`. Must pass `hfToken` from config via `--hf-token` arg. The `-o` flag expects a file path, not a directory.
+23. **embed_python.sh rsync excludes:** Use path-anchored excludes (`--exclude='/bin/pip*'`) not bare globs (`--exclude='pip*'`) — bare `pip*` also matches `pipelines/` inside packages like torchaudio.
 
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)

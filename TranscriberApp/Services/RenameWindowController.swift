@@ -63,9 +63,17 @@ final class RenameWindowController {
               let segments = json["segments"] as? [[String: Any]]
         else { return [] }
 
-        // Collect unique speakers and sample quotes in order of appearance
+        // Build source→audio file mapping from metadata
+        let metadata = json["metadata"] as? [String: Any]
+        let audioPaths = metadata?["audio_paths"] as? [String] ?? []
+        // First path = system (remote), second = mic (local)
+        let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
+        let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
+
+        // Collect unique speakers, sample quotes, and first segment timestamps
         var seen = Set<String>()
         var sampleTexts: [String: [String]] = [:]
+        var sampleTimes: [String: (start: Double, end: Double, source: String)] = [:]
         var orderedIds: [String] = []
 
         for seg in segments {
@@ -75,8 +83,13 @@ final class RenameWindowController {
                 seen.insert(speaker)
                 orderedIds.append(speaker)
                 sampleTexts[speaker] = []
+                // Use the first segment as the audio sample
+                if let start = seg["start"] as? Double,
+                   let end = seg["end"] as? Double {
+                    let source = seg["source"] as? String ?? "remote"
+                    sampleTimes[speaker] = (start, end, source)
+                }
             }
-            // Keep first 2 quotes per speaker (enough to identify them)
             if let count = sampleTexts[speaker]?.count, count < 2 {
                 let trimmed = text.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
@@ -85,16 +98,21 @@ final class RenameWindowController {
             }
         }
 
-        let dir = jsonPath.deletingLastPathComponent()
         return orderedIds.map { speaker in
-            let samplePath = dir.appendingPathComponent(
-                "\(speaker.lowercased().replacingOccurrences(of: " ", with: "_")).wav"
-            )
+            let times = sampleTimes[speaker]
+            let audioFile: URL? = {
+                guard let times else { return nil }
+                let file = times.source == "local" ? localAudio : remoteAudio
+                guard let file, FileManager.default.fileExists(atPath: file.path) else { return nil }
+                return file
+            }()
             return SpeakerEntry(
                 id: speaker,
                 displayName: speaker,
                 sampleText: sampleTexts[speaker]?.joined(separator: " ") ?? "",
-                samplePath: FileManager.default.fileExists(atPath: samplePath.path) ? samplePath : nil
+                sampleAudioFile: audioFile,
+                sampleStart: times?.start ?? 0,
+                sampleEnd: times?.end ?? 0
             )
         }
     }
