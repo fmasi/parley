@@ -1,5 +1,17 @@
 import SwiftUI
+import UserNotifications
 import TranscriberCore
+
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotificationDelegate()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+}
 
 @MainActor
 @Observable
@@ -34,8 +46,8 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
-
     init() {
+        UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         let gate = launchGate
         Task { @MainActor in
             await gate.checkAndGate()

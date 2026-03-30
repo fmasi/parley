@@ -11,6 +11,15 @@ struct MenuView: View {
     let calendarService: CalendarService
 
     var body: some View {
+        if let errorText = appState.truncatedErrorMessage {
+            Button("⚠ \(errorText)") {}
+                .disabled(true)
+            Button("Dismiss Error") {
+                appState.errorMessage = nil
+            }
+            Divider()
+        }
+
         Button(appState.recordingToggleLabel) {
             Task { await toggleRecording() }
         }
@@ -64,6 +73,8 @@ struct MenuView: View {
     }
 
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+        appState.errorMessage = nil
+
         // Persist the mic choice for next time
         configManager.update { $0.lastMicrophoneDeviceId = microphoneDeviceId }
 
@@ -91,6 +102,7 @@ struct MenuView: View {
             appState.phase = .recording(since: Date())
         } catch {
             appState.errorMessage = error.localizedDescription
+            sendNotification(title: "Recording Failed", body: error.localizedDescription)
         }
     }
 
@@ -111,22 +123,24 @@ struct MenuView: View {
             appState.lastTranscriptPath = result.outputPath.path
             appState.lastJsonPath = result.jsonPath?.path
             appState.phase = .idle
-            sendNotification(path: result.outputPath)
+            sendNotification(title: "Transcription Complete", body: result.outputPath.lastPathComponent)
 
             if let jsonPath = result.jsonPath {
                 RenameWindowController.shared.show(jsonPath: jsonPath)
             }
         } catch {
             appState.errorMessage = error.localizedDescription
+            sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle
         }
     }
 
-    private func sendNotification(path: URL) {
+    private func sendNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Transcription Complete"
-        content.body = path.lastPathComponent
+        content.title = title
+        content.body = body
+        content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
         )
