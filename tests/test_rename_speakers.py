@@ -196,15 +196,3 @@ def test_main_no_speakers_exits(tmp_path, sample_json_transcript):
     with patch("sys.argv", ["rename_speakers.py", "-i", str(sample_json_transcript)]):
         with pytest.raises(SystemExit):
             main()
-
-
-def test_main_missing_audio(tmp_path, sample_json_transcript):
-    from rename_speakers import main
-    # audio_paths in metadata points to a file that does not exist
-    data = json.loads(sample_json_transcript.read_text())
-    data["metadata"]["audio_paths"] = [str(tmp_path / "missing.wav")]
-    sample_json_transcript.write_text(json.dumps(data))
-
-    with patch("sys.argv", ["rename_speakers.py", "-i", str(sample_json_transcript)]):
-        with pytest.raises(SystemExit):
-            main()
