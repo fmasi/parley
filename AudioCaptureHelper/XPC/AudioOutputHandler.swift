@@ -1,6 +1,22 @@
+import AudioToolbox
 import Foundation
 import ScreenCaptureKit
 import TranscriberCore
+
+private let logFile: FileHandle? = {
+    let dir = NSHomeDirectory() + "/.audio-transcribe/logs"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/audio-output-handler.log"
+    FileManager.default.createFile(atPath: path, contents: nil)
+    return FileHandle(forWritingAtPath: path)
+}()
+
+private func log(_ msg: String) {
+    guard let logFile else { return }
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
+    logFile.seekToEndOfFile()
+    logFile.write(Data(line.utf8))
+}
 
 final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let systemWriter: WavFileWriter
@@ -27,16 +43,20 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         if type == .audio {
             if !detectedSystemRate {
                 detectedSystemRate = true
-                if let rate = sampleRate(from: sampleBuffer) {
-                    systemWriter.setSampleRate(UInt32(rate))
+                if let info = formatInfo(from: sampleBuffer) {
+                    systemWriter.setSampleRate(UInt32(info.rate))
+                    systemWriter.setChannelCount(UInt16(info.channels))
+                    log("System audio: rate=\(info.rate), channels=\(info.channels), float=\(info.isFloat), bitsPerChannel=\(info.bitsPerChannel)")
                 }
             }
             writer = systemWriter
         } else if type == .microphone {
             if !detectedMicRate {
                 detectedMicRate = true
-                if let rate = sampleRate(from: sampleBuffer) {
-                    micWriter.setSampleRate(UInt32(rate))
+                if let info = formatInfo(from: sampleBuffer) {
+                    micWriter.setSampleRate(UInt32(info.rate))
+                    micWriter.setChannelCount(UInt16(info.channels))
+                    log("Microphone: rate=\(info.rate), channels=\(info.channels), float=\(info.isFloat), bitsPerChannel=\(info.bitsPerChannel)")
                 }
             }
             writer = micWriter
@@ -54,9 +74,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
-        let count = totalLength / MemoryLayout<Float32>.size
-        ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
-            writer.append(UnsafeBufferPointer(start: floatPtr, count: count))
+        let isFloat = isFloatFormat(from: sampleBuffer)
+        if isFloat {
+            let count = totalLength / MemoryLayout<Float32>.size
+            ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
+                writer.append(UnsafeBufferPointer(start: floatPtr, count: count))
+            }
+        } else {
+            let count = totalLength / MemoryLayout<Int16>.size
+            ptr.withMemoryRebound(to: Int16.self, capacity: count) { int16Ptr in
+                writer.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
+            }
         }
     }
 
@@ -64,9 +92,26 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Log or propagate error
     }
 
-    private func sampleRate(from buf: CMSampleBuffer) -> Double? {
+    private struct FormatInfo {
+        let rate: Double
+        let channels: UInt32
+        let isFloat: Bool
+        let bitsPerChannel: UInt32
+    }
+
+    private func formatInfo(from buf: CMSampleBuffer) -> FormatInfo? {
         guard let fmt = CMSampleBufferGetFormatDescription(buf),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else { return nil }
-        return asbd.pointee.mSampleRate
+        let p = asbd.pointee
+        return FormatInfo(
+            rate: p.mSampleRate,
+            channels: p.mChannelsPerFrame,
+            isFloat: p.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+            bitsPerChannel: p.mBitsPerChannel
+        )
+    }
+
+    private func isFloatFormat(from buf: CMSampleBuffer) -> Bool {
+        return formatInfo(from: buf)?.isFloat ?? true
     }
 }

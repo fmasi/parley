@@ -182,6 +182,9 @@ def main() -> None:
     if "reset_tcc" in steps:
         do_reset_tcc()
     if "build" in steps:
+        # Fresh build = new ad-hoc signature, so TCC must be reset
+        if "reset_tcc" not in steps:
+            do_reset_tcc()
         do_build(skip_embed=args.skip_embed, install="install" in steps)
     elif "install" in steps:
         # Install without build — delegate to package_app.sh --install
