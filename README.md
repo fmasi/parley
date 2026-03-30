@@ -115,11 +115,11 @@ Click the menu bar icon to access:
 
 | Action | Description |
 |---|---|
-| **Start Recording** | Starts dual-stream recording (system audio + mic) |
+| **Start Recording** | Prompts for session name and mic input, then starts dual-stream recording (system audio + selected mic) |
 | **Stop Recording** | Stops recording and starts transcription automatically |
 | **Open Recordings Folder** | Opens the recordings directory in Finder |
 | **Rename Speakers…** | Rename detected speakers in the latest transcript |
-| **Settings** | Configure recordings directory, output format, HuggingFace token, Launch at Login |
+| **Settings** | Configure recordings directory, output format, HuggingFace token, Launch at Login, permissions |
 | **Quit** | Stops the app |
 
 When transcription completes, a notification is sent.
@@ -146,6 +146,12 @@ Config is stored at `~/.audio-transcribe/config.json` and shared between the app
 }
 ```
 
+### Microphone selection
+
+Before recording starts, a dialog lets you pick which microphone to use. This is important when conferencing apps (Zoom, Teams, Meet) select a mic internally without changing the macOS system default — e.g. when your laptop lid is closed and a USB webcam mic is active in Zoom but macOS still defaults to the built-in mic.
+
+The dialog shows all available input devices with a live level meter. Your last-used device is pre-selected on subsequent recordings.
+
 ### Audio capture
 
 The app records **both your microphone and system audio** simultaneously — no virtual audio devices required:
@@ -153,6 +159,7 @@ The app records **both your microphone and system audio** simultaneously — no 
 - **With headphones**: mic captures your voice; system audio captures the remote side
 - **With speakers**: both sides are captured by the mic, and system audio also captures the remote side — both paths work
 - Works with any app (Zoom, Teams, Meet, Slack, FaceTime, Discord, …)
+- Works with USB webcam mics, external audio interfaces, iPhone Continuity mic, etc.
 
 ### Performance
 
@@ -282,6 +289,31 @@ Local Speaker 1: Thanks for having me.
 
 ## Development
 
+### Developer iteration tool
+
+`scripts/dev.py` is the primary tool for building, installing, and testing during development:
+
+```bash
+python scripts/dev.py                          # full cycle: kill → build → install → launch
+python scripts/dev.py --skip-embed             # skip Python embedding (faster Swift-only rebuild)
+python scripts/dev.py --reset-tcc              # just reset TCC permissions
+python scripts/dev.py --kill --launch          # relaunch existing install
+python scripts/dev.py --build --install        # build + install only
+```
+
+Default (no flags) runs the full cycle: kill running app → reset TCC permissions → build → install → launch. Passing any step flag (`--kill`, `--build`, `--install`, `--launch`, `--reset-tcc`) switches to explicit mode where only the specified steps run. TCC permissions are always reset when building, since ad-hoc re-signing invalidates prior grants.
+
+A test checklist is printed on launch — update `scripts/test-checklist.md` when adding features.
+
+| Flag | Type | Description |
+|---|---|---|
+| `--kill` | step | Kill running AudioTranscribe |
+| `--build` | step | Build app bundle |
+| `--install` | step | Install to /Applications |
+| `--launch` | step | Launch via `open` |
+| `--reset-tcc` | step | Reset TCC permissions (Mic, Screen Recording, Calendar) |
+| `--skip-embed` | modifier | Skip Python embedding (faster rebuild) |
+
 ### Running without installing
 
 ```bash
@@ -289,36 +321,24 @@ swift build
 .build/debug/AudioTranscribe
 ```
 
-The XPC audio capture service requires a `.app` bundle — the bare binary will show the menu UI but recording will report an XPC connection error. Use `package_app.sh` for full end-to-end testing.
+The XPC audio capture service requires a `.app` bundle — the bare binary will show the menu UI but recording will report an XPC connection error. Use `scripts/dev.py` for full end-to-end testing.
 
-### Rebuilding after changes
+### Full build with Python
 
 ```bash
-# After Swift changes only (no conda env needed)
-bash package_app.sh
-
-# After Python dependency changes
 conda activate transcribe-bundle
-pip install -r requirements-bundle.txt
-bash package_app.sh --embed-python
-
-# Full clean (no conda env needed)
-swift package clean && bash package_app.sh
+python scripts/dev.py
 ```
-
-### Resetting macOS permissions
-
-If you change `CFBundleIdentifier` in `packaging/Info.plist`, macOS treats it as a new app:
-
-1. Go to **System Settings > Privacy & Security > Screen & System Audio Recording**
-2. Remove the old AudioTranscribe entry
-3. Launch the new build — macOS will prompt again
 
 ### Running tests
 
 ```bash
+# Swift (83 tests across 9 suites)
+swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
+
+# Python (79 tests)
 conda activate transcribe
-python -m pytest tests/ -q   # 79 tests
+python -m pytest tests/ -q
 ```
 
 For deeper technical detail — architecture decisions, XPC design, ScreenCaptureKit constraints — see [ARCHITECTURE.md](ARCHITECTURE.md).

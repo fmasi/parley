@@ -3,21 +3,6 @@ import Foundation
 import ScreenCaptureKit
 import TranscriberCore
 
-private let logFile: FileHandle? = {
-    let dir = NSHomeDirectory() + "/.audio-transcribe/logs"
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let path = dir + "/audio-output-handler.log"
-    FileManager.default.createFile(atPath: path, contents: nil)
-    return FileHandle(forWritingAtPath: path)
-}()
-
-private func log(_ msg: String) {
-    guard let logFile else { return }
-    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
-    logFile.seekToEndOfFile()
-    logFile.write(Data(line.utf8))
-}
-
 final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let systemWriter: WavFileWriter
     private let micWriter: WavFileWriter
@@ -46,7 +31,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let info = formatInfo(from: sampleBuffer) {
                     systemWriter.setSampleRate(UInt32(info.rate))
                     systemWriter.setChannelCount(UInt16(info.channels))
-                    log("System audio: rate=\(info.rate), channels=\(info.channels), float=\(info.isFloat), bitsPerChannel=\(info.bitsPerChannel)")
                 }
             }
             writer = systemWriter
@@ -56,7 +40,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let info = formatInfo(from: sampleBuffer) {
                     micWriter.setSampleRate(UInt32(info.rate))
                     micWriter.setChannelCount(UInt16(info.channels))
-                    log("Microphone: rate=\(info.rate), channels=\(info.channels), float=\(info.isFloat), bitsPerChannel=\(info.bitsPerChannel)")
                 }
             }
             writer = micWriter

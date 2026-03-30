@@ -26,11 +26,12 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section
 - `TranscriberApp/Views/SetupView.swift` -- permission setup window content (shown at first launch)
 - `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet
-- `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording
+- `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording (includes mic picker)
+- `TranscriberApp/Views/MicrophonePicker.swift` -- mic device dropdown + live level meter (used in SessionNameDialog)
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol via ScreenCaptureKit
-- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters
+- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters, auto-detects sample format (Float32/Int16) and channel count
 - `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point
 
 ### Shared Protocol (AudioCaptureProtocol target)
@@ -41,7 +42,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/Config.swift` -- Codable struct mirroring Python config.json (snake_case JSON keys)
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
-- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate, Float32→Int16 conversion
+- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough
+- `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
+- `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 
@@ -58,7 +61,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams from ScreenCaptureKit)
 - `.audio` output type = system audio only (at config sampleRate)
-- `.microphone` output type = microphone only (at NATIVE device rate, varies: 24kHz, 48kHz)
+- `.microphone` output type = microphone only (at NATIVE device rate, varies: 16kHz, 24kHz, 48kHz)
 - There is NO Apple API to get a pre-mixed stream (verified in SDK headers through macOS 26)
 - Handler must be stored to prevent deallocation
 - Must use async/await API, not completion-handler callbacks (callbacks don't deliver frames reliably)
@@ -73,7 +76,7 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
-# 70 tests across 7 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager)
+# 83 tests across 9 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -106,14 +109,20 @@ python -m pytest tests/ -q
 12. All required permissions (Mic, Screen Recording) are gated at launch via SetupWindowController — don't add scattered permission requests elsewhere. Optional permissions (Calendar, Notifications) are accessible in Settings.
 13. `EKEventStore.authorizationStatus(for:)` may return stale values within a session — don't use `checkAll()` from individual Grant buttons, only update the specific permission that was requested
 14. Floating panels must NOT use `.hudWindow` styleMask — it creates a legacy dark HUD appearance that ignores system appearance and Liquid Glass. Use `[.titled, .closable, .utilityWindow]` instead. `SetupWindowController` is a standard `NSWindow` (not a floating panel) and is correct as-is.
-15. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`, and SwiftUI content applies `.glassEffect()` on a `RoundedRectangle` background (with `.regularMaterial` fallback for macOS 15). The `#available(macOS 26.0, *)` guard means no deployment-target bump is required — the glass is a progressive enhancement. To require macOS 26 as the hard minimum, bump `Package.swift` to `.macOS("26.0")`.
+15. USB webcam mics (e.g. Logitech C920) may deliver Int16 samples instead of Float32, and stereo instead of mono -- always detect format and channel count from CMSampleBuffer format description, never assume Float32 mono
+16. AVAudioEngine cannot handle USB webcam mics -- fails with -10868 (kAudioUnitErr_FormatNotSupported) due to internal audio graph format negotiation. Use AVCaptureSession instead.
+17. CADefaultDeviceAggregate is a virtual CoreAudio device -- filter it from device lists (`uniqueID.contains("Aggregate")`) to avoid hangs
+18. `SCStreamConfiguration.microphoneCaptureDeviceID` (macOS 15+) overrides the default mic for ScreenCaptureKit capture -- set it to the AVCaptureDevice uniqueID
+19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
+20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`, and SwiftUI content applies `.glassEffect()` on a `RoundedRectangle` background (with `.regularMaterial` fallback for macOS 15). The `#available(macOS 26.0, *)` guard means no deployment-target bump is required — the glass is a progressive enhancement. To require macOS 26 as the hard minimum, bump `Package.swift` to `.macOS("26.0")`.
 
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
 - `packaging/AudioCaptureHelper-Info.plist` -- XPC service plist (ServiceType: Application)
 - `packaging/embed_python.sh` -- embeds conda Python + scripts into .app Resources
-- `scripts/test-fresh.sh` -- resets TCC permissions, builds with embedded Python, installs to /Applications, launches app
+- `scripts/dev.py` -- developer iteration CLI: kill/build/install/launch/reset-tcc with modular flags (replaced test-fresh.sh)
+- `scripts/test-checklist.md` -- dynamic test checklist printed by dev.py on launch
 
 ## Branches
 - `main` -- stable (Python rumps UI)

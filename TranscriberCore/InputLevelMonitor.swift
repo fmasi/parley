@@ -1,22 +1,6 @@
 import AVFoundation
 import Observation
 
-/// Log file for diagnostics (visible even when launched via `open`).
-private let logFile: FileHandle? = {
-    let dir = NSHomeDirectory() + "/.audio-transcribe/logs"
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let path = dir + "/input-level-monitor.log"
-    FileManager.default.createFile(atPath: path, contents: nil)
-    return FileHandle(forWritingAtPath: path)
-}()
-
-private func log(_ msg: String) {
-    guard let logFile else { return }
-    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
-    logFile.seekToEndOfFile()
-    logFile.write(Data(line.utf8))
-}
-
 /// Monitors audio input level from a specified device (or system default).
 /// Uses AVCaptureSession which handles all device types including USB webcams.
 /// Publishes `level` (0.0–1.0) suitable for driving a level meter UI.
@@ -38,40 +22,28 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
         let device: AVCaptureDevice?
         if let deviceId {
             device = AVCaptureDevice(uniqueID: deviceId)
-            log("Requested device: \(deviceId) -> \(device?.localizedName ?? "NOT FOUND")")
         } else {
             device = AVCaptureDevice.default(for: .audio)
-            log("Using system default device: \(device?.localizedName ?? "NONE")")
         }
 
-        guard let device else {
-            log("ERROR: no audio device available")
-            return
-        }
+        guard let device else { return }
 
         let session = AVCaptureSession()
         do {
             let input = try AVCaptureDeviceInput(device: device)
-            guard session.canAddInput(input) else {
-                log("ERROR: cannot add input for \(device.localizedName)")
-                return
-            }
+            guard session.canAddInput(input) else { return }
             session.addInput(input)
 
             let output = AVCaptureAudioDataOutput()
-            guard session.canAddOutput(output) else {
-                log("ERROR: cannot add audio output")
-                return
-            }
+            guard session.canAddOutput(output) else { return }
             output.setSampleBufferDelegate(self, queue: processingQueue)
             session.addOutput(output)
 
             session.startRunning()
             self.session = session
             self.isMonitoring = true
-            log("Capture session started for \(device.localizedName)")
         } catch {
-            log("ERROR: failed to create input: \(error)")
+            // Device unavailable or permission denied
         }
     }
 
@@ -86,8 +58,6 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
     }
 
     // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
-
-    private var rmsLogCounter = 0
 
     public func captureOutput(
         _ output: AVCaptureOutput,
@@ -126,13 +96,6 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
             )
             let sampleCount = lengthAtOffset / MemoryLayout<Int16>.size
             rawRMS = computeRMSInt16(int16Ptr, count: sampleCount)
-        }
-
-        // Log periodically
-        rmsLogCounter += 1
-        if rmsLogCounter % 47 == 1 {
-            let db = rawRMS > 0 ? 20.0 * log10(rawRMS) : -999.0
-            log("RMS: raw=\(rawRMS), dB=\(db), format=\(asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 ? "float" : "int16"), rate=\(asbd.mSampleRate)")
         }
 
         let normalized = dBNormalize(rawRMS)
