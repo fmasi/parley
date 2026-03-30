@@ -21,7 +21,7 @@ public enum AudioDeviceEnumerator {
         var result = [AudioInputDevice(id: nil, name: "System Default")]
 
         let discovery = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInMicrophone, .externalUnknown],
+            deviceTypes: [.microphone, .external],
             mediaType: .audio,
             position: .unspecified
         )
