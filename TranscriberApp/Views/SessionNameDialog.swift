@@ -1,18 +1,25 @@
 import SwiftUI
+import TranscriberCore
 
 struct SessionNameDialog: View {
     @State private var name: String
+    @State private var selectedDeviceId: String?
     @FocusState private var focused: Bool
 
-    let onStart: (String) -> Void
+    let devices: [AudioInputDevice]
+    let onStart: (String, String?) -> Void  // (sessionName, micDeviceId?)
     let onCancel: () -> Void
 
     init(
         suggestedName: String,
-        onStart: @escaping (String) -> Void,
+        initialDeviceId: String?,
+        devices: [AudioInputDevice],
+        onStart: @escaping (String, String?) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self._name = State(initialValue: suggestedName)
+        self._selectedDeviceId = State(initialValue: initialDeviceId)
+        self.devices = devices
         self.onStart = onStart
         self.onCancel = onCancel
     }
@@ -31,6 +38,11 @@ struct SessionNameDialog: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            MicrophonePicker(
+                selectedDeviceId: $selectedDeviceId,
+                devices: devices
+            )
+
             HStack {
                 Spacer()
                 Button("Cancel") { onCancel() }
@@ -40,7 +52,7 @@ struct SessionNameDialog: View {
             }
         }
         .padding()
-        .frame(width: 320)
+        .frame(width: 380)
         .background {
             if #available(macOS 26.0, *) {
                 RoundedRectangle(cornerRadius: 12).glassEffect()
@@ -52,6 +64,9 @@ struct SessionNameDialog: View {
     }
 
     private func start() {
-        onStart(name.trimmingCharacters(in: .whitespaces))
+        onStart(
+            name.trimmingCharacters(in: .whitespaces),
+            selectedDeviceId
+        )
     }
 }

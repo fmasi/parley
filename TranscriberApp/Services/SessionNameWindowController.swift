@@ -1,13 +1,23 @@
 import AppKit
 import SwiftUI
+import TranscriberCore
 
 @MainActor
 final class SessionNameWindowController {
     static let shared = SessionNameWindowController()
     private var panel: NSPanel?
 
-    func show(suggestedName: String?, onStart: @escaping (String) -> Void) {
+    func show(
+        suggestedName: String?,
+        lastMicrophoneDeviceId: String?,
+        onStart: @escaping (String, String?) -> Void  // (sessionName, micDeviceId?)
+    ) {
         panel?.close()
+
+        let devices = AudioDeviceEnumerator.availableDevices()
+        let initialDeviceId = AudioDeviceEnumerator.resolveDeviceId(
+            lastUsed: lastMicrophoneDeviceId, available: devices
+        )
 
         let closePanel = { [weak self] in
             self?.panel?.close()
@@ -16,9 +26,11 @@ final class SessionNameWindowController {
 
         let dialog = SessionNameDialog(
             suggestedName: suggestedName ?? "",
-            onStart: { name in
+            initialDeviceId: initialDeviceId,
+            devices: devices,
+            onStart: { name, deviceId in
                 closePanel()
-                onStart(name)
+                onStart(name, deviceId)
             },
             onCancel: closePanel
         )
