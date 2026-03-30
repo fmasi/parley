@@ -21,17 +21,23 @@ public final class InputLevelMonitor {
         let engine = AVAudioEngine()
 
         // Select input device if specified
-        if let deviceId,
-           let audioDeviceID = audioDeviceID(for: deviceId) {
-            setInputDevice(audioDeviceID, on: engine)
+        if let deviceId {
+            if let coreAudioID = coreAudioDeviceID(for: deviceId) {
+                let status = setInputDevice(coreAudioID, on: engine)
+                if status != noErr {
+                    fputs("InputLevelMonitor: failed to set device \(deviceId), status=\(status)\n", stderr)
+                }
+            } else {
+                fputs("InputLevelMonitor: no CoreAudio device found for uniqueID=\(deviceId)\n", stderr)
+            }
         }
-        // else: system default — no configuration needed
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            return // no valid input format
+            fputs("InputLevelMonitor: invalid format (rate=\(format.sampleRate), ch=\(format.channelCount))\n", stderr)
+            return
         }
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
@@ -47,7 +53,7 @@ public final class InputLevelMonitor {
             self.engine = engine
             self.isMonitoring = true
         } catch {
-            // Failed to start — leave in non-monitoring state
+            fputs("InputLevelMonitor: engine.start() failed: \(error)\n", stderr)
             inputNode.removeTap(onBus: 0)
         }
     }
@@ -77,16 +83,17 @@ public final class InputLevelMonitor {
             sum += sample * sample
         }
         let rms = sqrt(sum / Float(frameLength))
-        // Clamp to 0...1
-        return min(max(rms * 3.0, 0.0), 1.0) // scale up for visibility
+        // Convert to dB-like scale for visual responsiveness (matches System Settings feel)
+        // -50 dB floor, 0 dB ceiling, linear interpolation between
+        guard rms > 0 else { return 0.0 }
+        let db = 20.0 * log10(rms)
+        let minDb: Float = -50.0
+        let normalized = (db - minDb) / (0.0 - minDb) // 0..1
+        return min(max(normalized, 0.0), 1.0)
     }
 
     /// Convert AVCaptureDevice.uniqueID to CoreAudio AudioDeviceID.
-    private func audioDeviceID(for uniqueID: String) -> AudioDeviceID? {
-        let device = AVCaptureDevice(uniqueID: uniqueID)
-        guard let _ = device else { return nil }
-
-        // Use CoreAudio to find the device by UID.
+    private func coreAudioDeviceID(for uniqueID: String) -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -121,11 +128,12 @@ public final class InputLevelMonitor {
     }
 
     /// Set the input device on an AVAudioEngine via CoreAudio.
-    private func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) {
+    @discardableResult
+    private func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) -> OSStatus {
         let inputNode = engine.inputNode
         let audioUnit = inputNode.audioUnit!
         var devID = deviceID
-        AudioUnitSetProperty(
+        return AudioUnitSetProperty(
             audioUnit,
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
