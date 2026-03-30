@@ -34,7 +34,8 @@ env/
 # Use com.audio-transcribe.plist.template for the committed version
 com.audio-transcribe.plist
 
-# Swift build artifacts (binary is built locally via audio_capture_helper/build.sh)
+# Swift build artifacts
+.build/
 audio_capture_helper/.build/
 bin/audio-capture-helper
 

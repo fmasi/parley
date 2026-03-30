@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="16" y="16" width="480" height="480" rx="112" ry="112"/>
+    </clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1f2d"/>
+      <stop offset="100%" stop-color="#061018"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="white" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0.05"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="0.35" cy="0.4" r="0.4">
+      <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#003060" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.65" cy="0.6" r="0.4">
+      <stop offset="0%" stop-color="#ff6090" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#400020" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wave1Grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#0088cc"/>
+    </linearGradient>
+    <linearGradient id="wave2Grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff6090"/>
+      <stop offset="100%" stop-color="#cc3060"/>
+    </linearGradient>
+    <filter id="blur1"><feGaussianBlur stdDeviation="25"/></filter>
+    <filter id="softglow"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="innerglow"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="16" y="16" width="480" height="480" fill="url(#bg)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glow1)" filter="url(#blur1)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glow2)" filter="url(#blur1)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glass)"/>
+
+    <!-- System audio wave (cyan) — top -->
+    <g opacity="0.9">
+      <!-- Glow -->
+      <path d="M60,210 Q100,120 150,200 Q200,280 256,180 Q310,80 360,200 Q410,300 452,210"
+            fill="none" stroke="#00e5ff" stroke-width="14" stroke-linecap="round" opacity="0.15" filter="url(#softglow)"/>
+      <!-- Main stroke -->
+      <path d="M60,210 Q100,120 150,200 Q200,280 256,180 Q310,80 360,200 Q410,300 452,210"
+            fill="none" stroke="url(#wave1Grad)" stroke-width="7" stroke-linecap="round"/>
+    </g>
+
+    <!-- Mic audio wave (pink) — bottom -->
+    <g opacity="0.9">
+      <!-- Glow -->
+      <path d="M60,310 Q110,250 160,310 Q210,380 256,290 Q300,210 350,310 Q400,390 452,310"
+            fill="none" stroke="#ff6090" stroke-width="14" stroke-linecap="round" opacity="0.15" filter="url(#softglow)"/>
+      <!-- Main stroke -->
+      <path d="M60,310 Q110,250 160,310 Q210,380 256,290 Q300,210 350,310 Q400,390 452,310"
+            fill="none" stroke="url(#wave2Grad)" stroke-width="7" stroke-linecap="round"/>
+    </g>
+
+    <!-- Intersection glow where waves cross -->
+    <circle cx="256" cy="240" r="30" fill="white" opacity="0.08" filter="url(#innerglow)"/>
+
+    <!-- Small label indicators -->
+    <!-- System icon (speaker) -->
+    <g transform="translate(72, 148)" opacity="0.6">
+      <rect x="0" y="6" width="10" height="12" rx="2" fill="#00e5ff"/>
+      <polygon points="10,6 22,0 22,24 10,18" fill="#00e5ff"/>
+    </g>
+    <!-- Mic icon -->
+    <g transform="translate(72, 360)" opacity="0.6">
+      <rect x="6" y="0" width="12" height="18" rx="6" fill="#ff6090"/>
+      <path d="M2,16 Q2,28 12,28 Q22,28 22,16" fill="none" stroke="#ff6090" stroke-width="2.5"/>
+      <line x1="12" y1="28" x2="12" y2="34" stroke="#ff6090" stroke-width="2.5"/>
+    </g>
+
+    <ellipse cx="256" cy="70" rx="180" ry="50" fill="white" opacity="0.04"/>
+  </g>
+
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="none" stroke="white" stroke-opacity="0.12" stroke-width="1.5"/>
+</svg>

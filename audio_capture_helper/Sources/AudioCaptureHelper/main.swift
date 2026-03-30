@@ -132,12 +132,25 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
 // MARK: - Entry point
 
-guard CommandLine.arguments.count == 2 else {
-    fputs("Usage: audio-capture-helper <output_base.wav>\n", stderr)
+// Parse arguments
+var basePath: String?
+var micDeviceId: String?
+var args = CommandLine.arguments.dropFirst() // skip program name
+while let arg = args.first {
+    args = args.dropFirst()
+    if arg == "--mic-device", let next = args.first {
+        micDeviceId = next
+        args = args.dropFirst()
+    } else if basePath == nil {
+        basePath = arg
+    }
+}
+guard let basePath else {
+    fputs("Usage: audio-capture-helper [--mic-device <id>] <output_base.wav>\n", stderr)
     fputs("  Writes <base>.wav (system audio) and <base>_mic.wav (microphone)\n", stderr)
+    fputs("  --mic-device <id>  Use specific microphone (AVCaptureDevice.uniqueID)\n", stderr)
     exit(1)
 }
-let basePath = CommandLine.arguments[1]
 let micPath: String = {
     if basePath.hasSuffix(".wav") {
         return String(basePath.dropLast(4)) + "_mic.wav"
@@ -169,6 +182,9 @@ func startCapture() async throws {
     let config = SCStreamConfiguration()
     config.capturesAudio = true
     config.captureMicrophone = true
+    if let micDeviceId {
+        config.microphoneCaptureDeviceID = micDeviceId
+    }
     config.excludesCurrentProcessAudio = true
     config.channelCount = 1
     config.width = 2
