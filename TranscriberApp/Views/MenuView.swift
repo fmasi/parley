@@ -12,7 +12,7 @@ struct MenuView: View {
 
     var body: some View {
         if let errorText = appState.truncatedErrorMessage {
-            Button("⚠ \(errorText)") {}
+            Button("⚠ Error: \(errorText)") {}
                 .disabled(true)
             Button("Dismiss Error") {
                 appState.errorMessage = nil
@@ -140,6 +140,7 @@ struct MenuView: View {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        content.sound = .default
         content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil

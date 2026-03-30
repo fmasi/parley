@@ -52,7 +52,5 @@ Each call site will also fire the appropriate notification.
 ## Files Changed
 
 - `TranscriberApp/Views/MenuView.swift` — add error menu items, dismiss button, error notifications, auto-clear on start
-
-## Not Changed
-
-- `TranscriberCore/AppState.swift` — `errorMessage: String?` already exists, no modifications needed
+- `TranscriberCore/AppState.swift` — add `truncatedErrorMessage` computed property, update `menuBarIcon` for error and recording states
+- `TranscriberApp/TranscriberApp.swift` — add `UNUserNotificationCenterDelegate` for foreground banner display
