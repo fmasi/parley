@@ -109,10 +109,10 @@ public final class InputLevelMonitor {
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
-            var uid: CFString = "" as CFString
-            var uidSize = UInt32(MemoryLayout<CFString>.size)
+            var uid: Unmanaged<CFString>?
+            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
             if AudioObjectGetPropertyData(id, &uidAddress, 0, nil, &uidSize, &uid) == noErr {
-                if uid as String == uniqueID {
+                if let deviceUID = uid?.takeUnretainedValue() as String?, deviceUID == uniqueID {
                     return id
                 }
             }
