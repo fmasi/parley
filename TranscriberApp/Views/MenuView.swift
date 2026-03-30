@@ -2,6 +2,7 @@ import SwiftUI
 import SettingsAccess
 import TranscriberCore
 import UserNotifications
+import os
 
 struct MenuView: View {
     @Bindable var appState: AppState
@@ -15,6 +16,7 @@ struct MenuView: View {
             Button("⚠ Error: \(errorText)") {}
                 .disabled(true)
             Button("Dismiss Error") {
+                Logger.state.debug("User dismissed error")
                 appState.errorMessage = nil
             }
             Divider()
@@ -73,6 +75,7 @@ struct MenuView: View {
     }
 
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+        Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
         appState.errorMessage = nil
 
         // Persist the mic choice for next time
@@ -107,6 +110,7 @@ struct MenuView: View {
     }
 
     private func stopRecording() async {
+        Logger.state.info("Recording stopped")
         do {
             let paths = try await captureClient.stop()
             appState.phase = .transcribing(progress: "Transcribing...")
@@ -137,6 +141,7 @@ struct MenuView: View {
 
     private func sendNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
+        Logger.state.debug("Sending notification: \(title, privacy: .public)")
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -145,6 +150,10 @@ struct MenuView: View {
         let request = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.state.error("Notification failed: \(error, privacy: .public)")
+            }
+        }
     }
 }
