@@ -5,12 +5,6 @@ import TranscriberCore
 final class CalendarService {
     private let store = EKEventStore()
 
-    func requestAccess() {
-        Task {
-            try? await store.requestFullAccessToEvents()
-        }
-    }
-
     func currentEventTitle(from calendars: [EKCalendar]? = nil) -> String? {
         let now = Date()
         // Search a window around now to catch events that started recently
