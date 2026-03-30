@@ -36,7 +36,15 @@ public final class InputLevelMonitor {
 
         let engine = AVAudioEngine()
 
-        // Select input device if specified
+        // Select input device if specified.
+        // IMPORTANT: We must set the device on the AudioUnit BEFORE the engine
+        // initializes its graph. Accessing engine.inputNode lazily creates the
+        // node and binds it to the default device's format. Setting the device
+        // after that causes -10868 (format not supported) on engine.start().
+        //
+        // The trick: access the inputNode's audioUnit directly to set the device,
+        // then call engine.reset() to force the graph to reinitialize with the
+        // new device's native format.
         if let deviceId {
             log("Requested device: \(deviceId)")
             if let coreAudioID = coreAudioDeviceID(for: deviceId) {
@@ -46,6 +54,9 @@ public final class InputLevelMonitor {
                     log("ERROR: AudioUnitSetProperty failed, status=\(status)")
                 } else {
                     log("Device set successfully")
+                    // Reset the engine so it reinitializes the graph with the new device
+                    engine.reset()
+                    log("Engine reset after device change")
                 }
             } else {
                 log("ERROR: no CoreAudio device found for uniqueID=\(deviceId)")
@@ -58,10 +69,9 @@ public final class InputLevelMonitor {
 
         let inputNode = engine.inputNode
         let reportedFormat = inputNode.outputFormat(forBus: 0)
-        log("Input format: rate=\(reportedFormat.sampleRate), channels=\(reportedFormat.channelCount)")
+        log("Input format after setup: rate=\(reportedFormat.sampleRate), channels=\(reportedFormat.channelCount)")
 
-        // Pass nil format — lets AVAudioEngine use the device's native format,
-        // avoiding mismatches when switching between devices with different sample rates.
+        // Pass nil format — lets AVAudioEngine use the device's native format.
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             guard let self else { return }
             let rms = self.computeRMS(buffer: buffer)
