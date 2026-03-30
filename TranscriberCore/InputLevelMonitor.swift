@@ -97,6 +97,8 @@ public final class InputLevelMonitor {
 
     // MARK: - Private
 
+    private var rmsLogCounter = 0
+
     private func computeRMS(buffer: AVAudioPCMBuffer) -> Float {
         guard let channelData = buffer.floatChannelData else { return 0.0 }
         let channelSamples = channelData[0]
@@ -108,11 +110,19 @@ public final class InputLevelMonitor {
             let sample = channelSamples[i]
             sum += sample * sample
         }
-        let rms = sqrt(sum / Float(frameLength))
+        let rawRMS = sqrt(sum / Float(frameLength))
+
+        // Log periodically (~1/sec at 48kHz with 1024 buffer)
+        rmsLogCounter += 1
+        if rmsLogCounter % 47 == 1 {
+            let db = rawRMS > 0 ? 20.0 * log10(rawRMS) : -999.0
+            log("RMS: raw=\(rawRMS), dB=\(db)")
+        }
+
         // Convert to dB-like scale for visual responsiveness (matches System Settings feel)
         // -50 dB floor, 0 dB ceiling, linear interpolation between
-        guard rms > 0 else { return 0.0 }
-        let db = 20.0 * log10(rms)
+        guard rawRMS > 0 else { return 0.0 }
+        let db = 20.0 * log10(rawRMS)
         let minDb: Float = -50.0
         let normalized = (db - minDb) / (0.0 - minDb) // 0..1
         return min(max(normalized, 0.0), 1.0)
