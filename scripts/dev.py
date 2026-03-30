@@ -104,9 +104,14 @@ def do_kill() -> None:
 def do_reset_tcc() -> None:
     step("Resetting TCC permissions")
     for service in TCC_SERVICES:
-        subprocess.run(["tccutil", "reset", service, BUNDLE_ID],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"   Reset {service}")
+        result = subprocess.run(["tccutil", "reset", service, BUNDLE_ID],
+                                capture_output=True, text=True)
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            for line in output.splitlines():
+                print(f"   {line}")
+        else:
+            print(f"   Reset {service}")
     print("   Note: Notifications can't be reset via tccutil.")
     print("   To reset: System Settings > Notifications > AudioTranscribe")
 
