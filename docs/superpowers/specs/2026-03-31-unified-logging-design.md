@@ -36,7 +36,7 @@ extension Logger {
 }
 ```
 
-The XPC service (AudioCaptureHelperXPC) is a separate process and cannot link TranscriberCore. It gets its own copy of the Logger extension with the same subsystem, using the `audio` category.
+The XPC service (AudioCaptureHelperXPC) is a separate process but already links TranscriberCore (see Package.swift). It uses the same Logger extension — no separate copy needed.
 
 ### Log Levels
 
