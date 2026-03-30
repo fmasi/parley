@@ -93,12 +93,16 @@ struct RenameDialog: View {
     private func playSample(_ url: URL, from start: TimeInterval, to end: TimeInterval) {
         audioPlayer?.stop()
         stopTimer?.invalidate()
-        audioPlayer = try? AVAudioPlayer(contentsOf: url)
-        audioPlayer?.currentTime = start
-        audioPlayer?.play()
-        let duration = end - start
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        let safeStart = min(start, player.duration)
+        let safeEnd = min(end, player.duration)
+        let duration = safeEnd - safeStart
+        guard duration > 0 else { return }
+        player.currentTime = safeStart
+        player.play()
+        audioPlayer = player
         stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
-            audioPlayer?.stop()
+            self.audioPlayer?.stop()
         }
     }
 }
