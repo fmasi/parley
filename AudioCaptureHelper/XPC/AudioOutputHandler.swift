@@ -1,5 +1,6 @@
 import Foundation
 import ScreenCaptureKit
+import TranscriberCore
 
 final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let systemWriter: WavFileWriter

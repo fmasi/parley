@@ -1,14 +1,14 @@
 import Foundation
 
-final class ConfigManager {
-    static let shared = ConfigManager()
+public final class ConfigManager {
+    public static let shared = ConfigManager()
 
     private let configDir: URL
     private let configFile: URL
 
-    private(set) var config: Config
+    public private(set) var config: Config
 
-    init(configDir: URL? = nil) {
+    public init(configDir: URL? = nil) {
         let dir = configDir ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".audio-transcribe")
         self.configDir = dir
@@ -25,7 +25,7 @@ final class ConfigManager {
         return config
     }
 
-    func save() {
+    public func save() {
         try? FileManager.default.createDirectory(
             at: configDir, withIntermediateDirectories: true
         )
@@ -35,7 +35,7 @@ final class ConfigManager {
         try? data.write(to: configFile, options: .atomic)
     }
 
-    func update(_ transform: (inout Config) -> Void) {
+    public func update(_ transform: (inout Config) -> Void) {
         transform(&config)
         save()
     }

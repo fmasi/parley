@@ -27,7 +27,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "AudioCaptureHelperXPC",
-            dependencies: ["AudioCaptureProtocol"],
+            dependencies: ["AudioCaptureProtocol", "TranscriberCore"],
             path: "AudioCaptureHelper/XPC"
         ),
         .testTarget(

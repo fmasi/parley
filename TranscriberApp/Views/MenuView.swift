@@ -1,5 +1,6 @@
 import SwiftUI
 import SettingsAccess
+import TranscriberCore
 import UserNotifications
 
 struct MenuView: View {
@@ -56,14 +57,6 @@ struct MenuView: View {
         SessionNameWindowController.shared.show(suggestedName: suggestedName) { sessionName in
             Task { await startRecording(sessionName: sessionName) }
         }
-    }
-
-    private func sanitizeFilename(_ name: String) -> String {
-        var sanitized = name
-        for char in ["/", ":", "\0"] {
-            sanitized = sanitized.replacingOccurrences(of: char, with: "")
-        }
-        return sanitized
     }
 
     private func startRecording(sessionName: String) async {

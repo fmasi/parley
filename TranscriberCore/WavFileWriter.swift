@@ -1,21 +1,21 @@
 import Foundation
 
-final class WavFileWriter {
+public final class WavFileWriter {
     private let fileHandle: FileHandle
     private var dataByteCount: UInt32 = 0
     private var sampleRate: UInt32 = 0
 
-    init(path: String) throws {
+    public init(path: String) throws {
         FileManager.default.createFile(atPath: path, contents: nil)
         fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         writeHeader(sampleRate: 16000, dataSize: 0)
     }
 
-    func setSampleRate(_ rate: UInt32) {
+    public func setSampleRate(_ rate: UInt32) {
         sampleRate = rate
     }
 
-    func append(_ samples: UnsafeBufferPointer<Float32>) {
+    public func append(_ samples: UnsafeBufferPointer<Float32>) {
         var pcm = [Int16](repeating: 0, count: samples.count)
         for i in 0..<samples.count {
             let clamped = max(-1.0, min(1.0, samples[i]))
@@ -26,7 +26,7 @@ final class WavFileWriter {
         dataByteCount += UInt32(bytes.count)
     }
 
-    func finalize() {
+    public func finalize() {
         let rate = sampleRate > 0 ? sampleRate : 16000
         fileHandle.seek(toFileOffset: 0)
         writeHeader(sampleRate: rate, dataSize: dataByteCount)

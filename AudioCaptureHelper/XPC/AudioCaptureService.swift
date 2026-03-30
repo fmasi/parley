@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import AudioCaptureProtocol
+import TranscriberCore
 
 final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var handler: AudioOutputHandler?
