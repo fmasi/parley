@@ -13,6 +13,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     func startCapture(
         outputDirectory: String,
         baseName: String,
+        microphoneDeviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     ) {
         guard !isCapturing else {
@@ -39,7 +40,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
             Task {
                 do {
-                    try await self.configureAndStart(handler: outputHandler)
+                    try await self.configureAndStart(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
                     self.isCapturing = true
                     reply(true, nil)
                 } catch {
@@ -87,7 +88,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(isCapturing, nil)
     }
 
-    private func configureAndStart(handler: AudioOutputHandler) async throws {
+    private func configureAndStart(handler: AudioOutputHandler, microphoneDeviceId: String?) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false
         )
@@ -104,6 +105,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.captureMicrophone = true
+        if let microphoneDeviceId {
+            config.microphoneCaptureDeviceID = microphoneDeviceId
+        }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
         config.width = 2

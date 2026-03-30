@@ -4,10 +4,13 @@ import Foundation
 /// Both the app target and the XPC service target import this.
 @objc public protocol AudioCaptureProtocol {
     /// Start capturing system audio + microphone to WAV files in the given directory.
+    /// `microphoneDeviceId` selects a specific mic (AVCaptureDevice.uniqueID);
+    /// pass nil to use the system default input device.
     /// Reply: (success: Bool, errorMessage: String?)
     func startCapture(
         outputDirectory: String,
         baseName: String,
+        microphoneDeviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     )
 

@@ -21,7 +21,7 @@ final class AudioCaptureClient {
         connection = conn
     }
 
-    func start(outputDirectory: URL, baseName: String) async throws {
+    func start(outputDirectory: URL, baseName: String, microphoneDeviceId: String? = nil) async throws {
         let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
@@ -32,7 +32,8 @@ final class AudioCaptureClient {
 
             proxy.startCapture(
                 outputDirectory: outputDirectory.path,
-                baseName: baseName
+                baseName: baseName,
+                microphoneDeviceId: microphoneDeviceId
             ) { success, errorMessage in
                 if success {
                     cont.resume()
