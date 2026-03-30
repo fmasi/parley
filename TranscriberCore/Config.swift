@@ -9,6 +9,7 @@ public struct Config: Codable, Equatable {
     public var logLevel: String
     public var suppressCaptureWarning: Bool
     public var hfToken: String
+    public var lastMicrophoneDeviceId: String?
 
     public static let `default` = Config(
         recordingDirectory: NSHomeDirectory() + "/Documents/Recordings",
@@ -18,7 +19,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: true,
         logLevel: "info",
         suppressCaptureWarning: false,
-        hfToken: ""
+        hfToken: "",
+        lastMicrophoneDeviceId: nil
     )
 
     public init(
@@ -29,7 +31,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: Bool = true,
         logLevel: String = "info",
         suppressCaptureWarning: Bool = false,
-        hfToken: String = ""
+        hfToken: String = "",
+        lastMicrophoneDeviceId: String? = nil
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -39,6 +42,7 @@ public struct Config: Codable, Equatable {
         self.logLevel = logLevel
         self.suppressCaptureWarning = suppressCaptureWarning
         self.hfToken = hfToken
+        self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
     }
 
     enum CodingKeys: String, CodingKey {
@@ -50,5 +54,6 @@ public struct Config: Codable, Equatable {
         case logLevel = "log_level"
         case suppressCaptureWarning = "suppress_capture_warning"
         case hfToken = "hf_token"
+        case lastMicrophoneDeviceId = "last_microphone_device_id"
     }
 }

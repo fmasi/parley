@@ -109,4 +109,33 @@ struct ConfigTests {
         modified.outputFormat = "srt"
         #expect(modified != Config.default)
     }
+
+    // MARK: - lastMicrophoneDeviceId
+
+    @Test func lastMicrophoneDeviceIdRoundTrips() throws {
+        var config = Config.default
+        config.lastMicrophoneDeviceId = "AppleUSBAudioEngine:Logitech:C920:1234"
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+
+        #expect(decoded.lastMicrophoneDeviceId == "AppleUSBAudioEngine:Logitech:C920:1234")
+    }
+
+    @Test func lastMicrophoneDeviceIdDefaultsToNil() {
+        let config = Config.default
+        #expect(config.lastMicrophoneDeviceId == nil)
+    }
+
+    @Test func configDecodesWithoutLastMicrophoneDeviceId() throws {
+        // Existing config.json files won't have this field — must still decode
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,"log_level":"info",\
+        "suppress_capture_warning":false,"hf_token":""}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.lastMicrophoneDeviceId == nil)
+    }
 }
