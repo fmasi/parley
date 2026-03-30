@@ -1,5 +1,6 @@
 import AudioToolbox
 import Foundation
+import os
 import ScreenCaptureKit
 import TranscriberCore
 
@@ -31,6 +32,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let info = formatInfo(from: sampleBuffer) {
                     systemWriter.setSampleRate(UInt32(info.rate))
                     systemWriter.setChannelCount(UInt16(info.channels))
+                    Logger.audio.info("System audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
                 }
             }
             writer = systemWriter
@@ -40,6 +42,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let info = formatInfo(from: sampleBuffer) {
                     micWriter.setSampleRate(UInt32(info.rate))
                     micWriter.setChannelCount(UInt16(info.channels))
+                    Logger.audio.info("Mic audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
                 }
             }
             writer = micWriter
@@ -69,10 +72,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 writer.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
         }
+        Logger.audio.debug("\(type == .audio ? "System" : "Mic", privacy: .public) frame: \(totalLength) bytes")
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        // Log or propagate error
+        Logger.audio.error("Stream stopped with error: \(error, privacy: .public)")
     }
 
     private struct FormatInfo {
