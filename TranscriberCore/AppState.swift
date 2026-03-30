@@ -14,6 +14,12 @@ public final class AppState {
     public var lastJsonPath: String?
     public var errorMessage: String?
 
+    public var truncatedErrorMessage: String? {
+        guard let msg = errorMessage else { return nil }
+        if msg.count <= 80 { return msg }
+        return String(msg.prefix(80)) + "..."
+    }
+
     public init() {}
 
     public var isIdle: Bool {
@@ -32,9 +38,10 @@ public final class AppState {
     }
 
     public var menuBarIcon: String {
+        if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
         case .idle: return "mic"
-        case .recording: return "record.circle"
+        case .recording: return "microphone.and.signal.meter.fill"
         case .transcribing: return "hourglass"
         }
     }
