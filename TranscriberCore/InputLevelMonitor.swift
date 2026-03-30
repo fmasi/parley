@@ -1,5 +1,4 @@
 import AVFoundation
-import CoreAudio
 import Observation
 
 /// Log file for diagnostics (visible even when launched via `open`).
@@ -19,207 +18,156 @@ private func log(_ msg: String) {
 }
 
 /// Monitors audio input level from a specified device (or system default).
+/// Uses AVCaptureSession which handles all device types including USB webcams.
 /// Publishes `level` (0.0–1.0) suitable for driving a level meter UI.
 @Observable
-public final class InputLevelMonitor {
+public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     public var level: Float = 0.0
     public private(set) var isMonitoring = false
 
-    private var engine: AVAudioEngine?
+    private var session: AVCaptureSession?
+    private let processingQueue = DispatchQueue(label: "input-level-monitor")
 
-    public init() {}
+    public override init() {}
 
     /// Start monitoring the given device. Pass `nil` for system default.
     /// If already monitoring, stops the previous session first.
     public func start(deviceId: String?) {
         stop()
 
-        let engine = AVAudioEngine()
-
-        // Select input device if specified.
-        // IMPORTANT: We must set the device on the AudioUnit BEFORE the engine
-        // initializes its graph. Accessing engine.inputNode lazily creates the
-        // node and binds it to the default device's format. Setting the device
-        // after that causes -10868 (format not supported) on engine.start().
-        //
-        // The trick: access the inputNode's audioUnit directly to set the device,
-        // then call engine.reset() to force the graph to reinitialize with the
-        // new device's native format.
+        let device: AVCaptureDevice?
         if let deviceId {
-            log("Requested device: \(deviceId)")
-            if let coreAudioID = coreAudioDeviceID(for: deviceId) {
-                log("Found CoreAudio device ID: \(coreAudioID)")
-                let status = setInputDevice(coreAudioID, on: engine)
-                if status != noErr {
-                    log("ERROR: AudioUnitSetProperty failed, status=\(status)")
-                } else {
-                    log("Device set successfully")
-                    // Reset the engine so it reinitializes the graph with the new device
-                    engine.reset()
-                    log("Engine reset after device change")
-                }
-            } else {
-                log("ERROR: no CoreAudio device found for uniqueID=\(deviceId)")
-                log("Available CoreAudio devices:")
-                logAllCoreAudioDevices()
-            }
+            device = AVCaptureDevice(uniqueID: deviceId)
+            log("Requested device: \(deviceId) -> \(device?.localizedName ?? "NOT FOUND")")
         } else {
-            log("Using system default device")
+            device = AVCaptureDevice.default(for: .audio)
+            log("Using system default device: \(device?.localizedName ?? "NONE")")
         }
 
-        let inputNode = engine.inputNode
-        let reportedFormat = inputNode.outputFormat(forBus: 0)
-        log("Input format after setup: rate=\(reportedFormat.sampleRate), channels=\(reportedFormat.channelCount)")
-
-        // Pass nil format — lets AVAudioEngine use the device's native format.
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
-            guard let self else { return }
-            let rms = self.computeRMS(buffer: buffer)
-            DispatchQueue.main.async {
-                self.level = rms
-            }
+        guard let device else {
+            log("ERROR: no audio device available")
+            return
         }
 
+        let session = AVCaptureSession()
         do {
-            try engine.start()
-            self.engine = engine
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                log("ERROR: cannot add input for \(device.localizedName)")
+                return
+            }
+            session.addInput(input)
+
+            let output = AVCaptureAudioDataOutput()
+            guard session.canAddOutput(output) else {
+                log("ERROR: cannot add audio output")
+                return
+            }
+            output.setSampleBufferDelegate(self, queue: processingQueue)
+            session.addOutput(output)
+
+            session.startRunning()
+            self.session = session
             self.isMonitoring = true
-            log("Engine started OK")
+            log("Capture session started for \(device.localizedName)")
         } catch {
-            log("ERROR: engine.start() failed: \(error)")
-            inputNode.removeTap(onBus: 0)
+            log("ERROR: failed to create input: \(error)")
         }
     }
 
     /// Stop monitoring and reset level to zero.
     public func stop() {
-        if let engine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        if let session {
+            session.stopRunning()
         }
-        engine = nil
+        session = nil
         isMonitoring = false
         level = 0.0
     }
 
-    // MARK: - Private
+    // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
 
     private var rmsLogCounter = 0
 
-    private func computeRMS(buffer: AVAudioPCMBuffer) -> Float {
-        guard let channelData = buffer.floatChannelData else { return 0.0 }
-        let channelSamples = channelData[0]
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return 0.0 }
+    public func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let length = CMBlockBufferGetDataLength(blockBuffer)
+        guard length > 0 else { return }
 
-        var sum: Float = 0.0
-        for i in 0..<frameLength {
-            let sample = channelSamples[i]
-            sum += sample * sample
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        var lengthAtOffset: Int = 0
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset,
+            totalLengthOut: nil, dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let dataPointer else { return }
+
+        // Determine format to compute RMS correctly
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee
+        guard let asbd else { return }
+
+        let rawRMS: Float
+        if asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+            // Float32 samples
+            let floatPtr = UnsafeRawPointer(dataPointer).bindMemory(
+                to: Float.self, capacity: lengthAtOffset / MemoryLayout<Float>.size
+            )
+            let sampleCount = lengthAtOffset / MemoryLayout<Float>.size
+            rawRMS = computeRMSFloat(floatPtr, count: sampleCount)
+        } else {
+            // Int16 samples (common for USB devices)
+            let int16Ptr = UnsafeRawPointer(dataPointer).bindMemory(
+                to: Int16.self, capacity: lengthAtOffset / MemoryLayout<Int16>.size
+            )
+            let sampleCount = lengthAtOffset / MemoryLayout<Int16>.size
+            rawRMS = computeRMSInt16(int16Ptr, count: sampleCount)
         }
-        let rawRMS = sqrt(sum / Float(frameLength))
 
-        // Log periodically (~1/sec at 48kHz with 1024 buffer)
+        // Log periodically
         rmsLogCounter += 1
         if rmsLogCounter % 47 == 1 {
             let db = rawRMS > 0 ? 20.0 * log10(rawRMS) : -999.0
-            log("RMS: raw=\(rawRMS), dB=\(db)")
+            log("RMS: raw=\(rawRMS), dB=\(db), format=\(asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 ? "float" : "int16"), rate=\(asbd.mSampleRate)")
         }
 
-        // Convert to dB-like scale for visual responsiveness (matches System Settings feel)
-        // -50 dB floor, 0 dB ceiling, linear interpolation between
+        let normalized = dBNormalize(rawRMS)
+        DispatchQueue.main.async {
+            self.level = normalized
+        }
+    }
+
+    // MARK: - Private
+
+    private func computeRMSFloat(_ samples: UnsafePointer<Float>, count: Int) -> Float {
+        guard count > 0 else { return 0.0 }
+        var sum: Float = 0.0
+        for i in 0..<count {
+            let s = samples[i]
+            sum += s * s
+        }
+        return sqrt(sum / Float(count))
+    }
+
+    private func computeRMSInt16(_ samples: UnsafePointer<Int16>, count: Int) -> Float {
+        guard count > 0 else { return 0.0 }
+        var sum: Float = 0.0
+        for i in 0..<count {
+            let s = Float(samples[i]) / 32768.0
+            sum += s * s
+        }
+        return sqrt(sum / Float(count))
+    }
+
+    private func dBNormalize(_ rawRMS: Float) -> Float {
         guard rawRMS > 0 else { return 0.0 }
         let db = 20.0 * log10(rawRMS)
         let minDb: Float = -50.0
-        let normalized = (db - minDb) / (0.0 - minDb) // 0..1
+        let normalized = (db - minDb) / (0.0 - minDb)
         return min(max(normalized, 0.0), 1.0)
-    }
-
-    /// Convert AVCaptureDevice.uniqueID to CoreAudio AudioDeviceID.
-    private func coreAudioDeviceID(for uniqueID: String) -> AudioDeviceID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
-        ) == noErr else {
-            log("ERROR: failed to get device list size")
-            return nil
-        }
-
-        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs
-        ) == noErr else {
-            log("ERROR: failed to get device list")
-            return nil
-        }
-
-        for id in deviceIDs {
-            if let deviceUID = coreAudioDeviceUID(id), deviceUID == uniqueID {
-                return id
-            }
-        }
-        return nil
-    }
-
-    /// Get the UID string for a CoreAudio device.
-    private func coreAudioDeviceUID(_ deviceID: AudioDeviceID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var uid: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
-        let status = withUnsafeMutablePointer(to: &uid) { ptr in
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
-        }
-        guard status == noErr else { return nil }
-        return uid as String
-    }
-
-    /// Log all CoreAudio devices for diagnostics.
-    private func logAllCoreAudioDevices() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
-        ) == noErr else { return }
-
-        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs
-        ) == noErr else { return }
-
-        for id in deviceIDs {
-            let uid = coreAudioDeviceUID(id) ?? "<no UID>"
-            log("  CoreAudio device \(id): \(uid)")
-        }
-    }
-
-    /// Set the input device on an AVAudioEngine via CoreAudio.
-    @discardableResult
-    private func setInputDevice(_ deviceID: AudioDeviceID, on engine: AVAudioEngine) -> OSStatus {
-        let inputNode = engine.inputNode
-        let audioUnit = inputNode.audioUnit!
-        var devID = deviceID
-        return AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &devID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
     }
 }
