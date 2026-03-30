@@ -54,12 +54,19 @@ struct MenuView: View {
 
     private func promptAndStartRecording() {
         let suggestedName = calendarService.currentEventTitle()
-        SessionNameWindowController.shared.show(suggestedName: suggestedName) { sessionName in
-            Task { await startRecording(sessionName: sessionName) }
+        let lastMicId = configManager.config.lastMicrophoneDeviceId
+        SessionNameWindowController.shared.show(
+            suggestedName: suggestedName,
+            lastMicrophoneDeviceId: lastMicId
+        ) { sessionName, micDeviceId in
+            Task { await startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
         }
     }
 
-    private func startRecording(sessionName: String) async {
+    private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+        // Persist the mic choice for next time
+        configManager.update { $0.lastMicrophoneDeviceId = microphoneDeviceId }
+
         let config = configManager.config
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
@@ -78,7 +85,8 @@ struct MenuView: View {
         do {
             try await captureClient.start(
                 outputDirectory: outputDir,
-                baseName: baseName
+                baseName: baseName,
+                microphoneDeviceId: microphoneDeviceId
             )
             appState.phase = .recording(since: Date())
         } catch {
