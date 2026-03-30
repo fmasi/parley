@@ -25,12 +25,17 @@ final class SessionNameWindowController {
 
         let newPanel = NSPanel(
             contentRect: .zero,
-            styleMask: [.titled, .closable, .hudWindow, .utilityWindow],
+            styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
         newPanel.title = "New Recording"
-        newPanel.contentView = NSHostingView(rootView: dialog)
+        newPanel.backgroundColor = .clear
+        newPanel.isOpaque = false
+        let hostingView = NSHostingView(rootView: dialog)
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+        newPanel.contentView = hostingView
         newPanel.isFloatingPanel = true
         newPanel.becomesKeyOnlyIfNeeded = false
         newPanel.center()

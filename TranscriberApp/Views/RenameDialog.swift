@@ -70,6 +70,13 @@ struct RenameDialog: View {
         }
         .padding()
         .frame(width: 400)
+        .background {
+            if #available(macOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 12).glassEffect()
+            } else {
+                RoundedRectangle(cornerRadius: 12).fill(.regularMaterial)
+            }
+        }
     }
 
     private func playSample(_ url: URL) {

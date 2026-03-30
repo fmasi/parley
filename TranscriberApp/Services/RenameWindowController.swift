@@ -35,11 +35,15 @@ final class RenameWindowController {
 
         let newPanel = NSPanel(
             contentRect: .zero,
-            styleMask: [.titled, .closable, .hudWindow, .utilityWindow],
+            styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
         newPanel.title = "Rename Speakers"
+        newPanel.backgroundColor = .clear
+        newPanel.isOpaque = false
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
         newPanel.contentView = hostingView
         newPanel.isFloatingPanel = true
         newPanel.becomesKeyOnlyIfNeeded = false

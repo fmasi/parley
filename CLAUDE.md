@@ -105,6 +105,8 @@ python -m pytest tests/ -q
 11. Screen Recording has no requestAuthorization API — use `CGPreflightScreenCaptureAccess()` to check (no prompt) and `CGRequestScreenCaptureAccess()` to request (opens System Settings)
 12. All required permissions (Mic, Screen Recording) are gated at launch via SetupWindowController — don't add scattered permission requests elsewhere. Optional permissions (Calendar, Notifications) are accessible in Settings.
 13. `EKEventStore.authorizationStatus(for:)` may return stale values within a session — don't use `checkAll()` from individual Grant buttons, only update the specific permission that was requested
+14. Floating panels must NOT use `.hudWindow` styleMask — it creates a legacy dark HUD appearance that ignores system appearance and Liquid Glass. Use `[.titled, .closable, .utilityWindow]` instead. `SetupWindowController` is a standard `NSWindow` (not a floating panel) and is correct as-is.
+15. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`, and SwiftUI content applies `.glassEffect()` on a `RoundedRectangle` background (with `.regularMaterial` fallback for macOS 15). The `#available(macOS 26.0, *)` guard means no deployment-target bump is required — the glass is a progressive enhancement. To require macOS 26 as the hard minimum, bump `Package.swift` to `.macOS("26.0")`.
 
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)

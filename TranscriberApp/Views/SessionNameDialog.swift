@@ -41,6 +41,13 @@ struct SessionNameDialog: View {
         }
         .padding()
         .frame(width: 320)
+        .background {
+            if #available(macOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 12).glassEffect()
+            } else {
+                RoundedRectangle(cornerRadius: 12).fill(.regularMaterial)
+            }
+        }
         .onAppear { focused = true }
     }
 
