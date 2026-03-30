@@ -57,15 +57,12 @@ public final class InputLevelMonitor {
         }
 
         let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        log("Input format: rate=\(format.sampleRate), channels=\(format.channelCount)")
+        let reportedFormat = inputNode.outputFormat(forBus: 0)
+        log("Input format: rate=\(reportedFormat.sampleRate), channels=\(reportedFormat.channelCount)")
 
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            log("ERROR: invalid format, aborting")
-            return
-        }
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        // Pass nil format — lets AVAudioEngine use the device's native format,
+        // avoiding mismatches when switching between devices with different sample rates.
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             guard let self else { return }
             let rms = self.computeRMS(buffer: buffer)
             DispatchQueue.main.async {
