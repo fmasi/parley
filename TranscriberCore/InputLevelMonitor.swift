@@ -2,6 +2,22 @@ import AVFoundation
 import CoreAudio
 import Observation
 
+/// Log file for diagnostics (visible even when launched via `open`).
+private let logFile: FileHandle? = {
+    let dir = NSHomeDirectory() + "/.audio-transcribe/logs"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/input-level-monitor.log"
+    FileManager.default.createFile(atPath: path, contents: nil)
+    return FileHandle(forWritingAtPath: path)
+}()
+
+private func log(_ msg: String) {
+    guard let logFile else { return }
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
+    logFile.seekToEndOfFile()
+    logFile.write(Data(line.utf8))
+}
+
 /// Monitors audio input level from a specified device (or system default).
 /// Publishes `level` (0.0–1.0) suitable for driving a level meter UI.
 @Observable
@@ -22,21 +38,30 @@ public final class InputLevelMonitor {
 
         // Select input device if specified
         if let deviceId {
+            log("Requested device: \(deviceId)")
             if let coreAudioID = coreAudioDeviceID(for: deviceId) {
+                log("Found CoreAudio device ID: \(coreAudioID)")
                 let status = setInputDevice(coreAudioID, on: engine)
                 if status != noErr {
-                    fputs("InputLevelMonitor: failed to set device \(deviceId), status=\(status)\n", stderr)
+                    log("ERROR: AudioUnitSetProperty failed, status=\(status)")
+                } else {
+                    log("Device set successfully")
                 }
             } else {
-                fputs("InputLevelMonitor: no CoreAudio device found for uniqueID=\(deviceId)\n", stderr)
+                log("ERROR: no CoreAudio device found for uniqueID=\(deviceId)")
+                log("Available CoreAudio devices:")
+                logAllCoreAudioDevices()
             }
+        } else {
+            log("Using system default device")
         }
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        log("Input format: rate=\(format.sampleRate), channels=\(format.channelCount)")
 
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            fputs("InputLevelMonitor: invalid format (rate=\(format.sampleRate), ch=\(format.channelCount))\n", stderr)
+            log("ERROR: invalid format, aborting")
             return
         }
 
@@ -52,8 +77,9 @@ public final class InputLevelMonitor {
             try engine.start()
             self.engine = engine
             self.isMonitoring = true
+            log("Engine started OK")
         } catch {
-            fputs("InputLevelMonitor: engine.start() failed: \(error)\n", stderr)
+            log("ERROR: engine.start() failed: \(error)")
             inputNode.removeTap(onBus: 0)
         }
     }
@@ -102,29 +128,66 @@ public final class InputLevelMonitor {
         var dataSize: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
-        ) == noErr else { return nil }
+        ) == noErr else {
+            log("ERROR: failed to get device list size")
+            return nil
+        }
 
         let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
         var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs
-        ) == noErr else { return nil }
+        ) == noErr else {
+            log("ERROR: failed to get device list")
+            return nil
+        }
 
         for id in deviceIDs {
-            var uidAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceUID,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var uid: Unmanaged<CFString>?
-            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-            if AudioObjectGetPropertyData(id, &uidAddress, 0, nil, &uidSize, &uid) == noErr {
-                if let deviceUID = uid?.takeUnretainedValue() as String?, deviceUID == uniqueID {
-                    return id
-                }
+            if let deviceUID = coreAudioDeviceUID(id), deviceUID == uniqueID {
+                return id
             }
         }
         return nil
+    }
+
+    /// Get the UID string for a CoreAudio device.
+    private func coreAudioDeviceUID(_ deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uid: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &uid) { ptr in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
+        }
+        guard status == noErr else { return nil }
+        return uid as String
+    }
+
+    /// Log all CoreAudio devices for diagnostics.
+    private func logAllCoreAudioDevices() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
+        ) == noErr else { return }
+
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs
+        ) == noErr else { return }
+
+        for id in deviceIDs {
+            let uid = coreAudioDeviceUID(id) ?? "<no UID>"
+            log("  CoreAudio device \(id): \(uid)")
+        }
     }
 
     /// Set the input device on an AVAudioEngine via CoreAudio.
