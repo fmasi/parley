@@ -12,3 +12,10 @@
 7. Each speaker has a **play button** — plays their first segment from the source WAV
 8. "Rename Speakers..." menu item is enabled (not grayed out)
 9. Click "Rename Speakers..." from menu — dialog opens reliably
+
+## Error Visibility
+- [ ] Kill transcribe.py mid-run → menu shows "⚠ Error: ..." + "Dismiss Error"
+- [ ] Click "Dismiss Error" → error items disappear from menu
+- [ ] Start new recording after error → error items auto-clear
+- [ ] Error notification appears in Notification Center
+- [ ] Success notification still appears after normal transcription
