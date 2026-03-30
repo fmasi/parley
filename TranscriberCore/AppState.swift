@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 @Observable
 public final class AppState {
@@ -9,10 +10,24 @@ public final class AppState {
         case transcribing(progress: String)
     }
 
-    public var phase: Phase = .idle
+    public var phase: Phase = .idle {
+        didSet {
+            if oldValue != self.phase {
+                Logger.state.info("State: \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.phase), privacy: .public)")
+            }
+        }
+    }
     public var lastTranscriptPath: String?
     public var lastJsonPath: String?
-    public var errorMessage: String?
+    public var errorMessage: String? {
+        didSet {
+            if let msg = self.errorMessage {
+                Logger.state.info("Error set: \(msg, privacy: .public)")
+            } else if oldValue != nil {
+                Logger.state.info("Error cleared")
+            }
+        }
+    }
 
     public var truncatedErrorMessage: String? {
         guard let msg = errorMessage else { return nil }
