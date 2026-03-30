@@ -13,7 +13,6 @@ struct ConfigTests {
         #expect(config.silenceDetectionEnabled == true)
         #expect(config.outputFormat == "txt")
         #expect(config.launchOnStartup == true)
-        #expect(config.logLevel == "info")
         #expect(config.suppressCaptureWarning == false)
         #expect(config.hfToken == "")
     }
@@ -25,7 +24,6 @@ struct ConfigTests {
             silenceDetectionEnabled: false,
             outputFormat: "srt",
             launchOnStartup: false,
-            logLevel: "debug",
             suppressCaptureWarning: true,
             hfToken: "hf_abc123"
         )
@@ -34,7 +32,6 @@ struct ConfigTests {
         #expect(config.silenceDetectionEnabled == false)
         #expect(config.outputFormat == "srt")
         #expect(config.launchOnStartup == false)
-        #expect(config.logLevel == "debug")
         #expect(config.suppressCaptureWarning == true)
         #expect(config.hfToken == "hf_abc123")
     }
@@ -48,7 +45,6 @@ struct ConfigTests {
             silenceDetectionEnabled: false,
             outputFormat: "json",
             launchOnStartup: false,
-            logLevel: "warning",
             suppressCaptureWarning: true,
             hfToken: "hf_token_value"
         )
@@ -68,7 +64,6 @@ struct ConfigTests {
         #expect(json["silence_detection_enabled"] != nil)
         #expect(json["output_format"] != nil)
         #expect(json["launch_on_startup"] != nil)
-        #expect(json["log_level"] != nil)
         #expect(json["suppress_capture_warning"] != nil)
         #expect(json["hf_token"] != nil)
         // camelCase keys should NOT be present
@@ -84,7 +79,6 @@ struct ConfigTests {
             "silence_detection_enabled": false,
             "output_format": "srt",
             "launch_on_startup": false,
-            "log_level": "debug",
             "suppress_capture_warning": true,
             "hf_token": "test_token"
         }

@@ -6,7 +6,6 @@ public struct Config: Codable, Equatable {
     public var silenceDetectionEnabled: Bool
     public var outputFormat: String
     public var launchOnStartup: Bool
-    public var logLevel: String
     public var suppressCaptureWarning: Bool
     public var hfToken: String
     public var lastMicrophoneDeviceId: String?
@@ -17,7 +16,6 @@ public struct Config: Codable, Equatable {
         silenceDetectionEnabled: true,
         outputFormat: "txt",
         launchOnStartup: true,
-        logLevel: "info",
         suppressCaptureWarning: false,
         hfToken: "",
         lastMicrophoneDeviceId: nil
@@ -29,7 +27,6 @@ public struct Config: Codable, Equatable {
         silenceDetectionEnabled: Bool = true,
         outputFormat: String = "txt",
         launchOnStartup: Bool = true,
-        logLevel: String = "info",
         suppressCaptureWarning: Bool = false,
         hfToken: String = "",
         lastMicrophoneDeviceId: String? = nil
@@ -39,7 +36,6 @@ public struct Config: Codable, Equatable {
         self.silenceDetectionEnabled = silenceDetectionEnabled
         self.outputFormat = outputFormat
         self.launchOnStartup = launchOnStartup
-        self.logLevel = logLevel
         self.suppressCaptureWarning = suppressCaptureWarning
         self.hfToken = hfToken
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
@@ -51,7 +47,6 @@ public struct Config: Codable, Equatable {
         case silenceDetectionEnabled = "silence_detection_enabled"
         case outputFormat = "output_format"
         case launchOnStartup = "launch_on_startup"
-        case logLevel = "log_level"
         case suppressCaptureWarning = "suppress_capture_warning"
         case hfToken = "hf_token"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
