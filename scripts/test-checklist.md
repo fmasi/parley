@@ -19,3 +19,12 @@
 - [ ] Start new recording after error → error items auto-clear
 - [ ] Error notification appears in Notification Center
 - [ ] Success notification still appears after normal transcription
+
+## Unified Logging
+- [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
+- [ ] Start recording — see "Recording started" and "Starting capture" in log stream
+- [ ] Observe "System audio: ...Hz" and "Mic audio: ...Hz" format detection lines
+- [ ] Stop recording — see "Stopping capture" and "Launching transcription" lines
+- [ ] Python progress lines appear as `[python] Transcribing audio...` etc.
+- [ ] Transcription completes — see duration in "Transcription complete" line
+- [ ] Ctrl+C stops log stream; app keeps running

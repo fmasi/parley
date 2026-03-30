@@ -119,6 +119,29 @@ python -m pytest tests/ -q
 22. **TranscriptionRunner environment:** `process.environment = [...]` replaces ALL env vars. Must include `HOME`, `TMPDIR`, embedded python `bin/` in PATH (for ffmpeg), and `/opt/homebrew/bin`. Must pass `hfToken` from config via `--hf-token` arg. The `-o` flag expects a file path, not a directory.
 23. **embed_python.sh rsync excludes:** Use path-anchored excludes (`--exclude='/bin/pip*'`) not bare globs (`--exclude='pip*'`) — bare `pip*` also matches `pipelines/` inside packages like torchaudio.
 
+## Debugging with Unified Logging
+All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
+
+```bash
+# All logs (debug + info + error) — use during development
+log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug
+
+# Only errors
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND messageType == error'
+
+# Only audio capture (format detection, frame delivery)
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "audio"' --level debug
+
+# Only Python transcription output
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "transcription"'
+
+# Historical (last 5 minutes)
+log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 5m
+
+# Via dev.py (launches app + tails log)
+python scripts/dev.py --debug
+```
+
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
