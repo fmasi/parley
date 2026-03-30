@@ -44,6 +44,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.isCapturing = true
                     reply(true, nil)
                 } catch {
+                    self.cleanupAfterFailure()
                     let desc = "\(error)"
                     if desc.contains("permission") || desc.contains("denied")
                         || desc.contains("notAuthorized") {
@@ -86,6 +87,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     func status(reply: @escaping (Bool, String?) -> Void) {
         reply(isCapturing, nil)
+    }
+
+    private func cleanupAfterFailure() {
+        handler?.finalizeAll()
+        if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
+        if let mic = micPath { try? FileManager.default.removeItem(atPath: mic) }
+        stream = nil
+        handler = nil
+        systemPath = nil
+        micPath = nil
     }
 
     private func configureAndStart(handler: AudioOutputHandler, microphoneDeviceId: String?) async throws {
