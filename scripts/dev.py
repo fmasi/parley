@@ -4,16 +4,17 @@
 Build, install, and launch the app for manual testing.
 
 Default (no flags): kill -> build -> install -> launch + print checklist.
-Step flags (--kill, --build, --install, --launch) switch to explicit mode.
-Modifier flags (--console, --reset-tcc, --skip-embed) layer on top.
+Step flags (--kill, --build, --install, --launch, --reset-tcc) switch to explicit mode.
+Modifier flags (--console, --skip-embed) layer on top of default or explicit steps.
 
 Examples:
-    python scripts/dev.py                     # full cycle
-    python scripts/dev.py --console           # full cycle, stderr in terminal
-    python scripts/dev.py --reset-tcc         # full cycle + reset permissions
-    python scripts/dev.py --build --install   # build + install only
-    python scripts/dev.py --kill --launch     # relaunch existing install
-    python scripts/dev.py --skip-embed        # full cycle, skip Python embedding
+    python scripts/dev.py                          # full cycle
+    python scripts/dev.py --console                # full cycle, stderr in terminal
+    python scripts/dev.py --reset-tcc              # just reset TCC permissions
+    python scripts/dev.py --reset-tcc --launch     # reset + launch
+    python scripts/dev.py --build --install        # build + install only
+    python scripts/dev.py --kill --launch          # relaunch existing install
+    python scripts/dev.py --skip-embed             # full cycle, skip Python embedding
 """
 
 import argparse
@@ -33,9 +34,7 @@ PACKAGE_SCRIPT = PROJECT_ROOT / "package_app.sh"
 CHECKLIST_FILE = Path(__file__).resolve().parent / "test-checklist.md"
 
 # Step flags
-STEP_FLAGS = ("kill", "build", "install", "launch")
-# Modifier flags
-MODIFIER_FLAGS = ("console", "reset_tcc", "skip_embed")
+STEP_FLAGS = ("kill", "build", "install", "launch", "reset_tcc")
 
 DEFAULT_STEPS = {"kill", "build", "install", "launch"}
 TCC_SERVICES = ["Microphone", "ScreenCapture", "Calendar"]
@@ -53,12 +52,11 @@ def parse_args() -> argparse.Namespace:
     steps.add_argument("--build", action="store_true", help="Build app bundle")
     steps.add_argument("--install", action="store_true", help="Install to /Applications")
     steps.add_argument("--launch", action="store_true", help="Launch via open")
+    steps.add_argument("--reset-tcc", action="store_true", help="Reset TCC permissions")
 
     mods = parser.add_argument_group("modifiers (layer on top of default or explicit)")
     mods.add_argument("--console", action="store_true",
                       help="Launch binary directly (stderr in terminal)")
-    mods.add_argument("--reset-tcc", action="store_true",
-                      help="Reset TCC permissions (implies --kill)")
     mods.add_argument("--skip-embed", action="store_true",
                       help="Skip Python embedding (faster rebuild)")
 
@@ -78,11 +76,6 @@ def resolve_steps(args: argparse.Namespace) -> set[str]:
     if args.console:
         steps.discard("launch")
         steps.add("console")
-
-    # Modifier: --reset-tcc implies kill
-    if args.reset_tcc:
-        steps.add("kill")
-        steps.add("reset_tcc")
 
     return steps
 
