@@ -65,7 +65,10 @@ struct TranscriberApp: App {
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView(configManager: configManager)
+            SettingsView(
+                configManager: configManager,
+                permissionManager: launchGate.permissionManager
+            )
         }
     }
 }

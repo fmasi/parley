@@ -15,30 +15,35 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
-- `TranscriberApp/Models/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
-- `TranscriberApp/Models/Config.swift` -- Codable struct mirroring Python config.json (snake_case JSON keys)
-- `TranscriberApp/Services/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
 - `TranscriberApp/Services/TranscriptionRunner.swift` -- launches transcribe.py via Process
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
+- `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
+- `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter)
 - `TranscriberApp/Views/MenuView.swift` -- menu bar dropdown content
-- `TranscriberApp/Views/SettingsView.swift` -- settings Form
+- `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section
+- `TranscriberApp/Views/SetupView.swift` -- permission setup window content (shown at first launch)
 - `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet
 - `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol via ScreenCaptureKit
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters
-- `AudioCaptureHelper/XPC/WavFileWriter.swift` -- WAV file writing with deferred sample rate
 - `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point
 
 ### Shared Protocol (AudioCaptureProtocol target)
 - `AudioCaptureProtocol/AudioCaptureProtocol.swift` -- @objc XPC protocol + service name constant
 
 ### Shared Logic (TranscriberCore target)
+- `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
+- `TranscriberCore/Config.swift` -- Codable struct mirroring Python config.json (snake_case JSON keys)
+- `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
+- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate, Float32→Int16 conversion
+- `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
+- `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 
 ### Python CLI (unchanged)
 - `transcribe.py` -- CLI tool, mlx-whisper + pyannote diarization, supports dual-stream input (`-i system.wav -i mic.wav`)
@@ -68,7 +73,8 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
-# Runs Swift tests (uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools)
+# 70 tests across 7 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager)
+# Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
 
@@ -96,12 +102,16 @@ python -m pytest tests/ -q
 8. Use `remoteObjectProxyWithErrorHandler` for XPC calls to prevent continuation leaks
 9. MenuBarExtra with `.menu` style cannot present sheets -- use NSPanel via window controllers
 10. Calendar access requires `NSCalendarsUsageDescription` in Info.plist and `requestFullAccessToEvents()` at launch
+11. Screen Recording has no requestAuthorization API — use `CGPreflightScreenCaptureAccess()` to check (no prompt) and `CGRequestScreenCaptureAccess()` to request (opens System Settings)
+12. All required permissions (Mic, Screen Recording) are gated at launch via SetupWindowController — don't add scattered permission requests elsewhere. Optional permissions (Calendar, Notifications) are accessible in Settings.
+13. `EKEventStore.authorizationStatus(for:)` may return stale values within a session — don't use `checkAll()` from individual Grant buttons, only update the specific permission that was requested
 
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
 - `packaging/AudioCaptureHelper-Info.plist` -- XPC service plist (ServiceType: Application)
 - `packaging/embed_python.sh` -- embeds conda Python + scripts into .app Resources
+- `scripts/test-fresh.sh` -- resets TCC permissions, builds with embedded Python, installs to /Applications, launches app
 
 ## Branches
 - `main` -- stable (Python rumps UI)
