@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
-# test-fresh.sh — Reset permissions, build, install, and launch for manual testing
+# test-fresh.sh — Build, install, and launch for manual testing
 #
 # Usage:
-#   bash scripts/test-fresh.sh
+#   bash scripts/test-fresh.sh              # build + install + launch
+#   bash scripts/test-fresh.sh --reset-tcc  # also reset TCC permissions first
 #
 # Requires: conda environment activated (for Python embedding)
-#
-# What it does:
-#   1. Kills running AudioTranscribe if any
-#   2. Resets all TCC permissions for the app
-#   3. Builds the app (debug) with embedded Python
-#   4. Installs to /Applications
-#   5. Launches the app
 
 set -euo pipefail
 
@@ -32,15 +26,17 @@ echo "==> Killing AudioTranscribe if running..."
 pkill -x AudioTranscribe 2>/dev/null || true
 sleep 1
 
-# ── Reset TCC permissions ────────────────────────────────────────────────────
-echo "==> Resetting TCC permissions..."
-tccutil reset Microphone "$BUNDLE_ID"
-tccutil reset ScreenCapture "$BUNDLE_ID"
-tccutil reset Calendar "$BUNDLE_ID"
-# Notifications: tccutil doesn't support this service.
-# To reset: System Settings > Notifications > AudioTranscribe > remove
-echo "   Note: Notification permission cannot be reset via tccutil."
-echo "   To reset: System Settings > Notifications > AudioTranscribe"
+# ── Optionally reset TCC permissions ────────────────────────────────────────
+if [[ "${1:-}" == "--reset-tcc" ]]; then
+    echo "==> Resetting TCC permissions..."
+    tccutil reset Microphone "$BUNDLE_ID"
+    tccutil reset ScreenCapture "$BUNDLE_ID"
+    tccutil reset Calendar "$BUNDLE_ID"
+    echo "   Note: Notification permission cannot be reset via tccutil."
+    echo "   To reset: System Settings > Notifications > AudioTranscribe"
+else
+    echo "==> Skipping TCC reset (use --reset-tcc to reset permissions)"
+fi
 
 # ── Build + install ───────────────────────────────────────────────────────────
 echo "==> Building and installing..."
@@ -51,27 +47,20 @@ echo "==> Launching AudioTranscribe..."
 open /Applications/AudioTranscribe.app
 
 echo ""
-echo "Done! The app should now show the permission setup window."
+echo "Done!"
 echo ""
 echo "=== Test Checklist ==="
 echo ""
-echo "Permissions (first launch):"
-echo "  1. Setup window appears with Grant buttons"
-echo "  2. Grant Microphone — green checkmark"
-echo "  3. Grant Screen Recording — green checkmark"
-echo "  4. Continue button enables after both required permissions granted"
-echo "  5. Click Continue — normal menu bar UI appears"
-echo ""
 echo "Microphone Picker:"
-echo "  6. Click Start Recording — session name dialog appears"
-echo "  7. Mic dropdown shows 'System Default' + all real input devices"
-echo "  8. Select a non-default mic — level meter shows input from THAT device only"
-echo "  9. Speak into selected mic — green/yellow bar animates"
-echo "  10. Click Start Recording — recording starts normally"
-echo "  11. Stop recording — transcription runs"
-echo "  12. Start another recording — last-used mic is pre-selected"
+echo "  1. Click Start Recording — session name dialog appears"
+echo "  2. Mic dropdown shows 'System Default' + all real input devices"
+echo "  3. Select a non-default mic — level meter shows input from THAT device only"
+echo "  4. Speak into selected mic — green/yellow bar animates"
+echo "  5. Click Start Recording — recording starts normally"
+echo "  6. Stop recording — transcription runs"
+echo "  7. Start another recording — last-used mic is pre-selected"
 echo ""
 echo "Recording end-to-end:"
-echo "  13. Start/stop a recording with system default mic"
-echo "  14. Verify _mic.wav has audio from the correct device"
-echo "  15. Quit and relaunch — no setup window (permissions remembered)"
+echo "  8. Start/stop a recording with system default mic"
+echo "  9. Verify _mic.wav has audio from the correct device"
+echo "  10. Quit and relaunch — permissions still granted, no setup window"
