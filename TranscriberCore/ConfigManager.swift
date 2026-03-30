@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public final class ConfigManager {
     public static let shared = ConfigManager()
@@ -20,8 +21,10 @@ public final class ConfigManager {
         guard let data = try? Data(contentsOf: url),
               let config = try? JSONDecoder().decode(Config.self, from: data)
         else {
+            Logger.config.info("Config not found or invalid, using defaults")
             return .default
         }
+        Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), hfToken: \(config.hfToken.isEmpty ? "not set" : "set", privacy: .public)")
         return config
     }
 
@@ -33,6 +36,7 @@ public final class ConfigManager {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else { return }
         try? data.write(to: configFile, options: .atomic)
+        Logger.config.debug("Config saved")
     }
 
     public func update(_ transform: (inout Config) -> Void) {
