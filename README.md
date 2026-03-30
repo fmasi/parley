@@ -333,7 +333,7 @@ python scripts/dev.py
 ### Running tests
 
 ```bash
-# Swift (83 tests across 9 suites)
+# Swift (102 tests across 9 suites)
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
 
 # Python (79 tests)

@@ -190,6 +190,102 @@ struct WavFileWriterTests {
 
     // MARK: - Empty file
 
+    // MARK: - Int16 passthrough
+
+    @Test func appendInt16WritesDirectly() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        let samples: [Int16] = [0, 32767, -32767, 16383]
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+
+        let data = readData(at: path)
+        #expect(data.count == 44 + 8)  // 4 samples × 2 bytes
+
+        let pcm: [Int16] = data[44...].withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+        #expect(pcm[0] == 0)
+        #expect(pcm[1] == 32767)
+        #expect(pcm[2] == -32767)
+        #expect(pcm[3] == 16383)
+    }
+
+    @Test func appendInt16HeaderReflectsDataSize() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        let samples: [Int16] = [100, 200, 300]
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == 6)  // 3 samples × 2 bytes
+    }
+
+    @Test func mixedFloat32AndInt16Appends() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        let floatSamples: [Float32] = [0.5, -0.5]
+        let int16Samples: [Int16] = [1000, -1000]
+        floatSamples.withUnsafeBufferPointer { writer.append($0) }
+        int16Samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == 8)  // 4 total samples × 2 bytes
+    }
+
+    // MARK: - Channel count (stereo)
+
+    @Test func stereoHeaderHasTwoChannels() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setChannelCount(2)
+        writer.finalize()
+
+        let data = readData(at: path)
+        let channels: UInt16 = data[22...23].withUnsafeBytes { $0.load(as: UInt16.self) }
+        #expect(channels == 2)
+    }
+
+    @Test func stereoBlockAlignIsFour() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setChannelCount(2)
+        writer.finalize()
+
+        let data = readData(at: path)
+        // Block align at offset 32 (2 bytes LE) = channels × 2
+        let blockAlign: UInt16 = data[32...33].withUnsafeBytes { $0.load(as: UInt16.self) }
+        #expect(blockAlign == 4)  // 2 channels × 2 bytes
+    }
+
+    @Test func stereoByteRateReflectsChannels() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        writer.setChannelCount(2)
+        writer.finalize()
+
+        let data = readData(at: path)
+        let byteRate: UInt32 = data[28...31].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(byteRate == 192000)  // 48000 × 2 channels × 2 bytes
+    }
+
+    // MARK: - Empty file
+
     @Test func emptyFileHasZeroDataSize() throws {
         let path = tempPath()
         defer { cleanup(path) }

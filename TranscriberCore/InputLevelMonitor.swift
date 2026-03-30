@@ -106,7 +106,7 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
 
     // MARK: - Private
 
-    private func computeRMSFloat(_ samples: UnsafePointer<Float>, count: Int) -> Float {
+    func computeRMSFloat(_ samples: UnsafePointer<Float>, count: Int) -> Float {
         guard count > 0 else { return 0.0 }
         var sum: Float = 0.0
         for i in 0..<count {
@@ -116,7 +116,7 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
         return sqrt(sum / Float(count))
     }
 
-    private func computeRMSInt16(_ samples: UnsafePointer<Int16>, count: Int) -> Float {
+    func computeRMSInt16(_ samples: UnsafePointer<Int16>, count: Int) -> Float {
         guard count > 0 else { return 0.0 }
         var sum: Float = 0.0
         for i in 0..<count {
@@ -126,7 +126,7 @@ public final class InputLevelMonitor: NSObject, AVCaptureAudioDataOutputSampleBu
         return sqrt(sum / Float(count))
     }
 
-    private func dBNormalize(_ rawRMS: Float) -> Float {
+    func dBNormalize(_ rawRMS: Float) -> Float {
         guard rawRMS > 0 else { return 0.0 }
         let db = 20.0 * log10(rawRMS)
         let minDb: Float = -50.0
