@@ -46,6 +46,7 @@ final class RenameWindowController {
         hostingView.layer?.backgroundColor = .clear
         newPanel.contentView = hostingView
         newPanel.isFloatingPanel = true
+        newPanel.hidesOnDeactivate = false
         newPanel.becomesKeyOnlyIfNeeded = false
         newPanel.center()
         newPanel.makeKeyAndOrderFront(nil)
@@ -62,23 +63,40 @@ final class RenameWindowController {
               let segments = json["segments"] as? [[String: Any]]
         else { return [] }
 
-        // Collect unique speakers in order of appearance
+        // Collect unique speakers and sample quotes in order of appearance
         var seen = Set<String>()
-        var speakers: [SpeakerEntry] = []
+        var sampleTexts: [String: [String]] = [:]
+        var orderedIds: [String] = []
+
         for seg in segments {
-            if let speaker = seg["speaker"] as? String, !seen.contains(speaker) {
+            guard let speaker = seg["speaker"] as? String,
+                  let text = seg["text"] as? String else { continue }
+            if !seen.contains(speaker) {
                 seen.insert(speaker)
-                // Look for a sample audio clip in the same directory
-                let samplePath = jsonPath.deletingLastPathComponent()
-                    .appendingPathComponent("\(speaker.lowercased().replacingOccurrences(of: " ", with: "_")).wav")
-                speakers.append(SpeakerEntry(
-                    id: speaker,
-                    displayName: speaker,
-                    samplePath: FileManager.default.fileExists(atPath: samplePath.path) ? samplePath : nil
-                ))
+                orderedIds.append(speaker)
+                sampleTexts[speaker] = []
+            }
+            // Keep first 2 quotes per speaker (enough to identify them)
+            if let count = sampleTexts[speaker]?.count, count < 2 {
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    sampleTexts[speaker]?.append(trimmed)
+                }
             }
         }
-        return speakers
+
+        let dir = jsonPath.deletingLastPathComponent()
+        return orderedIds.map { speaker in
+            let samplePath = dir.appendingPathComponent(
+                "\(speaker.lowercased().replacingOccurrences(of: " ", with: "_")).wav"
+            )
+            return SpeakerEntry(
+                id: speaker,
+                displayName: speaker,
+                sampleText: sampleTexts[speaker]?.joined(separator: " ") ?? "",
+                samplePath: FileManager.default.fileExists(atPath: samplePath.path) ? samplePath : nil
+            )
+        }
     }
 
     // MARK: - Apply Renames

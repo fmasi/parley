@@ -53,13 +53,7 @@ struct SessionNameDialog: View {
         }
         .padding()
         .frame(width: 380)
-        .background {
-            if #available(macOS 26.0, *) {
-                RoundedRectangle(cornerRadius: 12).glassEffect()
-            } else {
-                RoundedRectangle(cornerRadius: 12).fill(.regularMaterial)
-            }
-        }
+        .modifier(GlassBackgroundModifier(cornerRadius: 12))
         .onAppear { focused = true }
     }
 
@@ -68,5 +62,31 @@ struct SessionNameDialog: View {
             name.trimmingCharacters(in: .whitespaces),
             selectedDeviceId
         )
+    }
+}
+
+/// Applies Liquid Glass on macOS 26+, falls back to .regularMaterial on older versions.
+/// Used by both SessionNameDialog and RenameDialog.
+struct GlassBackgroundModifier: ViewModifier {
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(
+                in: .rect(
+                    topLeadingRadius: 0,
+                    bottomLeadingRadius: cornerRadius,
+                    bottomTrailingRadius: cornerRadius,
+                    topTrailingRadius: 0
+                )
+            )
+        } else {
+            content.background {
+                UnevenRoundedRectangle(
+                    bottomLeadingRadius: cornerRadius,
+                    bottomTrailingRadius: cornerRadius
+                ).fill(.regularMaterial)
+            }
+        }
     }
 }

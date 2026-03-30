@@ -49,6 +49,7 @@ final class SessionNameWindowController {
         hostingView.layer?.backgroundColor = .clear
         newPanel.contentView = hostingView
         newPanel.isFloatingPanel = true
+        newPanel.hidesOnDeactivate = false
         newPanel.becomesKeyOnlyIfNeeded = false
         newPanel.center()
         newPanel.makeKeyAndOrderFront(nil)

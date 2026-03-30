@@ -30,8 +30,10 @@ rsync -a --delete \
     "$RESOURCES_DIR/python/" \
     --exclude='*.pyc' \
     --exclude='__pycache__' \
-    --exclude='pip*' \
-    --exclude='setuptools*'
+    --exclude='/bin/pip*' \
+    --exclude='/lib/python*/site-packages/pip' \
+    --exclude='/lib/python*/site-packages/pip-*' \
+    --exclude='/lib/python*/site-packages/setuptools*'
 
 # 2. Copy Python application scripts
 echo "  Copying Python scripts..."

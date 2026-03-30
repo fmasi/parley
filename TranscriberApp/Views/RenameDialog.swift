@@ -4,6 +4,7 @@ import AVFoundation
 struct SpeakerEntry: Identifiable {
     let id: String  // "speaker_0", "speaker_1", etc.
     var displayName: String
+    let sampleText: String
     let samplePath: URL?
 }
 
@@ -33,22 +34,30 @@ struct RenameDialog: View {
                 .font(.headline)
 
             ForEach($speakers) { $speaker in
-                HStack {
-                    Text(speaker.id)
-                        .frame(width: 80, alignment: .leading)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(speaker.id)
+                            .frame(width: 120, alignment: .leading)
+                            .foregroundStyle(.secondary)
 
-                    TextField("Name", text: $speaker.displayName)
-                        .textFieldStyle(.roundedBorder)
+                        TextField("Name", text: $speaker.displayName)
+                            .textFieldStyle(.roundedBorder)
 
-                    if speaker.samplePath != nil {
-                        Button {
-                            playSample(speaker.samplePath!)
-                        } label: {
-                            Image(systemName: "play.circle")
+                        if speaker.samplePath != nil {
+                            Button {
+                                playSample(speaker.samplePath!)
+                            } label: {
+                                Image(systemName: "play.circle")
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        .buttonStyle(.borderless)
                     }
+
+                    Text(speaker.sampleText)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                        .padding(.leading, 124)
                 }
             }
 
@@ -70,13 +79,7 @@ struct RenameDialog: View {
         }
         .padding()
         .frame(width: 400)
-        .background {
-            if #available(macOS 26.0, *) {
-                RoundedRectangle(cornerRadius: 12).glassEffect()
-            } else {
-                RoundedRectangle(cornerRadius: 12).fill(.regularMaterial)
-            }
-        }
+        .modifier(GlassBackgroundModifier(cornerRadius: 12))
     }
 
     private func playSample(_ url: URL) {

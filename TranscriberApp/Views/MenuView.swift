@@ -104,7 +104,8 @@ struct MenuView: View {
                 systemAudio: paths.systemAudio,
                 micAudio: paths.micAudio,
                 outputFormat: config.outputFormat,
-                outputDirectory: paths.systemAudio.deletingLastPathComponent()
+                outputDirectory: paths.systemAudio.deletingLastPathComponent(),
+                hfToken: config.hfToken
             )
 
             appState.lastTranscriptPath = result.outputPath.path

@@ -24,14 +24,14 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputFormat: String,
-        outputDirectory: URL
+        outputDirectory: URL,
+        hfToken: String = ""
     ) async throws -> TranscriptionResult {
         let resources = Bundle.main.resourceURL!
-        let pythonHome = resources
-            .appendingPathComponent("python/Python.framework/Versions/3.11")
+        let pythonHome = resources.appendingPathComponent("python")
         let pythonBin = pythonHome.appendingPathComponent("bin/python3")
-        let sitePackages = resources
-            .appendingPathComponent("python/lib/python3.11/site-packages")
+        let sitePackages = pythonHome
+            .appendingPathComponent("lib/python3.11/site-packages")
         let transcribeScript = resources
             .appendingPathComponent("Python/transcribe.py")
 
@@ -42,6 +42,10 @@ final class TranscriptionRunner {
             throw RunnerError.scriptNotFound
         }
 
+        let baseName = systemAudio.deletingPathExtension().lastPathComponent
+        let outputFile = outputDirectory
+            .appendingPathComponent(baseName + "." + outputFormat)
+
         var arguments = [
             transcribeScript.path,
             "-i", systemAudio.path,
@@ -50,7 +54,10 @@ final class TranscriptionRunner {
             arguments += ["-i", mic.path]
         }
         arguments += ["-f", outputFormat]
-        arguments += ["-o", outputDirectory.path]
+        arguments += ["-o", outputFile.path]
+        if !hfToken.isEmpty {
+            arguments += ["--hf-token", hfToken]
+        }
 
         let process = Process()
         process.executableURL = pythonBin
@@ -58,7 +65,15 @@ final class TranscriptionRunner {
         process.environment = [
             "PYTHONHOME": pythonHome.path,
             "PYTHONPATH": sitePackages.path,
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "TMPDIR": NSTemporaryDirectory(),
+            "PATH": [
+                pythonHome.appendingPathComponent("bin").path,
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+            ].joined(separator: ":"),
         ]
 
         let stdoutPipe = Pipe()
@@ -68,22 +83,19 @@ final class TranscriptionRunner {
 
         return try await withCheckedThrowingContinuation { cont in
             process.terminationHandler = { proc in
-                _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
                 if proc.terminationStatus != 0 {
                     let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                    let output = stderr.isEmpty ? stdout : stderr
                     cont.resume(throwing: RunnerError.failed(
-                        "transcribe.py exited with code \(proc.terminationStatus): \(stderr)"
+                        "transcribe.py exited with code \(proc.terminationStatus): \(output)"
                     ))
                     return
                 }
 
-                // transcribe.py always writes <baseName>.json (master) + <baseName>.<format>
-                // Derive both paths from the system audio input — no stdout parsing needed.
-                let baseName = systemAudio.deletingPathExtension().lastPathComponent
-                let outputFile = outputDirectory
-                    .appendingPathComponent(baseName + "." + outputFormat)
                 let jsonFile = outputDirectory
                     .appendingPathComponent(baseName + ".json")
                 cont.resume(returning: TranscriptionResult(
