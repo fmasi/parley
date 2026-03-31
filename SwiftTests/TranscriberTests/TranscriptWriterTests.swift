@@ -56,4 +56,29 @@ struct TranscriptWriterTests {
         let expected = "1\n00:00:00,000 --> 00:00:01,000\nNo key\n\n"
         #expect(TranscriptWriter.formatSRT(segments: segments) == expected)
     }
+
+    // MARK: - TXT formatting
+
+    @Test func formatTXTMultipleSegments() {
+        let segments: [[String: Any]] = [
+            ["start": 8.039, "speaker": "Alice", "text": "Hello"],
+            ["start": 11.959, "speaker": "Bob", "text": "Hi there"],
+        ]
+        let expected = "[00:00:08] Alice: Hello\n[00:00:11] Bob: Hi there\n"
+        #expect(TranscriptWriter.formatTXT(segments: segments) == expected)
+    }
+
+    @Test func formatTXTEmptySpeakerOmitsPrefix() {
+        let segments: [[String: Any]] = [
+            ["start": 0.0, "speaker": "", "text": "No speaker"],
+        ]
+        #expect(TranscriptWriter.formatTXT(segments: segments) == "[00:00:00] No speaker\n")
+    }
+
+    @Test func formatTXTMissingSpeakerKeyOmitsPrefix() {
+        let segments: [[String: Any]] = [
+            ["start": 0.0, "text": "No key"],
+        ]
+        #expect(TranscriptWriter.formatTXT(segments: segments) == "[00:00:00] No key\n")
+    }
 }
