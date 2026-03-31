@@ -17,4 +17,18 @@ public enum TranscriptWriter {
         let s = Int(seconds) % 60
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
+
+    /// Format segments as SRT subtitle text.
+    static func formatSRT(segments: [[String: Any]]) -> String {
+        var result = ""
+        for (i, seg) in segments.enumerated() {
+            let start = formatTimestamp(seg["start"] as? Double ?? 0)
+            let end = formatTimestamp(seg["end"] as? Double ?? 0)
+            let speaker = seg["speaker"] as? String ?? ""
+            let text = seg["text"] as? String ?? ""
+            let prefix = speaker.isEmpty ? "" : "\(speaker): "
+            result += "\(i + 1)\n\(start) --> \(end)\n\(prefix)\(text)\n\n"
+        }
+        return result
+    }
 }
