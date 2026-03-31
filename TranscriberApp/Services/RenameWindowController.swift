@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import os
+import TranscriberCore
 
 /// Opens the RenameDialog as a standalone NSPanel.
 /// MenuBarExtra with `.menu` style cannot present sheets, so we use a panel instead.
@@ -16,6 +18,7 @@ final class RenameWindowController {
         guard !speakers.isEmpty else { return }
 
         let closePanel = { [weak self] in
+            Logger.state.debug("Panel closed: RenameSpeakers")
             self?.panel?.close()
             self?.panel = nil
         }
@@ -53,6 +56,7 @@ final class RenameWindowController {
         NSApp.activate(ignoringOtherApps: true)
 
         self.panel = newPanel
+        Logger.state.debug("Panel shown: RenameSpeakers")
     }
 
     // MARK: - JSON Parsing

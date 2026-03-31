@@ -11,7 +11,6 @@ def test_config_defaults(tmp_path):
     assert cm.config.silence_detection_enabled is True
     assert cm.config.output_format == "txt"
     assert cm.config.launch_on_startup is True
-    assert cm.config.log_level == "info"
     assert "Recordings" in cm.config.recording_directory
 
 
@@ -65,11 +64,10 @@ def test_config_update_persists_multiple_fields(tmp_path):
     from service.config_manager import ConfigManager
     path = tmp_path / "config.json"
     cm = ConfigManager(config_path=path)
-    cm.update(output_format="json", silence_timeout_minutes=15, log_level="debug")
+    cm.update(output_format="json", silence_timeout_minutes=15)
     cm2 = ConfigManager(config_path=path)
     assert cm2.config.output_format == "json"
     assert cm2.config.silence_timeout_minutes == 15
-    assert cm2.config.log_level == "debug"
 
 
 def test_config_default_hf_token_is_empty(tmp_path):

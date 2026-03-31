@@ -1,4 +1,5 @@
 import Foundation
+import os
 import ScreenCaptureKit
 import AudioCaptureProtocol
 import TranscriberCore
@@ -21,6 +22,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
 
+        Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .public), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
+
         let sysPath = (outputDirectory as NSString).appendingPathComponent(baseName + ".wav")
         let micFilePath = (outputDirectory as NSString).appendingPathComponent(baseName + "_mic.wav")
 
@@ -41,10 +44,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             Task {
                 do {
                     try await self.configureAndStart(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
+                    Logger.audio.info("SCStream started, awaiting frames")
                     self.isCapturing = true
                     reply(true, nil)
                 } catch {
                     self.cleanupAfterFailure()
+                    Logger.audio.error("Capture failed: \(error, privacy: .public)")
                     let desc = "\(error)"
                     if desc.contains("permission") || desc.contains("denied")
                         || desc.contains("notAuthorized") {
@@ -55,6 +60,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 }
             }
         } catch {
+            Logger.audio.error("Failed to open output files: \(error, privacy: .public)")
             reply(false, "Failed to open output files: \(error.localizedDescription)")
         }
     }
@@ -67,9 +73,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
 
+        Logger.audio.info("Stopping capture")
+
         Task {
             do {
                 try await stream.stopCapture()
+                Logger.audio.debug("SCStream stopped")
             } catch {
                 // Stream may already be stopped — proceed with finalization
             }
@@ -118,6 +127,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         config.captureMicrophone = true
         if let microphoneDeviceId {
             config.microphoneCaptureDeviceID = microphoneDeviceId
+            Logger.audio.debug("Mic capture device override: \(microphoneDeviceId, privacy: .public)")
         }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1

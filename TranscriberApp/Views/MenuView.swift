@@ -2,6 +2,7 @@ import SwiftUI
 import SettingsAccess
 import TranscriberCore
 import UserNotifications
+import os
 
 struct MenuView: View {
     @Bindable var appState: AppState
@@ -11,6 +12,16 @@ struct MenuView: View {
     let calendarService: CalendarService
 
     var body: some View {
+        if let errorText = appState.truncatedErrorMessage {
+            Button("⚠ Error: \(errorText)") {}
+                .disabled(true)
+            Button("Dismiss Error") {
+                Logger.state.debug("User dismissed error")
+                appState.errorMessage = nil
+            }
+            Divider()
+        }
+
         Button(appState.recordingToggleLabel) {
             Task { await toggleRecording() }
         }
@@ -64,6 +75,9 @@ struct MenuView: View {
     }
 
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+        Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
+        appState.errorMessage = nil
+
         // Persist the mic choice for next time
         configManager.update { $0.lastMicrophoneDeviceId = microphoneDeviceId }
 
@@ -91,10 +105,12 @@ struct MenuView: View {
             appState.phase = .recording(since: Date())
         } catch {
             appState.errorMessage = error.localizedDescription
+            sendNotification(title: "Recording Failed", body: error.localizedDescription)
         }
     }
 
     private func stopRecording() async {
+        Logger.state.info("Recording stopped")
         do {
             let paths = try await captureClient.stop()
             appState.phase = .transcribing(progress: "Transcribing...")
@@ -111,25 +127,33 @@ struct MenuView: View {
             appState.lastTranscriptPath = result.outputPath.path
             appState.lastJsonPath = result.jsonPath?.path
             appState.phase = .idle
-            sendNotification(path: result.outputPath)
+            sendNotification(title: "Transcription Complete", body: result.outputPath.lastPathComponent)
 
             if let jsonPath = result.jsonPath {
                 RenameWindowController.shared.show(jsonPath: jsonPath)
             }
         } catch {
             appState.errorMessage = error.localizedDescription
+            sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle
         }
     }
 
-    private func sendNotification(path: URL) {
+    private func sendNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
+        Logger.state.debug("Sending notification: \(title, privacy: .public)")
         let content = UNMutableNotificationContent()
-        content.title = "Transcription Complete"
-        content.body = path.lastPathComponent
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.state.error("Notification failed: \(error, privacy: .public)")
+            }
+        }
     }
 }

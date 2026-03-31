@@ -1,15 +1,20 @@
 import Foundation
+import os
 
 public final class WavFileWriter {
     private let fileHandle: FileHandle
+    private let path: String
     private var dataByteCount: UInt32 = 0
     private var sampleRate: UInt32 = 0
     private var channelCount: UInt16 = 1
+    private var firstWriteLogged = false
 
     public init(path: String) throws {
+        self.path = path
         FileManager.default.createFile(atPath: path, contents: nil)
         fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
+        Logger.files.debug("WAV writer created: \(path, privacy: .private)")
     }
 
     public func setSampleRate(_ rate: UInt32) {
@@ -29,6 +34,7 @@ public final class WavFileWriter {
         let bytes = pcm.withUnsafeBytes { Data($0) }
         fileHandle.write(bytes)
         dataByteCount += UInt32(bytes.count)
+        logFirstWrite()
     }
 
     /// Write Int16 PCM samples directly (no conversion needed).
@@ -36,6 +42,14 @@ public final class WavFileWriter {
         let bytes = samples.withMemoryRebound(to: UInt8.self) { Data($0) }
         fileHandle.write(bytes)
         dataByteCount += UInt32(bytes.count)
+        logFirstWrite()
+    }
+
+    private func logFirstWrite() {
+        guard !firstWriteLogged else { return }
+        firstWriteLogged = true
+        let rate = sampleRate > 0 ? sampleRate : 16000
+        Logger.files.info("WAV first write — sampleRate: \(rate), channels: \(self.channelCount), path: \(self.path, privacy: .private)")
     }
 
     public func finalize() {
@@ -44,6 +58,7 @@ public final class WavFileWriter {
         writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
         fileHandle.seekToEndOfFile()
         fileHandle.closeFile()
+        Logger.files.info("WAV finalized: \(self.path, privacy: .private), size: \(self.dataByteCount) bytes")
     }
 
     private func writeHeader(sampleRate: UInt32, channels: UInt16, dataSize: UInt32) {

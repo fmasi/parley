@@ -47,6 +47,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
+- `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
 
 ### Python CLI (unchanged)
 - `transcribe.py` -- CLI tool, mlx-whisper + pyannote diarization, supports dual-stream input (`-i system.wav -i mic.wav`)
@@ -75,7 +76,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
-swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
+swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 # 102 tests across 9 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
@@ -118,6 +119,35 @@ python -m pytest tests/ -q
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
 22. **TranscriptionRunner environment:** `process.environment = [...]` replaces ALL env vars. Must include `HOME`, `TMPDIR`, embedded python `bin/` in PATH (for ffmpeg), and `/opt/homebrew/bin`. Must pass `hfToken` from config via `--hf-token` arg. The `-o` flag expects a file path, not a directory.
 23. **embed_python.sh rsync excludes:** Use path-anchored excludes (`--exclude='/bin/pip*'`) not bare globs (`--exclude='pip*'`) — bare `pip*` also matches `pipelines/` inside packages like torchaudio.
+
+## Debugging with Unified Logging
+All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
+
+```bash
+# All logs (debug + info + error) — use during development
+log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug
+
+# Only errors
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND messageType == error'
+
+# Only audio capture (format detection, frame delivery)
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "audio"' --level debug
+
+# Only Python transcription output
+log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "transcription"'
+
+# Historical (last 5 minutes)
+log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 5m
+
+# Save to file (shows in terminal AND writes to file — share for debugging sessions)
+log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug --style compact | tee ~/Desktop/transcriber.log
+
+# Dump recent history to file (useful after a crash — no live stream needed)
+log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 30m --style compact > ~/Desktop/transcriber.log
+
+# Via dev.py (launches app + tails log)
+python scripts/dev.py --debug
+```
 
 ## Packaging
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)

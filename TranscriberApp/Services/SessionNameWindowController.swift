@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TranscriberCore
+import os
 
 @MainActor
 final class SessionNameWindowController {
@@ -20,6 +21,7 @@ final class SessionNameWindowController {
         )
 
         let closePanel = { [weak self] in
+            Logger.state.debug("Panel closed: SessionName")
             self?.panel?.close()
             self?.panel = nil
         }
@@ -56,5 +58,6 @@ final class SessionNameWindowController {
         NSApp.activate(ignoringOtherApps: true)
 
         self.panel = newPanel
+        Logger.state.debug("Panel shown: SessionName")
     }
 }

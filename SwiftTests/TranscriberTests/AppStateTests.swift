@@ -56,13 +56,26 @@ struct AppStateTests {
     @Test func menuBarIconForRecording() {
         let state = AppState()
         state.phase = .recording(since: Date())
-        #expect(state.menuBarIcon == "record.circle")
+        #expect(state.menuBarIcon == "microphone.and.signal.meter.fill")
     }
 
     @Test func menuBarIconForTranscribing() {
         let state = AppState()
         state.phase = .transcribing(progress: "")
         #expect(state.menuBarIcon == "hourglass")
+    }
+
+    @Test func menuBarIconForError() {
+        let state = AppState()
+        state.errorMessage = "Something failed"
+        #expect(state.menuBarIcon == "exclamationmark.triangle")
+    }
+
+    @Test func menuBarIconForErrorOverridesPhase() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.errorMessage = "Something failed"
+        #expect(state.menuBarIcon == "exclamationmark.triangle")
     }
 
     // MARK: - Recording toggle label
@@ -126,5 +139,32 @@ struct AppStateTests {
         state.lastJsonPath = "/tmp/transcript.json"
         #expect(state.lastTranscriptPath == "/tmp/transcript.txt")
         #expect(state.lastJsonPath == "/tmp/transcript.json")
+    }
+
+    // MARK: - Truncated error message
+
+    @Test func truncatedErrorMessageIsNilWhenNoError() {
+        let state = AppState()
+        #expect(state.truncatedErrorMessage == nil)
+    }
+
+    @Test func truncatedErrorMessageReturnsShortMessagesUnchanged() {
+        let state = AppState()
+        state.errorMessage = "Connection refused"
+        #expect(state.truncatedErrorMessage == "Connection refused")
+    }
+
+    @Test func truncatedErrorMessageTruncatesAt80Chars() {
+        let state = AppState()
+        state.errorMessage = String(repeating: "a", count: 100)
+        let truncated = state.truncatedErrorMessage!
+        #expect(truncated.count == 83) // 80 + "..."
+        #expect(truncated.hasSuffix("..."))
+    }
+
+    @Test func truncatedErrorMessageExactly80CharsNotTruncated() {
+        let state = AppState()
+        state.errorMessage = String(repeating: "b", count: 80)
+        #expect(state.truncatedErrorMessage == String(repeating: "b", count: 80))
     }
 }

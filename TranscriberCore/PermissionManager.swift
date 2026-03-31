@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 public enum PermissionStatus: Sendable {
     case authorized
@@ -47,21 +48,26 @@ public final class PermissionManager {
         screenRecording = await checker.checkScreenRecording()
         calendar = checker.checkCalendar()
         notifications = await checker.checkNotifications()
+        Logger.permissions.info("Permissions — mic: \(String(describing: self.microphone), privacy: .public), screen: \(String(describing: self.screenRecording), privacy: .public), calendar: \(String(describing: self.calendar), privacy: .public), notifications: \(String(describing: self.notifications), privacy: .public)")
     }
 
     public func requestMicrophone() async {
         microphone = await checker.requestMicrophone()
+        Logger.permissions.debug("Microphone permission: \(String(describing: self.microphone), privacy: .public)")
     }
 
     public func requestScreenRecording() async {
         screenRecording = await checker.requestScreenRecording()
+        Logger.permissions.debug("Screen recording permission: \(String(describing: self.screenRecording), privacy: .public)")
     }
 
     public func requestCalendar() async {
         calendar = await checker.requestCalendar()
+        Logger.permissions.debug("Calendar permission: \(String(describing: self.calendar), privacy: .public)")
     }
 
     public func requestNotifications() async {
         notifications = await checker.requestNotifications()
+        Logger.permissions.debug("Notifications permission: \(String(describing: self.notifications), privacy: .public)")
     }
 }

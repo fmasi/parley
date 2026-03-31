@@ -80,10 +80,8 @@ struct ConfigManagerTests {
         let manager = ConfigManager(configDir: dir)
         manager.update { config in
             config.hfToken = "hf_new_token"
-            config.logLevel = "debug"
         }
         #expect(manager.config.hfToken == "hf_new_token")
-        #expect(manager.config.logLevel == "debug")
 
         // Verify persisted
         let reloaded = ConfigManager(configDir: dir)

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 @Observable
 public final class AppState {
@@ -9,10 +10,30 @@ public final class AppState {
         case transcribing(progress: String)
     }
 
-    public var phase: Phase = .idle
+    public var phase: Phase = .idle {
+        didSet {
+            if oldValue != self.phase {
+                Logger.state.info("State: \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.phase), privacy: .public)")
+            }
+        }
+    }
     public var lastTranscriptPath: String?
     public var lastJsonPath: String?
-    public var errorMessage: String?
+    public var errorMessage: String? {
+        didSet {
+            if let msg = self.errorMessage {
+                Logger.state.info("Error set: \(msg, privacy: .private)")
+            } else if oldValue != nil {
+                Logger.state.info("Error cleared")
+            }
+        }
+    }
+
+    public var truncatedErrorMessage: String? {
+        guard let msg = errorMessage else { return nil }
+        if msg.count <= 80 { return msg }
+        return String(msg.prefix(80)) + "..."
+    }
 
     public init() {}
 
@@ -32,9 +53,10 @@ public final class AppState {
     }
 
     public var menuBarIcon: String {
+        if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
         case .idle: return "mic"
-        case .recording: return "record.circle"
+        case .recording: return "microphone.and.signal.meter.fill"
         case .transcribing: return "hourglass"
         }
     }
