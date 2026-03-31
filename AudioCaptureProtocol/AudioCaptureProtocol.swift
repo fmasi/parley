@@ -26,6 +26,14 @@ import Foundation
     func status(
         reply: @escaping (Bool, String?) -> Void
     )
+
+    /// Update the microphone device on a live capture session.
+    /// Pass nil to switch back to the system default input device.
+    /// Reply: (success: Bool, errorMessage: String?)
+    func updateMicrophone(
+        deviceId: String?,
+        reply: @escaping (Bool, String?) -> Void
+    )
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

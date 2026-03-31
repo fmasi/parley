@@ -25,7 +25,7 @@ mkdir -p "$RESOURCES_DIR"
 # 1. Copy relocatable Python framework
 echo "  Copying Python framework..."
 mkdir -p "$RESOURCES_DIR/python"
-rsync -a --delete \
+rsync -a --delete --delete-excluded \
     "$CONDA_ENV/" \
     "$RESOURCES_DIR/python/" \
     --exclude='*.pyc' \
@@ -33,7 +33,16 @@ rsync -a --delete \
     --exclude='/bin/pip*' \
     --exclude='/lib/python*/site-packages/pip' \
     --exclude='/lib/python*/site-packages/pip-*' \
-    --exclude='/lib/python*/site-packages/setuptools*'
+    --exclude='/lib/python*/site-packages/setuptools*' \
+    --exclude='/lib/python*/site-packages/torch/include/' \
+    --exclude='tests/' \
+    --exclude='test/' \
+    --exclude='/include/' \
+    --exclude='/share/terminfo/' \
+    --exclude='/share/doc/' \
+    --exclude='/share/info/' \
+    --exclude='/share/man/' \
+    --exclude='/lib/cmake/'
 
 # 2. Copy Python application scripts
 echo "  Copying Python scripts..."
@@ -46,4 +55,5 @@ cp "$PROJECT_ROOT/service/logger.py" "$RESOURCES_DIR/Python/service/"
 [ -f "$PROJECT_ROOT/service/__init__.py" ] && \
     cp "$PROJECT_ROOT/service/__init__.py" "$RESOURCES_DIR/Python/service/"
 
-echo "==> Done. Python embedded successfully."
+BUNDLE_SIZE=$(du -sh "$RESOURCES_DIR/python" 2>/dev/null | cut -f1)
+echo "==> Done. Embedded Python size: $BUNDLE_SIZE"

@@ -20,6 +20,17 @@
 - [ ] Error notification appears in Notification Center
 - [ ] Success notification still appears after normal transcription
 
+## Mid-Recording Mic Switch
+- [ ] Start recording on built-in mic → click "Change Microphone..." → select USB headset → click "Switch" → verify recording continues
+- [ ] After switching, verify the transcription includes audio from both the original and new mic
+- [ ] Open the mic WAV file in an audio editor — verify it's 48kHz mono throughout (no format glitch at switch point)
+- [ ] Start on USB webcam mic (48kHz stereo) → switch to built-in mic (48kHz mono) → verify no corruption
+- [ ] Switch to a device, then unplug it — verify recording continues on system audio and you can switch again
+- [ ] Verify "Change Microphone..." only appears in menu during active recording
+- [ ] Verify level meter in switch dialog shows live levels for the selected (not-yet-switched) device
+- [ ] Verify Cancel dismisses the dialog without switching
+- [ ] Verify selecting the same mic that's already active disables the Switch button
+
 ## Unified Logging
 - [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
 - [ ] Start recording — see "Recording started" and "Starting capture" in log stream

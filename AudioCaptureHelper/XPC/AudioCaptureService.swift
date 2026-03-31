@@ -98,6 +98,41 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(isCapturing, nil)
     }
 
+    func updateMicrophone(
+        deviceId: String?,
+        reply: @escaping (Bool, String?) -> Void
+    ) {
+        guard isCapturing, let stream else {
+            reply(false, "No capture in progress")
+            return
+        }
+
+        Logger.audio.info("Switching mic to: \(deviceId ?? "system default", privacy: .public)")
+
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.captureMicrophone = true
+        if let deviceId {
+            config.microphoneCaptureDeviceID = deviceId
+        }
+        config.excludesCurrentProcessAudio = true
+        config.channelCount = 1
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+
+        Task {
+            do {
+                try await stream.updateConfiguration(config)
+                Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .public)")
+                reply(true, nil)
+            } catch {
+                Logger.audio.error("Mic switch failed: \(error, privacy: .public)")
+                reply(false, "Mic switch failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func cleanupAfterFailure() {
         handler?.finalizeAll()
         if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
