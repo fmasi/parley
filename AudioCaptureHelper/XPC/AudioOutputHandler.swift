@@ -1,4 +1,5 @@
 import AudioToolbox
+import AVFoundation
 import Foundation
 import os
 import ScreenCaptureKit
@@ -8,11 +9,15 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let systemWriter: WavFileWriter
     private let micWriter: WavFileWriter
     private var detectedSystemRate = false
-    private var detectedMicRate = false
+    private let micConverter = AudioConverter()
 
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
         self.systemWriter = systemWriter
         self.micWriter = micWriter
+
+        // Mic writer always gets normalized 48kHz mono Int16
+        micWriter.setSampleRate(UInt32(AudioConverter.outputSampleRate))
+        micWriter.setChannelCount(UInt16(AudioConverter.outputChannelCount))
     }
 
     func finalizeAll() {
@@ -25,29 +30,27 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        let writer: WavFileWriter
         if type == .audio {
-            if !detectedSystemRate {
-                detectedSystemRate = true
-                if let info = formatInfo(from: sampleBuffer) {
-                    systemWriter.setSampleRate(UInt32(info.rate))
-                    systemWriter.setChannelCount(UInt16(info.channels))
-                    Logger.audio.info("System audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
-                }
-            }
-            writer = systemWriter
+            handleSystemAudio(sampleBuffer)
         } else if type == .microphone {
-            if !detectedMicRate {
-                detectedMicRate = true
-                if let info = formatInfo(from: sampleBuffer) {
-                    micWriter.setSampleRate(UInt32(info.rate))
-                    micWriter.setChannelCount(UInt16(info.channels))
-                    Logger.audio.info("Mic audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
-                }
+            handleMicAudio(sampleBuffer)
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        Logger.audio.error("Stream stopped with error: \(error, privacy: .public)")
+    }
+
+    // MARK: - System audio (unchanged — ScreenCaptureKit normalizes via config)
+
+    private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        if !detectedSystemRate {
+            detectedSystemRate = true
+            if let info = formatInfo(from: sampleBuffer) {
+                systemWriter.setSampleRate(UInt32(info.rate))
+                systemWriter.setChannelCount(UInt16(info.channels))
+                Logger.audio.info("System audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
             }
-            writer = micWriter
-        } else {
-            return
         }
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
@@ -64,20 +67,63 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         if isFloat {
             let count = totalLength / MemoryLayout<Float32>.size
             ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
-                writer.append(UnsafeBufferPointer(start: floatPtr, count: count))
+                systemWriter.append(UnsafeBufferPointer(start: floatPtr, count: count))
             }
         } else {
             let count = totalLength / MemoryLayout<Int16>.size
             ptr.withMemoryRebound(to: Int16.self, capacity: count) { int16Ptr in
-                writer.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
+                systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
         }
-        Logger.audio.debug("\(type == .audio ? "System" : "Mic", privacy: .public) frame: \(totalLength) bytes")
+        Logger.audio.debug("System frame: \(totalLength) bytes")
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        Logger.audio.error("Stream stopped with error: \(error, privacy: .public)")
+    // MARK: - Mic audio (normalized via AudioConverter)
+
+    private func handleMicAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
+        else { return }
+
+        let inputFormat = AVAudioFormat(streamDescription: asbd)!
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0 else { return }
+
+        // Extract AVAudioPCMBuffer from CMSampleBuffer
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            Logger.audio.error("Failed to create PCM buffer for mic audio")
+            return
+        }
+        pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
+
+        // Copy sample data from CMSampleBuffer into AVAudioPCMBuffer
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        var lengthAtOffset = 0, totalLength = 0
+        var rawPtr: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength,
+            dataPointerOut: &rawPtr
+        )
+        guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
+
+        // Copy raw bytes into the PCM buffer's audio buffer list
+        if let channelData = pcmBuffer.floatChannelData {
+            memcpy(channelData[0], ptr, totalLength)
+        } else if let channelData = pcmBuffer.int16ChannelData {
+            memcpy(channelData[0], ptr, totalLength)
+        }
+
+        do {
+            let result = try micConverter.convert(pcmBuffer)
+            result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+            Logger.audio.debug("Mic frame: \(frameCount) in → \(result.samples.count) out (48kHz mono)")
+        } catch {
+            Logger.audio.error("Mic audio conversion failed: \(error, privacy: .public)")
+        }
     }
+
+    // MARK: - Format helpers (system audio only)
 
     private struct FormatInfo {
         let rate: Double
