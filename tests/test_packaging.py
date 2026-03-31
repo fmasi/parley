@@ -91,6 +91,63 @@ def test_embed_script_copies_python_scripts():
     assert "config_manager.py" in content
 
 
+def test_embed_script_excludes_torch_headers():
+    content = (PACKAGING_DIR / "embed_python.sh").read_text()
+    assert "torch/include" in content
+
+
+def test_embed_script_excludes_test_directories():
+    content = (PACKAGING_DIR / "embed_python.sh").read_text()
+    assert "--exclude='tests/'" in content
+    assert "--exclude='test/'" in content
+
+
+# --- Embedded bundle smoke test (skipped if bundle not built yet) ---
+
+BUNDLE_PYTHON = (
+    Path(__file__).parent.parent
+    / "dist/AudioTranscribe.app/Contents/Resources/python/bin/python3"
+)
+
+import pytest
+import subprocess
+
+@pytest.mark.skipif(not BUNDLE_PYTHON.exists(), reason="bundle not built — run package_app.sh first")
+def test_bundle_python_imports_ml_stack():
+    """Verify the embedded Python can import all runtime ML dependencies.
+
+    This test catches broken bundle exclusions — it runs against the actual
+    embedded interpreter, not the host conda env.
+    """
+    script = (
+        "import mlx_whisper, pyannote.audio, torch, torchaudio, "
+        "numpy, scipy, pandas, numba, matplotlib, PIL, sklearn, "
+        "huggingface_hub, safetensors; print('OK')"
+    )
+    result = subprocess.run(
+        [str(BUNDLE_PYTHON), "-c", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"Bundle import failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stdout.strip() == "OK"
+
+
+@pytest.mark.skipif(not BUNDLE_PYTHON.exists(), reason="bundle not built — run package_app.sh first")
+def test_bundle_excludes_torch_headers():
+    """torch/include should not be present in the embedded bundle."""
+    torch_include = BUNDLE_PYTHON.parent.parent / "lib/python3.11/site-packages/torch/include"
+    assert not torch_include.exists(), "torch/include was embedded — update embed_python.sh excludes"
+
+
+@pytest.mark.skipif(not BUNDLE_PYTHON.exists(), reason="bundle not built — run package_app.sh first")
+def test_bundle_excludes_pandas_tests():
+    """pandas/tests should not be present in the embedded bundle (saves ~38 MB)."""
+    pandas_tests = BUNDLE_PYTHON.parent.parent / "lib/python3.11/site-packages/pandas/tests"
+    assert not pandas_tests.exists(), "pandas/tests was embedded — update embed_python.sh excludes"
+
+
 def _load_plist(name):
     with open(PACKAGING_DIR / name, "rb") as f:
         return plistlib.load(f)
