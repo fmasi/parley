@@ -28,9 +28,13 @@ final class RenameWindowController {
             speakers: speakers,
             onSave: { mapping in
                 Self.applySpeakerRenames(mapping, jsonPath: jsonPath)
+                Self.generateFormatFile(jsonPath: jsonPath)
                 closePanel()
             },
-            onCancel: closePanel
+            onCancel: {
+                Self.generateFormatFile(jsonPath: jsonPath)
+                closePanel()
+            }
         )
 
         let hostingView = NSHostingView(rootView: dialog)
@@ -142,5 +146,28 @@ final class RenameWindowController {
         ) {
             try? updatedData.write(to: jsonPath)
         }
+    }
+
+    // MARK: - Generate Format File
+
+    static func generateFormatFile(jsonPath: URL) {
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+            let format = Self.readOutputFormat(from: jsonPath) ?? "json"
+            if format != "json" {
+                let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
+                Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .public)")
+            }
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+        }
+    }
+
+    private static func readOutputFormat(from jsonPath: URL) -> String? {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = json["metadata"] as? [String: Any]
+        else { return nil }
+        return metadata["output_format"] as? String
     }
 }
