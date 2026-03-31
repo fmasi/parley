@@ -22,7 +22,7 @@ public final class AppState {
     public var errorMessage: String? {
         didSet {
             if let msg = self.errorMessage {
-                Logger.state.info("Error set: \(msg, privacy: .public)")
+                Logger.state.info("Error set: \(msg, privacy: .private)")
             } else if oldValue != nil {
                 Logger.state.info("Error cleared")
             }
