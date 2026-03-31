@@ -138,6 +138,12 @@ log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == 
 # Historical (last 5 minutes)
 log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 5m
 
+# Save to file (shows in terminal AND writes to file — share for debugging sessions)
+log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug --style compact | tee ~/Desktop/transcriber.log
+
+# Dump recent history to file (useful after a crash — no live stream needed)
+log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 30m --style compact > ~/Desktop/transcriber.log
+
 # Via dev.py (launches app + tails log)
 python scripts/dev.py --debug
 ```
