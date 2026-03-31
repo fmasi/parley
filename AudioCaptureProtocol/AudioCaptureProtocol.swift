@@ -26,6 +26,13 @@ import Foundation
     func status(
         reply: @escaping (Bool, String?) -> Void
     )
+
+    /// Update the microphone device on a live capture session.
+    /// Reply: (success: Bool, errorMessage: String?)
+    func updateMicrophone(
+        deviceId: String,
+        reply: @escaping (Bool, String?) -> Void
+    )
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

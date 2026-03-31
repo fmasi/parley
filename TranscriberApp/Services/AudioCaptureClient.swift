@@ -70,6 +70,27 @@ final class AudioCaptureClient {
         }
     }
 
+    func updateMicrophone(deviceId: String) async throws {
+        let conn = try getConnection()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { error in
+                cont.resume(throwing: CaptureError.micSwitchFailed(
+                    "XPC connection failed: \(error.localizedDescription)"
+                ))
+            } as! AudioCaptureProtocol
+
+            proxy.updateMicrophone(deviceId: deviceId) { success, errorMessage in
+                if success {
+                    cont.resume()
+                } else {
+                    cont.resume(throwing: CaptureError.micSwitchFailed(
+                        errorMessage ?? "Unknown error"
+                    ))
+                }
+            }
+        }
+    }
+
     private func getConnection() throws -> NSXPCConnection {
         if connection == nil { connect() }
         guard let conn = connection else {
@@ -83,12 +104,14 @@ enum CaptureError: LocalizedError {
     case notConnected
     case startFailed(String)
     case stopFailed(String)
+    case micSwitchFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .notConnected: return "XPC connection not available — run as .app bundle"
         case .startFailed(let msg): return msg
         case .stopFailed(let msg): return msg
+        case .micSwitchFailed(let msg): return msg
         }
     }
 }
