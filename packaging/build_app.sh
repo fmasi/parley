@@ -57,9 +57,10 @@ RELOC_PYTHON_TOOL="/tmp/relocatable-python"
 if [ ! -f "$RELOC_PYTHON_TOOL/make_relocatable_python_framework.py" ]; then
     git clone --quiet https://github.com/gregneagle/relocatable-python.git "$RELOC_PYTHON_TOOL"
 fi
-# Merge both requirements files — tool's --pip-requirements only accepts one file
+# NOTE: this script is the legacy relocatable-python approach, superseded by
+# package_app.sh + packaging/embed_python.sh (conda-based). Kept for reference.
 COMBINED_REQS="$(mktemp)"
-cat "$PROJECT_ROOT/requirements-service.txt" "$PROJECT_ROOT/requirements-transcribe.txt" > "$COMBINED_REQS"
+cat "$PROJECT_ROOT/requirements-service.txt" "$PROJECT_ROOT/requirements-bundle.txt" > "$COMBINED_REQS"
 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
     "$RELOC_PYTHON_TOOL/make_relocatable_python_framework.py" \
     --destination "$PYTHON_DEST" \

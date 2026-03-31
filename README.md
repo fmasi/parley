@@ -33,20 +33,15 @@ xcode-select --install
 brew install ffmpeg
 ```
 
-### 2. Create conda environments
+### 2. Create conda environment
 
-Two environments — one for development and CLI use, one lean environment for embedding into the app bundle:
+One environment for everything — development, CLI use, and embedding into the app bundle:
 
 ```bash
-# Development (includes pytest and dev tools)
-conda create -n transcribe python=3.11 -y
-conda activate transcribe
-pip install -r requirements-transcribe.txt
-
-# Bundle (runtime only — keeps the embedded app small)
 conda create -n transcribe-bundle python=3.11 -y
 conda activate transcribe-bundle
 pip install -r requirements-bundle.txt
+pip install pytest  # dev only — not embedded in the app
 ```
 
 > Never install packages directly on the host machine — always use a conda env.
@@ -172,7 +167,7 @@ On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 3
 ### transcribe.py
 
 ```bash
-conda activate transcribe
+conda activate transcribe-bundle
 
 # Single file
 python transcribe.py -i meeting.mp3
@@ -205,7 +200,7 @@ python transcribe.py -i audio.mp3 --no-diarize
 Replace generic labels (SPEAKER_00, SPEAKER_01) with real names after transcription. Plays a ~10s audio sample per speaker and asks for their name. Press Enter to keep the generic label, `r` to replay.
 
 ```bash
-conda activate transcribe
+conda activate transcribe-bundle
 
 # Audio path is read from the JSON metadata automatically
 python rename_speakers.py -i meeting.json
@@ -274,7 +269,7 @@ Local Speaker 1: Thanks for having me.
 | Symptom | Fix |
 |---|---|
 | "damaged or incomplete" on launch | Bundle built with old launcher — run `bash package_app.sh` to rebuild |
-| `No module named mlx_whisper` | `conda activate transcribe` |
+| `No module named mlx_whisper` | `conda activate transcribe-bundle` |
 | `ffmpeg not found` | `brew install ffmpeg` |
 | Diarization token error | Set HuggingFace token in Settings (or `HF_TOKEN` env var); accept both model terms on HuggingFace |
 | No speakers detected | HuggingFace token missing — diarization requires it |
@@ -337,7 +332,7 @@ python scripts/dev.py
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/
 
 # Python (79 tests)
-conda activate transcribe
+conda activate transcribe-bundle
 python -m pytest tests/ -q
 ```
 
