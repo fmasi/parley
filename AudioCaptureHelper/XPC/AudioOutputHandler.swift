@@ -107,11 +107,18 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
-        // Copy raw bytes into the PCM buffer's audio buffer list
+        // Copy raw bytes into the PCM buffer's channel data (non-interleaved)
+        // or AudioBufferList (interleaved)
         if let channelData = pcmBuffer.floatChannelData {
             memcpy(channelData[0], ptr, totalLength)
         } else if let channelData = pcmBuffer.int16ChannelData {
             memcpy(channelData[0], ptr, totalLength)
+        } else {
+            // Interleaved format — copy via AudioBufferList
+            let abl = pcmBuffer.mutableAudioBufferList
+            let buffers = UnsafeMutableAudioBufferListPointer(abl)
+            guard buffers.count > 0, let dstPtr = buffers[0].mData else { return }
+            memcpy(dstPtr, ptr, min(Int(buffers[0].mDataByteSize), totalLength))
         }
 
         do {

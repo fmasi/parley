@@ -14,7 +14,7 @@ public final class AudioConverter {
         commonFormat: .pcmFormatInt16,
         sampleRate: outputSampleRate,
         channels: AVAudioChannelCount(outputChannelCount),
-        interleaved: true
+        interleaved: false
     )!
 
     private var converter: AVAudioConverter?

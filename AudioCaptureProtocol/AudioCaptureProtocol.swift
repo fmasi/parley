@@ -28,9 +28,10 @@ import Foundation
     )
 
     /// Update the microphone device on a live capture session.
+    /// Pass nil to switch back to the system default input device.
     /// Reply: (success: Bool, errorMessage: String?)
     func updateMicrophone(
-        deviceId: String,
+        deviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     )
 }

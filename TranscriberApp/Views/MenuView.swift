@@ -32,7 +32,7 @@ struct MenuView: View {
                 MicSwitchWindowController.shared.show(
                     currentDeviceId: configManager.config.lastMicrophoneDeviceId
                 ) { newDeviceId in
-                    try await captureClient.updateMicrophone(deviceId: newDeviceId ?? "")
+                    try await captureClient.updateMicrophone(deviceId: newDeviceId)
                     await MainActor.run {
                         configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
                     }

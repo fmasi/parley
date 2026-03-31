@@ -70,7 +70,7 @@ final class AudioCaptureClient {
         }
     }
 
-    func updateMicrophone(deviceId: String) async throws {
+    func updateMicrophone(deviceId: String?) async throws {
         let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
