@@ -44,4 +44,36 @@ public enum TranscriptWriter {
         }
         return result
     }
+
+    public enum WriterError: Error {
+        case invalidJSON
+    }
+
+    /// Generate a format file (.srt or .txt) from a JSON transcript.
+    /// Reads segments and output_format from the JSON metadata.
+    /// Writes the format file alongside the JSON (same directory, same base name).
+    /// No-op if output_format is "json" or missing.
+    public static func writeFormatFile(fromJSON jsonPath: URL) throws {
+        let data = try Data(contentsOf: jsonPath)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let segments = json["segments"] as? [[String: Any]],
+              let metadata = json["metadata"] as? [String: Any]
+        else { throw WriterError.invalidJSON }
+
+        let format = metadata["output_format"] as? String ?? "json"
+        guard format != "json" else { return }
+
+        let content: String
+        switch format {
+        case "srt":
+            content = formatSRT(segments: segments)
+        case "txt":
+            content = formatTXT(segments: segments)
+        default:
+            return
+        }
+
+        let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
+        try content.write(to: outputPath, atomically: true, encoding: .utf8)
+    }
 }

@@ -81,4 +81,96 @@ struct TranscriptWriterTests {
         ]
         #expect(TranscriptWriter.formatTXT(segments: segments) == "[00:00:00] No key\n")
     }
+
+    // MARK: - writeFormatFile
+
+    private func tempDir() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcript-test-\(UUID().uuidString)")
+    }
+
+    private func createJSON(in dir: URL, metadata: [String: Any], segments: [[String: Any]]) throws -> URL {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let json: [String: Any] = ["metadata": metadata, "segments": segments]
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        let path = dir.appendingPathComponent("test.json")
+        try data.write(to: path)
+        return path
+    }
+
+    @Test func writeFormatFileSRT() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let segments: [[String: Any]] = [
+            ["start": 1.0, "end": 2.0, "speaker": "Alice", "text": "Hello"],
+        ]
+        let jsonPath = try createJSON(in: dir, metadata: ["output_format": "srt"], segments: segments)
+
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+
+        let srtPath = dir.appendingPathComponent("test.srt")
+        let content = try String(contentsOf: srtPath, encoding: .utf8)
+        #expect(content.contains("Alice: Hello"))
+        #expect(content.contains("00:00:01,000 --> 00:00:02,000"))
+    }
+
+    @Test func writeFormatFileTXT() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let segments: [[String: Any]] = [
+            ["start": 1.0, "end": 2.0, "speaker": "Bob", "text": "Hi"],
+        ]
+        let jsonPath = try createJSON(in: dir, metadata: ["output_format": "txt"], segments: segments)
+
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+
+        let txtPath = dir.appendingPathComponent("test.txt")
+        let content = try String(contentsOf: txtPath, encoding: .utf8)
+        #expect(content == "[00:00:01] Bob: Hi\n")
+    }
+
+    @Test func writeFormatFileJSONIsNoop() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let jsonPath = try createJSON(in: dir, metadata: ["output_format": "json"], segments: [])
+
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+
+        // No extra file should be created
+        let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        #expect(contents.count == 1) // only the .json
+    }
+
+    @Test func writeFormatFileReflectsRenamedSpeakers() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let segments: [[String: Any]] = [
+            ["start": 0.0, "end": 1.0, "speaker": "Frederic", "text": "Hello"],
+            ["start": 1.0, "end": 2.0, "speaker": "Remote Speaker 1", "text": "Hi"],
+        ]
+        let jsonPath = try createJSON(in: dir, metadata: ["output_format": "srt"], segments: segments)
+
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+
+        let srtPath = dir.appendingPathComponent("test.srt")
+        let content = try String(contentsOf: srtPath, encoding: .utf8)
+        #expect(content.contains("Frederic: Hello"))
+        #expect(content.contains("Remote Speaker 1: Hi"))
+    }
+
+    @Test func writeFormatFileMissingFormatDefaultsToNoOp() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let jsonPath = try createJSON(in: dir, metadata: [:], segments: [])
+
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+
+        let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        #expect(contents.count == 1) // only the .json
+    }
 }
