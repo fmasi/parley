@@ -5,11 +5,11 @@ Build, install, and launch the app for manual testing.
 
 Default (no flags): kill -> build -> install -> launch + print checklist.
 Step flags (--kill, --build, --install, --launch, --reset-tcc) switch to explicit mode.
-Modifier flags (--console, --skip-embed) layer on top of default or explicit steps.
+Modifier flags (--debug, --skip-embed) layer on top of default or explicit steps.
 
 Examples:
     python scripts/dev.py                          # full cycle
-    python scripts/dev.py --console                # full cycle, stderr in terminal
+    python scripts/dev.py --debug                  # full cycle + tail unified log
     python scripts/dev.py --reset-tcc              # just reset TCC permissions
     python scripts/dev.py --reset-tcc --launch     # reset + launch
     python scripts/dev.py --build --install        # build + install only
@@ -19,7 +19,6 @@ Examples:
 
 import argparse
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -55,8 +54,8 @@ def parse_args() -> argparse.Namespace:
     steps.add_argument("--reset-tcc", action="store_true", help="Reset TCC permissions")
 
     mods = parser.add_argument_group("modifiers (layer on top of default or explicit)")
-    mods.add_argument("--console", action="store_true",
-                      help="Launch binary directly (stderr in terminal)")
+    mods.add_argument("--debug", action="store_true",
+                      help="Launch app normally, then tail unified log (Ctrl+C to stop)")
     mods.add_argument("--skip-embed", action="store_true",
                       help="Skip Python embedding (faster rebuild)")
 
@@ -72,10 +71,9 @@ def resolve_steps(args: argparse.Namespace) -> set[str]:
     else:
         steps = set(DEFAULT_STEPS)
 
-    # Modifier: --console replaces --launch
-    if args.console:
-        steps.discard("launch")
-        steps.add("console")
+    # Modifier: --debug adds log tailing after launch
+    if args.debug:
+        steps.add("debug")
 
     return steps
 
@@ -144,22 +142,19 @@ def do_launch() -> None:
     run(["open", str(APP_PATH)])
 
 
-def do_console() -> None:
-    step("Launching AudioTranscribe (console mode — stderr visible)")
-    if not BINARY_PATH.exists():
-        print(f"\033[1;31mError: {BINARY_PATH} not found. Run --build --install first.\033[0m",
-              file=sys.stderr)
-        sys.exit(1)
-
-    print(f"   Running: {BINARY_PATH}")
-    print(f"   Press Ctrl+C to quit\n")
+def do_debug() -> None:
+    step("Tailing unified log (Ctrl+C to stop)")
+    print(f"   Subsystem: {BUNDLE_ID}")
+    print(f"   Level: debug\n")
     try:
-        proc = subprocess.Popen([str(BINARY_PATH)])
-        proc.wait()
+        subprocess.run([
+            "log", "stream",
+            "--predicate", f'subsystem == "{BUNDLE_ID}"',
+            "--level", "debug",
+            "--style", "compact",
+        ])
     except KeyboardInterrupt:
-        print("\n   Stopping...")
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=5)
+        print("\n   Log stream stopped.")
 
 
 def print_checklist() -> None:
@@ -192,9 +187,8 @@ def main() -> None:
     if "launch" in steps:
         do_launch()
         print_checklist()
-    elif "console" in steps:
-        print_checklist()
-        do_console()  # blocking — checklist prints before
+    if "debug" in steps:
+        do_debug()  # blocking — runs after launch
 
 
 if __name__ == "__main__":
