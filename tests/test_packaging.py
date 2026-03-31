@@ -2,7 +2,10 @@
 import os
 import plistlib
 import stat
+import subprocess
 from pathlib import Path
+
+import pytest
 
 PACKAGING_DIR = Path(__file__).parent.parent / "packaging"
 
@@ -109,8 +112,17 @@ BUNDLE_PYTHON = (
     / "dist/AudioTranscribe.app/Contents/Resources/python/bin/python3"
 )
 
-import pytest
-import subprocess
+
+def _bundle_env():
+    """Build an environment mirroring what TranscriptionRunner sets for the embedded Python."""
+    python_root = BUNDLE_PYTHON.parent.parent
+    site_packages = python_root / "lib" / "python3.11" / "site-packages"
+    env = os.environ.copy()
+    env["PYTHONHOME"] = str(python_root)
+    env["PYTHONPATH"] = str(site_packages)
+    env["PATH"] = str(BUNDLE_PYTHON.parent) + os.pathsep + env.get("PATH", "")
+    return env
+
 
 @pytest.mark.skipif(not BUNDLE_PYTHON.exists(), reason="bundle not built — run package_app.sh first")
 def test_bundle_python_imports_ml_stack():
@@ -127,6 +139,7 @@ def test_bundle_python_imports_ml_stack():
     result = subprocess.run(
         [str(BUNDLE_PYTHON), "-c", script],
         capture_output=True, text=True, timeout=60,
+        env=_bundle_env(),
     )
     assert result.returncode == 0, (
         f"Bundle import failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"

@@ -25,7 +25,7 @@ mkdir -p "$RESOURCES_DIR"
 # 1. Copy relocatable Python framework
 echo "  Copying Python framework..."
 mkdir -p "$RESOURCES_DIR/python"
-rsync -a --delete \
+rsync -a --delete --delete-excluded \
     "$CONDA_ENV/" \
     "$RESOURCES_DIR/python/" \
     --exclude='*.pyc' \
