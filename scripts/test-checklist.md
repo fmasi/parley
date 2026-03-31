@@ -6,7 +6,7 @@
 
 ## Transcription + Rename Speakers
 3. Stop a recording — status shows "Transcribing..." and stays for ~30s+
-4. Transcription completes — `.json` + `.srt` file appear in recording folder
+4. Transcription completes — `.json` file appears in recording folder (format file generated after rename dialog)
 5. Rename speakers dialog auto-opens and **stays visible when clicked**
 6. Each speaker shows **sample text** below their name
 7. Each speaker has a **play button** — plays their first segment from the source WAV
@@ -30,6 +30,13 @@
 - [ ] Verify level meter in switch dialog shows live levels for the selected (not-yet-switched) device
 - [ ] Verify Cancel dismisses the dialog without switching
 - [ ] Verify selecting the same mic that's already active disables the Switch button
+
+## Format File Generation
+- [ ] Record with output_format=srt → rename speakers → save → .srt has renamed speakers
+- [ ] Record with output_format=srt → rename dialog → cancel → .srt has original speakers
+- [ ] Record with output_format=txt → rename speakers → save → .txt has renamed speakers
+- [ ] Record with output_format=json → rename dialog → save → no extra file created
+- [ ] Manual "Rename Speakers..." → save → format file updated with new names
 
 ## Unified Logging
 - [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
