@@ -6,6 +6,8 @@ public struct ModelInfo: Identifiable, Sendable {
     public let id: String
     public let displayName: String
     public let huggingFaceRepo: String
+    /// The variant string WhisperKit uses to match model folders in the HF repo.
+    public let whisperKitVariant: String
     public let approximateSizeMB: Int
 }
 
@@ -22,12 +24,14 @@ public final class ModelManager {
             id: "large-v3-turbo",
             displayName: "Fast (recommended)",
             huggingFaceRepo: "argmaxinc/whisperkit-coreml",
+            whisperKitVariant: "large-v3_turbo",
             approximateSizeMB: 1600
         ),
         ModelInfo(
             id: "large-v3",
             displayName: "High Quality",
             huggingFaceRepo: "argmaxinc/whisperkit-coreml",
+            whisperKitVariant: "large-v3",
             approximateSizeMB: 3000
         ),
     ]
@@ -63,7 +67,7 @@ public final class ModelManager {
             // WhisperKit.download returns the path to the downloaded model folder.
             // We pass storagePath as downloadBase so WhisperKit places files under our directory.
             let downloadedURL = try await WhisperKit.download(
-                variant: modelId,
+                variant: info.whisperKitVariant,
                 downloadBase: storagePath,
                 from: info.huggingFaceRepo,
                 progressCallback: { progress in
