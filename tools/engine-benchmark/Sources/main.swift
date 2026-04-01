@@ -300,6 +300,8 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
 
     // Extract transcribe.py from main branch
     let scriptPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("benchmark-transcribe.py")
+    // transcribe.py always writes master JSON to <input>.with_suffix(".json")
+    // so we use a copy of the audio in /tmp to control the output location
     let outputPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bench-mlx-output.json")
 
     do {
@@ -355,27 +357,37 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
         try proc.run()
         proc.waitUntilExit()
 
-        // Print any output for debugging
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if !stdout.isEmpty { print("  stdout: \(stdout.prefix(300))") }
-        if !stderr.isEmpty { print("  stderr: \(stderr.prefix(300))") }
-
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
+        let stdoutStr = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderrStr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if !stdoutStr.isEmpty { print("  stdout: \(stdoutStr.prefix(500))") }
+        if !stderrStr.isEmpty { print("  stderr: \(stderrStr.prefix(500))") }
+
         guard proc.terminationStatus == 0 else {
-            let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             return BenchmarkResult(
                 engine: "mlx-whisper (Python, large-v3, MLX GPU)",
                 wallClockSeconds: seconds, segmentCount: 0, sampleSegments: [],
                 audioDurationSeconds: audioDuration,
-                error: "Exit code \(proc.terminationStatus): \(stderr.prefix(200))"
+                error: "Exit code \(proc.terminationStatus): \(stderrStr.prefix(300))"
             )
         }
 
+        // transcribe.py writes master JSON alongside input file too
+        // Check both the -o path and the input-derived path
+        var jsonPath = outputPath
+        if !FileManager.default.fileExists(atPath: jsonPath.path) {
+            // Fall back to input file with .json extension
+            let inputDerived = audioPath.deletingPathExtension().appendingPathExtension("json")
+            if FileManager.default.fileExists(atPath: inputDerived.path) {
+                jsonPath = inputDerived
+                print("  Output found at: \(jsonPath.path)")
+            }
+        }
+
         // Parse output JSON
-        let data = try Data(contentsOf: outputPath)
+        let data = try Data(contentsOf: jsonPath)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let segments = json?["segments"] as? [[String: Any]] ?? []
         let sampleSegs = segments.prefix(3).map { seg in
