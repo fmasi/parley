@@ -3,172 +3,185 @@ import os
 import TranscriberCore
 
 struct TranscriptionResult {
-    let outputPath: URL
-    let jsonPath: URL?
+    let jsonPath: URL
 }
 
 final class TranscriptionRunner {
     enum RunnerError: LocalizedError {
-        case pythonNotFound
-        case scriptNotFound
+        case modelNotDownloaded(String)
         case failed(String)
 
         var errorDescription: String? {
             switch self {
-            case .pythonNotFound: return "Embedded Python not found in app bundle"
-            case .scriptNotFound: return "transcribe.py not found in app bundle"
-            case .failed(let msg): return msg
+            case .modelNotDownloaded(let model):
+                return "Whisper model '\(model)' is not downloaded. Open Settings to download it."
+            case .failed(let msg):
+                return msg
             }
         }
     }
+
+    private var transcriber: WhisperKitTranscriber?
+    private var lastModelKey: String?
+    private var diarizer: (any DiarizationProvider)?
+
+    /// Minimum WAV file size to consider non-empty (44 bytes = WAV header only).
+    private let wavHeaderSize = 44
 
     func run(
         systemAudio: URL,
         micAudio: URL?,
-        outputFormat: String,
-        outputDirectory: URL
+        outputDirectory: URL,
+        config: Config
     ) async throws -> TranscriptionResult {
-        let resources = Bundle.main.resourceURL!
-        let pythonHome = resources.appendingPathComponent("python")
-        let pythonBin = pythonHome.appendingPathComponent("bin/python3")
-        let sitePackages = pythonHome
-            .appendingPathComponent("lib/python3.11/site-packages")
-        let transcribeScript = resources
-            .appendingPathComponent("Python/transcribe.py")
-
-        guard FileManager.default.fileExists(atPath: pythonBin.path) else {
-            throw RunnerError.pythonNotFound
-        }
-        guard FileManager.default.fileExists(atPath: transcribeScript.path) else {
-            throw RunnerError.scriptNotFound
-        }
-
-        let baseName = systemAudio.deletingPathExtension().lastPathComponent
-        let outputFile = outputDirectory
-            .appendingPathComponent(baseName + "." + outputFormat)
-
-        var arguments = [
-            transcribeScript.path,
-            "-i", systemAudio.path,
-        ]
-        if let mic = micAudio {
-            arguments += ["-i", mic.path]
-        }
-        arguments += ["-f", outputFormat]
-        arguments += ["-o", outputFile.path]
-
-        let inputCount = micAudio != nil ? 2 : 1
-        Logger.transcription.info("Launching transcription — format: \(outputFormat, privacy: .public), inputs: \(inputCount)")
-        Logger.transcription.debug("Python args: \(arguments, privacy: .private)")
-
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = arguments
-        process.environment = [
-            "PYTHONHOME": pythonHome.path,
-            "PYTHONPATH": sitePackages.path,
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-            "TMPDIR": NSTemporaryDirectory(),
-            "PATH": [
-                pythonHome.appendingPathComponent("bin").path,
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-            ].joined(separator: ":"),
-        ]
-
-        Logger.transcription.debug("Python env — PYTHONHOME: \(pythonHome.path, privacy: .private), PATH: \(process.environment?["PATH"] ?? "", privacy: .private)")
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        // Accumulate stderr for error reporting on failure
-        let stderrAccumulator = StderrAccumulator()
-
-        // Real-time forwarding of Python output to unified log
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty,
-                  let text = String(data: data, encoding: .utf8) else { return }
-            for line in text.split(separator: "\n") {
-                Logger.transcription.info("[python] \(line, privacy: .public)")
-            }
-        }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { [stderrAccumulator] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            stderrAccumulator.append(data)
-            if let text = String(data: data, encoding: .utf8) {
-                for line in text.split(separator: "\n") {
-                    Logger.transcription.error("[python-err] \(line, privacy: .public)")
-                }
-            }
-        }
-
         let startTime = ContinuousClock.now
 
-        return try await withCheckedThrowingContinuation { cont in
-            process.terminationHandler = { [stderrAccumulator] proc in
-                // Clean up handlers to avoid retain cycles
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
+        // 1. Resolve model path and verify the model exists on disk
+        let storagePath = ModelManager.resolveStoragePath(config.modelStoragePath)
+        let modelDir = storagePath.appendingPathComponent(config.whisperModel)
 
-                let elapsed = ContinuousClock.now - startTime
-                let seconds = elapsed.components.seconds
+        guard FileManager.default.fileExists(atPath: modelDir.path) else {
+            Logger.transcription.error("Model not found at \(modelDir.path, privacy: .private)")
+            throw RunnerError.modelNotDownloaded(config.whisperModel)
+        }
 
-                if proc.terminationStatus != 0 {
-                    let stderr = stderrAccumulator.string
-                    // Read any remaining stdout
-                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                    let output = stderr.isEmpty ? stdout : stderr
-                    Logger.transcription.error("Transcription failed — exit code: \(proc.terminationStatus), duration: \(seconds)s")
-                    cont.resume(throwing: RunnerError.failed(
-                        "transcribe.py exited with code \(proc.terminationStatus): \(output)"
-                    ))
-                    return
-                }
+        // 2. Lazy-init transcriber, reuse if same model for caching benefit
+        let modelKey = "\(storagePath.path)/\(config.whisperModel)"
+        if transcriber == nil || lastModelKey != modelKey {
+            Logger.transcription.info("Creating WhisperKitTranscriber — model: \(config.whisperModel, privacy: .public)")
+            transcriber = WhisperKitTranscriber(
+                modelPath: storagePath,
+                model: config.whisperModel,
+                unloadTimeoutMinutes: config.modelUnloadTimeout
+            )
+            lastModelKey = modelKey
+        }
 
-                Logger.transcription.info("Transcription complete — exit code: 0, duration: \(seconds)s")
+        guard let transcriber = transcriber else {
+            throw RunnerError.failed("Failed to initialize transcriber")
+        }
 
-                let jsonFile = outputDirectory
-                    .appendingPathComponent(baseName + ".json")
-                cont.resume(returning: TranscriptionResult(
-                    outputPath: outputFile,
-                    jsonPath: jsonFile
-                ))
-            }
+        let isDualStream = micAudio != nil
+        var allSegments: [LabeledSegment] = []
 
-            do {
-                try process.run()
-            } catch {
-                Logger.transcription.error("Failed to launch Python: \(error, privacy: .public)")
-                cont.resume(throwing: RunnerError.failed(
-                    "Failed to launch transcribe.py: \(error.localizedDescription)"
-                ))
+        // 3. Transcribe system audio (remote)
+        let systemSegments = try await transcribeStream(
+            audioPath: systemAudio,
+            source: "remote",
+            transcriber: transcriber,
+            label: "system"
+        )
+        allSegments.append(contentsOf: systemSegments)
+
+        // 4. Transcribe mic audio (local) if present
+        if let micPath = micAudio {
+            let micSegments = try await transcribeStream(
+                audioPath: micPath,
+                source: "local",
+                transcriber: transcriber,
+                label: "mic"
+            )
+            allSegments.append(contentsOf: micSegments)
+        }
+
+        // 5. If dual-stream, tag speakers with source prefix
+        if isDualStream && !allSegments.isEmpty {
+            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+            Logger.transcription.debug("Applied source prefix tags for dual-stream")
+        }
+
+        // 6. Sort all segments chronologically
+        allSegments.sort { $0.start < $1.start }
+        Logger.transcription.info("Total segments after merge: \(allSegments.count)")
+
+        // 7. Build audio paths list for metadata
+        var audioPaths = [systemAudio]
+        if let mic = micAudio {
+            audioPaths.append(mic)
+        }
+
+        let detectedLanguage = allSegments.first.flatMap { _ in
+            // Language was detected during transcription; not stored on LabeledSegment.
+            // Use a sensible default.
+            nil as String?
+        } ?? "en"
+
+        let hasDiarization = diarizer != nil
+        let json = TranscriptAssembler.assemble(
+            segments: allSegments,
+            audioPaths: audioPaths,
+            outputFormat: config.outputFormat,
+            language: detectedLanguage,
+            numSpeakers: nil,
+            diarization: hasDiarization,
+            dualStream: isDualStream
+        )
+
+        // 8. Write JSON output
+        let baseName = systemAudio.deletingPathExtension().lastPathComponent
+        let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+
+        try TranscriptAssembler.write(json, to: jsonPath)
+
+        let elapsed = ContinuousClock.now - startTime
+        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
+
+        return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    func setDiarizer(_ provider: any DiarizationProvider) {
+        self.diarizer = provider
+        Logger.transcription.info("Diarization provider set: \(String(describing: type(of: provider)), privacy: .public)")
+    }
+
+    // MARK: - Private
+
+    private func transcribeStream(
+        audioPath: URL,
+        source: String,
+        transcriber: WhisperKitTranscriber,
+        label: String
+    ) async throws -> [LabeledSegment] {
+        // Skip empty files (WAV header only = 44 bytes)
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
+        if fileSize <= wavHeaderSize {
+            Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
+            return []
+        }
+
+        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
+
+        // Transcribe (deduplicate is called internally by WhisperKitTranscriber)
+        let segments = try await transcriber.transcribe(audioPath: audioPath)
+
+        // Diarize if provider is available
+        var labeled: [LabeledSegment]
+        if let diarizer = diarizer {
+            Logger.transcription.info("Running diarization on \(label, privacy: .public) audio")
+            let diarizedSegments = try await diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
+            labeled = SpeakerAssignment.assign(
+                transcriptSegments: segments,
+                diarizationSegments: diarizedSegments
+            )
+        } else {
+            // No diarization -- convert TranscriptSegments to LabeledSegments with "Speaker 1"
+            labeled = segments.map { seg in
+                LabeledSegment(
+                    start: seg.start,
+                    end: seg.end,
+                    speaker: "Speaker 1",
+                    text: seg.text.trimmingCharacters(in: .whitespaces),
+                    source: ""
+                )
             }
         }
-    }
-}
 
-/// Thread-safe accumulator for stderr data from the Python process.
-private final class StderrAccumulator: @unchecked Sendable {
-    private var data = Data()
-    private let lock = NSLock()
+        // Tag source for dual-stream merging
+        for i in labeled.indices {
+            labeled[i].source = source
+        }
 
-    func append(_ newData: Data) {
-        lock.lock()
-        data.append(newData)
-        lock.unlock()
-    }
-
-    var string: String {
-        lock.lock()
-        defer { lock.unlock() }
-        return String(data: data, encoding: .utf8) ?? ""
+        Logger.transcription.info("\(label.capitalized, privacy: .public) transcription: \(labeled.count) segments")
+        return labeled
     }
 }

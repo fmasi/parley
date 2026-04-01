@@ -128,22 +128,19 @@ struct MenuView: View {
             let paths = try await captureClient.stop()
             appState.phase = .transcribing(progress: "Transcribing...")
 
-            let config = configManager.config
             let result = try await transcriptionRunner.run(
                 systemAudio: paths.systemAudio,
                 micAudio: paths.micAudio,
-                outputFormat: config.outputFormat,
-                outputDirectory: paths.systemAudio.deletingLastPathComponent()
+                outputDirectory: paths.systemAudio.deletingLastPathComponent(),
+                config: configManager.config
             )
 
-            appState.lastTranscriptPath = result.outputPath.path
-            appState.lastJsonPath = result.jsonPath?.path
+            appState.lastJsonPath = result.jsonPath.path
+            appState.lastTranscriptPath = result.jsonPath.path
             appState.phase = .idle
-            sendNotification(title: "Transcription Complete", body: result.outputPath.lastPathComponent)
+            sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
 
-            if let jsonPath = result.jsonPath {
-                RenameWindowController.shared.show(jsonPath: jsonPath)
-            }
+            RenameWindowController.shared.show(jsonPath: result.jsonPath)
         } catch {
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Transcription Failed", body: error.localizedDescription)
