@@ -294,6 +294,107 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
     }
 }
 
+// ── Engine: Python / mlx-whisper ──
+
+func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> BenchmarkResult {
+    let start = ContinuousClock.now
+
+    // Extract transcribe.py from main branch
+    let scriptPath = FileManager.default.temporaryDirectory.appendingPathComponent("benchmark-transcribe.py")
+    let outputPath = FileManager.default.temporaryDirectory.appendingPathComponent("bench-mlx-output.json")
+
+    do {
+        let gitResult = Process()
+        gitResult.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        gitResult.arguments = ["show", "main:transcribe.py"]
+        let gitPipe = Pipe()
+        gitResult.standardOutput = gitPipe
+        gitResult.standardError = Pipe()
+        try gitResult.run()
+        gitResult.waitUntilExit()
+
+        let scriptData = gitPipe.fileHandleForReading.readDataToEndOfFile()
+        guard !scriptData.isEmpty else {
+            return BenchmarkResult(
+                engine: "mlx-whisper (Python, large-v3, MLX GPU)",
+                wallClockSeconds: 0, segmentCount: 0, sampleSegments: [],
+                audioDurationSeconds: audioDuration,
+                error: "Cannot extract transcribe.py from main branch"
+            )
+        }
+        try scriptData.write(to: scriptPath)
+
+        // Find python in conda env or PATH
+        let pythonPath: String
+        if let conda = ProcessInfo.processInfo.environment["CONDA_PREFIX"] {
+            pythonPath = conda + "/bin/python"
+        } else {
+            pythonPath = "/usr/bin/python3"
+        }
+
+        print("  Running mlx-whisper via Python...")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: pythonPath)
+        proc.arguments = [
+            scriptPath.path,
+            "-i", audioPath.path,
+            "-f", "json",
+            "-o", outputPath.path,
+            "--no-diarize",
+        ]
+        let stderrPipe = Pipe()
+        proc.standardOutput = Pipe()
+        proc.standardError = stderrPipe
+        try proc.run()
+        proc.waitUntilExit()
+
+        let elapsed = ContinuousClock.now - start
+        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+
+        guard proc.terminationStatus == 0 else {
+            let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return BenchmarkResult(
+                engine: "mlx-whisper (Python, large-v3, MLX GPU)",
+                wallClockSeconds: seconds, segmentCount: 0, sampleSegments: [],
+                audioDurationSeconds: audioDuration,
+                error: "Exit code \(proc.terminationStatus): \(stderr.prefix(200))"
+            )
+        }
+
+        // Parse output JSON
+        let data = try Data(contentsOf: outputPath)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let segments = json?["segments"] as? [[String: Any]] ?? []
+        let sampleSegs = segments.prefix(3).map { seg in
+            (seg["start"] as? Double ?? 0, seg["end"] as? Double ?? 0, seg["text"] as? String ?? "")
+        }
+
+        // Cleanup
+        try? FileManager.default.removeItem(at: scriptPath)
+        try? FileManager.default.removeItem(at: outputPath)
+
+        return BenchmarkResult(
+            engine: "mlx-whisper (Python, large-v3, MLX GPU)",
+            wallClockSeconds: seconds,
+            segmentCount: segments.count,
+            sampleSegments: Array(sampleSegs),
+            audioDurationSeconds: audioDuration,
+            error: nil
+        )
+    } catch {
+        try? FileManager.default.removeItem(at: scriptPath)
+        try? FileManager.default.removeItem(at: outputPath)
+        let elapsed = ContinuousClock.now - start
+        let seconds = Double(elapsed.components.seconds)
+        return BenchmarkResult(
+            engine: "mlx-whisper (Python, large-v3, MLX GPU)",
+            wallClockSeconds: seconds, segmentCount: 0, sampleSegments: [],
+            audioDurationSeconds: audioDuration,
+            error: error.localizedDescription
+        )
+    }
+}
+
 // ── Report ──
 
 func printResult(_ r: BenchmarkResult) {
@@ -372,6 +473,7 @@ struct EngineBenchmarkCLI {
             print("  whisper-cpp  — SwiftWhisper / whisper.cpp (Metal GPU)")
             print("  fluid        — FluidAudio (Parakeet, CoreML/ANE)")
             print("  speech       — macOS 26 SpeechAnalyzer (on-device)")
+            print("  mlx          — mlx-whisper (Python, large-v3, MLX GPU)")
             print("  all          — run all engines (default)")
             Foundation.exit(1)
         }
@@ -383,7 +485,7 @@ struct EngineBenchmarkCLI {
         }
 
         // Parse --engines flag
-        var engines = Set(["whisperkit", "whisper-cpp", "fluid", "speech"])
+        var engines = Set(["whisperkit", "whisper-cpp", "fluid", "speech", "mlx"])
         if let idx = args.firstIndex(of: "--engines"), idx + 1 < args.count {
             engines = Set(args[idx + 1].split(separator: ",").map(String.init))
         }
@@ -455,6 +557,15 @@ struct EngineBenchmarkCLI {
             }
         }
 
+        if engines.contains("mlx") {
+            let conda = ProcessInfo.processInfo.environment["CONDA_PREFIX"] ?? ""
+            if conda.isEmpty {
+                print("\n  mlx-whisper: WARNING — no conda env active, may fail")
+            } else {
+                print("\n  mlx-whisper: conda env active (\(URL(fileURLWithPath: conda).lastPathComponent))")
+            }
+        }
+
         print("\n══════ Running benchmarks ══════")
 
         var results: [BenchmarkResult] = []
@@ -489,6 +600,13 @@ struct EngineBenchmarkCLI {
             } else {
                 print("  SKIPPED: Requires macOS 26.0+")
             }
+        }
+
+        if engines.contains("mlx") {
+            print("\n── mlx-whisper (Python) ──")
+            let r = await benchmarkMlxWhisper(audioPath: audioPath, audioDuration: audioDuration)
+            printResult(r)
+            results.append(r)
         }
 
         // Summary
