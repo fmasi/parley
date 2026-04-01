@@ -5,7 +5,7 @@ public extension Logger {
 
     /// Audio capture: stream lifecycle, format detection, device selection
     static let audio = Logger(subsystem: subsystem, category: "audio")
-    /// Transcription: Python process launch, output forwarding, completion
+    /// Transcription: WhisperKit model lifecycle, transcription timing, diarization
     static let transcription = Logger(subsystem: subsystem, category: "transcription")
     /// App state: phase transitions, error message lifecycle
     static let state = Logger(subsystem: subsystem, category: "state")
