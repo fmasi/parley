@@ -1,9 +1,10 @@
 # Transcriber - Project Instructions
 
 ## Environment
-- **NEVER install Python packages directly on the host machine** -- always use a conda environment
-- macOS only (requires Apple Silicon for WhisperKit)
+- macOS only (requires Apple Silicon for WhisperKit/CoreML)
 - Requires macOS 15.0+ for microphone capture via ScreenCaptureKit
+- No Python/conda required for the app itself (fully Swift-native)
+- Benchmark tool (`tools/engine-benchmark/`) optionally uses Python for mlx-whisper comparison — use conda if running that
 
 ## Project Overview
 macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams/Meet).
