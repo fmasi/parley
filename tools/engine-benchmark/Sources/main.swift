@@ -3,7 +3,7 @@ import AVFoundation
 
 // ── Engine imports ──
 import WhisperKit
-import SwiftWhisper
+import WhisperCppKit
 import FluidAudio
 import Speech  // macOS 26 SpeechAnalyzer
 
@@ -131,46 +131,45 @@ func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> Benchma
     }
 }
 
-// ── Engine: SwiftWhisper (whisper.cpp) ──
+// ── Engine: WhisperCppKit (whisper.cpp) ──
 
 func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> BenchmarkResult {
     let start = ContinuousClock.now
 
     do {
-        // SwiftWhisper needs a GGML model file
         let modelDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".audio-transcribe/models")
         let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
 
-        if !FileManager.default.fileExists(atPath: ggmlModel.path) {
+        guard FileManager.default.fileExists(atPath: ggmlModel.path) else {
             return BenchmarkResult(
-                engine: "SwiftWhisper (whisper.cpp, large-v3-turbo)",
+                engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
                 wallClockSeconds: 0,
                 segmentCount: 0,
                 sampleSegments: [],
                 audioDurationSeconds: audioDuration,
-                error: "GGML model not found at \(ggmlModel.path). Download with: curl -L -o '\(ggmlModel.path)' 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin'"
+                error: "GGML model not found at \(ggmlModel.path)"
             )
         }
 
         print("  Loading whisper.cpp model...")
-        let whisper = try Whisper(fromFileURL: ggmlModel)
+        let ctx = try WhisperContext(modelPath: ggmlModel.path)
 
         print("  Loading audio...")
         let (samples, _) = try loadAudioAsFloats(url: audioPath)
 
         print("  Transcribing...")
-        let segments = try await whisper.transcribe(audioFrames: samples)
+        let segments = try ctx.transcribe(pcm16k: samples)
 
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
         let sampleSegs = segments.prefix(3).map { seg in
-            (Double(seg.startTime) / 1000.0, Double(seg.endTime) / 1000.0, seg.text)
+            (seg.startTime, seg.endTime, seg.text)
         }
 
         return BenchmarkResult(
-            engine: "SwiftWhisper (whisper.cpp, large-v3-turbo)",
+            engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
             wallClockSeconds: seconds,
             segmentCount: segments.count,
             sampleSegments: Array(sampleSegs),
@@ -181,7 +180,7 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds)
         return BenchmarkResult(
-            engine: "SwiftWhisper (whisper.cpp, large-v3-turbo)",
+            engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
             wallClockSeconds: seconds,
             segmentCount: 0,
             sampleSegments: [],
@@ -470,7 +469,7 @@ struct EngineBenchmarkCLI {
             print("")
             print("Engines:")
             print("  whisperkit   — WhisperKit (CoreML, large-v3-turbo)")
-            print("  whisper-cpp  — SwiftWhisper / whisper.cpp (Metal GPU)")
+            print("  whisper-cpp  — WhisperCppKit / whisper.cpp (Metal GPU)")
             print("  fluid        — FluidAudio (Parakeet, CoreML/ANE)")
             print("  speech       — macOS 26 SpeechAnalyzer (on-device)")
             print("  mlx          — mlx-whisper (Python, large-v3, MLX GPU)")
@@ -524,12 +523,27 @@ struct EngineBenchmarkCLI {
         }
 
         if engines.contains("whisper-cpp") {
-            // NOTE: SwiftWhisper 1.2.0 bundles whisper.cpp with WHISPER_N_MEL=80,
-            // but large-v3-turbo requires 128 mels. This causes a fatal assertion.
-            // Skipping until SwiftWhisper updates to a newer whisper.cpp.
-            print("\n  SwiftWhisper: SKIPPED — SwiftWhisper 1.2.0 doesn't support large-v3-turbo (needs 128 mels, has 80)")
-            print("  Will test when SwiftWhisper updates to whisper.cpp with 128-mel support")
-            engines.remove("whisper-cpp")
+            let modelDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".audio-transcribe/models")
+            let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
+            if FileManager.default.fileExists(atPath: ggmlModel.path) {
+                print("\n  WhisperCppKit: GGML model found")
+            } else {
+                print("\n  WhisperCppKit: GGML model NOT found. Downloading (~1.6GB)...")
+                try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+                let downloadURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                proc.arguments = ["-L", "-o", ggmlModel.path, "--progress-bar", downloadURL]
+                try? proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus == 0 {
+                    print("  WhisperCppKit: download complete")
+                } else {
+                    print("  WhisperCppKit: download failed — will skip benchmark")
+                    engines.remove("whisper-cpp")
+                }
+            }
         }
 
         if engines.contains("speech") {

@@ -1,5 +1,5 @@
 {
-  "originHash" : "993ddbfceac5a014912f53504342a49dda268481b5d4db02946caa00ab7bc374",
+  "originHash" : "4813483cd1f5d515e063191cf2066ed40d5aa965131f6b782ca1735acf75c5b7",
   "pins" : [
     {
       "identity" : "fluidaudio",
@@ -65,12 +65,12 @@
       }
     },
     {
-      "identity" : "swiftwhisper",
+      "identity" : "whispercppkit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/exPHAT/SwiftWhisper.git",
+      "location" : "https://github.com/Justmalhar/WhisperCppKit.git",
       "state" : {
-        "revision" : "a192004db08de7c6eaa169eede77f1625e7d23fb",
-        "version" : "1.2.0"
+        "revision" : "f45a3319036b93bafb4e9fdd81ca9e0840c04687",
+        "version" : "0.1.1"
       }
     },
     {
