@@ -158,12 +158,16 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
         print("  Loading audio...")
         let (samples, _) = try loadAudioAsFloats(url: audioPath)
 
-        print("  Transcribing...")
-        let segments = try ctx.transcribe(pcm16k: samples)
+        print("  Transcribing (language=auto)...")
+        var options = WhisperOptions()
+        options.language = nil  // auto-detect
+        options.translateToEnglish = false
+        let segments = try ctx.transcribe(pcm16k: samples, options: options)
 
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
+        let detectedLang = segments.first?.text.prefix(0) ?? ""  // can't get language from whisper.cpp easily
         let sampleSegs = segments.prefix(3).map { seg in
             (seg.startTime, seg.endTime, seg.text)
         }
@@ -207,17 +211,36 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
+        // Group token timings into sentence-like segments by splitting on punctuation
         let timings = result.tokenTimings ?? []
-        // Group token timings into approximate segments (by sentence boundaries or fixed chunks)
-        let sampleSegs = timings.prefix(3).map { t in
-            (t.startTime, t.endTime, t.token)
+        var sentences: [(start: Double, end: Double, text: String)] = []
+        var currentText = ""
+        var segStart: Double = 0
+        var segEnd: Double = 0
+
+        for (i, t) in timings.enumerated() {
+            if currentText.isEmpty { segStart = t.startTime }
+            currentText += t.token
+            segEnd = t.endTime
+            let isPunct = t.token.last.map { ".!?".contains($0) } ?? false
+            if isPunct || i == timings.count - 1 {
+                let trimmed = currentText.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    sentences.append((segStart, segEnd, trimmed))
+                }
+                currentText = ""
+            }
         }
+
+        let sampleSegs = Array(sentences.prefix(3))
+
+        print("  Full text preview: \(result.text.prefix(200))")
 
         return BenchmarkResult(
             engine: "FluidAudio (Parakeet, CoreML/ANE)",
             wallClockSeconds: seconds,
-            segmentCount: timings.count,
-            sampleSegments: Array(sampleSegs),
+            segmentCount: sentences.count,
+            sampleSegments: sampleSegs,
             audioDurationSeconds: audioDuration,
             error: nil
         )
@@ -243,20 +266,27 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
 
     do {
         print("  Setting up SpeechAnalyzer...")
+        // Don't force locale — let it auto-detect language
         let transcriber = SpeechTranscriber(
-            locale: Locale(identifier: "en_US"),
+            locale: Locale.autoupdatingCurrent,
             preset: .transcription
         )
         let analyzer = SpeechAnalyzer(modules: [transcriber])
 
         print("  Transcribing...")
         let audioFile = try AVAudioFile(forReading: audioPath)
-        if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
-            try await analyzer.finalizeAndFinish(through: lastSample)
-        }
 
+        // Collect results and finalize concurrently
         var segmentCount = 0
         var sampleTexts: [(Double, Double, String)] = []
+        var allText = ""
+
+        // Start analysis
+        let analysisTask = Task {
+            if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            }
+        }
 
         for try await result in transcriber.results {
             if result.isFinal {
@@ -265,8 +295,12 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
                 if sampleTexts.count < 3 {
                     sampleTexts.append((0, 0, text))
                 }
+                allText += text + " "
             }
         }
+
+        try await analysisTask.value
+        print("  Full text preview: \(allText.prefix(200))")
 
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
