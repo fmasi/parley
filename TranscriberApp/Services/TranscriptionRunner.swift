@@ -123,6 +123,13 @@ final class TranscriptionRunner {
 
         try TranscriptAssembler.write(json, to: jsonPath)
 
+        // Generate format file (SRT/TXT) if output_format != json
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+        }
+
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
 

@@ -25,6 +25,7 @@ public actor WhisperKitTranscriber {
 
         let options = DecodingOptions(
             language: language,
+            skipSpecialTokens: true,
             wordTimestamps: true,
             compressionRatioThreshold: 1.8,
             noSpeechThreshold: 0.8
