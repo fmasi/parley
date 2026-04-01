@@ -3,8 +3,7 @@ import os
 import TranscriberCore
 
 struct TranscriptionResult {
-    let outputPath: URL
-    let jsonPath: URL?
+    let jsonPath: URL
 }
 
 final class TranscriptionRunner {
@@ -25,7 +24,6 @@ final class TranscriptionRunner {
     func run(
         systemAudio: URL,
         micAudio: URL?,
-        outputFormat: String,
         outputDirectory: URL,
         hfToken: String = ""
     ) async throws -> TranscriptionResult {
@@ -45,8 +43,7 @@ final class TranscriptionRunner {
         }
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
-        let outputFile = outputDirectory
-            .appendingPathComponent(baseName + "." + outputFormat)
+        let jsonFile = outputDirectory.appendingPathComponent(baseName + ".json")
 
         var arguments = [
             transcribeScript.path,
@@ -55,14 +52,14 @@ final class TranscriptionRunner {
         if let mic = micAudio {
             arguments += ["-i", mic.path]
         }
-        arguments += ["-f", outputFormat]
-        arguments += ["-o", outputFile.path]
+        arguments += ["-f", "json"]
+        arguments += ["-o", jsonFile.path]
         if !hfToken.isEmpty {
             arguments += ["--hf-token", hfToken]
         }
 
         let inputCount = micAudio != nil ? 2 : 1
-        Logger.transcription.info("Launching transcription — format: \(outputFormat, privacy: .public), inputs: \(inputCount)")
+        Logger.transcription.info("Launching transcription — format: json, inputs: \(inputCount)")
         Logger.transcription.debug("Python args: \(arguments, privacy: .private)")
 
         let process = Process()
@@ -139,10 +136,7 @@ final class TranscriptionRunner {
 
                 Logger.transcription.info("Transcription complete — exit code: 0, duration: \(seconds)s")
 
-                let jsonFile = outputDirectory
-                    .appendingPathComponent(baseName + ".json")
                 cont.resume(returning: TranscriptionResult(
-                    outputPath: outputFile,
                     jsonPath: jsonFile
                 ))
             }
