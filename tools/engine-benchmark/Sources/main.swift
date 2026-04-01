@@ -84,7 +84,7 @@ func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> Benchma
 
     do {
         let kit = try await WhisperKit(
-            model: "large-v3-turbo",
+            model: "large-v3_turbo",
             verbose: false,
             prewarm: true
         )
@@ -403,7 +403,7 @@ struct EngineBenchmarkCLI {
         if engines.contains("whisperkit") {
             print("\n  WhisperKit: downloading/compiling model if needed...")
             do {
-                let _ = try await WhisperKit(model: "large-v3-turbo", verbose: false, prewarm: true)
+                let _ = try await WhisperKit(model: "large-v3_turbo", verbose: false, prewarm: true)
                 print("  WhisperKit: ready")
             } catch {
                 print("  WhisperKit: setup failed — \(error.localizedDescription)")
