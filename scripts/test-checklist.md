@@ -1,56 +1,29 @@
-# Test Checklist
+# Test Checklist — WhisperKit Migration
 
-## Liquid Glass Dialog Shape
-1. Click Start Recording — session name dialog appears with rounded rectangle glass (not oval)
-2. Glass is flush at top (no gap with title bar), rounded at bottom
+## Setup Flow
+- [ ] Setup window shows "Transcription Model" section with Whisper Model row
+- [ ] If model already downloaded → green checkmark shown
+- [ ] If model not downloaded → "Download" button appears, downloads with progress bar
+- [ ] "Continue" button disabled until permissions granted AND model downloaded
 
-## Transcription + Rename Speakers
-3. Stop a recording — status shows "Transcribing..." and stays for ~30s+
-4. Transcription completes — `.json` file appears in recording folder (format file generated after rename dialog)
-5. Rename speakers dialog auto-opens and **stays visible when clicked**
-6. Each speaker shows **sample text** below their name
-7. Each speaker has a **play button** — plays their first segment from the source WAV
-8. "Rename Speakers..." menu item is enabled (not grayed out)
-9. Click "Rename Speakers..." from menu — dialog opens reliably
+## Settings
+- [ ] "Transcription Model" section shows model picker (Fast / High Quality)
+- [ ] No HuggingFace Token field anywhere
+- [ ] Output Format picker still works (txt/srt/json)
 
-## Error Visibility
-- [ ] Kill transcribe.py mid-run → menu shows "⚠ Error: ..." + "Dismiss Error"
-- [ ] Click "Dismiss Error" → error items disappear from menu
-- [ ] Start new recording after error → error items auto-clear
-- [ ] Error notification appears in Notification Center
-- [ ] Success notification still appears after normal transcription
+## Transcription (WhisperKit)
+- [ ] Record a short clip (15-30s), stop recording
+- [ ] Status shows "Transcribing..." during processing
+- [ ] `.json` file appears in recording folder
+- [ ] Format file (`.srt` or `.txt`) appears alongside JSON (matching output_format setting)
+- [ ] JSON segments have clean text — no `<|startoftranscript|>` or `<|0.00|>` tokens
+- [ ] Rename speakers dialog opens after transcription
+- [ ] Play button works in rename dialog
+- [ ] After rename → format file updated with new speaker names
 
-## Mid-Recording Mic Switch
-- [ ] Start recording on built-in mic → click "Change Microphone..." → select USB headset → click "Switch" → verify recording continues
-- [ ] After switching, verify the transcription includes audio from both the original and new mic
-- [ ] Open the mic WAV file in an audio editor — verify it's 48kHz mono throughout (no format glitch at switch point)
-- [ ] Start on USB webcam mic (48kHz stereo) → switch to built-in mic (48kHz mono) → verify no corruption
-- [ ] Switch to a device, then unplug it — verify recording continues on system audio and you can switch again
-- [ ] Verify "Change Microphone..." only appears in menu during active recording
-- [ ] Verify level meter in switch dialog shows live levels for the selected (not-yet-switched) device
-- [ ] Verify Cancel dismisses the dialog without switching
-- [ ] Verify selecting the same mic that's already active disables the Switch button
-
-## Format File Generation
-- [ ] Record with output_format=srt → rename speakers → save → .srt has renamed speakers
-- [ ] Record with output_format=srt → rename dialog → cancel → .srt has original speakers
-- [ ] Record with output_format=txt → rename speakers → save → .txt has renamed speakers
-- [ ] Record with output_format=json → rename dialog → save → no extra file created
-- [ ] Manual "Rename Speakers..." → save → format file updated with new names
-
-## WhisperKit Migration Benchmark
-- [ ] Place 2 recording pairs (system.wav + mic.wav each) in ~/.audio-transcribe/benchmark/
-- [ ] Download model via Setup flow or Settings
-- [ ] Record a short test meeting and transcribe — verify JSON output is correct
-- [ ] Compare segment counts and text quality vs Python baseline
-- [ ] Compare speaker assignments (if diarization enabled)
-- [ ] Note wall-clock transcription time for comparison
-
-## Unified Logging
-- [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
-- [ ] Start recording — see "Recording started" and "Starting capture" in log stream
-- [ ] Observe "System audio: ...Hz" and "Mic audio: ...Hz" format detection lines
-- [ ] Stop recording — see "Stopping capture" and "Launching transcription" lines
-- [ ] Python progress lines appear as `[python] Transcribing audio...` etc.
-- [ ] Transcription completes — see duration in "Transcription complete" line
-- [ ] Ctrl+C stops log stream; app keeps running
+## Logging (check in log stream)
+- [ ] "Creating WhisperKitTranscriber" on first transcription
+- [ ] "WhisperKit already loaded" on subsequent transcriptions (no 113s wait)
+- [ ] "Transcription complete: N segments in Xs" with timing
+- [ ] "JSON transcript written" line
+- [ ] "Format file written" line (if output_format is srt/txt)
