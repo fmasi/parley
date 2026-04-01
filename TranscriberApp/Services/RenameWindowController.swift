@@ -28,11 +28,11 @@ final class RenameWindowController {
             speakers: speakers,
             onSave: { mapping in
                 Self.applySpeakerRenames(mapping, jsonPath: jsonPath)
-                Self.generateFormatFile(jsonPath: jsonPath)
+                Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
                 closePanel()
             },
             onCancel: {
-                Self.generateFormatFile(jsonPath: jsonPath)
+                Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
                 closePanel()
             }
         )
@@ -150,7 +150,7 @@ final class RenameWindowController {
 
     // MARK: - Generate Format File
 
-    static func generateFormatFile(jsonPath: URL) {
+    nonisolated static func generateFormatFile(jsonPath: URL) {
         let format = Self.readOutputFormat(from: jsonPath) ?? "json"
         guard format == "srt" || format == "txt" else { return }
 
@@ -165,7 +165,7 @@ final class RenameWindowController {
         }
     }
 
-    private static func readOutputFormat(from jsonPath: URL) -> String? {
+    private nonisolated static func readOutputFormat(from jsonPath: URL) -> String? {
         guard let data = try? Data(contentsOf: jsonPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let metadata = json["metadata"] as? [String: Any]
