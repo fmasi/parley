@@ -21,7 +21,7 @@ final class TranscriptionRunner {
         }
     }
 
-    private var transcriber: WhisperKitTranscriber?
+    private var transcriber: (any TranscriptionEngine)?
     private var lastModelKey: String?
     private var diarizer: (any DiarizationProvider)?
 
@@ -136,6 +136,12 @@ final class TranscriptionRunner {
         return TranscriptionResult(jsonPath: jsonPath)
     }
 
+    func setTranscriber(_ engine: any TranscriptionEngine) {
+        self.transcriber = engine
+        self.lastModelKey = engine.name
+        Logger.transcription.info("Transcription engine set: \(engine.name, privacy: .public)")
+    }
+
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
         Logger.transcription.info("Diarization provider set: \(String(describing: type(of: provider)), privacy: .public)")
@@ -146,7 +152,7 @@ final class TranscriptionRunner {
     private func transcribeStream(
         audioPath: URL,
         source: String,
-        transcriber: WhisperKitTranscriber,
+        transcriber: any TranscriptionEngine,
         label: String
     ) async throws -> [LabeledSegment] {
         // Skip empty files (WAV header only = 44 bytes)
@@ -159,7 +165,7 @@ final class TranscriptionRunner {
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
 
         // Transcribe (deduplicate is called internally by WhisperKitTranscriber)
-        let segments = try await transcriber.transcribe(audioPath: audioPath)
+        let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil)
 
         // Diarize if provider is available
         var labeled: [LabeledSegment]
@@ -177,7 +183,7 @@ final class TranscriptionRunner {
                     start: seg.start,
                     end: seg.end,
                     speaker: "Speaker 1",
-                    text: seg.text.trimmingCharacters(in: .whitespaces),
+                    text: seg.text.trimmingCharacters(in: CharacterSet.whitespaces),
                     source: ""
                 )
             }

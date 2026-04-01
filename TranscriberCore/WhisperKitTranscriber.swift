@@ -2,17 +2,27 @@ import Foundation
 import os
 import WhisperKit
 
-public actor WhisperKitTranscriber {
+public actor WhisperKitTranscriber: TranscriptionEngine {
     private var whisperKit: WhisperKit?
     private let modelPath: URL
     private let modelVariant: String
     private let unloadTimeout: TimeInterval
     private var unloadTask: Task<Void, Never>?
 
+    public nonisolated let name = "WhisperKit"
+
     public init(modelPath: URL, model: String = "large-v3-turbo", unloadTimeoutMinutes: Int = 60) {
         self.modelPath = modelPath.appendingPathComponent(model)
         self.modelVariant = model
         self.unloadTimeout = TimeInterval(unloadTimeoutMinutes * 60)
+    }
+
+    public nonisolated func isReady() -> Bool {
+        FileManager.default.fileExists(atPath: modelPath.path)
+    }
+
+    public func prepare() async throws {
+        let _ = try await ensureLoaded()
     }
 
     public func transcribe(audioPath: URL, language: String? = nil) async throws -> [TranscriptSegment] {
