@@ -397,6 +397,65 @@ struct EngineBenchmarkCLI {
         print("Duration: \(Int(audioDuration) / 60)m \(Int(audioDuration) % 60)s")
         print("Engines: \(engines.sorted().joined(separator: ", "))")
 
+        // ── Preparation: download models and warm up before timing ──
+        print("\n══════ Preparing models (not timed) ══════")
+
+        if engines.contains("whisperkit") {
+            print("\n  WhisperKit: downloading/compiling model if needed...")
+            do {
+                let _ = try await WhisperKit(model: "large-v3-turbo", verbose: false, prewarm: true)
+                print("  WhisperKit: ready")
+            } catch {
+                print("  WhisperKit: setup failed — \(error.localizedDescription)")
+            }
+        }
+
+        if engines.contains("fluid") {
+            print("\n  FluidAudio: downloading model if needed...")
+            do {
+                let _ = try await AsrModels.downloadAndLoad()
+                print("  FluidAudio: ready")
+            } catch {
+                print("  FluidAudio: setup failed — \(error.localizedDescription)")
+            }
+        }
+
+        if engines.contains("whisper-cpp") {
+            let modelDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".audio-transcribe/models")
+            let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
+            if FileManager.default.fileExists(atPath: ggmlModel.path) {
+                print("\n  SwiftWhisper: GGML model found")
+            } else {
+                print("\n  SwiftWhisper: GGML model NOT found. Downloading (~1.6GB)...")
+                let downloadURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+                let result = await Task.detached {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                    proc.arguments = ["-L", "-o", ggmlModel.path, "--progress-bar", downloadURL]
+                    try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+                    try? proc.run()
+                    proc.waitUntilExit()
+                    return proc.terminationStatus
+                }.value
+                if result == 0 {
+                    print("  SwiftWhisper: download complete")
+                } else {
+                    print("  SwiftWhisper: download failed — will skip benchmark")
+                }
+            }
+        }
+
+        if engines.contains("speech") {
+            if #available(macOS 26.0, *) {
+                print("\n  SpeechAnalyzer: system framework, no download needed")
+            } else {
+                print("\n  SpeechAnalyzer: requires macOS 26.0+, will skip")
+            }
+        }
+
+        print("\n══════ Running benchmarks ══════")
+
         var results: [BenchmarkResult] = []
 
         if engines.contains("whisperkit") {
