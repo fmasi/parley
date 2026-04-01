@@ -299,8 +299,8 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
     let start = ContinuousClock.now
 
     // Extract transcribe.py from main branch
-    let scriptPath = FileManager.default.temporaryDirectory.appendingPathComponent("benchmark-transcribe.py")
-    let outputPath = FileManager.default.temporaryDirectory.appendingPathComponent("bench-mlx-output.json")
+    let scriptPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("benchmark-transcribe.py")
+    let outputPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("bench-mlx-output.json")
 
     do {
         let gitResult = Process()
@@ -331,7 +331,12 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
             pythonPath = "/usr/bin/python3"
         }
 
+        // Remove stale output
+        try? FileManager.default.removeItem(at: outputPath)
+
         print("  Running mlx-whisper via Python...")
+        print("  Script: \(scriptPath.path)")
+        print("  Output: \(outputPath.path)")
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
         proc.arguments = [
@@ -341,11 +346,20 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
             "-o", outputPath.path,
             "--no-diarize",
         ]
+        // Pass through environment (conda, HF_TOKEN, etc.)
+        proc.environment = ProcessInfo.processInfo.environment
+        let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        proc.standardOutput = Pipe()
+        proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
         try proc.run()
         proc.waitUntilExit()
+
+        // Print any output for debugging
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if !stdout.isEmpty { print("  stdout: \(stdout.prefix(300))") }
+        if !stderr.isEmpty { print("  stderr: \(stderr.prefix(300))") }
 
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
@@ -394,6 +408,32 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
     }
 }
 
+// ── Table formatting (avoids String(format: %s) crash in Swift 6) ──
+
+func pad(_ s: String, _ width: Int) -> String {
+    s.count >= width ? s : s + String(repeating: " ", count: width - s.count)
+}
+
+func rpad(_ s: String, _ width: Int) -> String {
+    s.count >= width ? s : String(repeating: " ", count: width - s.count) + s
+}
+
+func tableRow(_ engine: String, _ time: String, _ segs: String, _ rtf: String) -> String {
+    "\(pad(engine, 45)) \(rpad(time, 10)) \(rpad(segs, 8)) \(rpad(rtf, 8))"
+}
+
+// ── Logging (tee to file + stdout) ──
+
+nonisolated(unsafe) var logFileHandle: FileHandle?
+
+func log(_ message: String) {
+    print(message)
+    if let handle = logFileHandle {
+        let line = message + "\n"
+        handle.write(Data(line.utf8))
+    }
+}
+
 // ── Report ──
 
 func printResult(_ r: BenchmarkResult) {
@@ -426,14 +466,14 @@ func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
     lines.append("")
 
     // Summary table
-    lines.append(String(format: "%-45s %10s %8s %8s", "Engine", "Time", "Segs", "RTF"))
+    lines.append(tableRow("Engine", "Time", "Segs", "RTF"))
     lines.append(String(repeating: "─", count: 75))
     for r in results {
         if r.error != nil {
-            lines.append(String(format: "%-45s %10s", r.engine, "ERROR"))
+            lines.append(tableRow(r.engine, "ERROR", "-", "-"))
         } else {
             let time = "\(Int(r.wallClockSeconds) / 60)m \(Int(r.wallClockSeconds) % 60)s"
-            lines.append(String(format: "%-45s %10s %8d %7.1fx", r.engine, time, r.segmentCount, r.realtimeFactor))
+            lines.append(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor)))
         }
     }
 
@@ -491,9 +531,17 @@ struct EngineBenchmarkCLI {
 
         let audioDuration = getAudioDuration(url: audioPath)
 
-        print("╔═══════════════════════════════════════════╗")
-        print("║  ASR Engine Benchmark                     ║")
-        print("╚═══════════════════════════════════════════╝")
+        // Set up log file (tee output to file + stdout)
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".audio-transcribe/benchmark")
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        let logPath = logDir.appendingPathComponent("engine-benchmark-\(DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")).log")
+        FileManager.default.createFile(atPath: logPath.path, contents: nil)
+        logFileHandle = FileHandle(forWritingAtPath: logPath.path)
+
+        log("╔═══════════════════════════════════════════╗")
+        log("║  ASR Engine Benchmark                     ║")
+        log("╚═══════════════════════════════════════════╝")
         print("")
         print("Audio: \(audioPath.lastPathComponent)")
         print("Duration: \(Int(audioDuration) / 60)m \(Int(audioDuration) % 60)s")
@@ -607,15 +655,15 @@ struct EngineBenchmarkCLI {
         }
 
         // Summary
-        print("\n══════ Summary ══════")
-        print(String(format: "\n%-45s %10s %8s %8s", "Engine", "Time", "Segs", "RTF"))
-        print(String(repeating: "─", count: 75))
+        log("\n══════ Summary ══════")
+        log("\n" + tableRow("Engine", "Time", "Segs", "RTF"))
+        log(String(repeating: "─", count: 75))
         for r in results {
             if r.error != nil {
-                print(String(format: "%-45s %10s", r.engine, "ERROR"))
+                log(tableRow(r.engine, "ERROR", "-", "-"))
             } else {
                 let time = "\(Int(r.wallClockSeconds) / 60)m \(Int(r.wallClockSeconds) % 60)s"
-                print(String(format: "%-45s %10s %8d %7.1fx", r.engine, time, r.segmentCount, r.realtimeFactor))
+                log(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor)))
             }
         }
 
