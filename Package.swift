@@ -21,6 +21,7 @@ let package = Package(
             name: "TranscriberCore",
             dependencies: [
                 .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "SpeakerKit", package: "WhisperKit"),
             ],
             path: "TranscriberCore"
         ),

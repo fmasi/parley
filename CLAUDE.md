@@ -2,21 +2,20 @@
 
 ## Environment
 - **NEVER install Python packages directly on the host machine** -- always use a conda environment
-- macOS only (requires Apple Silicon for mlx-whisper)
+- macOS only (requires Apple Silicon for WhisperKit)
 - Requires macOS 15.0+ for microphone capture via ScreenCaptureKit
 
 ## Project Overview
 macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams/Meet).
 - **SwiftUI**: native menu bar app (`MenuBarExtra` + `Settings` scene), audio capture via XPC service
-- **Python**: transcription engine (`transcribe.py`), speaker renaming CLI (`rename_speakers.py`)
-- Uses mlx-whisper (Apple Silicon optimized) + pyannote.audio for speaker diarization
+- Uses WhisperKit (Apple Silicon optimized) + SpeakerKit for speaker diarization (fully Swift-native, no Python)
 
 ## Architecture
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
-- `TranscriberApp/Services/TranscriptionRunner.swift` -- launches transcribe.py via Process
+- `TranscriberApp/Services/TranscriptionRunner.swift` -- runs WhisperKit transcription + SpeakerKit diarization
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
@@ -48,12 +47,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 - `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
-
-### Python CLI (unchanged)
-- `transcribe.py` -- CLI tool, mlx-whisper + pyannote diarization, supports dual-stream input (`-i system.wav -i mic.wav`)
-- `rename_speakers.py` -- interactive speaker renaming, reads/updates JSON master file
-- `service/config_manager.py` -- JSON config (shared format with Swift ConfigManager)
-- `service/logger.py` -- logging setup
 
 ### Standalone Swift CLI (legacy, still functional)
 - `audio_capture_helper/` -- Swift Package Manager project, standalone binary for CLI use
@@ -88,13 +81,6 @@ cd audio_capture_helper && bash build.sh
 # Produces bin/audio-capture-helper
 ```
 
-### Python
-```bash
-# Activate conda env first!
-python -m pytest tests/ -q
-# 79 tests
-```
-
 ## Key Gotchas
 1. `captureMicrophone` requires macOS 15.0+ (not 14.0)
 2. PackageDescription `.v15` requires swift-tools-version 6.0; use `.macOS("15.0")` string syntax with 5.9
@@ -117,8 +103,7 @@ python -m pytest tests/ -q
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
 20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
-22. **TranscriptionRunner environment:** `process.environment = [...]` replaces ALL env vars. Must include `HOME`, `TMPDIR`, embedded python `bin/` in PATH (for ffmpeg), and `/opt/homebrew/bin`. Must pass `hfToken` from config via `--hf-token` arg. The `-o` flag expects a file path, not a directory.
-23. **embed_python.sh rsync excludes:** Use path-anchored excludes (`--exclude='/bin/pip*'`) not bare globs (`--exclude='pip*'`) — bare `pip*` also matches `pipelines/` inside packages like torchaudio.
+22. **WhisperKit model download:** Models are downloaded on first use from argmaxinc/whisperkit-coreml. Requires internet access and enough disk space (~1-3 GB depending on model variant). Progress is reported via ModelManager callbacks.
 
 ## Debugging with Unified Logging
 All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
@@ -153,7 +138,6 @@ python scripts/dev.py --debug
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
 - `packaging/AudioCaptureHelper-Info.plist` -- XPC service plist (ServiceType: Application)
-- `packaging/embed_python.sh` -- embeds conda Python + scripts into .app Resources
 - `scripts/dev.py` -- developer iteration CLI: kill/build/install/launch/reset-tcc with modular flags (replaced test-fresh.sh)
 - `scripts/test-checklist.md` -- dynamic test checklist printed by dev.py on launch
 
