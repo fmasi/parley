@@ -89,8 +89,7 @@ enum CLIHandler {
         guard FileManager.default.fileExists(atPath: jsonPath.path) else {
             throw CLIError.fileNotFound(jsonPathStr)
         }
-        // CLIRename will be implemented in Task 16
-        print("Rename not yet implemented")
+        try CLIRename.run(jsonPath: jsonPath)
     }
 
     private static func handleBenchmark(_ opts: BenchmarkOptions) async throws {
