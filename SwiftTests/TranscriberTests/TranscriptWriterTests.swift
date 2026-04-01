@@ -144,7 +144,7 @@ struct TranscriptWriterTests {
         #expect(contents.count == 1) // only the .json
     }
 
-    @Test func writeFormatFileReflectsRenamedSpeakers() throws {
+    @Test func writeFormatFilePreservesSpeakerNames() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 

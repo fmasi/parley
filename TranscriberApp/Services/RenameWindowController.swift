@@ -151,11 +151,13 @@ final class RenameWindowController {
     // MARK: - Generate Format File
 
     static func generateFormatFile(jsonPath: URL) {
+        let format = Self.readOutputFormat(from: jsonPath) ?? "json"
+        guard format == "srt" || format == "txt" else { return }
+
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
-            let format = Self.readOutputFormat(from: jsonPath) ?? "json"
-            if format != "json" {
-                let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
+            let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
+            if FileManager.default.fileExists(atPath: outputPath.path) {
                 Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .public)")
             }
         } catch {

@@ -3,10 +3,11 @@ import Foundation
 public enum TranscriptWriter {
     /// Format seconds as HH:MM:SS,mmm (SRT format).
     static func formatTimestamp(_ seconds: Double) -> String {
-        let h = Int(seconds) / 3600
-        let m = (Int(seconds) % 3600) / 60
-        let s = Int(seconds) % 60
-        let ms = Int((seconds.truncatingRemainder(dividingBy: 1) * 1000).rounded())
+        let totalMs = Int(seconds * 1000)
+        let h = totalMs / 3_600_000
+        let m = (totalMs % 3_600_000) / 60_000
+        let s = (totalMs % 60_000) / 1000
+        let ms = totalMs % 1000
         return String(format: "%02d:%02d:%02d,%03d", h, m, s, ms)
     }
 
