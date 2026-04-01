@@ -62,7 +62,7 @@ swift run --package-path tools/engine-benchmark EngineBenchmark ~/Documents/Reco
 # Run specific engines only
 swift run --package-path tools/engine-benchmark EngineBenchmark ~/Documents/Recordings/2026-04-01/"130007-gustavo part 2.wav" --engines fluid,speech
 
-# Available engines: whisperkit, whisper-cpp (currently skipped), fluid, speech, mlx
+# Available engines: whisperkit, whisper-cpp, fluid, speech, mlx
 ```
 
 Reports saved to `~/.audio-transcribe/benchmark/`.
@@ -71,7 +71,7 @@ Compare with previous reports to see if framework updates improved performance.
 
 ## Known Benchmark Issues
 
-- **whisper-cpp**: SwiftWhisper 1.2.0 is stalled and doesn't support 128-mel models (large-v3-turbo). Currently skipped in benchmark. Replace with WhisperCppKit (Justmalhar/WhisperCppKit) when integrating — it's actively maintained and supports all models.
+- **whisper-cpp**: Now uses WhisperCppKit (Justmalhar/WhisperCppKit) — actively maintained, supports 128-mel models. Replaced dead SwiftWhisper (exPHAT, stalled since Aug 2023).
 
 ## Reference Documents
 
