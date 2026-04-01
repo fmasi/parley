@@ -49,6 +49,11 @@ struct TranscriberApp: App {
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
     init() {
+        // CLI mode: if arguments present, run CLI and exit
+        if CommandLine.arguments.count > 1 {
+            CLIHandler.run()  // Never returns
+        }
+
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         let gate = launchGate
         Task { @MainActor in
