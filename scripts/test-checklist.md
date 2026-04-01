@@ -38,6 +38,14 @@
 - [ ] Record with output_format=json → rename dialog → save → no extra file created
 - [ ] Manual "Rename Speakers..." → save → format file updated with new names
 
+## WhisperKit Migration Benchmark
+- [ ] Place 2 recording pairs (system.wav + mic.wav each) in ~/.audio-transcribe/benchmark/
+- [ ] Download model via Setup flow or Settings
+- [ ] Record a short test meeting and transcribe — verify JSON output is correct
+- [ ] Compare segment counts and text quality vs Python baseline
+- [ ] Compare speaker assignments (if diarization enabled)
+- [ ] Note wall-clock transcription time for comparison
+
 ## Unified Logging
 - [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
 - [ ] Start recording — see "Recording started" and "Starting capture" in log stream
