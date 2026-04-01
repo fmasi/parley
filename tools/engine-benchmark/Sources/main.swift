@@ -266,10 +266,14 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
 
     do {
         print("  Setting up SpeechAnalyzer...")
-        // Don't force locale — let it auto-detect language
+        // Use preset with audioTimeRange to get timestamps
         let transcriber = SpeechTranscriber(
             locale: Locale.autoupdatingCurrent,
-            preset: .transcription
+            preset: SpeechTranscriber.Preset(
+                transcriptionOptions: [],
+                reportingOptions: [.volatileResults],
+                attributeOptions: [.audioTimeRange]
+            )
         )
         let analyzer = SpeechAnalyzer(modules: [transcriber])
 
@@ -292,8 +296,21 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
             if result.isFinal {
                 segmentCount += 1
                 let text = String(result.text.characters)
+
+                // Try to extract time range from AttributedString
+                var startTime: Double = 0
+                var endTime: Double = 0
+                for run in result.text.runs {
+                    if let timeRange = run.audioTimeRange {
+                        let s = CMTimeGetSeconds(timeRange.start)
+                        let e = CMTimeGetSeconds(timeRange.end)
+                        if startTime == 0 || s < startTime { startTime = s }
+                        if e > endTime { endTime = e }
+                    }
+                }
+
                 if sampleTexts.count < 3 {
-                    sampleTexts.append((0, 0, text))
+                    sampleTexts.append((startTime, endTime, text))
                 }
                 allText += text + " "
             }
