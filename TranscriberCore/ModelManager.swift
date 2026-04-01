@@ -17,7 +17,7 @@ public final class ModelManager {
     public var isDownloading = false
     public var downloadError: String?
 
-    public nonisolated(unsafe) static let availableModels: [ModelInfo] = [
+    public static let availableModels: [ModelInfo] = [
         ModelInfo(
             id: "large-v3-turbo",
             displayName: "Fast (recommended)",
