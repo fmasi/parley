@@ -10,6 +10,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/orchetect/SettingsAccess", from: "2.0.0"),
+        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.18.0"),
     ],
     targets: [
         .target(
@@ -18,6 +19,9 @@ let package = Package(
         ),
         .target(
             name: "TranscriberCore",
+            dependencies: [
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ],
             path: "TranscriberCore"
         ),
         .executableTarget(
