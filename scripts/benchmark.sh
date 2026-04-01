@@ -1,7 +1,8 @@
 #!/bin/bash
 # Benchmark script: WhisperKit vs Python transcription pipeline
-# Run with: sudo bash scripts/benchmark.sh
-# Requires: sudo (for powermetrics), conda env transcribe-bundle (for Python baseline)
+# Run with: bash scripts/benchmark.sh
+# Will prompt for sudo password (needed for powermetrics only).
+# Requires: conda env transcribe-bundle (for Python baseline)
 #
 # Outputs:
 #   ~/.audio-transcribe/benchmark/
@@ -15,18 +16,28 @@
 
 set -e
 
+# Pre-authenticate sudo (for powermetrics) so it doesn't prompt mid-run
+echo "This script needs sudo for powermetrics (hardware telemetry)."
+sudo -v || { echo "ERROR: sudo required for powermetrics"; exit 1; }
+
+# Keep sudo alive in background (refreshes every 4 minutes)
+(while true; do sudo -n true; sleep 240; done) &
+SUDO_KEEPALIVE_PID=$!
+trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
+
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-REPORT_DIR="$HOME/.audio-transcribe/benchmark"
+USER_HOME="$HOME"
+REPORT_DIR="$USER_HOME/.audio-transcribe/benchmark"
 REPORT="$REPORT_DIR/report-${TIMESTAMP}.txt"
 TELEMETRY_DIR="$REPORT_DIR/telemetry-${TIMESTAMP}"
 
 # Audio files to benchmark (edit these paths)
-AUDIO_1_SYSTEM="$HOME/Documents/Recordings/2026-04-01/152936-Jon Interview.wav"
-AUDIO_1_MIC="$HOME/Documents/Recordings/2026-04-01/152936-Jon Interview_mic.wav"
+AUDIO_1_SYSTEM="$USER_HOME/Documents/Recordings/2026-04-01/152936-Jon Interview.wav"
+AUDIO_1_MIC="$USER_HOME/Documents/Recordings/2026-04-01/152936-Jon Interview_mic.wav"
 AUDIO_1_NAME="Jon Interview (38min)"
 
-AUDIO_2_SYSTEM="$HOME/Documents/Recordings/2026-04-01/130007-gustavo part 2.wav"
-AUDIO_2_MIC="$HOME/Documents/Recordings/2026-04-01/130007-gustavo part 2_mic.wav"
+AUDIO_2_SYSTEM="$USER_HOME/Documents/Recordings/2026-04-01/130007-gustavo part 2.wav"
+AUDIO_2_MIC="$USER_HOME/Documents/Recordings/2026-04-01/130007-gustavo part 2_mic.wav"
 AUDIO_2_NAME="Gustavo Part 2 (17min)"
 
 WHISPERKIT_BIN=".build/debug/AudioTranscribe"
@@ -63,7 +74,7 @@ start_telemetry() {
     (
         local start_epoch
         start_epoch=$(date +%s)
-        powermetrics \
+        sudo powermetrics \
             --samplers cpu_power,gpu_power,ane_power \
             -i 2000 2>/dev/null | while IFS= read -r line; do
             # Parse power lines as they appear
