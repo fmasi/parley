@@ -18,6 +18,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 final class LaunchGate {
     var permissionsReady = false
     let permissionManager: PermissionManager
+    let modelManager = ModelManager()
 
     init() {
         let checker = SystemPermissionChecker()
@@ -26,11 +27,12 @@ final class LaunchGate {
 
     func checkAndGate() async {
         await permissionManager.checkAll()
-        if permissionManager.allRequiredGranted {
+        if permissionManager.allRequiredGranted && modelManager.isModelDownloaded("large-v3-turbo") {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(
-                permissionManager: permissionManager
+                permissionManager: permissionManager,
+                modelManager: modelManager
             ) { [weak self] in
                 self?.permissionsReady = true
             }

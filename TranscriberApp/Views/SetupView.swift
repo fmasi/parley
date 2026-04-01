@@ -3,7 +3,12 @@ import TranscriberCore
 
 struct SetupView: View {
     @Bindable var permissionManager: PermissionManager
+    let modelManager: ModelManager
     let onReady: () -> Void
+
+    private var canContinue: Bool {
+        permissionManager.allRequiredGranted && modelManager.isModelDownloaded("large-v3-turbo")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -51,17 +56,67 @@ struct SetupView: View {
                     status: permissionManager.notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
                 )
+
+                Divider()
+
+                Text("Transcription Model")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                ModelDownloadRow(modelManager: modelManager)
             }
 
             HStack {
                 Spacer()
                 Button("Continue") { onReady() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!permissionManager.allRequiredGranted)
+                    .disabled(!canContinue)
             }
         }
         .padding(24)
         .frame(width: 420)
+    }
+}
+
+private struct ModelDownloadRow: View {
+    let modelManager: ModelManager
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .frame(width: 20)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Whisper Model").fontWeight(.medium)
+                if modelManager.isDownloading {
+                    ProgressView(value: modelManager.downloadProgress)
+                        .frame(width: 150)
+                } else if let error = modelManager.downloadError {
+                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
+                } else {
+                    Text("Required for transcription (~1.6 GB)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if modelManager.isModelDownloaded("large-v3-turbo") {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else if modelManager.isDownloading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button(modelManager.downloadError != nil ? "Retry" : "Download") {
+                    Task {
+                        try? await modelManager.downloadModel("large-v3-turbo")
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
     }
 }
 

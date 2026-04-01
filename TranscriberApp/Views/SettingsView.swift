@@ -43,6 +43,14 @@ struct SettingsView: View {
                 )
             }
 
+            Section("Transcription Model") {
+                Picker("Model", selection: $config.whisperModel) {
+                    ForEach(ModelManager.availableModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+            }
+
             Section("Recording") {
                 TextField("Recording Directory", text: $config.recordingDirectory)
                 Picker("Output Format", selection: $config.outputFormat) {
