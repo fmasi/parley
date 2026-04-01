@@ -524,29 +524,12 @@ struct EngineBenchmarkCLI {
         }
 
         if engines.contains("whisper-cpp") {
-            let modelDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".audio-transcribe/models")
-            let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
-            if FileManager.default.fileExists(atPath: ggmlModel.path) {
-                print("\n  SwiftWhisper: GGML model found")
-            } else {
-                print("\n  SwiftWhisper: GGML model NOT found. Downloading (~1.6GB)...")
-                let downloadURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-                let result = await Task.detached {
-                    let proc = Process()
-                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-                    proc.arguments = ["-L", "-o", ggmlModel.path, "--progress-bar", downloadURL]
-                    try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
-                    try? proc.run()
-                    proc.waitUntilExit()
-                    return proc.terminationStatus
-                }.value
-                if result == 0 {
-                    print("  SwiftWhisper: download complete")
-                } else {
-                    print("  SwiftWhisper: download failed — will skip benchmark")
-                }
-            }
+            // NOTE: SwiftWhisper 1.2.0 bundles whisper.cpp with WHISPER_N_MEL=80,
+            // but large-v3-turbo requires 128 mels. This causes a fatal assertion.
+            // Skipping until SwiftWhisper updates to a newer whisper.cpp.
+            print("\n  SwiftWhisper: SKIPPED — SwiftWhisper 1.2.0 doesn't support large-v3-turbo (needs 128 mels, has 80)")
+            print("  Will test when SwiftWhisper updates to whisper.cpp with 128-mel support")
+            engines.remove("whisper-cpp")
         }
 
         if engines.contains("speech") {
