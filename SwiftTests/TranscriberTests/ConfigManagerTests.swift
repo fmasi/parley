@@ -79,13 +79,13 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { config in
-            config.hfToken = "hf_new_token"
+            config.whisperModel = "large-v3"
         }
-        #expect(manager.config.hfToken == "hf_new_token")
+        #expect(manager.config.whisperModel == "large-v3")
 
         // Verify persisted
         let reloaded = ConfigManager(configDir: dir)
-        #expect(reloaded.config.hfToken == "hf_new_token")
+        #expect(reloaded.config.whisperModel == "large-v3")
     }
 
     // MARK: - Partial JSON merges with defaults (unknown keys ignored)
@@ -103,8 +103,7 @@ struct ConfigManagerTests {
             "output_format": "json",
             "launch_on_startup": true,
             "log_level": "info",
-            "suppress_capture_warning": false,
-            "hf_token": ""
+            "suppress_capture_warning": false
         }
         """
         let configFile = dir.appendingPathComponent("config.json")
@@ -141,9 +140,9 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { $0.outputFormat = "srt" }
-        manager.update { $0.hfToken = "token123" }
+        manager.update { $0.whisperModel = "large-v3" }
 
         #expect(manager.config.outputFormat == "srt")
-        #expect(manager.config.hfToken == "token123")
+        #expect(manager.config.whisperModel == "large-v3")
     }
 }

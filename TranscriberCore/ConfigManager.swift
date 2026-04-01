@@ -24,7 +24,7 @@ public final class ConfigManager {
             Logger.config.info("Config not found or invalid, using defaults")
             return .default
         }
-        Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), hfToken: \(config.hfToken.isEmpty ? "not set" : "set", privacy: .public)")
+        Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), whisperModel: \(config.whisperModel, privacy: .public)")
         return config
     }
 

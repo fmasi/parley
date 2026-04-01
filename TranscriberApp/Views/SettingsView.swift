@@ -63,11 +63,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Speaker Diarization") {
-                SecureField("HuggingFace Token", text: $config.hfToken)
-                    .textContentType(.password)
-            }
-
             Section("Startup") {
                 Toggle("Launch at Login", isOn: $config.launchOnStartup)
                     .onChange(of: config.launchOnStartup) { _, enabled in

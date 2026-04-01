@@ -3,7 +3,8 @@ import os
 import TranscriberCore
 
 struct TranscriptionResult {
-    let jsonPath: URL
+    let outputPath: URL
+    let jsonPath: URL?
 }
 
 final class TranscriptionRunner {
@@ -24,8 +25,8 @@ final class TranscriptionRunner {
     func run(
         systemAudio: URL,
         micAudio: URL?,
-        outputDirectory: URL,
-        hfToken: String = ""
+        outputFormat: String,
+        outputDirectory: URL
     ) async throws -> TranscriptionResult {
         let resources = Bundle.main.resourceURL!
         let pythonHome = resources.appendingPathComponent("python")
@@ -43,7 +44,8 @@ final class TranscriptionRunner {
         }
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
-        let jsonFile = outputDirectory.appendingPathComponent(baseName + ".json")
+        let outputFile = outputDirectory
+            .appendingPathComponent(baseName + "." + outputFormat)
 
         var arguments = [
             transcribeScript.path,
@@ -52,14 +54,11 @@ final class TranscriptionRunner {
         if let mic = micAudio {
             arguments += ["-i", mic.path]
         }
-        arguments += ["-f", "json"]
-        arguments += ["-o", jsonFile.path]
-        if !hfToken.isEmpty {
-            arguments += ["--hf-token", hfToken]
-        }
+        arguments += ["-f", outputFormat]
+        arguments += ["-o", outputFile.path]
 
         let inputCount = micAudio != nil ? 2 : 1
-        Logger.transcription.info("Launching transcription — format: json, inputs: \(inputCount)")
+        Logger.transcription.info("Launching transcription — format: \(outputFormat, privacy: .public), inputs: \(inputCount)")
         Logger.transcription.debug("Python args: \(arguments, privacy: .private)")
 
         let process = Process()
@@ -136,7 +135,10 @@ final class TranscriptionRunner {
 
                 Logger.transcription.info("Transcription complete — exit code: 0, duration: \(seconds)s")
 
+                let jsonFile = outputDirectory
+                    .appendingPathComponent(baseName + ".json")
                 cont.resume(returning: TranscriptionResult(
+                    outputPath: outputFile,
                     jsonPath: jsonFile
                 ))
             }
