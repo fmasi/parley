@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Download curated test audio files for ASR engine benchmarking.
 
-Downloads:
-  - English clean speech (LibriVox Gettysburg Address)
-  - French, Portuguese, Spanish samples (FLEURS dataset)
-  - English noisy/accented (Harvard sentences, 8kHz telephony)
+Downloads from HuggingFace datasets-server API:
+  - English: LibriSpeech (openslr/librispeech_asr)
+  - French, Portuguese, Spanish: MLS (facebook/multilingual_librispeech)
+  - Korean: Zeroth Korean (kresnik/zeroth_korean)
+  - Multi-speaker: AMI Meeting Corpus (edinburghcstr/ami)
 
 Files saved to: ~/.audio-transcribe/benchmark/test-audio/
 """
 
 import json
-import os
 import urllib.request
 from pathlib import Path
 
@@ -18,6 +18,9 @@ TEST_DIR = Path.home() / ".audio-transcribe" / "benchmark" / "test-audio"
 TEST_DIR.mkdir(parents=True, exist_ok=True)
 
 GROUND_TRUTH = {}
+
+# User-Agent required by some servers
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ASR-Benchmark/1.0"
 
 
 def download(url: str, filename: str, description: str) -> bool:
@@ -27,7 +30,10 @@ def download(url: str, filename: str, description: str) -> bool:
         return True
     print(f"  Downloading {description}...")
     try:
-        urllib.request.urlretrieve(url, str(path))
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+        path.write_bytes(data)
         size_mb = path.stat().st_size / (1024 * 1024)
         print(f"  [done] {filename} ({size_mb:.1f} MB)")
         return True
@@ -36,57 +42,82 @@ def download(url: str, filename: str, description: str) -> bool:
         return False
 
 
-def download_fleurs(lang_code: str, lang_name: str, count: int = 5):
-    """Download multiple FLEURS samples for a language."""
-    print(f"\n  Fetching {count} {lang_name} samples from FLEURS...")
+def download_hf_rows(
+    dataset: str,
+    config: str,
+    split: str,
+    lang_code: str,
+    lang_name: str,
+    text_key: str = "text",
+    count: int = 5,
+):
+    """Download audio samples from HuggingFace datasets-server API."""
+    print(f"\n  Fetching {count} {lang_name} samples from {dataset}...")
     try:
-        url = f"https://datasets-server.huggingface.co/rows?dataset=google/fleurs&config={lang_code}&split=test&offset=0&length={count}"
-        with urllib.request.urlopen(url) as resp:
+        url = (
+            f"https://datasets-server.huggingface.co/rows"
+            f"?dataset={dataset}&config={config}&split={split}"
+            f"&offset=0&length={count}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req) as resp:
             data = json.load(resp)
 
         transcripts = []
         for i, row_data in enumerate(data["rows"]):
             row = row_data["row"]
-            audio_url = row["audio"][0]["src"]
-            transcript = row["transcription"]
-            filename = f"{lang_code.replace('_', '-')}-fleurs-{i:02d}.wav"
+            audio_info = row["audio"]
+            audio_url = audio_info[0]["src"] if isinstance(audio_info, list) else audio_info.get("src", "")
+            transcript = row.get(text_key, "")
+            filename = f"{lang_code}-{i:02d}.wav"
             path = TEST_DIR / filename
             if not path.exists():
-                urllib.request.urlretrieve(audio_url, str(path))
+                audio_req = urllib.request.Request(audio_url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(audio_req) as audio_resp:
+                    path.write_bytes(audio_resp.read())
+            size_kb = path.stat().st_size / 1024
             transcripts.append({"file": filename, "text": transcript})
-            print(f"  [done] {filename}: {transcript[:60]}...")
+            print(f"  [done] {filename} ({size_kb:.0f} KB): {transcript[:60]}...")
 
         GROUND_TRUTH[lang_name] = transcripts
     except Exception as e:
-        print(f"  [fail] FLEURS {lang_name}: {e}")
+        print(f"  [fail] {lang_name}: {e}")
 
 
 def download_ami_sample():
-    """Download a single AMI meeting segment for diarization testing (multi-speaker)."""
-    print("  Fetching AMI meeting sample from HuggingFace...")
+    """Download AMI meeting segments for diarization testing (multi-speaker)."""
+    print("  Fetching AMI meeting samples from HuggingFace...")
     try:
-        url = "https://datasets-server.huggingface.co/rows?dataset=diarizers-community/ami&config=headset-single&split=test&offset=0&length=1"
-        with urllib.request.urlopen(url) as resp:
+        # Get a few consecutive utterances from the same meeting
+        url = (
+            "https://datasets-server.huggingface.co/rows"
+            "?dataset=edinburghcstr/ami&config=ihm&split=test"
+            "&offset=0&length=5"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req) as resp:
             data = json.load(resp)
 
-        row = data["rows"][0]["row"]
-        audio_url = row["audio"][0]["src"]
-        filename = "en-ami-meeting-00.wav"
-        path = TEST_DIR / filename
-        if not path.exists():
-            urllib.request.urlretrieve(audio_url, str(path))
-            size_mb = path.stat().st_size / (1024 * 1024)
-            print(f"  [done] {filename} ({size_mb:.1f} MB)")
-        else:
-            print(f"  [skip] {filename} already exists")
+        for i, row_data in enumerate(data["rows"]):
+            row = row_data["row"]
+            audio_url = row["audio"][0]["src"] if isinstance(row["audio"], list) else row["audio"].get("src", "")
+            text = row.get("text", "")
+            speaker = row.get("speaker_id", "unknown")
+            filename = f"en-ami-{i:02d}.wav"
+            path = TEST_DIR / filename
+            if not path.exists():
+                audio_req = urllib.request.Request(audio_url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(audio_req) as audio_resp:
+                    path.write_bytes(audio_resp.read())
+            size_kb = path.stat().st_size / 1024
+            print(f"  [done] {filename} ({size_kb:.0f} KB) speaker={speaker}: {text[:50]}")
 
-        # AMI has speaker labels but we store basic info for diarization reference
-        num_speakers = row.get("num_speakers", "unknown")
-        print(f"  Speakers: {num_speakers}")
-        GROUND_TRUTH["AMI meeting"] = [{"file": filename, "speakers": num_speakers}]
+        GROUND_TRUTH["AMI meeting"] = [
+            {"file": f"en-ami-{i:02d}.wav", "text": row_data["row"].get("text", ""), "speaker": row_data["row"].get("speaker_id", "")}
+            for i, row_data in enumerate(data["rows"])
+        ]
     except Exception as e:
         print(f"  [fail] AMI sample: {e}")
-        print("  (AMI dataset may require HuggingFace authentication)")
 
 
 def main():
@@ -95,48 +126,78 @@ def main():
     print("╚═══════════════════════════════════════════╝")
     print(f"\nTarget: {TEST_DIR}")
 
-    # English clean
-    print("\n── English (clean speech) ──")
+    # English — LibriSpeech test-clean (openslr/librispeech_asr)
+    print("\n── English (LibriSpeech) ──")
+    download_hf_rows(
+        dataset="openslr/librispeech_asr",
+        config="clean",
+        split="test",
+        lang_code="en",
+        lang_name="English",
+        text_key="text",
+        count=5,
+    )
+
+    # English — LibriVox Gettysburg Address (long-form)
+    print("\n── English (long-form) ──")
     download(
         "https://archive.org/download/gettysburg_johng_librivox/gettysburg_address.mp3",
         "en-clean-gettysburg.mp3",
         "Gettysburg Address (LibriVox, ~2.5 min)",
     )
-    GROUND_TRUTH["English clean"] = "Four score and seven years ago our fathers brought forth on this continent..."
 
-    # English telephony
-    print("\n── English (telephony quality, 8kHz) ──")
-    download(
-        "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav",
-        "en-telephony-harvard.wav",
-        "Harvard sentences (female, 8kHz)",
+    # French — MLS (facebook/multilingual_librispeech)
+    print("\n── French (MLS) ──")
+    download_hf_rows(
+        dataset="facebook/multilingual_librispeech",
+        config="french",
+        split="test",
+        lang_code="fr",
+        lang_name="French",
+        text_key="transcript",
     )
 
-    # FLEURS multilingual
-    print("\n── French ──")
-    download_fleurs("fr_fr", "French")
+    # Portuguese — MLS
+    print("\n── Portuguese (MLS) ──")
+    download_hf_rows(
+        dataset="facebook/multilingual_librispeech",
+        config="portuguese",
+        split="test",
+        lang_code="pt",
+        lang_name="Portuguese",
+        text_key="transcript",
+    )
 
-    print("\n── Portuguese ──")
-    download_fleurs("pt_br", "Portuguese")
+    # Spanish — MLS
+    print("\n── Spanish (MLS) ──")
+    download_hf_rows(
+        dataset="facebook/multilingual_librispeech",
+        config="spanish",
+        split="test",
+        lang_code="es",
+        lang_name="Spanish",
+        text_key="transcript",
+    )
 
-    print("\n── Spanish ──")
-    download_fleurs("es_419", "Spanish")
-
-    print("\n── Turkish ──")
-    download_fleurs("tr_tr", "Turkish")
-
-    print("\n── Finnish ──")
-    download_fleurs("fi_fi", "Finnish")
-
-    print("\n── Korean ──")
-    download_fleurs("ko_kr", "Korean")
-
-    print("\n── Japanese ──")
-    download_fleurs("ja_jp", "Japanese")
+    # Korean — Zeroth Korean (kresnik/zeroth_korean)
+    print("\n── Korean (Zeroth) ──")
+    download_hf_rows(
+        dataset="kresnik/zeroth_korean",
+        config="default",
+        split="test",
+        lang_code="ko",
+        lang_name="Korean",
+        text_key="text",
+    )
 
     # Multi-speaker meeting audio for diarization testing
     print("\n── Multi-speaker (AMI Meeting Corpus) ──")
     download_ami_sample()
+
+    # Note about missing languages
+    print("\n── Notes ──")
+    print("  Turkish (tr) and Japanese (ja) require gated HuggingFace datasets.")
+    print("  To add them, use `huggingface-cli login` and install the `datasets` library.")
 
     # Save ground truth
     gt_path = TEST_DIR / "ground-truth.json"
