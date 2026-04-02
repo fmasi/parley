@@ -95,10 +95,10 @@ enum CLIRename {
     private static func playAudioSample(file: URL, start: Double, duration: Double) {
         guard duration > 0 else { return }
 
+        // afplay has no seek option — only --time for duration and --rate for speed.
+        // Play from start of file, capped at 10s. Full seek would require AVAudioPlayer.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        // afplay supports --time for duration but not seek
-        // Play from beginning for the duration as a reasonable approximation
         process.arguments = [
             file.path,
             "--time", String(format: "%.1f", min(duration, 10.0)),
@@ -113,28 +113,33 @@ enum CLIRename {
     }
 
     private static func applyRenames(_ mapping: [String: String], jsonPath: URL) {
-        guard let data = try? Data(contentsOf: jsonPath),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var segments = json["segments"] as? [[String: Any]]
-        else { return }
-
-        for i in segments.indices {
-            if let speaker = segments[i]["speaker"] as? String,
-               let newName = mapping[speaker] {
-                segments[i]["speaker"] = newName
+        do {
+            let data = try Data(contentsOf: jsonPath)
+            guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var segments = json["segments"] as? [[String: Any]]
+            else {
+                Logger.files.error("Failed to parse JSON for rename: \(jsonPath.lastPathComponent, privacy: .public)")
+                return
             }
-        }
-        json["segments"] = segments
 
-        // Also store the mapping in metadata
-        var metadata = json["metadata"] as? [String: Any] ?? [:]
-        metadata["speaker_names"] = mapping
-        json["metadata"] = metadata
+            for i in segments.indices {
+                if let speaker = segments[i]["speaker"] as? String,
+                   let newName = mapping[speaker] {
+                    segments[i]["speaker"] = newName
+                }
+            }
+            json["segments"] = segments
 
-        if let updatedData = try? JSONSerialization.data(
-            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? updatedData.write(to: jsonPath)
+            var metadata = json["metadata"] as? [String: Any] ?? [:]
+            metadata["speaker_names"] = mapping
+            json["metadata"] = metadata
+
+            let updatedData = try JSONSerialization.data(
+                withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+            )
+            try updatedData.write(to: jsonPath, options: .atomic)
+        } catch {
+            Logger.files.error("Failed to apply renames: \(error, privacy: .public)")
         }
     }
 

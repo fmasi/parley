@@ -12,21 +12,21 @@ struct CLIHandlerTests {
             return
         }
         #expect(opts.inputs == ["system.wav"])
-        #expect(opts.output == nil)
+        #expect(opts.outputDir == nil)
         #expect(opts.format == "json")
         #expect(opts.noDiarize == false)
         #expect(opts.engine == nil)
     }
 
     @Test func parseTranscribeDualInput() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "system.wav", "-i", "mic.wav", "-f", "srt", "-o", "out.json"]
+        let args = ["AudioTranscribe", "transcribe", "-i", "system.wav", "-i", "mic.wav", "-f", "srt", "--output-dir", "/tmp/out"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
             return
         }
         #expect(opts.inputs == ["system.wav", "mic.wav"])
-        #expect(opts.output == "out.json")
+        #expect(opts.outputDir == "/tmp/out")
         #expect(opts.format == "srt")
     }
 

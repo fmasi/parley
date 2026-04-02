@@ -73,6 +73,6 @@ public enum EngineID: String, Codable, CaseIterable, Sendable, Identifiable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode(String.self)
-        self = EngineID(rawValue: raw) ?? .default
+        self = EngineID(rawValue: raw) ?? .resolvedDefault
     }
 }

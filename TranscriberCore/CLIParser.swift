@@ -2,7 +2,7 @@ import Foundation
 
 public struct TranscribeOptions {
     public let inputs: [String]
-    public let output: String?
+    public let outputDir: String?
     public let format: String
     public let noDiarize: Bool
     public let engine: String?
@@ -55,7 +55,7 @@ public enum CLIParser {
 
     private static func parseTranscribe(_ args: [String]) throws -> TranscribeOptions {
         var inputs: [String] = []
-        var output: String?
+        var outputDir: String?
         var format = "json"
         var noDiarize = false
         var engine: String?
@@ -67,10 +67,10 @@ public enum CLIParser {
                 i += 1
                 guard i < args.count else { throw ParseError.missingRequiredArg("-i") }
                 inputs.append(args[i])
-            case "-o", "--output":
+            case "--output-dir":
                 i += 1
-                guard i < args.count else { throw ParseError.missingRequiredArg("-o") }
-                output = args[i]
+                guard i < args.count else { throw ParseError.missingRequiredArg("--output-dir") }
+                outputDir = args[i]
             case "-f", "--format":
                 i += 1
                 guard i < args.count else { throw ParseError.missingRequiredArg("-f") }
@@ -90,7 +90,7 @@ public enum CLIParser {
         guard !inputs.isEmpty else { throw ParseError.missingRequiredArg("-i") }
 
         return TranscribeOptions(
-            inputs: inputs, output: output, format: format,
+            inputs: inputs, outputDir: outputDir, format: format,
             noDiarize: noDiarize, engine: engine
         )
     }

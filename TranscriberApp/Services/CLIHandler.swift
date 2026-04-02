@@ -51,8 +51,8 @@ enum CLIHandler {
         let micAudio = inputURLs.count > 1 ? inputURLs[1] : nil
 
         let outputDir: URL
-        if let output = opts.output {
-            outputDir = URL(fileURLWithPath: output).deletingLastPathComponent()
+        if let output = opts.outputDir {
+            outputDir = URL(fileURLWithPath: output)
         } else {
             outputDir = systemAudio.deletingLastPathComponent()
         }
@@ -105,7 +105,7 @@ enum CLIHandler {
         Subcommands:
           transcribe  Transcribe audio files
             -i <file>        Input audio file (required, can specify twice for dual-stream)
-            -o <file>        Output file path (default: auto from input name)
+            --output-dir <dir>  Output directory (default: same as input file)
             -f <format>      Output format: json, srt, txt (default: json)
             --engine <id>    Engine: speech_analyzer, fluid_audio, whisper_cpp (default: from config)
             --no-diarize     Skip speaker diarization

@@ -5,7 +5,7 @@ import FluidAudio
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models download automatically on first use (~10MB).
-public final class FluidAudioDiarizer: DiarizationProvider, @unchecked Sendable {
+public actor FluidAudioDiarizer: DiarizationProvider {
     private var manager: OfflineDiarizerManager?
 
     public init() {}

@@ -69,9 +69,9 @@ struct EngineIDTests {
         #expect(EngineID.availableEngines.contains(resolved))
     }
 
-    @Test func decodesUnknownEngineToDefault() throws {
+    @Test func decodesUnknownEngineToResolvedDefault() throws {
         let json = Data("\"some_future_engine\"".utf8)
         let decoded = try JSONDecoder().decode(EngineID.self, from: json)
-        #expect(decoded == .default)
+        #expect(decoded == .resolvedDefault)
     }
 }

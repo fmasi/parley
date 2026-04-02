@@ -149,7 +149,7 @@ public actor WhisperCppEngine: TranscriptionEngine {
             throw WhisperCppError.audioLoadFailed("Cannot create sample rate converter")
         }
 
-        let outputFrameCount = AVAudioFrameCount(duration * targetRate)
+        let outputFrameCount = AVAudioFrameCount(ceil(duration * targetRate))
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputFrameCount) else {
             throw WhisperCppError.audioLoadFailed("Cannot create output buffer")
         }

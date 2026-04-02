@@ -45,15 +45,8 @@ struct SettingsView: View {
 
             Section("Transcription Engine") {
                 Picker("Engine", selection: $config.engine) {
-                    ForEach(EngineID.allCases) { engine in
-                        HStack {
-                            Text(engine.descriptor.displayName)
-                            if !engine.descriptor.isAvailableOnThisOS {
-                                Text("(requires macOS \(engine.descriptor.minimumMacOS))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                    ForEach(EngineID.availableEngines) { engine in
+                        Text(engine.descriptor.displayName)
                         .tag(engine)
                     }
                 }
