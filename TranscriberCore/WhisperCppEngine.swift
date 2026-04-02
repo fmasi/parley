@@ -67,11 +67,35 @@ public actor WhisperCppEngine: TranscriptionEngine {
 
     // MARK: - Lifecycle
 
+    private static let defaultDownloadURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin")!
+
+    /// Download the GGML model file if it doesn't exist on disk.
+    private func downloadModelIfNeeded() async throws {
+        guard !FileManager.default.fileExists(atPath: modelPath.path) else { return }
+
+        let dir = modelPath.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        Logger.transcription.info("Downloading whisper.cpp model: \(Self.defaultDownloadURL.lastPathComponent, privacy: .public) (~1.6GB)")
+
+        let (tempURL, response) = try await URLSession.shared.download(from: Self.defaultDownloadURL)
+
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw WhisperCppError.downloadFailed("HTTP \(code)")
+        }
+
+        try FileManager.default.moveItem(at: tempURL, to: modelPath)
+        Logger.transcription.info("whisper.cpp model downloaded to: \(self.modelPath.path, privacy: .private)")
+    }
+
     private func ensureLoaded() async throws -> WhisperContext {
         if let ctx = context {
             Logger.transcription.debug("whisper.cpp context already loaded")
             return ctx
         }
+
+        try await downloadModelIfNeeded()
 
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading whisper.cpp model: \(self.modelPath.lastPathComponent, privacy: .public)")
@@ -143,10 +167,12 @@ public actor WhisperCppEngine: TranscriptionEngine {
 
     public enum WhisperCppError: LocalizedError {
         case audioLoadFailed(String)
+        case downloadFailed(String)
 
         public var errorDescription: String? {
             switch self {
             case .audioLoadFailed(let msg): return "whisper.cpp audio load failed: \(msg)"
+            case .downloadFailed(let msg): return "whisper.cpp model download failed: \(msg)"
             }
         }
     }

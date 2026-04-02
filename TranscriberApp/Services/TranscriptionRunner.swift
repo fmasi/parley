@@ -26,7 +26,7 @@ final class TranscriptionRunner {
 
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
-    private var diarizer: (any DiarizationProvider)?
+    private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
 
     private let wavHeaderSize = 44
 
