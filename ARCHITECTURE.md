@@ -10,7 +10,7 @@ The app has three layers:
    - `<base>.wav` — system/remote audio
    - `<base>_mic.wav` — local microphone (at device native rate)
 
-3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. Three swappable engines are available: Apple SpeechAnalyzer (default, macOS 26+), FluidAudio (Parakeet, CoreML/ANE), and whisper.cpp (GGML, Metal GPU). Engine selection is stored in config and exposed in Settings. Each audio stream is transcribed independently, segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
+3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. Two swappable engines are available: Apple SpeechAnalyzer (default, macOS 26+) and FluidAudio (Parakeet, CoreML/ANE). Engine selection is stored in config and exposed in Settings. Each audio stream is transcribed independently, segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -29,8 +29,7 @@ The app has three layers:
 │                                                              │
 │    Engines:                                                  │
 │      ├── SpeechAnalyzerEngine (Apple, macOS 26+, no download)│
-│      ├── FluidAudioEngine (Parakeet, CoreML/ANE, ~500MB)    │
-│      └── WhisperCppEngine (whisper.cpp, Metal GPU, ~1.6GB)  │
+│      └── FluidAudioEngine (Parakeet, CoreML/ANE, ~500MB)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,7 +51,7 @@ The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some
 Unlike BlackHole/Loopback solutions, ScreenCaptureKit captures system audio natively with a single macOS permission. `.screen` output type must be registered even for audio-only capture — this is a ScreenCaptureKit requirement.
 
 **6. Fully Swift-native, swappable engines**
-All three transcription engines are Swift-native with no Python runtime. SpeechAnalyzer uses Apple's system framework (no download). FluidAudio runs the Parakeet model on CoreML/ANE. whisper.cpp uses the GGML model format with Metal GPU acceleration. Engines conform to the `TranscriptionEngine` protocol and are selected via `EngineID` in config.
+Both transcription engines are Swift-native with no Python runtime. SpeechAnalyzer uses Apple's system framework (no download). FluidAudio runs the Parakeet model on CoreML/ANE. Engines conform to the `TranscriptionEngine` protocol and are selected via `EngineID` in config.
 
 ## Source Layout
 
@@ -81,7 +80,6 @@ TranscriberCore/                 Shared logic target
   TranscriptionEngine.swift      Protocol for swappable transcription engines
   FluidAudioEngine.swift         FluidAudio/Parakeet engine (CoreML/ANE)
   SpeechAnalyzerEngine.swift     Apple SpeechAnalyzer engine (macOS 26+)
-  WhisperCppEngine.swift         whisper.cpp engine (GGML, Metal GPU)
   DiarizationProvider.swift      Protocol for speaker diarization
   WavFileWriter.swift            WAV file writing with deferred sample rate
   AudioDeviceEnumerator.swift    Lists input devices via AVCaptureDevice

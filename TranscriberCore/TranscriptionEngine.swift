@@ -9,7 +9,7 @@ public enum AudioSourceType: Sendable {
 }
 
 /// Protocol for swappable transcription engines.
-/// Implementations: FluidAudioEngine, WhisperCppEngine, SpeechAnalyzerEngine
+/// Implementations: FluidAudioEngine, SpeechAnalyzerEngine
 public protocol TranscriptionEngine: Sendable {
     /// Human-readable engine name for logging and UI.
     var name: String { get }

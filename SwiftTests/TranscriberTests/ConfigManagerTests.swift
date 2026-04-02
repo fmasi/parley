@@ -140,9 +140,9 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { $0.outputFormat = "srt" }
-        manager.update { $0.engine = .whisperCpp }
+        manager.update { $0.engine = .fluidAudio }
 
         #expect(manager.config.outputFormat == "srt")
-        #expect(manager.config.engine == .whisperCpp)
+        #expect(manager.config.engine == .fluidAudio)
     }
 }

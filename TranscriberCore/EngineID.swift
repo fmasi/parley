@@ -22,7 +22,6 @@ public struct EngineDescriptor: Sendable {
 public enum EngineID: String, Codable, CaseIterable, Sendable, Identifiable {
     case speechAnalyzer = "speech_analyzer"
     case fluidAudio = "fluid_audio"
-    case whisperCpp = "whisper_cpp"
 
     public var id: String { rawValue }
 
@@ -46,25 +45,17 @@ public enum EngineID: String, Codable, CaseIterable, Sendable, Identifiable {
         case .speechAnalyzer:
             EngineDescriptor(
                 displayName: "Apple Speech (recommended)",
-                description: "Apple's built-in speech recognition. No download required.",
+                description: "Apple's on-device model. No download. Best for multilingual (JA, KO). Requires macOS 26.",
                 requiresModelDownload: false,
                 approximateSizeMB: 0,
                 minimumMacOS: "26.0"
             )
         case .fluidAudio:
             EngineDescriptor(
-                displayName: "FluidAudio",
-                description: "Fast Parakeet model via CoreML. Downloads ~500MB on first use.",
+                displayName: "FluidAudio (dev)",
+                description: "Fastest engine, best accuracy for European languages. Downloads ~500MB on first use. macOS 15+.",
                 requiresModelDownload: true,
                 approximateSizeMB: 500,
-                minimumMacOS: "15.0"
-            )
-        case .whisperCpp:
-            EngineDescriptor(
-                displayName: "Whisper (whisper.cpp)",
-                description: "OpenAI Whisper large-v3-turbo via whisper.cpp. Downloads ~1.6GB GGML model.",
-                requiresModelDownload: true,
-                approximateSizeMB: 1600,
                 minimumMacOS: "15.0"
             )
         }
