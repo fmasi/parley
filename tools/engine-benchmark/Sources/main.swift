@@ -130,6 +130,7 @@ func computeWER(reference: String, hypothesis: String) -> Double {
     }
 
     guard !refTokens.isEmpty else { return hypTokens.isEmpty ? 0 : 1 }
+    guard !hypTokens.isEmpty else { return 1 }  // all reference words are deletions = 100% WER
 
     let n = refTokens.count
     let m = hypTokens.count
