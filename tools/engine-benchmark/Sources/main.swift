@@ -25,7 +25,9 @@ struct BenchmarkResult {
     let segmentCount: Int
     let sampleSegments: [(start: Double, end: Double, text: String)]
     let audioDurationSeconds: Double
+    let fullText: String
     let error: String?
+    var wer: Double?  // set after benchmarking if ground truth available
 
     var realtimeFactor: Double {
         guard wallClockSeconds > 0 else { return 0 }
@@ -82,6 +84,102 @@ func getAudioDuration(url: URL) -> Double {
     return Double(file.length) / file.processingFormat.sampleRate
 }
 
+// ── WER (Word Error Rate) ──
+
+/// Detect if text is predominantly CJK (Japanese, Korean, Chinese) — these need character-level comparison.
+func isCJK(_ text: String) -> Bool {
+    let cjkCount = text.unicodeScalars.filter { s in
+        (0x3000...0x9FFF).contains(s.value) ||  // CJK Unified, Hiragana, Katakana
+        (0xAC00...0xD7AF).contains(s.value) ||  // Hangul syllables
+        (0xF900...0xFAFF).contains(s.value)      // CJK Compatibility
+    }.count
+    return cjkCount > text.unicodeScalars.count / 3
+}
+
+/// Normalize text for WER comparison: lowercase, strip punctuation, collapse whitespace.
+func normalizeForWER(_ text: String) -> String {
+    let lowered = text.lowercased()
+    // Keep apostrophes (contractions), remove other punctuation
+    let cleaned = lowered.unicodeScalars.map { s -> Character in
+        if CharacterSet.punctuationCharacters.contains(s) && s != "'" {
+            return " "
+        }
+        return Character(s)
+    }
+    return String(cleaned)
+        .components(separatedBy: .whitespaces)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+}
+
+/// Compute WER (word-level) or CER (character-level for CJK) using Levenshtein distance.
+/// Returns (substitutions + deletions + insertions) / reference_count.
+func computeWER(reference: String, hypothesis: String) -> Double {
+    let refNorm = normalizeForWER(reference)
+    let hypNorm = normalizeForWER(hypothesis)
+
+    // For CJK languages, compare character-by-character (CER)
+    let refTokens: [String]
+    let hypTokens: [String]
+    if isCJK(refNorm) {
+        refTokens = refNorm.replacingOccurrences(of: " ", with: "").map(String.init)
+        hypTokens = hypNorm.replacingOccurrences(of: " ", with: "").map(String.init)
+    } else {
+        refTokens = refNorm.split(separator: " ").map(String.init)
+        hypTokens = hypNorm.split(separator: " ").map(String.init)
+    }
+
+    guard !refTokens.isEmpty else { return hypTokens.isEmpty ? 0 : 1 }
+
+    let n = refTokens.count
+    let m = hypTokens.count
+
+    // 2-row DP for edit distance
+    var prev = Array(0...m)
+    var curr = [Int](repeating: 0, count: m + 1)
+
+    for i in 1...n {
+        curr[0] = i
+        for j in 1...m {
+            if refTokens[i - 1] == hypTokens[j - 1] {
+                curr[j] = prev[j - 1]
+            } else {
+                curr[j] = 1 + min(prev[j - 1], prev[j], curr[j - 1])
+            }
+        }
+        prev = curr
+    }
+
+    return Double(prev[m]) / Double(n)
+}
+
+/// Load ground truth from JSON file. Returns dict mapping filename -> reference text.
+func loadGroundTruth(path: URL) -> [String: String] {
+    guard let data = try? Data(contentsOf: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        print("WARNING: Could not load ground truth from \(path.path)")
+        return [:]
+    }
+
+    var result: [String: String] = [:]
+    for (_, value) in json {
+        if let text = value as? String {
+            // Bare string entry (e.g. "English clean": "Four score...")
+            // Can't match by filename, skip — these are informational only
+            continue
+        }
+        if let entries = value as? [[String: Any]] {
+            for entry in entries {
+                if let file = entry["file"] as? String,
+                   let text = entry["text"] as? String {
+                    result[file] = text
+                }
+            }
+        }
+    }
+    return result
+}
+
 // ── Engine: WhisperKit ──
 
 func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> BenchmarkResult {
@@ -115,12 +213,15 @@ func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> Benchma
             }
         }
 
+        let fullText = segments.map(\.2).joined(separator: " ")
+
         return BenchmarkResult(
             engine: "WhisperKit (CoreML, large-v3-turbo)",
             wallClockSeconds: seconds,
             segmentCount: segments.count,
             sampleSegments: Array(segments.prefix(3)),
             audioDurationSeconds: audioDuration,
+            fullText: fullText,
             error: nil
         )
     } catch {
@@ -132,6 +233,7 @@ func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: 0,
             sampleSegments: [],
             audioDurationSeconds: audioDuration,
+            fullText: "",
             error: error.localizedDescription
         )
     }
@@ -154,6 +256,7 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
                 segmentCount: 0,
                 sampleSegments: [],
                 audioDurationSeconds: audioDuration,
+                fullText: "",
                 error: "GGML model not found at \(ggmlModel.path)"
             )
         }
@@ -173,6 +276,7 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
+        let fullText = segments.map(\.text).joined(separator: " ")
         let sampleSegs = segments.prefix(3).map { seg in
             (seg.startTime, seg.endTime, seg.text)
         }
@@ -183,6 +287,7 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: segments.count,
             sampleSegments: Array(sampleSegs),
             audioDurationSeconds: audioDuration,
+            fullText: fullText,
             error: nil
         )
     } catch {
@@ -194,6 +299,7 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: 0,
             sampleSegments: [],
             audioDurationSeconds: audioDuration,
+            fullText: "",
             error: error.localizedDescription
         )
     }
@@ -255,6 +361,7 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: sentences.count,
             sampleSegments: sampleSegs,
             audioDurationSeconds: audioDuration,
+            fullText: result.text,
             error: nil
         )
     } catch {
@@ -266,6 +373,7 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: 0,
             sampleSegments: [],
             audioDurationSeconds: audioDuration,
+            fullText: "",
             error: error.localizedDescription
         )
     }
@@ -344,12 +452,14 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
+        let fullText = allText.trimmingCharacters(in: .whitespaces)
         return BenchmarkResult(
             engine: "SpeechAnalyzer (macOS 26, on-device)",
             wallClockSeconds: seconds,
             segmentCount: segmentCount,
             sampleSegments: sampleTexts,
             audioDurationSeconds: audioDuration,
+            fullText: fullText,
             error: nil
         )
     } catch {
@@ -361,6 +471,7 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
             segmentCount: 0,
             sampleSegments: [],
             audioDurationSeconds: audioDuration,
+            fullText: "",
             error: error.localizedDescription
         )
     }
@@ -392,7 +503,7 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
             return BenchmarkResult(
                 engine: "mlx-whisper (Python, large-v3, MLX GPU)",
                 wallClockSeconds: 0, segmentCount: 0, sampleSegments: [],
-                audioDurationSeconds: audioDuration,
+                audioDurationSeconds: audioDuration, fullText: "",
                 error: "Cannot extract transcribe.py from main branch"
             )
         }
@@ -442,7 +553,7 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
             return BenchmarkResult(
                 engine: "mlx-whisper (Python, large-v3, MLX GPU)",
                 wallClockSeconds: seconds, segmentCount: 0, sampleSegments: [],
-                audioDurationSeconds: audioDuration,
+                audioDurationSeconds: audioDuration, fullText: "",
                 error: "Exit code \(proc.terminationStatus): \(stderrStr.prefix(300))"
             )
         }
@@ -466,6 +577,8 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
         let sampleSegs = segments.prefix(3).map { seg in
             (seg["start"] as? Double ?? 0, seg["end"] as? Double ?? 0, seg["text"] as? String ?? "")
         }
+        let fullText = (json?["text"] as? String)
+            ?? segments.compactMap { $0["text"] as? String }.joined(separator: " ")
 
         // Cleanup
         try? FileManager.default.removeItem(at: scriptPath)
@@ -477,6 +590,7 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
             segmentCount: segments.count,
             sampleSegments: Array(sampleSegs),
             audioDurationSeconds: audioDuration,
+            fullText: fullText,
             error: nil
         )
     } catch {
@@ -487,7 +601,7 @@ func benchmarkMlxWhisper(audioPath: URL, audioDuration: Double) async -> Benchma
         return BenchmarkResult(
             engine: "mlx-whisper (Python, large-v3, MLX GPU)",
             wallClockSeconds: seconds, segmentCount: 0, sampleSegments: [],
-            audioDurationSeconds: audioDuration,
+            audioDurationSeconds: audioDuration, fullText: "",
             error: error.localizedDescription
         )
     }
@@ -503,8 +617,10 @@ func rpad(_ s: String, _ width: Int) -> String {
     s.count >= width ? s : String(repeating: " ", count: width - s.count) + s
 }
 
-func tableRow(_ engine: String, _ time: String, _ segs: String, _ rtf: String) -> String {
-    "\(pad(engine, 45)) \(rpad(time, 10)) \(rpad(segs, 8)) \(rpad(rtf, 8))"
+func tableRow(_ engine: String, _ time: String, _ segs: String, _ rtf: String, _ wer: String = "") -> String {
+    var row = "\(pad(engine, 45)) \(rpad(time, 10)) \(rpad(segs, 8)) \(rpad(rtf, 8))"
+    if !wer.isEmpty { row += " \(rpad(wer, 8))" }
+    return row
 }
 
 // ── Logging (tee to file + stdout) ──
@@ -533,6 +649,10 @@ func printResult(_ r: BenchmarkResult) {
     print("  Wall clock: \(minutes)m \(seconds)s (\(String(format: "%.1f", r.wallClockSeconds))s)")
     print("  Segments: \(r.segmentCount)")
     print("  Real-time factor: \(String(format: "%.1f", r.realtimeFactor))x real-time")
+    if let wer = r.wer {
+        let label = isCJK(r.fullText) ? "CER" : "WER"
+        print("  \(label): \(String(format: "%.1f", wer * 100))%")
+    }
     print("  Sample segments:")
     for seg in r.sampleSegments {
         let startTs = String(format: "%02d:%02d", Int(seg.start) / 60, Int(seg.start) % 60)
@@ -542,6 +662,7 @@ func printResult(_ r: BenchmarkResult) {
 }
 
 func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
+    let hasWER = results.contains { $0.wer != nil }
     var lines: [String] = []
     lines.append("ASR Engine Benchmark Report")
     lines.append("==========================")
@@ -551,14 +672,15 @@ func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
     lines.append("")
 
     // Summary table
-    lines.append(tableRow("Engine", "Time", "Segs", "RTF"))
-    lines.append(String(repeating: "─", count: 75))
+    lines.append(tableRow("Engine", "Time", "Segs", "RTF", hasWER ? "WER" : ""))
+    lines.append(String(repeating: "─", count: hasWER ? 85 : 75))
     for r in results {
         if r.error != nil {
-            lines.append(tableRow(r.engine, "ERROR", "-", "-"))
+            lines.append(tableRow(r.engine, "ERROR", "-", "-", hasWER ? "-" : ""))
         } else {
             let time = "\(Int(r.wallClockSeconds) / 60)m \(Int(r.wallClockSeconds) % 60)s"
-            lines.append(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor)))
+            let werStr = r.wer.map { String(format: "%.1f%%", $0 * 100) } ?? "-"
+            lines.append(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor), hasWER ? werStr : ""))
         }
     }
 
@@ -571,6 +693,10 @@ func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
             lines.append("Wall clock: \(String(format: "%.1f", r.wallClockSeconds))s")
             lines.append("Segments: \(r.segmentCount)")
             lines.append("Real-time factor: \(String(format: "%.1f", r.realtimeFactor))x")
+            if let wer = r.wer {
+                let label = isCJK(r.fullText) ? "CER" : "WER"
+                lines.append("\(label): \(String(format: "%.1f", wer * 100))%")
+            }
             lines.append("Sample output:")
             for seg in r.sampleSegments {
                 lines.append("  [\(String(format: "%.1f", seg.start))-\(String(format: "%.1f", seg.end))] \(seg.text)")
@@ -590,7 +716,7 @@ struct EngineBenchmarkCLI {
         let args = CommandLine.arguments
 
         guard args.count >= 2 else {
-            print("Usage: EngineBenchmark <audio.wav> [--engines whisperkit,whisper-cpp,fluid,speech]")
+            print("Usage: EngineBenchmark <audio.wav> [--engines whisperkit,whisper-cpp,fluid,speech] [--ground-truth gt.json]")
             print("")
             print("Engines:")
             print("  whisperkit   — WhisperKit (CoreML, large-v3-turbo)")
@@ -599,6 +725,9 @@ struct EngineBenchmarkCLI {
             print("  speech       — macOS 26 SpeechAnalyzer (on-device)")
             print("  mlx          — mlx-whisper (Python, large-v3, MLX GPU)")
             print("  all          — run all engines (default)")
+            print("")
+            print("Options:")
+            print("  --ground-truth <path>  JSON file with reference transcripts for WER scoring")
             Foundation.exit(1)
         }
 
@@ -612,6 +741,18 @@ struct EngineBenchmarkCLI {
         var engines = Set(["whisperkit", "whisper-cpp", "fluid", "speech", "mlx"])
         if let idx = args.firstIndex(of: "--engines"), idx + 1 < args.count {
             engines = Set(args[idx + 1].split(separator: ",").map(String.init))
+        }
+
+        // Parse --ground-truth flag
+        var groundTruth: [String: String] = [:]
+        if let idx = args.firstIndex(of: "--ground-truth"), idx + 1 < args.count {
+            let gtPath = URL(fileURLWithPath: args[idx + 1])
+            groundTruth = loadGroundTruth(path: gtPath)
+            if groundTruth.isEmpty {
+                print("WARNING: No ground truth entries loaded from \(gtPath.path)")
+            } else {
+                print("Ground truth: \(groundTruth.count) entries loaded")
+            }
         }
 
         let audioDuration = getAudioDuration(url: audioPath)
@@ -739,16 +880,34 @@ struct EngineBenchmarkCLI {
             results.append(r)
         }
 
+        // Compute WER if ground truth available
+        let audioFilename = audioPath.lastPathComponent
+        if let reference = groundTruth[audioFilename] {
+            print("\n══════ WER Scoring ══════")
+            let label = isCJK(reference) ? "CER" : "WER"
+            print("  Reference: \(reference.prefix(80))...")
+            for i in results.indices {
+                if results[i].error == nil && !results[i].fullText.isEmpty {
+                    results[i].wer = computeWER(reference: reference, hypothesis: results[i].fullText)
+                    print("  \(results[i].engine): \(label) = \(String(format: "%.1f", results[i].wer! * 100))%")
+                }
+            }
+        } else if !groundTruth.isEmpty {
+            print("\n  No ground truth match for \(audioFilename)")
+        }
+
         // Summary
+        let hasWER = results.contains { $0.wer != nil }
         log("\n══════ Summary ══════")
-        log("\n" + tableRow("Engine", "Time", "Segs", "RTF"))
-        log(String(repeating: "─", count: 75))
+        log("\n" + tableRow("Engine", "Time", "Segs", "RTF", hasWER ? "WER" : ""))
+        log(String(repeating: "─", count: hasWER ? 85 : 75))
         for r in results {
             if r.error != nil {
-                log(tableRow(r.engine, "ERROR", "-", "-"))
+                log(tableRow(r.engine, "ERROR", "-", "-", hasWER ? "-" : ""))
             } else {
                 let time = "\(Int(r.wallClockSeconds) / 60)m \(Int(r.wallClockSeconds) % 60)s"
-                log(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor)))
+                let werStr = r.wer.map { String(format: "%.1f%%", $0 * 100) } ?? "-"
+                log(tableRow(r.engine, time, "\(r.segmentCount)", String(format: "%.1fx", r.realtimeFactor), hasWER ? werStr : ""))
             }
         }
 
