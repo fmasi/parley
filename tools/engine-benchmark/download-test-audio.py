@@ -11,6 +11,7 @@ Files saved to: ~/.audio-transcribe/benchmark/test-audio/
 """
 
 import json
+import os
 import urllib.request
 from pathlib import Path
 
@@ -82,6 +83,77 @@ def download_hf_rows(
         GROUND_TRUTH[lang_name] = transcripts
     except Exception as e:
         print(f"  [fail] {lang_name}: {e}")
+
+
+def download_fleurs(lang_code: str, lang_name: str, count: int = 5):
+    """Download FLEURS samples by reading the parquet file with pyarrow.
+
+    FLEURS uses a custom loading script that's no longer supported by the
+    `datasets` library. We download the auto-converted parquet file from
+    HuggingFace Hub and extract audio + transcriptions with pyarrow.
+
+    Requires: pip install pyarrow soundfile
+    Requires: HF_TOKEN environment variable for authentication.
+    """
+    print(f"\n  Fetching {count} {lang_name} samples from FLEURS ({lang_code})...")
+
+    # Check if all files already exist
+    all_exist = all((TEST_DIR / f"{lang_code.replace('_', '-')}-{i:02d}.wav").exists() for i in range(count))
+    if all_exist:
+        print(f"  [skip] all {count} files already exist")
+        return
+
+    try:
+        import pyarrow.parquet as pq
+        import soundfile as sf
+        import numpy as np
+        import tempfile
+
+        token = os.environ.get("HF_TOKEN", "")
+        if not token:
+            print(f"  [fail] HF_TOKEN required for FLEURS. Set it with: export HF_TOKEN=hf_...")
+            return
+
+        parquet_url = (
+            f"https://huggingface.co/datasets/google/fleurs/resolve/"
+            f"refs%2Fconvert%2Fparquet/{lang_code}/test/0000.parquet"
+        )
+        print(f"  Downloading parquet file (may be large)...")
+        req = urllib.request.Request(parquet_url, headers={
+            "User-Agent": UA,
+            "Authorization": f"Bearer {token}",
+        })
+        tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
+        with urllib.request.urlopen(req) as resp:
+            tmp.write(resp.read())
+        tmp.close()
+
+        table = pq.read_table(tmp.name, columns=["audio", "transcription"])
+        os.unlink(tmp.name)
+
+        transcripts = []
+        for i in range(min(count, len(table))):
+            filename = f"{lang_code.replace('_', '-')}-{i:02d}.wav"
+            path = TEST_DIR / filename
+            transcript = table.column("transcription")[i].as_py()
+            audio_dict = table.column("audio")[i].as_py()
+
+            if not path.exists():
+                audio_bytes = audio_dict["bytes"]
+                # Write raw bytes, then re-read and re-save as proper WAV
+                import io
+                sf_data, sr = sf.read(io.BytesIO(audio_bytes))
+                sf.write(str(path), sf_data, sr)
+
+            size_kb = path.stat().st_size / 1024
+            transcripts.append({"file": filename, "text": transcript})
+            print(f"  [done] {filename} ({size_kb:.0f} KB): {transcript[:60]}...")
+
+        GROUND_TRUTH[lang_name] = transcripts
+    except ImportError as e:
+        print(f"  [fail] requires pyarrow + soundfile: pip install pyarrow soundfile ({e})")
+    except Exception as e:
+        print(f"  [fail] FLEURS {lang_name}: {e}")
 
 
 def download_ami_sample():
@@ -190,14 +262,17 @@ def main():
         text_key="text",
     )
 
+    # Turkish — FLEURS (via datasets library, requires HF token)
+    print("\n── Turkish (FLEURS) ──")
+    download_fleurs("tr_tr", "Turkish")
+
+    # Japanese — FLEURS (via datasets library, requires HF token)
+    print("\n── Japanese (FLEURS) ──")
+    download_fleurs("ja_jp", "Japanese")
+
     # Multi-speaker meeting audio for diarization testing
     print("\n── Multi-speaker (AMI Meeting Corpus) ──")
     download_ami_sample()
-
-    # Note about missing languages
-    print("\n── Notes ──")
-    print("  Turkish (tr) and Japanese (ja) require gated HuggingFace datasets.")
-    print("  To add them, use `huggingface-cli login` and install the `datasets` library.")
 
     # Save ground truth
     gt_path = TEST_DIR / "ground-truth.json"
