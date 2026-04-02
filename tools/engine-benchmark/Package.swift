@@ -17,7 +17,12 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "WhisperCppKit", package: "WhisperCppKit"),
             ],
-            path: "Sources"
+            path: "Sources/EngineBenchmark"
+        ),
+        .executableTarget(
+            name: "SpeechTest",
+            dependencies: [],
+            path: "Sources/SpeechTest"
         ),
     ]
 )
