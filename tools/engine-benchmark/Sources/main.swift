@@ -163,7 +163,7 @@ func loadGroundTruth(path: URL) -> [String: String] {
 
     var result: [String: String] = [:]
     for (_, value) in json {
-        if let text = value as? String {
+        if value is String {
             // Bare string entry (e.g. "English clean": "Four score...")
             // Can't match by filename, skip — these are informational only
             continue
@@ -740,7 +740,7 @@ func benchmarkFluidDiarization(audioPath: URL, audioDuration: Double) async -> D
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
         let segments = result.segments.map { seg in
-            (Double(seg.startTimeSeconds), Double(seg.endTimeSeconds), seg.speakerId, seg.qualityScore)
+            (Double(seg.startTimeSeconds), Double(seg.endTimeSeconds), seg.speakerId, Double(seg.qualityScore))
         }
         let speakerCount = Set(result.segments.map(\.speakerId)).count
 
@@ -880,7 +880,6 @@ func runBatchBenchmark(
         print("  WhisperKit: \(whisperKitInstance != nil ? "ready" : "failed")")
     }
 
-    var fluidModels: AsrModels?
     var fluidManager: AsrManager?
     if engines.contains("fluid") {
         print("  FluidAudio...")
@@ -888,8 +887,8 @@ func runBatchBenchmark(
             let models = try await AsrModels.downloadAndLoad()
             let mgr = AsrManager()
             try await mgr.initialize(models: models)
-            fluidModels = models
             fluidManager = mgr
+            _ = models  // models retained by manager
             print("  FluidAudio: ready")
         } catch {
             print("  FluidAudio: failed — \(error.localizedDescription)")
