@@ -71,6 +71,7 @@ struct GlassBackgroundModifier: ViewModifier {
     let cornerRadius: CGFloat
 
     func body(content: Content) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content.glassEffect(
                 in: .rect(
@@ -88,5 +89,13 @@ struct GlassBackgroundModifier: ViewModifier {
                 ).fill(.regularMaterial)
             }
         }
+        #else
+        content.background {
+            UnevenRoundedRectangle(
+                bottomLeadingRadius: cornerRadius,
+                bottomTrailingRadius: cornerRadius
+            ).fill(.regularMaterial)
+        }
+        #endif
     }
 }
