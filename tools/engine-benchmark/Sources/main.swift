@@ -894,17 +894,25 @@ func runDiarizationSweep(audioPath: URL, audioDuration: Double, thresholds: [Dou
 // ── Engine-Language Compatibility ──
 
 /// FluidAudio Parakeet v3 supports 25 European languages.
+/// Turkish is NOT supported despite Turkey being partially European — confirmed by 100% WER in benchmarks.
 /// WhisperKit, WhisperCppKit, SpeechAnalyzer, and mlx-whisper support 99+ languages.
 let fluidAudioLanguages: Set<String> = [
-    "en", "fr", "pt", "es", "tr", "fi", "de", "it", "nl", "pl",
+    "en", "fr", "pt", "es", "fi", "de", "it", "nl", "pl",
     "sv", "da", "no", "cs", "sk", "hu", "ro", "bg", "hr", "sl",
     "lt", "lv", "et", "el", "uk",
 ]
+
+/// WhisperCppKit crashes with a fatal Range error on Korean text output (upstream bug).
+/// Skip Korean until the bug is fixed in WhisperCppKit.
+let whisperCppSkipLanguages: Set<String> = ["ko"]
 
 /// Returns true if the engine supports the given language code.
 func engineSupportsLanguage(_ engine: String, _ lang: String) -> Bool {
     if engine == "fluid" {
         return fluidAudioLanguages.contains(lang)
+    }
+    if engine == "whisper-cpp" {
+        return !whisperCppSkipLanguages.contains(lang)
     }
     return true  // all other engines support all languages
 }
