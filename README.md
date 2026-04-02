@@ -1,6 +1,6 @@
 # Audio Transcription Tool
 
-On-device meeting transcription with speaker diarization for Apple Silicon Macs. Records both system audio and microphone simultaneously — no virtual audio devices required. Transcribes using WhisperKit (Core ML) and labels who said what with SpeakerKit.
+On-device meeting transcription for Apple Silicon Macs. Records both system audio and microphone simultaneously — no virtual audio devices required. Transcribes using swappable engines: Apple SpeechAnalyzer (default), FluidAudio (Parakeet), or whisper.cpp — selectable in Settings.
 
 Comes as a native macOS menu bar app. Fully Swift-native — no Python runtime required.
 
@@ -19,7 +19,7 @@ Comes as a native macOS menu bar app. Fully Swift-native — no Python runtime r
 - macOS 15.0+ (Sequoia) with Apple Silicon (M1/M2/M3/M4/M5)
 - Swift 5.9+ (Xcode Command Line Tools)
 
-Models download automatically on first launch — no manual setup required.
+The default engine (Apple SpeechAnalyzer) requires no model download. FluidAudio and whisper.cpp download models on first use.
 
 ---
 
@@ -87,7 +87,25 @@ Config is stored at `~/.audio-transcribe/config.json`:
   "silence_detection_enabled": true,
   "output_format": "txt",
   "launch_on_startup": true,
-  "log_level": "info"
+  "engine": "speech_analyzer"
+}
+```
+
+#### Transcription engines
+
+| Engine | ID | Speed (17min audio) | Download | macOS |
+|---|---|---|---|---|
+| Apple SpeechAnalyzer | `speech_analyzer` | ~10s | None | 26.0+ |
+| FluidAudio (Parakeet) | `fluid_audio` | ~7s | ~500MB | 15.0+ |
+| whisper.cpp (large-v3-turbo) | `whisper_cpp` | ~41s | ~1.6GB | 15.0+ |
+
+Select in **Settings > Transcription Engine** or via `engine` in `config.json`.
+
+Power users can override the whisper.cpp model path:
+```json
+{
+  "engine": "whisper_cpp",
+  "whisper_cpp_model_path": "~/.audio-transcribe/models/ggml-large-v3.bin"
 }
 ```
 
@@ -108,15 +126,21 @@ The app records **both your microphone and system audio** simultaneously — no 
 
 ### Performance
 
-On Apple Silicon (M2 Pro), transcription runs at roughly real-time speed — a 30-minute recording takes ~30 minutes. Speaker diarization adds ~30% overhead. Short recordings (< 5 min) complete in under a minute.
+On Apple Silicon, transcription is significantly faster than real-time. Benchmarks on a 17-minute Portuguese/English recording:
+
+| Engine | Time | Real-time factor |
+|---|---|---|
+| FluidAudio | 7s | 146x |
+| SpeechAnalyzer | 10s | 102x |
+| whisper.cpp | 41s | 25x |
 
 ---
 
 ## CLI Usage
 
 ```bash
-# Transcribe audio files
-.build/debug/AudioTranscribe transcribe -i system.wav [-i mic.wav] [-f srt]
+# Transcribe audio files (uses engine from config, or override with --engine)
+.build/debug/AudioTranscribe transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
 
 # Rename speakers interactively
 .build/debug/AudioTranscribe rename -i transcript.json
@@ -175,8 +199,8 @@ Local Speaker 1: Thanks for having me.
 | Symptom | Fix |
 |---|---|
 | "damaged or incomplete" on launch | Bundle built with old launcher — run `bash package_app.sh` to rebuild |
-| Models not downloading | Check network connection; models are fetched from Hugging Face Hub on first launch |
-| Slow first run | WhisperKit model downloads once and is cached locally |
+| Models not downloading | Check network connection; FluidAudio and whisper.cpp models download on first use |
+| Slow first transcription | FluidAudio/whisper.cpp models download once and are cached locally |
 | XPC connection failed | Run as `.app` bundle — XPC services don't work with bare binaries |
 | Exit code 2 from capture service | Grant "Screen & System Audio Recording" in System Settings > Privacy & Security |
 | TCC permission not persisting | Run as `.app` bundle so macOS ties the grant to the bundle ID |

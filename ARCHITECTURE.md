@@ -10,7 +10,7 @@ The app has three layers:
    - `<base>.wav` — system/remote audio
    - `<base>_mic.wav` — local microphone (at device native rate)
 
-3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. WhisperKit (Core ML) transcribes each audio stream independently. SpeakerKit performs speaker diarization. Segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
+3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. Three swappable engines are available: Apple SpeechAnalyzer (default, macOS 26+), FluidAudio (Parakeet, CoreML/ANE), and whisper.cpp (GGML, Metal GPU). Engine selection is stored in config and exposed in Settings. Each audio stream is transcribed independently, segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -22,10 +22,15 @@ The app has three layers:
 │    │                 └── SCStream (.mic)    → base_mic.wav  │
 │    │                                                         │
 │    └── TranscriptionRunner                                   │
-│          ├── WhisperKit (base.wav)    → Remote 1, 2…        │
-│          ├── WhisperKit (base_mic…)   → Local 1, 2…         │
-│          ├── SpeakerKit (diarization per stream)            │
+│          ├── EngineID (from config) → engine selection       │
+│          ├── Engine (base.wav)       → Remote 1, 2…         │
+│          ├── Engine (base_mic.wav)   → Local 1, 2…          │
 │          └── merge chronologically   → transcript           │
+│                                                              │
+│    Engines:                                                  │
+│      ├── SpeechAnalyzerEngine (Apple, macOS 26+, no download)│
+│      ├── FluidAudioEngine (Parakeet, CoreML/ANE, ~500MB)    │
+│      └── WhisperCppEngine (whisper.cpp, Metal GPU, ~1.6GB)  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,8 +51,8 @@ The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some
 **5. No virtual audio devices needed**
 Unlike BlackHole/Loopback solutions, ScreenCaptureKit captures system audio natively with a single macOS permission. `.screen` output type must be registered even for audio-only capture — this is a ScreenCaptureKit requirement.
 
-**6. Fully Swift-native, no Python runtime**
-WhisperKit runs Whisper models compiled to Core ML, executing on the Neural Engine / GPU via the Core ML framework. SpeakerKit performs speaker diarization natively in Swift. There is no embedded Python runtime or subprocess execution.
+**6. Fully Swift-native, swappable engines**
+All three transcription engines are Swift-native with no Python runtime. SpeechAnalyzer uses Apple's system framework (no download). FluidAudio runs the Parakeet model on CoreML/ANE. whisper.cpp uses the GGML model format with Metal GPU acceleration. Engines conform to the `TranscriptionEngine` protocol and are selected via `EngineID` in config.
 
 ## Source Layout
 
@@ -55,7 +60,7 @@ WhisperKit runs Whisper models compiled to Core ML, executing on the Neural Engi
 TranscriberApp/                  SwiftUI app target
   TranscriberApp.swift           @main entry, MenuBarExtra + Settings scenes
   Services/AudioCaptureClient.swift  XPC connection to capture service
-  Services/TranscriptionRunner.swift Drives WhisperKit + SpeakerKit pipeline
+  Services/TranscriptionRunner.swift Engine factory + transcription pipeline
   Views/MenuView.swift           Menu bar dropdown
   Views/SettingsView.swift       Settings Form
   Views/RenameDialog.swift       Speaker rename sheet
@@ -70,8 +75,14 @@ AudioCaptureProtocol/            Shared protocol target
 
 TranscriberCore/                 Shared logic target
   AppState.swift                 Observable state machine: idle → recording → transcribing
-  Config.swift                   Codable config (snake_case JSON keys)
+  Config.swift                   Codable config (snake_case JSON keys, engine selection)
   ConfigManager.swift            Reads/writes ~/.audio-transcribe/config.json
+  EngineID.swift                 Engine enum + EngineDescriptor metadata
+  TranscriptionEngine.swift      Protocol for swappable transcription engines
+  FluidAudioEngine.swift         FluidAudio/Parakeet engine (CoreML/ANE)
+  SpeechAnalyzerEngine.swift     Apple SpeechAnalyzer engine (macOS 26+)
+  WhisperCppEngine.swift         whisper.cpp engine (GGML, Metal GPU)
+  DiarizationProvider.swift      Protocol for speaker diarization
   WavFileWriter.swift            WAV file writing with deferred sample rate
   AudioDeviceEnumerator.swift    Lists input devices via AVCaptureDevice
   InputLevelMonitor.swift        Real-time audio level meter
