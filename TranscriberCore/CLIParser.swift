@@ -16,6 +16,7 @@ public struct BenchmarkOptions {
 public enum CLICommand {
     case transcribe(TranscribeOptions)
     case rename(String)
+    case renameGUI(String)
     case benchmark(BenchmarkOptions)
 }
 
@@ -46,6 +47,8 @@ public enum CLIParser {
             return .transcribe(try parseTranscribe(rest))
         case "rename":
             return .rename(try parseRename(rest))
+        case "rename-gui":
+            return .renameGUI(try parseRename(rest))
         case "benchmark":
             return .benchmark(parseBenchmark(rest))
         default:

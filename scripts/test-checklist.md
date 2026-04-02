@@ -12,9 +12,16 @@
 - [ ] Format file (`.srt` or `.txt`) appears alongside JSON
 - [ ] JSON segments have timestamps, speaker labels, and text
 - [ ] Segments include `"confidence"` field (float from FluidAudio)
-- [ ] Rename speakers dialog opens after transcription
-- [ ] Play button works in rename dialog
-- [ ] After rename → format file updated with new speaker names
+
+## Rename Speakers Dialog
+- [ ] Rename dialog opens after transcription
+- [ ] Play button plays audio from the longest segment (not first segment)
+- [ ] Forward button cycles through up to 3 sample clips per speaker
+- [ ] Sample counter shows "1/3", "2/3", etc.
+- [ ] Sample text updates when cycling
+- [ ] Speakers with < 5 segments are hidden from dialog
+- [ ] After rename, format file updated with new speaker names
+- [ ] `rename-gui` CLI: `.build/debug/AudioTranscribe rename-gui -i <json>` opens GUI dialog
 
 ## Dual-stream (system + mic)
 - [ ] Record with both system audio and mic
@@ -25,9 +32,10 @@
 ## Diarization (FluidAudio)
 - [ ] Multi-speaker recording produces distinct Speaker 1, Speaker 2, etc.
 - [ ] Diarization quality scores logged (check log stream)
+- [ ] On multi-remote-speaker calls, check that remote speakers are separated (not merged)
 
 ## Text Normalization (ITN)
-- [ ] Numbers spoken as words appear as digits in transcript (e.g. "two hundred" → "200")
+- [ ] Numbers spoken as words appear as digits in transcript (e.g. "two hundred" -> "200")
 - [ ] Check log for "ITN applied to N segments" (or absent if native lib unavailable — still OK)
 
 ## Logging (check via `log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)

@@ -288,9 +288,21 @@ print('Audio URL:', row['audio'][0]['src'])
 | French | FLEURS fr_fr or mTEDx French | Standardized multilingual benchmark |
 | Portuguese | FLEURS pt_br or mTEDx Portuguese | Standardized multilingual benchmark |
 | Spanish | FLEURS es_419 or mTEDx Spanish | Standardized multilingual benchmark |
+| Turkish | FLEURS tr_tr | Non-CJK language supported by all engines including FluidAudio |
+| Korean | FLEURS ko_kr | CJK language — NOT supported by FluidAudio (Parakeet v3) |
+| Japanese | FLEURS ja_jp | CJK language — NOT supported by FluidAudio (Parakeet v3) |
 | Code-switching | SwitchLingua or CS-FLEURS | Multi-language in single recording |
 | Meeting diarization | AMI corpus | Multi-speaker with ground truth |
 | Conference talks | TED-LIUM 3 | Natural speech, single speaker |
+
+**Engine language coverage:**
+- **FluidAudio (Parakeet v3):** 25 European languages — EN, FR, PT, ES, TR, FI, DE, IT, NL, PL, SV, DA, NO, CS, SK, HU, RO, BG, HR, SL, LT, LV, ET, EL, UK. Does NOT cover KR, JP, ZH.
+- **WhisperCppKit / WhisperKit / mlx-whisper (Whisper large-v3):** 99 languages — covers all test languages.
+- **SpeechAnalyzer (macOS 26):** Broad language support via system locales — covers all test languages.
+
+**WER scoring notes:**
+- Korean and Japanese use CER (Character Error Rate) instead of WER since these languages don't use word boundaries.
+- WER normalization: lowercase, strip punctuation (keep apostrophes), collapse whitespace.
 
 ---
 

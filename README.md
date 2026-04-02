@@ -202,9 +202,15 @@ Power users can override the whisper.cpp model path:
 # Rename speakers interactively
 .build/debug/AudioTranscribe rename -i transcript.json
 
-# Run benchmark
-.build/debug/AudioTranscribe benchmark
+# Run benchmark (single file)
+swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,whisper-cpp,speech
+
+# Run benchmark matrix (all languages, all engines, with WER scoring)
+python3 tools/engine-benchmark/download-test-audio.py   # download test audio (once)
+bash tools/engine-benchmark/run-benchmark-matrix.sh      # run full matrix
 ```
+
+See [tools/engine-benchmark/README.md](tools/engine-benchmark/README.md) for details.
 
 ---
 

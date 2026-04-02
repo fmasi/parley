@@ -26,24 +26,26 @@ enum CLIRename {
         let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
         let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
 
-        // Collect speakers with samples
-        var seen = Set<String>()
-        var samples: [SpeakerSample] = []
+        // Collect speakers — pick the longest segment per speaker for the best sample
+        var candidatesBySpaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
+        var orderedIds: [String] = []
 
         for seg in segments {
-            guard let speaker = seg["speaker"] as? String, !seen.contains(speaker) else { continue }
-            seen.insert(speaker)
-
-            let text = seg["text"] as? String ?? ""
-            let start = seg["start"] as? Double ?? 0
-            let end = seg["end"] as? Double ?? 0
+            guard let speaker = seg["speaker"] as? String,
+                  let text = seg["text"] as? String,
+                  let start = seg["start"] as? Double,
+                  let end = seg["end"] as? Double else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            if candidatesBySpaker[speaker] == nil { orderedIds.append(speaker) }
             let source = seg["source"] as? String ?? "remote"
-            let audioFile = source == "local" ? localAudio : remoteAudio
+            candidatesBySpaker[speaker, default: []].append((trimmed, start, end, source))
+        }
 
-            samples.append(SpeakerSample(
-                id: speaker, sampleText: text,
-                audioFile: audioFile, start: start, end: end
-            ))
+        let samples: [SpeakerSample] = orderedIds.compactMap { speaker in
+            guard let best = candidatesBySpaker[speaker]?.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
+            let audioFile = best.source == "local" ? localAudio : remoteAudio
+            return SpeakerSample(id: speaker, sampleText: best.text, audioFile: audioFile, start: best.start, end: best.end)
         }
 
         guard !samples.isEmpty else {
