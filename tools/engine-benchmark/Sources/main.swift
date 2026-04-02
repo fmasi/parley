@@ -59,7 +59,13 @@ func loadAudioAsFloats(url: URL, targetSampleRate: Double = 16000) throws -> (sa
     }
 
     var error: NSError?
+    var inputProvided = false
     converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+        if inputProvided {
+            outStatus.pointee = .endOfStream
+            return nil
+        }
+        inputProvided = true
         outStatus.pointee = .haveData
         return buffer
     }
@@ -167,7 +173,6 @@ func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> Benchma
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
-        let detectedLang = segments.first?.text.prefix(0) ?? ""  // can't get language from whisper.cpp easily
         let sampleSegs = segments.prefix(3).map { seg in
             (seg.startTime, seg.endTime, seg.text)
         }
@@ -212,7 +217,9 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
 
         // Group token timings into sentence-like segments by splitting on punctuation
+        // (matches FluidAudioEngine.groupTokensIntoSegments in the app)
         let timings = result.tokenTimings ?? []
+        let confidence = result.confidence
         var sentences: [(start: Double, end: Double, text: String)] = []
         var currentText = ""
         var segStart: Double = 0
@@ -222,8 +229,12 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
             if currentText.isEmpty { segStart = t.startTime }
             currentText += t.token
             segEnd = t.endTime
-            let isPunct = t.token.last.map { ".!?".contains($0) } ?? false
-            if isPunct || i == timings.count - 1 {
+            let endsWithPunct = t.token.last.map { ".!?".contains($0) } ?? false
+            // Don't split on "." when the next token starts with a digit (e.g. "1." + "5 million")
+            let isDecimalDot: Bool = endsWithPunct && t.token.last == "." && i + 1 < timings.count
+                && timings[i + 1].token.first?.isNumber == true
+            let isSentenceEnd = (endsWithPunct && !isDecimalDot) || i == timings.count - 1
+            if isSentenceEnd {
                 let trimmed = currentText.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
                     sentences.append((segStart, segEnd, trimmed))
@@ -231,6 +242,8 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
                 currentText = ""
             }
         }
+
+        print("  Confidence: \(confidence)")
 
         let sampleSegs = Array(sentences.prefix(3))
 
@@ -285,10 +298,17 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
         var sampleTexts: [(Double, Double, String)] = []
         var allText = ""
 
-        // Start analysis
+        // Start analysis (matches SpeechAnalyzerEngine in the app)
         let analysisTask = Task {
-            if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
-                try await analyzer.finalizeAndFinish(through: lastSample)
+            do {
+                if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+                    try await analyzer.finalizeAndFinish(through: lastSample)
+                } else {
+                    await analyzer.cancelAndFinishNow()
+                }
+            } catch {
+                await analyzer.cancelAndFinishNow()
+                throw error
             }
         }
 
@@ -297,20 +317,22 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
                 segmentCount += 1
                 let text = String(result.text.characters)
 
-                // Try to extract time range from AttributedString
-                var startTime: Double = 0
-                var endTime: Double = 0
+                // Extract timestamp range from AttributedString runs
+                var segStart: Double = .greatestFiniteMagnitude
+                var segEnd: Double = 0
                 for run in result.text.runs {
                     if let timeRange = run.audioTimeRange {
                         let s = CMTimeGetSeconds(timeRange.start)
                         let e = CMTimeGetSeconds(timeRange.end)
-                        if startTime == 0 || s < startTime { startTime = s }
-                        if e > endTime { endTime = e }
+                        if s < segStart { segStart = s }
+                        if e > segEnd { segEnd = e }
                     }
                 }
+                if segStart == .greatestFiniteMagnitude { segStart = 0 }
 
-                if sampleTexts.count < 3 {
-                    sampleTexts.append((startTime, endTime, text))
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if sampleTexts.count < 3 && !trimmed.isEmpty {
+                    sampleTexts.append((segStart, segEnd, trimmed))
                 }
                 allText += text + " "
             }
@@ -512,7 +534,7 @@ func printResult(_ r: BenchmarkResult) {
     print("  Segments: \(r.segmentCount)")
     print("  Real-time factor: \(String(format: "%.1f", r.realtimeFactor))x real-time")
     print("  Sample segments:")
-    for (i, seg) in r.sampleSegments.enumerated() {
+    for seg in r.sampleSegments {
         let startTs = String(format: "%02d:%02d", Int(seg.start) / 60, Int(seg.start) % 60)
         let endTs = String(format: "%02d:%02d", Int(seg.end) / 60, Int(seg.end) % 60)
         print("    [\(startTs)-\(endTs)] \(seg.text.prefix(80))")
