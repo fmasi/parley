@@ -1,6 +1,11 @@
 import Foundation
 import os
 import AVFoundation
+
+// SpeechAnalyzer/SpeechTranscriber require the macOS 26 SDK (Swift 6.2+).
+// CI runs on macos-15 (Swift 6.0) where these types don't exist in headers.
+// Remove this guard once GitHub Actions offers a macOS 26 runner.
+#if compiler(>=6.2)
 import Speech
 
 /// Transcription engine backed by Apple's SpeechAnalyzer (macOS 26+).
@@ -96,3 +101,4 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         return SpeakerAssignment.deduplicate(segments)
     }
 }
+#endif // compiler(>=6.2)

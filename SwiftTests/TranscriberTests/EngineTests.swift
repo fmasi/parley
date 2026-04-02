@@ -18,6 +18,7 @@ struct EngineTests {
 
     // MARK: - SpeechAnalyzerEngine properties
 
+    #if compiler(>=6.2)
     @Test func speechAnalyzerEngineName() {
         if #available(macOS 26.0, *) {
             let engine = SpeechAnalyzerEngine()
@@ -31,6 +32,7 @@ struct EngineTests {
             #expect(engine.isReady() == true)
         }
     }
+    #endif
 
     // MARK: - WhisperCppEngine properties
 
