@@ -106,7 +106,6 @@ def download_fleurs(lang_code: str, lang_name: str, count: int = 5):
     try:
         import pyarrow.parquet as pq
         import soundfile as sf
-        import numpy as np
         import tempfile
 
         token = os.environ.get("HF_TOKEN", "")

@@ -6,9 +6,10 @@ import TranscriberCore
 /// Opens the RenameDialog as a standalone NSPanel.
 /// MenuBarExtra with `.menu` style cannot present sheets, so we use a panel instead.
 @MainActor
-final class RenameWindowController {
+final class RenameWindowController: NSObject, NSWindowDelegate {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
+    private var onDismissCallback: (() -> Void)?
 
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         // Close any existing panel
@@ -20,11 +21,14 @@ final class RenameWindowController {
             return
         }
 
+        self.onDismissCallback = onDismiss
+
         let closePanel = { [weak self] in
             Logger.state.debug("Panel closed: RenameSpeakers")
             self?.panel?.close()
             self?.panel = nil
-            onDismiss?()
+            self?.onDismissCallback?()
+            self?.onDismissCallback = nil
         }
 
         let dialog = RenameDialog(
@@ -56,6 +60,7 @@ final class RenameWindowController {
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
         newPanel.contentView = hostingView
+        newPanel.delegate = self
         newPanel.isFloatingPanel = true
         newPanel.hidesOnDeactivate = false
         newPanel.becomesKeyOnlyIfNeeded = false
@@ -65,6 +70,17 @@ final class RenameWindowController {
 
         self.panel = newPanel
         Logger.state.debug("Panel shown: RenameSpeakers")
+    }
+
+    // MARK: - NSWindowDelegate
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            Logger.state.debug("Panel closed via window button: RenameSpeakers")
+            panel = nil
+            onDismissCallback?()
+            onDismissCallback = nil
+        }
     }
 
     // MARK: - JSON Parsing
@@ -112,8 +128,10 @@ final class RenameWindowController {
         let maxSamples = 3
         let minSegments = 5
 
-        // Filter out noise speakers (< minSegments) — they're usually diarization artifacts
-        let significantIds = orderedIds.filter { (candidates[$0]?.count ?? 0) >= minSegments }
+        // Filter out noise speakers (< minSegments) — they're usually diarization artifacts.
+        // Fall back to unfiltered list if filtering would remove all speakers (e.g. short transcripts).
+        let filteredIds = orderedIds.filter { (candidates[$0]?.count ?? 0) >= minSegments }
+        let significantIds = filteredIds.isEmpty ? orderedIds : filteredIds
 
         return significantIds.map { speaker in
             let allCandidates = candidates[speaker] ?? []

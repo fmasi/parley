@@ -1534,9 +1534,9 @@ struct EngineBenchmarkCLI {
             let reportDir = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".audio-transcribe/benchmark")
             try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
-            let dateStr = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none)
-                .replacingOccurrences(of: "/", with: "-")
-            let reportPath = reportDir.appendingPathComponent("matrix-\(dateStr).md")
+            let matrixFormatter = DateFormatter()
+            matrixFormatter.dateFormat = "yyyyMMdd-HHmmss"
+            let reportPath = reportDir.appendingPathComponent("matrix-\(matrixFormatter.string(from: Date())).md")
             writeMatrixReport(batchResults: batchResults, outputPath: reportPath)
             print("\n══════ Complete ══════")
             print("Matrix report: \(reportPath.path)")
@@ -1570,7 +1570,9 @@ struct EngineBenchmarkCLI {
         let logDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".audio-transcribe/benchmark")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let logPath = logDir.appendingPathComponent("engine-benchmark-\(DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")).log")
+        let logFormatter = DateFormatter()
+        logFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let logPath = logDir.appendingPathComponent("engine-benchmark-\(logFormatter.string(from: Date())).log")
         FileManager.default.createFile(atPath: logPath.path, contents: nil)
         logFileHandle = FileHandle(forWritingAtPath: logPath.path)
 
@@ -1731,7 +1733,9 @@ struct EngineBenchmarkCLI {
         let reportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".audio-transcribe/benchmark")
         try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
-        let reportPath = reportDir.appendingPathComponent("engine-benchmark-\(DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")).txt")
+        let reportFormatter = DateFormatter()
+        reportFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let reportPath = reportDir.appendingPathComponent("engine-benchmark-\(reportFormatter.string(from: Date())).txt")
         writeReport(results: results, audioPath: audioPath, outputPath: reportPath)
         print("\nReport saved: \(reportPath.path)")
     }
