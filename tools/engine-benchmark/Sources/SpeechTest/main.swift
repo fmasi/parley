@@ -115,7 +115,7 @@ func testSpeechAnalyzer(audioPath: URL, localeId: String) async {
         print("=== SUCCESS ===")
         print("Time: \(String(format: "%.1f", seconds))s")
         print("Segments: \(segCount)")
-        print("Text: \(allText.trimmingCharacters(in: .whitespaces).prefix(200))")
+        print("Text: \(allText.trimmingCharacters(in: .whitespaces))")
     } catch {
         timedOut.pointee = true
         print("    ERROR: \(error)")
