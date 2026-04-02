@@ -110,6 +110,13 @@ struct SettingsView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         saveStatus = nil
                     }
+                    // Pre-download FluidAudio model in background when selected
+                    if config.engine == .fluidAudio {
+                        Task.detached(priority: .utility) {
+                            let engine = FluidAudioEngine()
+                            try? await engine.prepare()
+                        }
+                    }
                 }
             }
         }
