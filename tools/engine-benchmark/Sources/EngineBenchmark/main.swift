@@ -3,14 +3,13 @@ import AVFoundation
 
 // ── Engine imports ──
 import WhisperKit
-import WhisperCppKit
 import FluidAudio
 import Speech  // macOS 26 SpeechAnalyzer
 
 // ──────────────────────────────────────────────
 // ASR Engine Benchmark Tool
 //
-// Usage: swift run EngineBenchmark <audio.wav> [--engines whisperkit,whisper-cpp,fluid,speech]
+// Usage: swift run EngineBenchmark <audio.wav> [--engines whisperkit,fluid,speech]
 //
 // Transcribes the same audio file with each engine and reports:
 //   - Wall clock time
@@ -230,72 +229,6 @@ func benchmarkWhisperKit(audioPath: URL, audioDuration: Double) async -> Benchma
         let seconds = Double(elapsed.components.seconds)
         return BenchmarkResult(
             engine: "WhisperKit (CoreML, large-v3-turbo)",
-            wallClockSeconds: seconds,
-            segmentCount: 0,
-            sampleSegments: [],
-            audioDurationSeconds: audioDuration,
-            fullText: "",
-            error: error.localizedDescription
-        )
-    }
-}
-
-// ── Engine: WhisperCppKit (whisper.cpp) ──
-
-func benchmarkWhisperCpp(audioPath: URL, audioDuration: Double) async -> BenchmarkResult {
-    let start = ContinuousClock.now
-
-    do {
-        let modelDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".audio-transcribe/models")
-        let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
-
-        guard FileManager.default.fileExists(atPath: ggmlModel.path) else {
-            return BenchmarkResult(
-                engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
-                wallClockSeconds: 0,
-                segmentCount: 0,
-                sampleSegments: [],
-                audioDurationSeconds: audioDuration,
-                fullText: "",
-                error: "GGML model not found at \(ggmlModel.path)"
-            )
-        }
-
-        print("  Loading whisper.cpp model...")
-        let ctx = try WhisperContext(modelPath: ggmlModel.path)
-
-        print("  Loading audio...")
-        let (samples, _) = try loadAudioAsFloats(url: audioPath)
-
-        print("  Transcribing (language=auto)...")
-        var options = WhisperOptions()
-        options.language = nil  // auto-detect
-        options.translateToEnglish = false
-        let segments = try ctx.transcribe(pcm16k: samples, options: options)
-
-        let elapsed = ContinuousClock.now - start
-        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-
-        let fullText = segments.map(\.text).joined(separator: " ")
-        let sampleSegs = segments.prefix(3).map { seg in
-            (seg.startTime, seg.endTime, seg.text)
-        }
-
-        return BenchmarkResult(
-            engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
-            wallClockSeconds: seconds,
-            segmentCount: segments.count,
-            sampleSegments: Array(sampleSegs),
-            audioDurationSeconds: audioDuration,
-            fullText: fullText,
-            error: nil
-        )
-    } catch {
-        let elapsed = ContinuousClock.now - start
-        let seconds = Double(elapsed.components.seconds)
-        return BenchmarkResult(
-            engine: "WhisperCppKit (whisper.cpp, large-v3-turbo)",
             wallClockSeconds: seconds,
             segmentCount: 0,
             sampleSegments: [],
@@ -1045,24 +978,17 @@ func runDiarizationSweep(audioPath: URL, audioDuration: Double, thresholds: [Dou
 
 /// FluidAudio Parakeet v3 supports 25 European languages.
 /// Turkish is NOT supported despite Turkey being partially European — confirmed by 100% WER in benchmarks.
-/// WhisperKit, WhisperCppKit, SpeechAnalyzer, and mlx-whisper support 99+ languages.
+/// WhisperKit, SpeechAnalyzer, and mlx-whisper support 99+ languages.
 let fluidAudioLanguages: Set<String> = [
     "en", "fr", "pt", "es", "fi", "de", "it", "nl", "pl",
     "sv", "da", "no", "cs", "sk", "hu", "ro", "bg", "hr", "sl",
     "lt", "lv", "et", "el", "uk",
 ]
 
-/// WhisperCppKit crashes with a fatal Range error on Korean text output (upstream bug).
-/// Skip Korean until the bug is fixed in WhisperCppKit.
-let whisperCppSkipLanguages: Set<String> = ["ko"]
-
 /// Returns true if the engine supports the given language code.
 func engineSupportsLanguage(_ engine: String, _ lang: String) -> Bool {
     if engine == "fluid" {
         return fluidAudioLanguages.contains(lang)
-    }
-    if engine == "whisper-cpp" {
-        return !whisperCppSkipLanguages.contains(lang)
     }
     return true  // all other engines support all languages
 }
@@ -1154,19 +1080,6 @@ func runBatchBenchmark(
         }
     }
 
-    var whisperCtx: WhisperContext?
-    if engines.contains("whisper-cpp") {
-        let modelPath = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".audio-transcribe/models/ggml-large-v3-turbo.bin")
-        if fm.fileExists(atPath: modelPath.path) {
-            print("  WhisperCppKit...")
-            whisperCtx = try? WhisperContext(modelPath: modelPath.path)
-            print("  WhisperCppKit: \(whisperCtx != nil ? "ready" : "failed")")
-        } else {
-            print("  WhisperCppKit: GGML model not found, skipping")
-        }
-    }
-
     // SpeechAnalyzer: create one transcriber per file (5-locale concurrent limit).
     // No pre-loading — create fresh per file to stay under the limit.
     if engines.contains("speech") {
@@ -1242,120 +1155,74 @@ func runBatchBenchmark(
             print("  FluidAudio: skipped (language \(lang) not supported)")
         }
 
-        // WhisperCppKit (reuse context)
-        if engines.contains("whisper-cpp"), let ctx = whisperCtx {
-            print("  WhisperCppKit...")
-            let start = ContinuousClock.now
-            do {
-                let (samples, _) = try loadAudioAsFloats(url: audioFile)
-                var options = WhisperOptions()
-                options.language = lang == "en" ? "en" : nil  // auto-detect for non-English
-                options.translateToEnglish = false
-                let segments = try ctx.transcribe(pcm16k: samples, options: options)
-                let elapsed = ContinuousClock.now - start
-                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                let fullText = segments.map(\.text).joined(separator: " ")
-                let sampleSegs = segments.prefix(3).map { ($0.startTime, $0.endTime, $0.text) }
-                fileResults.append(BenchmarkResult(
-                    engine: "WhisperCppKit", wallClockSeconds: seconds,
-                    segmentCount: segments.count, sampleSegments: Array(sampleSegs),
-                    audioDurationSeconds: duration, fullText: fullText, error: nil
-                ))
-            } catch {
-                let s = Double((ContinuousClock.now - start).components.seconds)
-                fileResults.append(BenchmarkResult(
-                    engine: "WhisperCppKit", wallClockSeconds: s,
-                    segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
-                    fullText: "", error: error.localizedDescription
-                ))
-            }
-        }
-
-        // SpeechAnalyzer (fresh transcriber per file, with timeout to handle unsupported locales)
+        // SpeechAnalyzer (one transcriber at a time — run in subprocess to avoid locale accumulation)
         if engines.contains("speech") {
             if #available(macOS 26.0, *) {
                 let locale = localeForLanguage(lang)
-                print("  SpeechAnalyzer (\(locale.identifier))...")
-                let start = ContinuousClock.now
-                let timeoutSeconds = max(30, Int(duration) * 2)  // at least 30s, or 2x audio length
+                // Turkish not available in SpeechAnalyzer (confirmed: "transcription.tr asset unavailable")
+                let speechUnsupported: Set<String> = ["tr"]
+                if speechUnsupported.contains(lang) {
+                    print("  SpeechAnalyzer: skipped (locale \(locale.identifier) not available)")
+                } else {
+                    print("  SpeechAnalyzer (\(locale.identifier))...")
+                    // Run in a subprocess to isolate locale allocation — SpeechTranscriber
+                    // accumulates locale slots in-process and hangs after ~5 locales.
+                    let start = ContinuousClock.now
+                    let speechTestPath = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+                        .deletingLastPathComponent().appendingPathComponent("SpeechTest")
 
-                let speechTask = Task<BenchmarkResult, Error> {
-                    let transcriber = SpeechTranscriber(
-                        locale: locale,
-                        preset: SpeechTranscriber.Preset(
-                            transcriptionOptions: [],
-                            reportingOptions: [.volatileResults],
-                            attributeOptions: [.audioTimeRange]
-                        )
-                    )
-                    let analyzer = SpeechAnalyzer(modules: [transcriber])
-                    let audioFileObj = try AVAudioFile(forReading: audioFile)
+                    let proc = Process()
+                    proc.executableURL = speechTestPath
+                    proc.arguments = [audioFile.path, locale.identifier]
+                    let stdoutPipe = Pipe()
+                    proc.standardOutput = stdoutPipe
+                    proc.standardError = Pipe()
+                    do {
+                        try proc.run()
+                        // Read pipes before waitUntilExit to avoid deadlock if pipe buffer fills
+                        let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                        proc.waitUntilExit()
 
-                    let analysisTask = Task {
-                        do {
-                            if let lastSample = try await analyzer.analyzeSequence(from: audioFileObj) {
-                                try await analyzer.finalizeAndFinish(through: lastSample)
-                            } else { await analyzer.cancelAndFinishNow() }
-                        } catch { await analyzer.cancelAndFinishNow(); throw error }
-                    }
+                        let elapsed = ContinuousClock.now - start
+                        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                        let output = String(data: outputData, encoding: .utf8) ?? ""
 
-                    var allText = ""
-                    var segCount = 0
-                    for try await result in transcriber.results {
-                        try Task.checkCancellation()
-                        if result.isFinal {
-                            segCount += 1
-                            allText += String(result.text.characters) + " "
+                        if proc.terminationStatus == 0 {
+                            let lines = output.components(separatedBy: "\n")
+                            // Parse text from output: "Text: ..."
+                            let fullText = lines
+                                .first(where: { $0.hasPrefix("Text: ") })
+                                .map { String($0.dropFirst(6)) } ?? ""
+                            // Parse segment count: "Segments: N"
+                            let segCount = lines
+                                .first(where: { $0.hasPrefix("Segments: ") })
+                                .flatMap { Int($0.dropFirst(10)) } ?? 1
+                            fileResults.append(BenchmarkResult(
+                                engine: "SpeechAnalyzer", wallClockSeconds: seconds,
+                                segmentCount: segCount, sampleSegments: [],
+                                audioDurationSeconds: duration,
+                                fullText: fullText, error: nil
+                            ))
+                        } else {
+                            // Parse error from output
+                            let errorLine = output.components(separatedBy: "\n")
+                                .first(where: { $0.contains("TIMEOUT") || $0.contains("ERROR") || $0.contains("error") })
+                                ?? "Exit code \(proc.terminationStatus)"
+                            fileResults.append(BenchmarkResult(
+                                engine: "SpeechAnalyzer", wallClockSeconds: seconds,
+                                segmentCount: 0, sampleSegments: [],
+                                audioDurationSeconds: duration,
+                                fullText: "", error: errorLine
+                            ))
                         }
-                    }
-                    try await analysisTask.value
-
-                    let elapsed = ContinuousClock.now - start
-                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                    return BenchmarkResult(
-                        engine: "SpeechAnalyzer", wallClockSeconds: seconds,
-                        segmentCount: segCount, sampleSegments: [],
-                        audioDurationSeconds: duration,
-                        fullText: allText.trimmingCharacters(in: .whitespaces), error: nil
-                    )
-                }
-
-                // Race against timeout
-                let timeoutTask = Task {
-                    try await Task.sleep(for: .seconds(timeoutSeconds))
-                }
-
-                // Wait for whichever finishes first
-                do {
-                    let result = try await withThrowingTaskGroup(of: BenchmarkResult?.self) { group in
-                        group.addTask { try await speechTask.value }
-                        group.addTask {
-                            try await timeoutTask.value
-                            return nil  // timeout sentinel
-                        }
-                        let first = try await group.next()!
-                        group.cancelAll()
-                        return first
-                    }
-                    if let result {
-                        fileResults.append(result)
-                    } else {
-                        // Timeout
-                        speechTask.cancel()
-                        print("    TIMEOUT after \(timeoutSeconds)s")
+                    } catch {
+                        let s = Double((ContinuousClock.now - start).components.seconds)
                         fileResults.append(BenchmarkResult(
-                            engine: "SpeechAnalyzer", wallClockSeconds: Double(timeoutSeconds),
+                            engine: "SpeechAnalyzer", wallClockSeconds: s,
                             segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
-                            fullText: "", error: "Timeout (\(timeoutSeconds)s) — locale \(locale.identifier) may not be supported"
+                            fullText: "", error: error.localizedDescription
                         ))
                     }
-                } catch {
-                    let s = Double((ContinuousClock.now - start).components.seconds)
-                    fileResults.append(BenchmarkResult(
-                        engine: "SpeechAnalyzer", wallClockSeconds: s,
-                        segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
-                        fullText: "", error: error.localizedDescription
-                    ))
                 }
             }
         }
@@ -1469,7 +1336,6 @@ struct EngineBenchmarkCLI {
             print("")
             print("Engines (--engines flag):")
             print("  whisperkit   — WhisperKit (CoreML, large-v3-turbo)")
-            print("  whisper-cpp  — WhisperCppKit / whisper.cpp (Metal GPU)")
             print("  fluid        — FluidAudio (Parakeet, CoreML/ANE)")
             print("  speech       — macOS 26 SpeechAnalyzer (on-device)")
             print("  mlx          — mlx-whisper (Python, large-v3, MLX GPU)")
@@ -1486,7 +1352,7 @@ struct EngineBenchmarkCLI {
         }
 
         // Parse --engines flag (shared between single and batch modes)
-        var engines = Set(["whisperkit", "whisper-cpp", "fluid", "speech", "mlx"])
+        var engines = Set(["whisperkit", "fluid", "speech", "mlx"])
         if let idx = args.firstIndex(of: "--engines"), idx + 1 < args.count {
             engines = Set(args[idx + 1].split(separator: ",").map(String.init))
         }
@@ -1607,30 +1473,6 @@ struct EngineBenchmarkCLI {
             }
         }
 
-        if engines.contains("whisper-cpp") {
-            let modelDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".audio-transcribe/models")
-            let ggmlModel = modelDir.appendingPathComponent("ggml-large-v3-turbo.bin")
-            if FileManager.default.fileExists(atPath: ggmlModel.path) {
-                print("\n  WhisperCppKit: GGML model found")
-            } else {
-                print("\n  WhisperCppKit: GGML model NOT found. Downloading (~1.6GB)...")
-                try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
-                let downloadURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-                proc.arguments = ["-L", "-o", ggmlModel.path, "--progress-bar", downloadURL]
-                try? proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus == 0 {
-                    print("  WhisperCppKit: download complete")
-                } else {
-                    print("  WhisperCppKit: download failed — will skip benchmark")
-                    engines.remove("whisper-cpp")
-                }
-            }
-        }
-
         if engines.contains("speech") {
             if #available(macOS 26.0, *) {
                 print("\n  SpeechAnalyzer: system framework, no download needed")
@@ -1662,13 +1504,6 @@ struct EngineBenchmarkCLI {
         if engines.contains("fluid") {
             print("\n── FluidAudio ──")
             let r = await benchmarkFluidAudio(audioPath: audioPath, audioDuration: audioDuration)
-            printResult(r)
-            results.append(r)
-        }
-
-        if engines.contains("whisper-cpp") {
-            print("\n── SwiftWhisper (whisper.cpp) ──")
-            let r = await benchmarkWhisperCpp(audioPath: audioPath, audioDuration: audioDuration)
             printResult(r)
             results.append(r)
         }

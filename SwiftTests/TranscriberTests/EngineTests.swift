@@ -34,27 +34,6 @@ struct EngineTests {
     }
     #endif
 
-    // MARK: - WhisperCppEngine properties
-
-    @Test func whisperCppEngineName() {
-        let engine = WhisperCppEngine(modelPath: URL(fileURLWithPath: "/tmp/nonexistent.bin"))
-        #expect(engine.name == "WhisperCpp")
-    }
-
-    @Test func whisperCppEngineIsReadyReturnsFalseForMissingModel() {
-        let engine = WhisperCppEngine(modelPath: URL(fileURLWithPath: "/tmp/nonexistent-\(UUID()).bin"))
-        #expect(engine.isReady() == false)
-    }
-
-    @Test func whisperCppEngineIsReadyReturnsTrueForExistingFile() throws {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("test-model-\(UUID()).bin")
-        FileManager.default.createFile(atPath: tmp.path, contents: Data("fake".utf8))
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let engine = WhisperCppEngine(modelPath: tmp)
-        #expect(engine.isReady() == true)
-    }
-
     // MARK: - Token grouping (FluidAudioEngine pure logic)
 
     @Test func groupTokensEmptyInput() {

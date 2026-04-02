@@ -144,16 +144,6 @@ final class TranscriptionRunner {
 
         case .fluidAudio:
             return FluidAudioEngine()
-
-        case .whisperCpp:
-            let modelPath: URL
-            if let custom = config.whisperCppModelPath {
-                modelPath = URL(fileURLWithPath: NSString(string: custom).expandingTildeInPath)
-            } else {
-                modelPath = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".audio-transcribe/models/ggml-large-v3-turbo.bin")
-            }
-            return WhisperCppEngine(modelPath: modelPath)
         }
     }
 

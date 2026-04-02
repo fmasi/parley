@@ -9,7 +9,7 @@
 ## Project Overview
 macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams/Meet).
 - **SwiftUI**: native menu bar app (`MenuBarExtra` + `Settings` scene), audio capture via XPC service
-- Swappable transcription engines: SpeechAnalyzer (Apple, default), FluidAudio (Parakeet), WhisperCppKit (whisper.cpp) — selectable in Settings via `EngineID`
+- Swappable transcription engines: SpeechAnalyzer (Apple, default) and FluidAudio (Parakeet) — selectable in Settings via `EngineID`
 
 ## Architecture
 
@@ -39,14 +39,13 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### Shared Logic (TranscriberCore target)
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
-- `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `whisperCppModelPath`
+- `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
-- `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio/whisperCpp) + EngineDescriptor metadata
+- `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata
 - `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines + AudioSourceType enum
 - `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization
 - `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
-- `TranscriberCore/WhisperCppEngine.swift` -- whisper.cpp engine (GGML format, Metal GPU)
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough
@@ -111,7 +110,7 @@ cd audio_capture_helper && bash build.sh
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
 20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
-22. **Engine model downloads:** FluidAudio downloads its Parakeet model on first use (~500MB). WhisperCppKit needs a GGML model at `~/.audio-transcribe/models/ggml-large-v3-turbo.bin` (~1.6GB). SpeechAnalyzer uses the system framework (no download). Power users can override the whisper.cpp model path via `whisper_cpp_model_path` in config.json.
+22. **Engine model downloads:** FluidAudio downloads its Parakeet model on first use (~500MB). SpeechAnalyzer uses the system framework (no download).
 23. **SpeechAnalyzerEngine compile guard:** `SpeechAnalyzer`/`SpeechTranscriber` types require the macOS 26 SDK (Swift 6.2+). The entire file is wrapped in `#if compiler(>=6.2)` and references in TranscriptionRunner/tests are similarly guarded. Remove when CI gains a macOS 26 runner.
 24. **FluidAudio AudioSource:** Pass `.microphone` or `.system` to `AsrManager.transcribe()` based on stream type — affects audio preprocessing. Map from `AudioSourceType` enum in `TranscriptionEngine` protocol.
 25. **FluidAudio ITN:** `TextNormalizer` converts spoken numbers to written form (e.g. "three hundred" → "300"). Uses a native C library via `dlsym` — gracefully no-ops if unavailable (`isNativeAvailable`). Applied per-segment after token grouping.

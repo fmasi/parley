@@ -15,7 +15,6 @@ struct ConfigTests {
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
         #expect(config.engine == .resolvedDefault)
-        #expect(config.whisperCppModelPath == nil)
     }
 
     @Test func newFieldsRoundTrip() throws {
@@ -41,7 +40,6 @@ struct ConfigTests {
         """
         let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
         #expect(config.engine == .resolvedDefault)
-        #expect(config.whisperCppModelPath == nil)
     }
 
     @Test func memberWiseInit() {
@@ -171,25 +169,4 @@ struct ConfigTests {
         #expect(config.engine == .resolvedDefault)
     }
 
-    @Test func whisperCppModelPathDefaultsToNil() {
-        let config = Config.default
-        #expect(config.whisperCppModelPath == nil)
-    }
-
-    @Test func whisperCppModelPathRoundTrips() throws {
-        var config = Config.default
-        config.whisperCppModelPath = "~/.audio-transcribe/models/ggml-large-v3.bin"
-        let data = try JSONEncoder().encode(config)
-        let decoded = try JSONDecoder().decode(Config.self, from: data)
-        #expect(decoded.whisperCppModelPath == "~/.audio-transcribe/models/ggml-large-v3.bin")
-    }
-
-    @Test func whisperCppModelPathSnakeCaseKey() throws {
-        var config = Config.default
-        config.whisperCppModelPath = "/some/path"
-        let data = try JSONEncoder().encode(config)
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        #expect(json["whisper_cpp_model_path"] != nil)
-        #expect(json["whisperCppModelPath"] == nil)
-    }
 }

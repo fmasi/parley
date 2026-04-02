@@ -4,11 +4,10 @@ import Foundation
 
 struct EngineIDTests {
 
-    @Test func allCasesContainsThreeEngines() {
-        #expect(EngineID.allCases.count == 3)
+    @Test func allCasesContainsTwoEngines() {
+        #expect(EngineID.allCases.count == 2)
         #expect(EngineID.allCases.contains(.speechAnalyzer))
         #expect(EngineID.allCases.contains(.fluidAudio))
-        #expect(EngineID.allCases.contains(.whisperCpp))
     }
 
     @Test func defaultIsSpeechAnalyzer() {
@@ -26,7 +25,6 @@ struct EngineIDTests {
     @Test func rawValuesAreSnakeCase() {
         #expect(EngineID.speechAnalyzer.rawValue == "speech_analyzer")
         #expect(EngineID.fluidAudio.rawValue == "fluid_audio")
-        #expect(EngineID.whisperCpp.rawValue == "whisper_cpp")
     }
 
     @Test func descriptorExistsForEveryEngine() {
@@ -50,17 +48,10 @@ struct EngineIDTests {
         #expect(d.minimumMacOS == "15.0")
     }
 
-    @Test func whisperCppDescriptorDetails() {
-        let d = EngineID.whisperCpp.descriptor
-        #expect(d.requiresModelDownload == true)
-        #expect(d.minimumMacOS == "15.0")
-    }
-
     @Test func availableEnginesExcludeUnavailable() {
         let available = EngineID.availableEngines
-        // On any macOS version, at least FluidAudio and WhisperCpp are available
+        // On any macOS version, at least FluidAudio is available
         #expect(available.contains(.fluidAudio))
-        #expect(available.contains(.whisperCpp))
     }
 
     @Test func resolvedDefaultFallsBackWhenUnavailable() {

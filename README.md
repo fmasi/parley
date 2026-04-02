@@ -4,7 +4,7 @@ On-device meeting transcription for Apple Silicon Macs. Records system audio and
 
 ## What's new in v0.4.0
 
-- **Swappable transcription engines** -- choose between FluidAudio (fastest), whisper.cpp, or Apple SpeechAnalyzer in Settings
+- **Swappable transcription engines** -- choose between FluidAudio (fastest) or Apple SpeechAnalyzer in Settings
 - **Speaker diarization** -- automatic speaker identification powered by FluidAudio (pyannote + WeSpeaker + VBx clustering)
 - **Multilingual transcription** -- handles English, Portuguese, French, and 22 other European languages in a single recording
 - **Text normalization (ITN)** -- spoken numbers become written form ("three hundred forty-two" becomes "342")
@@ -62,13 +62,12 @@ rm -rf ~/.audio-transcribe   # optional -- removes config, models, and recording
 
 ## Transcription Engines
 
-Three engines, selectable in **Settings > Transcription Engine** or via `config.json`:
+Two engines, selectable in **Settings > Transcription Engine** or via `config.json`:
 
 | Engine | Speed (17min audio) | Download | Languages | macOS |
 |---|---|---|---|---|
 | **FluidAudio** (Parakeet) | ~7s (146x real-time) | ~500MB | 25 EU languages | 15.0+ |
 | **Apple SpeechAnalyzer** | ~10s (102x real-time) | None | System languages | 26.0+ |
-| **whisper.cpp** (large-v3-turbo) | ~41s (25x real-time) | ~1.6GB | 99 languages | 15.0+ |
 
 FluidAudio includes:
 - **Inverse Text Normalization** -- "two hundred" becomes "200", dates and numbers formatted correctly
@@ -183,14 +182,6 @@ Config is stored at `~/.audio-transcribe/config.json`:
 }
 ```
 
-Power users can override the whisper.cpp model path:
-```json
-{
-  "engine": "whisper_cpp",
-  "whisper_cpp_model_path": "~/.audio-transcribe/models/ggml-large-v3.bin"
-}
-```
-
 ---
 
 ## CLI Usage
@@ -203,7 +194,7 @@ Power users can override the whisper.cpp model path:
 .build/debug/AudioTranscribe rename -i transcript.json
 
 # Run benchmark (single file)
-swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,whisper-cpp,speech
+swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,speech
 
 # Run benchmark matrix (all languages, all engines, with WER scoring)
 python3 tools/engine-benchmark/download-test-audio.py   # download test audio (once)
@@ -219,7 +210,7 @@ See [tools/engine-benchmark/README.md](tools/engine-benchmark/README.md) for det
 | Symptom | Fix |
 |---|---|
 | "damaged or incomplete" on launch | Rebuild: `bash package_app.sh` |
-| Slow first transcription | FluidAudio/whisper.cpp download models on first use -- cached after that |
+| Slow first transcription | FluidAudio downloads its model on first use -- cached after that |
 | XPC connection failed | Run as `.app` bundle -- XPC services don't work with bare binaries |
 | Exit code 2 from capture service | Grant "Screen & System Audio Recording" in System Settings |
 | TCC permission not persisting | Run as `.app` bundle so macOS ties the grant to the bundle ID |

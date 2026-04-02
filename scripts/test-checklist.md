@@ -1,7 +1,7 @@
 # Test Checklist — Engine Abstraction + FluidAudio Integration
 
 ## Settings
-- [ ] Engine picker shows all available engines (FluidAudio, WhisperCpp, SpeechAnalyzer on macOS 26+)
+- [ ] Engine picker shows all available engines (FluidAudio, SpeechAnalyzer on macOS 26+)
 - [ ] Switching engine persists to config.json
 - [ ] Output Format picker still works (txt/srt/json)
 
