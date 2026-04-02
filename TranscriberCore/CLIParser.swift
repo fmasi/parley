@@ -6,7 +6,7 @@ public struct TranscribeOptions {
     public let format: String
     public let language: String?
     public let noDiarize: Bool
-    public let model: String?
+    public let engine: String?
     public let speakers: Int?
 }
 
@@ -61,7 +61,7 @@ public enum CLIParser {
         var format = "json"
         var language: String?
         var noDiarize = false
-        var model: String?
+        var engine: String?
         var speakers: Int?
 
         var i = 0
@@ -85,10 +85,10 @@ public enum CLIParser {
                 language = args[i]
             case "--no-diarize":
                 noDiarize = true
-            case "--model":
+            case "--engine":
                 i += 1
-                guard i < args.count else { throw ParseError.missingRequiredArg("--model") }
-                model = args[i]
+                guard i < args.count else { throw ParseError.missingRequiredArg("--engine") }
+                engine = args[i]
             case "-s", "--speakers":
                 i += 1
                 guard i < args.count else { throw ParseError.missingRequiredArg("-s") }
@@ -104,7 +104,7 @@ public enum CLIParser {
         return TranscribeOptions(
             inputs: inputs, output: output, format: format,
             language: language, noDiarize: noDiarize,
-            model: model, speakers: speakers
+            engine: engine, speakers: speakers
         )
     }
 

@@ -60,6 +60,9 @@ enum CLIHandler {
         let runner = TranscriptionRunner()
 
         var runConfig = config
+        if let engineStr = opts.engine, let engineID = EngineID(rawValue: engineStr) {
+            runConfig.engine = engineID
+        }
         runConfig.outputFormat = opts.format
 
         let result = try await runner.run(
@@ -103,7 +106,7 @@ enum CLIHandler {
             -f <format>      Output format: json, srt, txt (default: json)
             -l <lang>        Force language code (auto-detect if omitted)
             -s <count>       Number of speakers (auto-detect if omitted)
-            --model <name>   Whisper model (default: from config)
+            --engine <id>    Engine: speech_analyzer, fluid_audio, whisper_cpp (default: from config)
             --no-diarize     Skip speaker diarization
 
           rename      Rename speakers in a transcript

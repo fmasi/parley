@@ -16,7 +16,7 @@ struct CLIHandlerTests {
         #expect(opts.format == "json")
         #expect(opts.language == nil)
         #expect(opts.noDiarize == false)
-        #expect(opts.model == nil)
+        #expect(opts.engine == nil)
         #expect(opts.speakers == nil)
     }
 
@@ -33,7 +33,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseTranscribeAllFlags() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "a.wav", "-l", "fr", "--no-diarize", "--model", "large-v3", "--speakers", "3"]
+        let args = ["AudioTranscribe", "transcribe", "-i", "a.wav", "-l", "fr", "--no-diarize", "--engine", "fluid_audio", "--speakers", "3"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
@@ -41,7 +41,7 @@ struct CLIHandlerTests {
         }
         #expect(opts.language == "fr")
         #expect(opts.noDiarize == true)
-        #expect(opts.model == "large-v3")
+        #expect(opts.engine == "fluid_audio")
         #expect(opts.speakers == 3)
     }
 

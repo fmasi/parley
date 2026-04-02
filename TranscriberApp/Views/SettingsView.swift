@@ -43,12 +43,25 @@ struct SettingsView: View {
                 )
             }
 
-            // TODO: Task 5 will add engine picker here
             Section("Transcription Engine") {
                 Picker("Engine", selection: $config.engine) {
-                    ForEach(EngineID.availableEngines) { engine in
-                        Text(engine.descriptor.displayName).tag(engine)
+                    ForEach(EngineID.allCases) { engine in
+                        HStack {
+                            Text(engine.descriptor.displayName)
+                            if !engine.descriptor.isAvailableOnThisOS {
+                                Text("(requires macOS \(engine.descriptor.minimumMacOS))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .tag(engine)
                     }
+                }
+
+                if config.engine.descriptor.requiresModelDownload {
+                    Text("First use will download ~\(config.engine.descriptor.approximateSizeMB)MB")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 

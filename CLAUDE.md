@@ -1,7 +1,7 @@
 # Transcriber - Project Instructions
 
 ## Environment
-- macOS only (requires Apple Silicon for WhisperKit/CoreML)
+- macOS only (requires Apple Silicon for CoreML/ANE acceleration)
 - Requires macOS 15.0+ for microphone capture via ScreenCaptureKit
 - No Python/conda required for the app itself (fully Swift-native)
 - Benchmark tool (`tools/engine-benchmark/`) optionally uses Python for mlx-whisper comparison — use conda if running that
@@ -9,14 +9,14 @@
 ## Project Overview
 macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams/Meet).
 - **SwiftUI**: native menu bar app (`MenuBarExtra` + `Settings` scene), audio capture via XPC service
-- Uses WhisperKit (Apple Silicon optimized) + SpeakerKit for speaker diarization (fully Swift-native, no Python)
+- Swappable transcription engines: SpeechAnalyzer (Apple, default), FluidAudio (Parakeet), WhisperCppKit (whisper.cpp) — selectable in Settings via `EngineID`
 
 ## Architecture
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
-- `TranscriberApp/Services/TranscriptionRunner.swift` -- runs WhisperKit transcription + SpeakerKit diarization
+- `TranscriberApp/Services/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
@@ -39,8 +39,13 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### Shared Logic (TranscriberCore target)
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
-- `TranscriberCore/Config.swift` -- Codable struct mirroring Python config.json (snake_case JSON keys)
+- `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `whisperCppModelPath`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
+- `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio/whisperCpp) + EngineDescriptor metadata
+- `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines
+- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages)
+- `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download)
+- `TranscriberCore/WhisperCppEngine.swift` -- whisper.cpp engine (GGML format, Metal GPU)
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
@@ -71,7 +76,7 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 102 tests across 9 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor)
+# ~170 tests across ~15 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -104,7 +109,7 @@ cd audio_capture_helper && bash build.sh
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
 20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
-22. **WhisperKit model download:** Models are downloaded on first use from argmaxinc/whisperkit-coreml. Requires internet access and enough disk space (~1-3 GB depending on model variant). Progress is reported via ModelManager callbacks.
+22. **Engine model downloads:** FluidAudio downloads its Parakeet model on first use (~500MB). WhisperCppKit needs a GGML model at `~/.audio-transcribe/models/ggml-large-v3-turbo.bin` (~1.6GB). SpeechAnalyzer uses the system framework (no download). Power users can override the whisper.cpp model path via `whisper_cpp_model_path` in config.json.
 
 ## Debugging with Unified Logging
 All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
@@ -144,4 +149,5 @@ python scripts/dev.py --debug
 
 ## Branches
 - `main` -- stable (Python rumps UI)
-- `feature/swiftui-native-ui` -- SwiftUI native UI rewrite (this branch)
+- `feature/swiftui-native-ui` -- SwiftUI native UI rewrite
+- `feature/whisperkit-migration` -- engine abstraction: swappable engines replacing hardcoded WhisperKit (this branch)
