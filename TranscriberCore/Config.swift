@@ -19,7 +19,7 @@ public struct Config: Codable, Equatable {
         launchOnStartup: true,
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
-        engine: .speechAnalyzer,
+        engine: .resolvedDefault,
         whisperCppModelPath: nil
     )
 
@@ -31,7 +31,7 @@ public struct Config: Codable, Equatable {
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
-        engine: EngineID = .speechAnalyzer,
+        engine: EngineID = .resolvedDefault,
         whisperCppModelPath: String? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -66,7 +66,7 @@ public struct Config: Codable, Equatable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
-        engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .speechAnalyzer
+        engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         whisperCppModelPath = try c.decodeIfPresent(String.self, forKey: .whisperCppModelPath)
     }
 }

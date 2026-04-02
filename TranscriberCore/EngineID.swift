@@ -8,10 +8,14 @@ public struct EngineDescriptor: Sendable {
     public let minimumMacOS: String
 
     public var isAvailableOnThisOS: Bool {
-        if #available(macOS 26.0, *) {
-            return true
+        let parts = minimumMacOS.split(separator: ".")
+        guard let requiredMajor = parts.first.flatMap({ Int($0) }) else { return true }
+        let requiredMinor = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
+        let current = ProcessInfo.processInfo.operatingSystemVersion
+        if current.majorVersion != requiredMajor {
+            return current.majorVersion > requiredMajor
         }
-        return minimumMacOS != "26.0"
+        return current.minorVersion >= requiredMinor
     }
 }
 

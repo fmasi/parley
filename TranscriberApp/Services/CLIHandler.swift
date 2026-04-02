@@ -58,6 +58,9 @@ enum CLIHandler {
         }
 
         let runner = TranscriptionRunner()
+        if opts.noDiarize {
+            runner.disableDiarization()
+        }
 
         var runConfig = config
         if let engineStr = opts.engine, let engineID = EngineID(rawValue: engineStr) {
@@ -104,8 +107,6 @@ enum CLIHandler {
             -i <file>        Input audio file (required, can specify twice for dual-stream)
             -o <file>        Output file path (default: auto from input name)
             -f <format>      Output format: json, srt, txt (default: json)
-            -l <lang>        Force language code (auto-detect if omitted)
-            -s <count>       Number of speakers (auto-detect if omitted)
             --engine <id>    Engine: speech_analyzer, fluid_audio, whisper_cpp (default: from config)
             --no-diarize     Skip speaker diarization
 

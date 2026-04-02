@@ -54,8 +54,15 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
 
         // Start analysis concurrently
         let analysisTask = Task {
-            if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
-                try await analyzer.finalizeAndFinish(through: lastSample)
+            do {
+                if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+                    try await analyzer.finalizeAndFinish(through: lastSample)
+                } else {
+                    await analyzer.cancelAndFinishNow()
+                }
+            } catch {
+                await analyzer.cancelAndFinishNow()
+                throw error
             }
         }
 

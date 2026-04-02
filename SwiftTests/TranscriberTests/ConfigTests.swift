@@ -14,7 +14,7 @@ struct ConfigTests {
         #expect(config.outputFormat == "txt")
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
-        #expect(config.engine == .speechAnalyzer)
+        #expect(config.engine == .resolvedDefault)
         #expect(config.whisperCppModelPath == nil)
     }
 
@@ -40,7 +40,7 @@ struct ConfigTests {
         "suppress_capture_warning":false}
         """
         let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
-        #expect(config.engine == .speechAnalyzer)
+        #expect(config.engine == .resolvedDefault)
         #expect(config.whisperCppModelPath == nil)
     }
 

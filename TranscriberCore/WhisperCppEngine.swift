@@ -155,7 +155,13 @@ public actor WhisperCppEngine: TranscriptionEngine {
         }
 
         var error: NSError?
+        var inputProvided = false
         converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+            if inputProvided {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            inputProvided = true
             outStatus.pointee = .haveData
             return inputBuffer
         }

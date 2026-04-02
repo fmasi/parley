@@ -29,6 +29,7 @@ final class TranscriptionRunner {
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
 
     private let wavHeaderSize = 44
+    private var detectedLanguages: [String] = []
 
     func run(
         systemAudio: URL,
@@ -37,6 +38,7 @@ final class TranscriptionRunner {
         config: Config
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
+        detectedLanguages = []
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -82,7 +84,7 @@ final class TranscriptionRunner {
         var audioPaths = [systemAudio]
         if let mic = micAudio { audioPaths.append(mic) }
 
-        let detectedLanguage = "en"
+        let detectedLanguage = detectedLanguages.first ?? "auto"
 
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
@@ -112,6 +114,10 @@ final class TranscriptionRunner {
 
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
+    }
+
+    func disableDiarization() {
+        self.diarizer = nil
     }
 
     // MARK: - Private
@@ -161,6 +167,11 @@ final class TranscriptionRunner {
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
 
         let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
+
+        // Capture detected language from engine output
+        if let lang = segments.lazy.compactMap(\.language).first {
+            detectedLanguages.append(lang)
+        }
 
         var labeled: [LabeledSegment]
         if let diarizer = diarizer {

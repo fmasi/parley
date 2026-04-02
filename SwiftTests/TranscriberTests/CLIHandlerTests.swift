@@ -14,10 +14,8 @@ struct CLIHandlerTests {
         #expect(opts.inputs == ["system.wav"])
         #expect(opts.output == nil)
         #expect(opts.format == "json")
-        #expect(opts.language == nil)
         #expect(opts.noDiarize == false)
         #expect(opts.engine == nil)
-        #expect(opts.speakers == nil)
     }
 
     @Test func parseTranscribeDualInput() throws {
@@ -33,16 +31,14 @@ struct CLIHandlerTests {
     }
 
     @Test func parseTranscribeAllFlags() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "a.wav", "-l", "fr", "--no-diarize", "--engine", "fluid_audio", "--speakers", "3"]
+        let args = ["AudioTranscribe", "transcribe", "-i", "a.wav", "--no-diarize", "--engine", "fluid_audio"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
             return
         }
-        #expect(opts.language == "fr")
         #expect(opts.noDiarize == true)
         #expect(opts.engine == "fluid_audio")
-        #expect(opts.speakers == 3)
     }
 
     @Test func parseRename() throws {

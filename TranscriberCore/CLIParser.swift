@@ -4,10 +4,8 @@ public struct TranscribeOptions {
     public let inputs: [String]
     public let output: String?
     public let format: String
-    public let language: String?
     public let noDiarize: Bool
     public let engine: String?
-    public let speakers: Int?
 }
 
 public struct BenchmarkOptions {
@@ -59,10 +57,8 @@ public enum CLIParser {
         var inputs: [String] = []
         var output: String?
         var format = "json"
-        var language: String?
         var noDiarize = false
         var engine: String?
-        var speakers: Int?
 
         var i = 0
         while i < args.count {
@@ -79,20 +75,12 @@ public enum CLIParser {
                 i += 1
                 guard i < args.count else { throw ParseError.missingRequiredArg("-f") }
                 format = args[i]
-            case "-l", "--language":
-                i += 1
-                guard i < args.count else { throw ParseError.missingRequiredArg("-l") }
-                language = args[i]
             case "--no-diarize":
                 noDiarize = true
             case "--engine":
                 i += 1
                 guard i < args.count else { throw ParseError.missingRequiredArg("--engine") }
                 engine = args[i]
-            case "-s", "--speakers":
-                i += 1
-                guard i < args.count else { throw ParseError.missingRequiredArg("-s") }
-                speakers = Int(args[i])
             default:
                 break
             }
@@ -103,8 +91,7 @@ public enum CLIParser {
 
         return TranscribeOptions(
             inputs: inputs, output: output, format: format,
-            language: language, noDiarize: noDiarize,
-            engine: engine, speakers: speakers
+            noDiarize: noDiarize, engine: engine
         )
     }
 
