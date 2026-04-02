@@ -708,6 +708,88 @@ func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
     try? lines.joined(separator: "\n").write(to: outputPath, atomically: true, encoding: .utf8)
 }
 
+// ── Diarization Benchmarking ──
+
+struct DiarizationBenchmarkResult {
+    let engine: String
+    let wallClockSeconds: Double
+    let segmentCount: Int
+    let speakerCount: Int
+    let sampleSegments: [(start: Double, end: Double, speaker: String, quality: Double)]
+    let audioDurationSeconds: Double
+    let error: String?
+
+    var realtimeFactor: Double {
+        guard wallClockSeconds > 0 else { return 0 }
+        return audioDurationSeconds / wallClockSeconds
+    }
+}
+
+func benchmarkFluidDiarization(audioPath: URL, audioDuration: Double) async -> DiarizationBenchmarkResult {
+    let start = ContinuousClock.now
+
+    do {
+        print("  Loading diarization models...")
+        let mgr = OfflineDiarizerManager()
+        try await mgr.prepareModels()
+
+        print("  Diarizing...")
+        let result = try await mgr.process(audioPath)
+
+        let elapsed = ContinuousClock.now - start
+        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+
+        let segments = result.segments.map { seg in
+            (Double(seg.startTimeSeconds), Double(seg.endTimeSeconds), seg.speakerId, seg.qualityScore)
+        }
+        let speakerCount = Set(result.segments.map(\.speakerId)).count
+
+        return DiarizationBenchmarkResult(
+            engine: "FluidAudio Diarization (pyannote + WeSpeaker + VBx)",
+            wallClockSeconds: seconds,
+            segmentCount: segments.count,
+            speakerCount: speakerCount,
+            sampleSegments: Array(segments.prefix(5)),
+            audioDurationSeconds: audioDuration,
+            error: nil
+        )
+    } catch {
+        let elapsed = ContinuousClock.now - start
+        let seconds = Double(elapsed.components.seconds)
+        return DiarizationBenchmarkResult(
+            engine: "FluidAudio Diarization (pyannote + WeSpeaker + VBx)",
+            wallClockSeconds: seconds,
+            segmentCount: 0,
+            speakerCount: 0,
+            sampleSegments: [],
+            audioDurationSeconds: audioDuration,
+            error: error.localizedDescription
+        )
+    }
+}
+
+func printDiarizationResult(_ r: DiarizationBenchmarkResult) {
+    print("")
+    print("  \(r.engine)")
+    if let error = r.error {
+        print("  ERROR: \(error)")
+        return
+    }
+    let minutes = Int(r.wallClockSeconds) / 60
+    let seconds = Int(r.wallClockSeconds) % 60
+    print("  Wall clock: \(minutes)m \(seconds)s (\(String(format: "%.1f", r.wallClockSeconds))s)")
+    print("  Speakers: \(r.speakerCount)")
+    print("  Segments: \(r.segmentCount)")
+    print("  Real-time factor: \(String(format: "%.1f", r.realtimeFactor))x real-time")
+    print("  Sample segments:")
+    for seg in r.sampleSegments {
+        let startTs = String(format: "%02d:%02d", Int(seg.start) / 60, Int(seg.start) % 60)
+        let endTs = String(format: "%02d:%02d", Int(seg.end) / 60, Int(seg.end) % 60)
+        print("    [\(startTs)-\(endTs)] Speaker \(seg.speaker) (quality: \(String(format: "%.2f", seg.quality)))")
+    }
+    // TODO: Add DER (Diarization Error Rate) scoring when RTTM ground truth is available
+}
+
 // ── Engine-Language Compatibility ──
 
 /// FluidAudio Parakeet v3 supports 25 European languages.
@@ -1098,6 +1180,7 @@ struct EngineBenchmarkCLI {
             print("Options:")
             print("  --ground-truth <path>  JSON file with reference transcripts for WER scoring")
             print("  --batch <directory>    Run all audio files in directory (loads models once)")
+            print("  --diarize              Also benchmark FluidAudio speaker diarization")
             Foundation.exit(1)
         }
 
@@ -1289,6 +1372,13 @@ struct EngineBenchmarkCLI {
             let r = await benchmarkMlxWhisper(audioPath: audioPath, audioDuration: audioDuration)
             printResult(r)
             results.append(r)
+        }
+
+        // Diarization benchmark (single-file mode)
+        if args.contains("--diarize") {
+            print("\n── Diarization: FluidAudio ──")
+            let dr = await benchmarkFluidDiarization(audioPath: audioPath, audioDuration: audioDuration)
+            printDiarizationResult(dr)
         }
 
         // Compute WER if ground truth available

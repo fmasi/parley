@@ -61,6 +61,34 @@ def download_fleurs(lang_code: str, lang_name: str, count: int = 5):
         print(f"  [fail] FLEURS {lang_name}: {e}")
 
 
+def download_ami_sample():
+    """Download a single AMI meeting segment for diarization testing (multi-speaker)."""
+    print("  Fetching AMI meeting sample from HuggingFace...")
+    try:
+        url = "https://datasets-server.huggingface.co/rows?dataset=diarizers-community/ami&config=headset-single&split=test&offset=0&length=1"
+        with urllib.request.urlopen(url) as resp:
+            data = json.load(resp)
+
+        row = data["rows"][0]["row"]
+        audio_url = row["audio"][0]["src"]
+        filename = "en-ami-meeting-00.wav"
+        path = TEST_DIR / filename
+        if not path.exists():
+            urllib.request.urlretrieve(audio_url, str(path))
+            size_mb = path.stat().st_size / (1024 * 1024)
+            print(f"  [done] {filename} ({size_mb:.1f} MB)")
+        else:
+            print(f"  [skip] {filename} already exists")
+
+        # AMI has speaker labels but we store basic info for diarization reference
+        num_speakers = row.get("num_speakers", "unknown")
+        print(f"  Speakers: {num_speakers}")
+        GROUND_TRUTH["AMI meeting"] = [{"file": filename, "speakers": num_speakers}]
+    except Exception as e:
+        print(f"  [fail] AMI sample: {e}")
+        print("  (AMI dataset may require HuggingFace authentication)")
+
+
 def main():
     print("╔═══════════════════════════════════════════╗")
     print("║  ASR Benchmark Test Audio Downloader      ║")
@@ -106,6 +134,10 @@ def main():
     print("\n── Japanese ──")
     download_fleurs("ja_jp", "Japanese")
 
+    # Multi-speaker meeting audio for diarization testing
+    print("\n── Multi-speaker (AMI Meeting Corpus) ──")
+    download_ami_sample()
+
     # Save ground truth
     gt_path = TEST_DIR / "ground-truth.json"
     with open(gt_path, "w") as f:
@@ -119,10 +151,13 @@ def main():
     print(f"\n══════ Complete ══════")
     print(f"  {len(audio_files)} audio files, {total_mb:.1f} MB total")
     print(f"  Location: {TEST_DIR}")
-    print(f"\nTo benchmark all test files:")
-    print(f"  for f in {TEST_DIR}/*.wav {TEST_DIR}/*.mp3; do")
-    print(f'    swift run --package-path tools/engine-benchmark EngineBenchmark "$f" --engines fluid,speech')
-    print(f"  done")
+    print(f"\nTo benchmark:")
+    print(f"  # Single file:")
+    print(f"  swift run --package-path tools/engine-benchmark EngineBenchmark <audio.wav> --ground-truth {gt_path}")
+    print(f"\n  # Full matrix (all files, all engines):")
+    print(f"  bash tools/engine-benchmark/run-benchmark-matrix.sh")
+    print(f"\n  # With diarization:")
+    print(f"  swift run --package-path tools/engine-benchmark EngineBenchmark <meeting.wav> --diarize")
 
 
 if __name__ == "__main__":
