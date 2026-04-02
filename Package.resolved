@@ -1,12 +1,30 @@
 {
   "pins" : [
     {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidInference/FluidAudio.git",
+      "state" : {
+        "revision" : "d9eef864d29783fc22754b12090631da5388c3a9",
+        "version" : "0.13.4"
+      }
+    },
+    {
       "identity" : "settingsaccess",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/orchetect/SettingsAccess",
       "state" : {
         "revision" : "08e80c35501f273afa2f5d6f737429bbe395ff81",
         "version" : "2.1.0"
+      }
+    },
+    {
+      "identity" : "whispercppkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Justmalhar/WhisperCppKit.git",
+      "state" : {
+        "revision" : "f45a3319036b93bafb4e9fdd81ca9e0840c04687",
+        "version" : "0.1.1"
       }
     }
   ],

@@ -1,22 +1,22 @@
 # Transcriber - Project Instructions
 
 ## Environment
-- **NEVER install Python packages directly on the host machine** -- always use a conda environment
-- macOS only (requires Apple Silicon for mlx-whisper)
+- macOS only (requires Apple Silicon for CoreML/ANE acceleration)
 - Requires macOS 15.0+ for microphone capture via ScreenCaptureKit
+- No Python/conda required for the app itself (fully Swift-native)
+- Benchmark tool (`tools/engine-benchmark/`) optionally uses Python for mlx-whisper comparison — use conda if running that
 
 ## Project Overview
 macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams/Meet).
 - **SwiftUI**: native menu bar app (`MenuBarExtra` + `Settings` scene), audio capture via XPC service
-- **Python**: transcription engine (`transcribe.py`), speaker renaming CLI (`rename_speakers.py`)
-- Uses mlx-whisper (Apple Silicon optimized) + pyannote.audio for speaker diarization
+- Swappable transcription engines: SpeechAnalyzer (Apple, default), FluidAudio (Parakeet), WhisperCppKit (whisper.cpp) — selectable in Settings via `EngineID`
 
 ## Architecture
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
-- `TranscriberApp/Services/TranscriptionRunner.swift` -- launches transcribe.py via Process
+- `TranscriberApp/Services/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
@@ -39,8 +39,15 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### Shared Logic (TranscriberCore target)
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
-- `TranscriberCore/Config.swift` -- Codable struct mirroring Python config.json (snake_case JSON keys)
+- `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `whisperCppModelPath`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
+- `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio/whisperCpp) + EngineDescriptor metadata
+- `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines + AudioSourceType enum
+- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization
+- `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores
+- `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
+- `TranscriberCore/WhisperCppEngine.swift` -- whisper.cpp engine (GGML format, Metal GPU)
+- `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
@@ -48,12 +55,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 - `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
-
-### Python CLI (unchanged)
-- `transcribe.py` -- CLI tool, mlx-whisper + pyannote diarization, supports dual-stream input (`-i system.wav -i mic.wav`)
-- `rename_speakers.py` -- interactive speaker renaming, reads/updates JSON master file
-- `service/config_manager.py` -- JSON config (shared format with Swift ConfigManager)
-- `service/logger.py` -- logging setup
 
 ### Standalone Swift CLI (legacy, still functional)
 - `audio_capture_helper/` -- Swift Package Manager project, standalone binary for CLI use
@@ -77,7 +78,7 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 102 tests across 9 suites (Config, ConfigManager, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor)
+# ~170 tests across ~15 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -86,13 +87,6 @@ swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTo
 ```bash
 cd audio_capture_helper && bash build.sh
 # Produces bin/audio-capture-helper
-```
-
-### Python
-```bash
-# Activate conda env first!
-python -m pytest tests/ -q
-# 79 tests
 ```
 
 ## Key Gotchas
@@ -117,8 +111,13 @@ python -m pytest tests/ -q
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
 20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
-22. **TranscriptionRunner environment:** `process.environment = [...]` replaces ALL env vars. Must include `HOME`, `TMPDIR`, embedded python `bin/` in PATH (for ffmpeg), and `/opt/homebrew/bin`. Must pass `hfToken` from config via `--hf-token` arg. The `-o` flag expects a file path, not a directory.
-23. **embed_python.sh rsync excludes:** Use path-anchored excludes (`--exclude='/bin/pip*'`) not bare globs (`--exclude='pip*'`) — bare `pip*` also matches `pipelines/` inside packages like torchaudio.
+22. **Engine model downloads:** FluidAudio downloads its Parakeet model on first use (~500MB). WhisperCppKit needs a GGML model at `~/.audio-transcribe/models/ggml-large-v3-turbo.bin` (~1.6GB). SpeechAnalyzer uses the system framework (no download). Power users can override the whisper.cpp model path via `whisper_cpp_model_path` in config.json.
+23. **SpeechAnalyzerEngine compile guard:** `SpeechAnalyzer`/`SpeechTranscriber` types require the macOS 26 SDK (Swift 6.2+). The entire file is wrapped in `#if compiler(>=6.2)` and references in TranscriptionRunner/tests are similarly guarded. Remove when CI gains a macOS 26 runner.
+24. **FluidAudio AudioSource:** Pass `.microphone` or `.system` to `AsrManager.transcribe()` based on stream type — affects audio preprocessing. Map from `AudioSourceType` enum in `TranscriptionEngine` protocol.
+25. **FluidAudio ITN:** `TextNormalizer` converts spoken numbers to written form (e.g. "three hundred" → "300"). Uses a native C library via `dlsym` — gracefully no-ops if unavailable (`isNativeAvailable`). Applied per-segment after token grouping.
+26. **Decimal-point sentence splitting:** The token grouper must not split on `.` when the next token starts with a digit (e.g. "1.5 million"), or it creates broken segments.
+27. **Config default engine:** Must use `.resolvedDefault` (not `.speechAnalyzer`) so fresh installs on macOS 15 get FluidAudio instead of an unavailable engine.
+28. **CLI entry detection:** Check for known subcommands (`transcribe`, `rename`, `benchmark`) not just `arguments.count > 1` — LaunchServices can inject extra arguments.
 
 ## Debugging with Unified Logging
 All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
@@ -153,10 +152,10 @@ python scripts/dev.py --debug
 - `Package.swift` -- SPM workspace with 4 targets + 1 test target (TranscriberApp, TranscriberCore, AudioCaptureHelperXPC, AudioCaptureProtocol, TranscriberTests)
 - `packaging/Info.plist` -- app bundle metadata (CFBundleIdentifier, TCC usage descriptions, LSUIElement)
 - `packaging/AudioCaptureHelper-Info.plist` -- XPC service plist (ServiceType: Application)
-- `packaging/embed_python.sh` -- embeds conda Python + scripts into .app Resources
 - `scripts/dev.py` -- developer iteration CLI: kill/build/install/launch/reset-tcc with modular flags (replaced test-fresh.sh)
 - `scripts/test-checklist.md` -- dynamic test checklist printed by dev.py on launch
 
 ## Branches
 - `main` -- stable (Python rumps UI)
-- `feature/swiftui-native-ui` -- SwiftUI native UI rewrite (this branch)
+- `feature/swiftui-native-ui` -- SwiftUI native UI rewrite
+- `feature/whisperkit-migration` -- engine abstraction: swappable engines replacing hardcoded WhisperKit (this branch)

@@ -7,8 +7,9 @@ public struct Config: Codable, Equatable {
     public var outputFormat: String
     public var launchOnStartup: Bool
     public var suppressCaptureWarning: Bool
-    public var hfToken: String
     public var lastMicrophoneDeviceId: String?
+    public var engine: EngineID
+    public var whisperCppModelPath: String?
 
     public static let `default` = Config(
         recordingDirectory: NSHomeDirectory() + "/Documents/Recordings",
@@ -17,8 +18,9 @@ public struct Config: Codable, Equatable {
         outputFormat: "txt",
         launchOnStartup: true,
         suppressCaptureWarning: false,
-        hfToken: "",
-        lastMicrophoneDeviceId: nil
+        lastMicrophoneDeviceId: nil,
+        engine: .resolvedDefault,
+        whisperCppModelPath: nil
     )
 
     public init(
@@ -28,8 +30,9 @@ public struct Config: Codable, Equatable {
         outputFormat: String = "txt",
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
-        hfToken: String = "",
-        lastMicrophoneDeviceId: String? = nil
+        lastMicrophoneDeviceId: String? = nil,
+        engine: EngineID = .resolvedDefault,
+        whisperCppModelPath: String? = nil
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -37,8 +40,9 @@ public struct Config: Codable, Equatable {
         self.outputFormat = outputFormat
         self.launchOnStartup = launchOnStartup
         self.suppressCaptureWarning = suppressCaptureWarning
-        self.hfToken = hfToken
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
+        self.engine = engine
+        self.whisperCppModelPath = whisperCppModelPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -48,7 +52,21 @@ public struct Config: Codable, Equatable {
         case outputFormat = "output_format"
         case launchOnStartup = "launch_on_startup"
         case suppressCaptureWarning = "suppress_capture_warning"
-        case hfToken = "hf_token"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
+        case engine
+        case whisperCppModelPath = "whisper_cpp_model_path"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        recordingDirectory = try c.decode(String.self, forKey: .recordingDirectory)
+        silenceTimeoutMinutes = try c.decode(Int.self, forKey: .silenceTimeoutMinutes)
+        silenceDetectionEnabled = try c.decode(Bool.self, forKey: .silenceDetectionEnabled)
+        outputFormat = try c.decode(String.self, forKey: .outputFormat)
+        launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
+        suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
+        lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
+        engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
+        whisperCppModelPath = try c.decodeIfPresent(String.self, forKey: .whisperCppModelPath)
     }
 }

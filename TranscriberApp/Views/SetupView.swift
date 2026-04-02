@@ -5,6 +5,10 @@ struct SetupView: View {
     @Bindable var permissionManager: PermissionManager
     let onReady: () -> Void
 
+    private var canContinue: Bool {
+        permissionManager.allRequiredGranted
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Audio Transcribe needs a few permissions to work")
@@ -57,7 +61,7 @@ struct SetupView: View {
                 Spacer()
                 Button("Continue") { onReady() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!permissionManager.allRequiredGranted)
+                    .disabled(!canContinue)
             }
         }
         .padding(24)

@@ -2,11 +2,10 @@
 # package_app.sh — Build and package AudioTranscribe.app (SwiftUI + XPC)
 #
 # Usage:
-#   bash package_app.sh [--release] [--install] [--embed-python]
+#   bash package_app.sh [--release] [--install]
 #
 #   --release        Build in release mode (default: debug)
 #   --install        Copy finished .app to /Applications
-#   --embed-python   Embed conda Python env (requires CONDA_PREFIX to be set)
 #
 # Output: dist/AudioTranscribe.app
 
@@ -18,12 +17,10 @@ cd "$SCRIPT_DIR"
 # ── Parse flags ────────────────────────────────────────────────────────────────
 CONFIG="debug"
 INSTALL=0
-EMBED_PYTHON=0
 for arg in "$@"; do
     case "$arg" in
-        --release)       CONFIG="release" ;;
-        --install)       INSTALL=1 ;;
-        --embed-python)  EMBED_PYTHON=1 ;;
+        --release)  CONFIG="release" ;;
+        --install)  INSTALL=1 ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done
@@ -60,12 +57,6 @@ cp packaging/AppIcon.icns "$RESOURCES/AppIcon.icns"
 # Binaries
 cp "$BUILD_DIR/AudioTranscribe"           "$MACOS/AudioTranscribe"
 cp "$BUILD_DIR/audio-capture-helper-xpc"  "$XPC_MACOS/audio-capture-helper-xpc"
-
-# ── Embed Python (optional) ───────────────────────────────────────────────────
-if [[ "$EMBED_PYTHON" == "1" ]]; then
-    echo "==> Embedding Python..."
-    bash packaging/embed_python.sh "dist"
-fi
 
 # ── Code sign (ad-hoc) ────────────────────────────────────────────────────────
 echo "==> Signing (ad-hoc)..."

@@ -1,48 +1,43 @@
-# Test Checklist
+# Test Checklist — Engine Abstraction + FluidAudio Integration
 
-## Liquid Glass Dialog Shape
-1. Click Start Recording — session name dialog appears with rounded rectangle glass (not oval)
-2. Glass is flush at top (no gap with title bar), rounded at bottom
+## Settings
+- [ ] Engine picker shows all available engines (FluidAudio, WhisperCpp, SpeechAnalyzer on macOS 26+)
+- [ ] Switching engine persists to config.json
+- [ ] Output Format picker still works (txt/srt/json)
 
-## Transcription + Rename Speakers
-3. Stop a recording — status shows "Transcribing..." and stays for ~30s+
-4. Transcription completes — `.json` file appears in recording folder (format file generated after rename dialog)
-5. Rename speakers dialog auto-opens and **stays visible when clicked**
-6. Each speaker shows **sample text** below their name
-7. Each speaker has a **play button** — plays their first segment from the source WAV
-8. "Rename Speakers..." menu item is enabled (not grayed out)
-9. Click "Rename Speakers..." from menu — dialog opens reliably
+## Transcription (FluidAudio engine)
+- [ ] Record a short clip (15-30s) with system audio, stop recording
+- [ ] Status shows "Transcribing..." during processing
+- [ ] `.json` file appears in recording folder
+- [ ] Format file (`.srt` or `.txt`) appears alongside JSON
+- [ ] JSON segments have timestamps, speaker labels, and text
+- [ ] Segments include `"confidence"` field (float from FluidAudio)
+- [ ] Rename speakers dialog opens after transcription
+- [ ] Play button works in rename dialog
+- [ ] After rename → format file updated with new speaker names
 
-## Error Visibility
-- [ ] Kill transcribe.py mid-run → menu shows "⚠ Error: ..." + "Dismiss Error"
-- [ ] Click "Dismiss Error" → error items disappear from menu
-- [ ] Start new recording after error → error items auto-clear
-- [ ] Error notification appears in Notification Center
-- [ ] Success notification still appears after normal transcription
+## Dual-stream (system + mic)
+- [ ] Record with both system audio and mic
+- [ ] JSON shows segments from both streams with source tags (Remote/Local)
+- [ ] Mic audio transcribed with correct AudioSource (check log for "source: microphone")
+- [ ] System audio transcribed with correct AudioSource (check log for "source: system")
 
-## Mid-Recording Mic Switch
-- [ ] Start recording on built-in mic → click "Change Microphone..." → select USB headset → click "Switch" → verify recording continues
-- [ ] After switching, verify the transcription includes audio from both the original and new mic
-- [ ] Open the mic WAV file in an audio editor — verify it's 48kHz mono throughout (no format glitch at switch point)
-- [ ] Start on USB webcam mic (48kHz stereo) → switch to built-in mic (48kHz mono) → verify no corruption
-- [ ] Switch to a device, then unplug it — verify recording continues on system audio and you can switch again
-- [ ] Verify "Change Microphone..." only appears in menu during active recording
-- [ ] Verify level meter in switch dialog shows live levels for the selected (not-yet-switched) device
-- [ ] Verify Cancel dismisses the dialog without switching
-- [ ] Verify selecting the same mic that's already active disables the Switch button
+## Diarization (FluidAudio)
+- [ ] Multi-speaker recording produces distinct Speaker 1, Speaker 2, etc.
+- [ ] Diarization quality scores logged (check log stream)
 
-## Format File Generation
-- [ ] Record with output_format=srt → rename speakers → save → .srt has renamed speakers
-- [ ] Record with output_format=srt → rename dialog → cancel → .srt has original speakers
-- [ ] Record with output_format=txt → rename speakers → save → .txt has renamed speakers
-- [ ] Record with output_format=json → rename dialog → save → no extra file created
-- [ ] Manual "Rename Speakers..." → save → format file updated with new names
+## Text Normalization (ITN)
+- [ ] Numbers spoken as words appear as digits in transcript (e.g. "two hundred" → "200")
+- [ ] Check log for "ITN applied to N segments" (or absent if native lib unavailable — still OK)
 
-## Unified Logging
-- [ ] Run `python scripts/dev.py --debug` — log stream starts after app launches
-- [ ] Start recording — see "Recording started" and "Starting capture" in log stream
-- [ ] Observe "System audio: ...Hz" and "Mic audio: ...Hz" format detection lines
-- [ ] Stop recording — see "Stopping capture" and "Launching transcription" lines
-- [ ] Python progress lines appear as `[python] Transcribing audio...` etc.
-- [ ] Transcription completes — see duration in "Transcription complete" line
-- [ ] Ctrl+C stops log stream; app keeps running
+## Logging (check via `log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)
+- [ ] "Loading FluidAudio model (Parakeet)..." on first transcription
+- [ ] "FluidAudio already loaded" on subsequent transcriptions
+- [ ] "FluidAudio complete: N segments in Xs (confidence: X.XX)" with timing
+- [ ] "FluidAudio diarization complete: N segments, M speakers" after diarization
+- [ ] "JSON transcript written" line
+- [ ] "Format file written" line (if output_format is srt/txt)
+
+## Model download (first run)
+- [ ] FluidAudio Parakeet model downloads automatically on first transcription (~500MB)
+- [ ] Diarization models download automatically on first use (~10MB)

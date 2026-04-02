@@ -14,7 +14,34 @@ struct ConfigTests {
         #expect(config.outputFormat == "txt")
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
-        #expect(config.hfToken == "")
+        #expect(config.engine == .resolvedDefault)
+        #expect(config.whisperCppModelPath == nil)
+    }
+
+    @Test func newFieldsRoundTrip() throws {
+        var config = Config.default
+        config.engine = .fluidAudio
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.engine == .fluidAudio)
+    }
+
+    @Test func newFieldsSnakeCaseKeys() throws {
+        let config = Config.default
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(json["engine"] != nil)
+    }
+
+    @Test func decodesLegacyConfigWithoutNewFields() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.engine == .resolvedDefault)
+        #expect(config.whisperCppModelPath == nil)
     }
 
     @Test func memberWiseInit() {
@@ -25,7 +52,7 @@ struct ConfigTests {
             outputFormat: "srt",
             launchOnStartup: false,
             suppressCaptureWarning: true,
-            hfToken: "hf_abc123"
+            engine: .fluidAudio
         )
         #expect(config.recordingDirectory == "/tmp/test")
         #expect(config.silenceTimeoutMinutes == 10)
@@ -33,7 +60,7 @@ struct ConfigTests {
         #expect(config.outputFormat == "srt")
         #expect(config.launchOnStartup == false)
         #expect(config.suppressCaptureWarning == true)
-        #expect(config.hfToken == "hf_abc123")
+        #expect(config.engine == .fluidAudio)
     }
 
     // MARK: - Codable round-trip
@@ -45,8 +72,7 @@ struct ConfigTests {
             silenceDetectionEnabled: false,
             outputFormat: "json",
             launchOnStartup: false,
-            suppressCaptureWarning: true,
-            hfToken: "hf_token_value"
+            suppressCaptureWarning: true
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
@@ -65,7 +91,7 @@ struct ConfigTests {
         #expect(json["output_format"] != nil)
         #expect(json["launch_on_startup"] != nil)
         #expect(json["suppress_capture_warning"] != nil)
-        #expect(json["hf_token"] != nil)
+        #expect(json["engine"] != nil)
         // camelCase keys should NOT be present
         #expect(json["recordingDirectory"] == nil)
         #expect(json["silenceTimeoutMinutes"] == nil)
@@ -80,14 +106,14 @@ struct ConfigTests {
             "output_format": "srt",
             "launch_on_startup": false,
             "suppress_capture_warning": true,
-            "hf_token": "test_token"
+            "engine": "fluid_audio"
         }
         """.data(using: .utf8)!
         let config = try JSONDecoder().decode(Config.self, from: json)
         #expect(config.recordingDirectory == "/custom/path")
         #expect(config.silenceTimeoutMinutes == 8)
         #expect(config.outputFormat == "srt")
-        #expect(config.hfToken == "test_token")
+        #expect(config.engine == .fluidAudio)
     }
 
     // MARK: - Equatable
@@ -127,9 +153,43 @@ struct ConfigTests {
         let json = """
         {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
         "output_format":"txt","launch_on_startup":true,"log_level":"info",\
-        "suppress_capture_warning":false,"hf_token":""}
+        "suppress_capture_warning":false}
         """
         let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
         #expect(config.lastMicrophoneDeviceId == nil)
+    }
+
+    // MARK: - Engine
+
+    @Test func decodesUnknownEngineToDefault() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false,"engine":"some_future_engine"}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.engine == .resolvedDefault)
+    }
+
+    @Test func whisperCppModelPathDefaultsToNil() {
+        let config = Config.default
+        #expect(config.whisperCppModelPath == nil)
+    }
+
+    @Test func whisperCppModelPathRoundTrips() throws {
+        var config = Config.default
+        config.whisperCppModelPath = "~/.audio-transcribe/models/ggml-large-v3.bin"
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.whisperCppModelPath == "~/.audio-transcribe/models/ggml-large-v3.bin")
+    }
+
+    @Test func whisperCppModelPathSnakeCaseKey() throws {
+        var config = Config.default
+        config.whisperCppModelPath = "/some/path"
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(json["whisper_cpp_model_path"] != nil)
+        #expect(json["whisperCppModelPath"] == nil)
     }
 }

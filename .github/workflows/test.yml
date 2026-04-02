@@ -8,19 +8,14 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install test dependencies
+      - name: Run Swift tests
         run: |
-          pip install pytest numpy torch torchaudio soundfile
-
-      - name: Run tests (skip macOS-only)
-        run: pytest -v -m "not macos"
+          swift test --filter TranscriberTests \
+            -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/

@@ -8,165 +8,203 @@ struct TranscriptionResult {
 
 final class TranscriptionRunner {
     enum RunnerError: LocalizedError {
-        case pythonNotFound
-        case scriptNotFound
+        case engineNotReady(String)
+        case engineUnavailable(String)
         case failed(String)
 
         var errorDescription: String? {
             switch self {
-            case .pythonNotFound: return "Embedded Python not found in app bundle"
-            case .scriptNotFound: return "transcribe.py not found in app bundle"
-            case .failed(let msg): return msg
+            case .engineNotReady(let name):
+                return "Engine '\(name)' is not ready. It may need to download a model first."
+            case .engineUnavailable(let name):
+                return "Engine '\(name)' is not available on this version of macOS."
+            case .failed(let msg):
+                return msg
             }
         }
     }
+
+    private var transcriber: (any TranscriptionEngine)?
+    private var lastEngineID: EngineID?
+    private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
+
+    private let wavHeaderSize = 44
+    private var detectedLanguages: [String] = []
 
     func run(
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        hfToken: String = ""
+        config: Config
     ) async throws -> TranscriptionResult {
-        let resources = Bundle.main.resourceURL!
-        let pythonHome = resources.appendingPathComponent("python")
-        let pythonBin = pythonHome.appendingPathComponent("bin/python3")
-        let sitePackages = pythonHome
-            .appendingPathComponent("lib/python3.11/site-packages")
-        let transcribeScript = resources
-            .appendingPathComponent("Python/transcribe.py")
+        let startTime = ContinuousClock.now
+        detectedLanguages = []
 
-        guard FileManager.default.fileExists(atPath: pythonBin.path) else {
-            throw RunnerError.pythonNotFound
+        let engineID = config.engine
+        if transcriber == nil || lastEngineID != engineID {
+            Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
+            transcriber = try createEngine(for: engineID, config: config)
+            lastEngineID = engineID
         }
-        guard FileManager.default.fileExists(atPath: transcribeScript.path) else {
-            throw RunnerError.scriptNotFound
+
+        guard let transcriber = transcriber else {
+            throw RunnerError.failed("Failed to initialize transcription engine")
         }
+
+        let isDualStream = micAudio != nil
+        var allSegments: [LabeledSegment] = []
+
+        let systemSegments = try await transcribeStream(
+            audioPath: systemAudio,
+            source: "remote",
+            transcriber: transcriber,
+            label: "system",
+            audioSource: .system
+        )
+        allSegments.append(contentsOf: systemSegments)
+
+        if let micPath = micAudio {
+            let micSegments = try await transcribeStream(
+                audioPath: micPath,
+                source: "local",
+                transcriber: transcriber,
+                label: "mic",
+                audioSource: .microphone
+            )
+            allSegments.append(contentsOf: micSegments)
+        }
+
+        if isDualStream && !allSegments.isEmpty {
+            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+        }
+
+        allSegments.sort { $0.start < $1.start }
+        Logger.transcription.info("Total segments after merge: \(allSegments.count)")
+
+        var audioPaths = [systemAudio]
+        if let mic = micAudio { audioPaths.append(mic) }
+
+        let uniqueLanguages = Set(detectedLanguages)
+        let detectedLanguage: String
+        switch uniqueLanguages.count {
+        case 0: detectedLanguage = "auto"
+        case 1: detectedLanguage = uniqueLanguages.first!
+        default: detectedLanguage = "multilingual"
+        }
+
+        let json = TranscriptAssembler.assemble(
+            segments: allSegments,
+            audioPaths: audioPaths,
+            outputFormat: config.outputFormat,
+            language: detectedLanguage,
+            numSpeakers: nil,
+            diarization: diarizer != nil,
+            dualStream: isDualStream
+        )
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
-        let jsonFile = outputDirectory.appendingPathComponent(baseName + ".json")
+        let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+        try TranscriptAssembler.write(json, to: jsonPath)
 
-        var arguments = [
-            transcribeScript.path,
-            "-i", systemAudio.path,
-        ]
-        if let mic = micAudio {
-            arguments += ["-i", mic.path]
-        }
-        arguments += ["-f", "json"]
-        arguments += ["-o", jsonFile.path]
-        if !hfToken.isEmpty {
-            arguments += ["--hf-token", hfToken]
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
 
-        let inputCount = micAudio != nil ? 2 : 1
-        Logger.transcription.info("Launching transcription — format: json, inputs: \(inputCount)")
-        Logger.transcription.debug("Python args: \(arguments, privacy: .private)")
+        let elapsed = ContinuousClock.now - startTime
+        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
-        let process = Process()
-        process.executableURL = pythonBin
-        process.arguments = arguments
-        process.environment = [
-            "PYTHONHOME": pythonHome.path,
-            "PYTHONPATH": sitePackages.path,
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-            "TMPDIR": NSTemporaryDirectory(),
-            "PATH": [
-                pythonHome.appendingPathComponent("bin").path,
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-            ].joined(separator: ":"),
-        ]
-
-        Logger.transcription.debug("Python env — PYTHONHOME: \(pythonHome.path, privacy: .private), PATH: \(process.environment?["PATH"] ?? "", privacy: .private)")
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        // Accumulate stderr for error reporting on failure
-        let stderrAccumulator = StderrAccumulator()
-
-        // Real-time forwarding of Python output to unified log
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty,
-                  let text = String(data: data, encoding: .utf8) else { return }
-            for line in text.split(separator: "\n") {
-                Logger.transcription.info("[python] \(line, privacy: .public)")
-            }
-        }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { [stderrAccumulator] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            stderrAccumulator.append(data)
-            if let text = String(data: data, encoding: .utf8) {
-                for line in text.split(separator: "\n") {
-                    Logger.transcription.error("[python-err] \(line, privacy: .public)")
-                }
-            }
-        }
-
-        let startTime = ContinuousClock.now
-
-        return try await withCheckedThrowingContinuation { cont in
-            process.terminationHandler = { [stderrAccumulator] proc in
-                // Clean up handlers to avoid retain cycles
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-
-                let elapsed = ContinuousClock.now - startTime
-                let seconds = elapsed.components.seconds
-
-                if proc.terminationStatus != 0 {
-                    let stderr = stderrAccumulator.string
-                    // Read any remaining stdout
-                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                    let output = stderr.isEmpty ? stdout : stderr
-                    Logger.transcription.error("Transcription failed — exit code: \(proc.terminationStatus), duration: \(seconds)s")
-                    cont.resume(throwing: RunnerError.failed(
-                        "transcribe.py exited with code \(proc.terminationStatus): \(output)"
-                    ))
-                    return
-                }
-
-                Logger.transcription.info("Transcription complete — exit code: 0, duration: \(seconds)s")
-
-                cont.resume(returning: TranscriptionResult(
-                    jsonPath: jsonFile
-                ))
-            }
-
-            do {
-                try process.run()
-            } catch {
-                Logger.transcription.error("Failed to launch Python: \(error, privacy: .public)")
-                cont.resume(throwing: RunnerError.failed(
-                    "Failed to launch transcribe.py: \(error.localizedDescription)"
-                ))
-            }
-        }
-    }
-}
-
-/// Thread-safe accumulator for stderr data from the Python process.
-private final class StderrAccumulator: @unchecked Sendable {
-    private var data = Data()
-    private let lock = NSLock()
-
-    func append(_ newData: Data) {
-        lock.lock()
-        data.append(newData)
-        lock.unlock()
+        return TranscriptionResult(jsonPath: jsonPath)
     }
 
-    var string: String {
-        lock.lock()
-        defer { lock.unlock() }
-        return String(data: data, encoding: .utf8) ?? ""
+    func setDiarizer(_ provider: any DiarizationProvider) {
+        self.diarizer = provider
+    }
+
+    func disableDiarization() {
+        self.diarizer = nil
+    }
+
+    // MARK: - Private
+
+    private func createEngine(for id: EngineID, config: Config) throws -> any TranscriptionEngine {
+        guard id.descriptor.isAvailableOnThisOS else {
+            throw RunnerError.engineUnavailable(id.descriptor.displayName)
+        }
+
+        switch id {
+        case .speechAnalyzer:
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                return SpeechAnalyzerEngine()
+            }
+            #endif
+            throw RunnerError.engineUnavailable("SpeechAnalyzer requires macOS 26")
+
+        case .fluidAudio:
+            return FluidAudioEngine()
+
+        case .whisperCpp:
+            let modelPath: URL
+            if let custom = config.whisperCppModelPath {
+                modelPath = URL(fileURLWithPath: NSString(string: custom).expandingTildeInPath)
+            } else {
+                modelPath = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".audio-transcribe/models/ggml-large-v3-turbo.bin")
+            }
+            return WhisperCppEngine(modelPath: modelPath)
+        }
+    }
+
+    private func transcribeStream(
+        audioPath: URL,
+        source: String,
+        transcriber: any TranscriptionEngine,
+        label: String,
+        audioSource: AudioSourceType
+    ) async throws -> [LabeledSegment] {
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
+        if fileSize <= wavHeaderSize {
+            Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
+            return []
+        }
+
+        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
+
+        let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
+
+        // Capture detected language from engine output
+        if let lang = segments.lazy.compactMap(\.language).first {
+            detectedLanguages.append(lang)
+        }
+
+        var labeled: [LabeledSegment]
+        if let diarizer = diarizer {
+            let diarizedSegments = try await diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
+            labeled = SpeakerAssignment.assign(
+                transcriptSegments: segments,
+                diarizationSegments: diarizedSegments
+            )
+        } else {
+            labeled = segments.map { seg in
+                LabeledSegment(
+                    start: seg.start,
+                    end: seg.end,
+                    speaker: "Speaker 1",
+                    text: seg.text.trimmingCharacters(in: .whitespaces),
+                    source: "",
+                    confidence: seg.confidence,
+                    language: seg.language
+                )
+            }
+        }
+
+        for i in labeled.indices {
+            labeled[i].source = source
+        }
+
+        Logger.transcription.info("\(label.capitalized, privacy: .public) transcription: \(labeled.count) segments")
+        return labeled
     }
 }

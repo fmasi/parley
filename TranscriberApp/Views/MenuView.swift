@@ -128,12 +128,11 @@ struct MenuView: View {
             let paths = try await captureClient.stop()
             appState.phase = .transcribing(progress: "Transcribing...")
 
-            let config = configManager.config
             let result = try await transcriptionRunner.run(
                 systemAudio: paths.systemAudio,
                 micAudio: paths.micAudio,
                 outputDirectory: paths.systemAudio.deletingLastPathComponent(),
-                hfToken: config.hfToken
+                config: configManager.config
             )
 
             appState.lastJsonPath = result.jsonPath.path

@@ -79,13 +79,13 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { config in
-            config.hfToken = "hf_new_token"
+            config.engine = .fluidAudio
         }
-        #expect(manager.config.hfToken == "hf_new_token")
+        #expect(manager.config.engine == .fluidAudio)
 
         // Verify persisted
         let reloaded = ConfigManager(configDir: dir)
-        #expect(reloaded.config.hfToken == "hf_new_token")
+        #expect(reloaded.config.engine == .fluidAudio)
     }
 
     // MARK: - Partial JSON merges with defaults (unknown keys ignored)
@@ -103,8 +103,7 @@ struct ConfigManagerTests {
             "output_format": "json",
             "launch_on_startup": true,
             "log_level": "info",
-            "suppress_capture_warning": false,
-            "hf_token": ""
+            "suppress_capture_warning": false
         }
         """
         let configFile = dir.appendingPathComponent("config.json")
@@ -141,9 +140,9 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { $0.outputFormat = "srt" }
-        manager.update { $0.hfToken = "token123" }
+        manager.update { $0.engine = .whisperCpp }
 
         #expect(manager.config.outputFormat == "srt")
-        #expect(manager.config.hfToken == "token123")
+        #expect(manager.config.engine == .whisperCpp)
     }
 }

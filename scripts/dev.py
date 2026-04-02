@@ -5,7 +5,7 @@ Build, install, and launch the app for manual testing.
 
 Default (no flags): kill -> build -> install -> launch + print checklist.
 Step flags (--kill, --build, --install, --launch, --reset-tcc) switch to explicit mode.
-Modifier flags (--debug, --skip-embed) layer on top of default or explicit steps.
+Modifier flags (--debug) layer on top of default or explicit steps.
 
 Examples:
     python scripts/dev.py                          # full cycle
@@ -14,11 +14,9 @@ Examples:
     python scripts/dev.py --reset-tcc --launch     # reset + launch
     python scripts/dev.py --build --install        # build + install only
     python scripts/dev.py --kill --launch          # relaunch existing install
-    python scripts/dev.py --skip-embed             # full cycle, skip Python embedding
 """
 
 import argparse
-import os
 import subprocess
 import sys
 import time
@@ -56,8 +54,6 @@ def parse_args() -> argparse.Namespace:
     mods = parser.add_argument_group("modifiers (layer on top of default or explicit)")
     mods.add_argument("--debug", action="store_true",
                       help="Launch app normally, then tail unified log (Ctrl+C to stop)")
-    mods.add_argument("--skip-embed", action="store_true",
-                      help="Skip Python embedding (faster rebuild)")
 
     return parser.parse_args()
 
@@ -114,23 +110,13 @@ def do_reset_tcc() -> None:
     print("   To reset: System Settings > Notifications > AudioTranscribe")
 
 
-def do_build(skip_embed: bool, install: bool) -> None:
+def do_build(install: bool) -> None:
     label = "Building"
     if install:
         label += " + installing"
-    if skip_embed:
-        label += " (skip Python embed)"
     step(label)
 
-    # Preflight: conda env
-    if not skip_embed and not os.environ.get("CONDA_PREFIX"):
-        print("\033[1;31mError: Activate your conda environment first.\033[0m",
-              file=sys.stderr)
-        sys.exit(1)
-
     cmd = ["bash", str(PACKAGE_SCRIPT)]
-    if not skip_embed:
-        cmd.append("--embed-python")
     if install:
         cmd.append("--install")
 
@@ -180,10 +166,10 @@ def main() -> None:
         # Fresh build = new ad-hoc signature, so TCC must be reset
         if "reset_tcc" not in steps:
             do_reset_tcc()
-        do_build(skip_embed=args.skip_embed, install="install" in steps)
+        do_build(install="install" in steps)
     elif "install" in steps:
         # Install without build — delegate to package_app.sh --install
-        do_build(skip_embed=True, install=True)
+        do_build(install=True)
     if "launch" in steps:
         do_launch()
         print_checklist()

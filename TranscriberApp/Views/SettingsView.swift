@@ -43,6 +43,21 @@ struct SettingsView: View {
                 )
             }
 
+            Section("Transcription Engine") {
+                Picker("Engine", selection: $config.engine) {
+                    ForEach(EngineID.availableEngines) { engine in
+                        Text(engine.descriptor.displayName)
+                        .tag(engine)
+                    }
+                }
+
+                if config.engine.descriptor.requiresModelDownload {
+                    Text("First use will download ~\(config.engine.descriptor.approximateSizeMB)MB")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Recording") {
                 TextField("Recording Directory", text: $config.recordingDirectory)
                 Picker("Output Format", selection: $config.outputFormat) {
@@ -61,11 +76,6 @@ struct SettingsView: View {
                         format: .number
                     )
                 }
-            }
-
-            Section("Speaker Diarization") {
-                SecureField("HuggingFace Token", text: $config.hfToken)
-                    .textContentType(.password)
             }
 
             Section("Startup") {

@@ -46,7 +46,15 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
+    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "benchmark"]
+
     init() {
+        // CLI mode: only enter for known subcommands (not system-injected args)
+        if let first = CommandLine.arguments.dropFirst().first,
+           Self.cliSubcommands.contains(first) {
+            CLIHandler.run()  // Never returns
+        }
+
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         let gate = launchGate
         Task { @MainActor in

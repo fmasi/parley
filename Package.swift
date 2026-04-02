@@ -10,6 +10,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/orchetect/SettingsAccess", from: "2.0.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4"),
+        .package(url: "https://github.com/Justmalhar/WhisperCppKit.git", from: "0.1.0"),
     ],
     targets: [
         .target(
@@ -18,6 +20,10 @@ let package = Package(
         ),
         .target(
             name: "TranscriberCore",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "WhisperCppKit", package: "WhisperCppKit"),
+            ],
             path: "TranscriberCore"
         ),
         .executableTarget(

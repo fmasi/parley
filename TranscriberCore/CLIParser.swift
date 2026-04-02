@@ -1,0 +1,119 @@
+import Foundation
+
+public struct TranscribeOptions {
+    public let inputs: [String]
+    public let outputDir: String?
+    public let format: String
+    public let noDiarize: Bool
+    public let engine: String?
+}
+
+public struct BenchmarkOptions {
+    public let transcriptionOnly: Bool
+    public let diarizationOnly: Bool
+}
+
+public enum CLICommand {
+    case transcribe(TranscribeOptions)
+    case rename(String)
+    case benchmark(BenchmarkOptions)
+}
+
+public enum CLIParser {
+
+    public enum ParseError: LocalizedError {
+        case missingSubcommand
+        case unknownSubcommand(String)
+        case missingRequiredArg(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .missingSubcommand: return "Usage: AudioTranscribe <transcribe|rename|benchmark>"
+            case .unknownSubcommand(let cmd): return "Unknown subcommand: \(cmd)"
+            case .missingRequiredArg(let arg): return "Missing required argument: \(arg)"
+            }
+        }
+    }
+
+    public static func parse(_ args: [String]) throws -> CLICommand? {
+        guard args.count > 1 else { return nil }
+
+        let subcommand = args[1]
+        let rest = Array(args.dropFirst(2))
+
+        switch subcommand {
+        case "transcribe":
+            return .transcribe(try parseTranscribe(rest))
+        case "rename":
+            return .rename(try parseRename(rest))
+        case "benchmark":
+            return .benchmark(parseBenchmark(rest))
+        default:
+            throw ParseError.unknownSubcommand(subcommand)
+        }
+    }
+
+    private static func parseTranscribe(_ args: [String]) throws -> TranscribeOptions {
+        var inputs: [String] = []
+        var outputDir: String?
+        var format = "json"
+        var noDiarize = false
+        var engine: String?
+
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "-i", "--input":
+                i += 1
+                guard i < args.count else { throw ParseError.missingRequiredArg("-i") }
+                inputs.append(args[i])
+            case "--output-dir":
+                i += 1
+                guard i < args.count else { throw ParseError.missingRequiredArg("--output-dir") }
+                outputDir = args[i]
+            case "-f", "--format":
+                i += 1
+                guard i < args.count else { throw ParseError.missingRequiredArg("-f") }
+                format = args[i]
+            case "--no-diarize":
+                noDiarize = true
+            case "--engine":
+                i += 1
+                guard i < args.count else { throw ParseError.missingRequiredArg("--engine") }
+                engine = args[i]
+            default:
+                break
+            }
+            i += 1
+        }
+
+        guard !inputs.isEmpty else { throw ParseError.missingRequiredArg("-i") }
+
+        return TranscribeOptions(
+            inputs: inputs, outputDir: outputDir, format: format,
+            noDiarize: noDiarize, engine: engine
+        )
+    }
+
+    private static func parseRename(_ args: [String]) throws -> String {
+        var input: String?
+        var i = 0
+        while i < args.count {
+            if args[i] == "-i" || args[i] == "--input" {
+                i += 1
+                guard i < args.count else { throw ParseError.missingRequiredArg("-i") }
+                input = args[i]
+            }
+            i += 1
+        }
+        guard let input else { throw ParseError.missingRequiredArg("-i") }
+        return input
+    }
+
+    private static func parseBenchmark(_ args: [String]) -> BenchmarkOptions {
+        BenchmarkOptions(
+            transcriptionOnly: args.contains("--transcription-only"),
+            diarizationOnly: args.contains("--diarization-only")
+        )
+    }
+}
