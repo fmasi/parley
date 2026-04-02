@@ -1,7 +1,7 @@
 import Foundation
 
 /// Protocol for swappable transcription engines.
-/// Implementations: WhisperKitEngine, FluidAudioEngine, WhisperCppEngine, SpeechAnalyzerEngine
+/// Implementations: FluidAudioEngine, WhisperCppEngine, SpeechAnalyzerEngine
 public protocol TranscriptionEngine: Sendable {
     /// Human-readable engine name for logging and UI.
     var name: String { get }

@@ -38,8 +38,6 @@ enum CLIHandler {
 
     private static func handleTranscribe(_ opts: TranscribeOptions) async throws {
         let config = ConfigManager.shared.config
-        let model = opts.model ?? "large-v3-turbo" // TODO: Task 4 will use engine-based selection
-        let storagePath = ModelManager.resolveStoragePath("~/.audio-transcribe/models")
 
         // Validate inputs exist
         let inputURLs = opts.inputs.map { URL(fileURLWithPath: $0) }
@@ -47,12 +45,6 @@ enum CLIHandler {
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw CLIError.fileNotFound(url.path)
             }
-        }
-
-        // Validate model downloaded
-        let modelDir = storagePath.appendingPathComponent(model)
-        guard FileManager.default.fileExists(atPath: modelDir.path) else {
-            throw CLIError.modelNotDownloaded(model)
         }
 
         let systemAudio = inputURLs[0]
@@ -66,12 +58,8 @@ enum CLIHandler {
         }
 
         let runner = TranscriptionRunner()
-        if !opts.noDiarize {
-            runner.setDiarizer(NativeSpeakerKitDiarizer())
-        }
 
         var runConfig = config
-        // TODO: Task 4 will set engine-based config
         runConfig.outputFormat = opts.format
 
         let result = try await runner.run(
@@ -130,13 +118,11 @@ enum CLIHandler {
 
     enum CLIError: LocalizedError {
         case fileNotFound(String)
-        case modelNotDownloaded(String)
         case noBenchmarkFiles
 
         var errorDescription: String? {
             switch self {
             case .fileNotFound(let path): return "File not found: \(path)"
-            case .modelNotDownloaded(let model): return "Model '\(model)' not downloaded. Run the app first to download it."
             case .noBenchmarkFiles: return "No benchmark files found in ~/.audio-transcribe/benchmark/"
             }
         }

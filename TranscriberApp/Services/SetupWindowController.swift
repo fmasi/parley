@@ -7,7 +7,7 @@ final class SetupWindowController {
     static let shared = SetupWindowController()
     private var window: NSWindow?
 
-    func show(permissionManager: PermissionManager, modelManager: ModelManager, onReady: @escaping () -> Void) {
+    func show(permissionManager: PermissionManager, onReady: @escaping () -> Void) {
         window?.close()
 
         let closeWindow = { [weak self] in
@@ -15,7 +15,7 @@ final class SetupWindowController {
             self?.window = nil
         }
 
-        let view = SetupView(permissionManager: permissionManager, modelManager: modelManager) {
+        let view = SetupView(permissionManager: permissionManager) {
             closeWindow()
             onReady()
         }

@@ -8,13 +8,16 @@ struct TranscriptionResult {
 
 final class TranscriptionRunner {
     enum RunnerError: LocalizedError {
-        case modelNotDownloaded(String)
+        case engineNotReady(String)
+        case engineUnavailable(String)
         case failed(String)
 
         var errorDescription: String? {
             switch self {
-            case .modelNotDownloaded(let model):
-                return "Whisper model '\(model)' is not downloaded. Open Settings to download it."
+            case .engineNotReady(let name):
+                return "Engine '\(name)' is not ready. It may need to download a model first."
+            case .engineUnavailable(let name):
+                return "Engine '\(name)' is not available on this version of macOS."
             case .failed(let msg):
                 return msg
             }
@@ -22,10 +25,9 @@ final class TranscriptionRunner {
     }
 
     private var transcriber: (any TranscriptionEngine)?
-    private var lastModelKey: String?
+    private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)?
 
-    /// Minimum WAV file size to consider non-empty (44 bytes = WAV header only).
     private let wavHeaderSize = 44
 
     func run(
@@ -36,37 +38,20 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
 
-        // 1. Resolve model path and verify the model exists on disk
-        // TODO: Task 4 will replace this with engine-based selection
-        let storagePath = ModelManager.resolveStoragePath("~/.audio-transcribe/models")
-        let whisperModel = "large-v3-turbo"
-        let modelDir = storagePath.appendingPathComponent(whisperModel)
-
-        guard FileManager.default.fileExists(atPath: modelDir.path) else {
-            Logger.transcription.error("Model not found at \(modelDir.path, privacy: .private)")
-            throw RunnerError.modelNotDownloaded(whisperModel)
-        }
-
-        // 2. Lazy-init transcriber, reuse if same model for caching benefit
-        let modelKey = "\(storagePath.path)/\(whisperModel)"
-        if transcriber == nil || lastModelKey != modelKey {
-            Logger.transcription.info("Creating WhisperKitTranscriber — model: \(whisperModel, privacy: .public)")
-            transcriber = WhisperKitTranscriber(
-                modelPath: storagePath,
-                model: whisperModel,
-                unloadTimeoutMinutes: 60
-            )
-            lastModelKey = modelKey
+        let engineID = config.engine
+        if transcriber == nil || lastEngineID != engineID {
+            Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
+            transcriber = try createEngine(for: engineID, config: config)
+            lastEngineID = engineID
         }
 
         guard let transcriber = transcriber else {
-            throw RunnerError.failed("Failed to initialize transcriber")
+            throw RunnerError.failed("Failed to initialize transcription engine")
         }
 
         let isDualStream = micAudio != nil
         var allSegments: [LabeledSegment] = []
 
-        // 3. Transcribe system audio (remote)
         let systemSegments = try await transcribeStream(
             audioPath: systemAudio,
             source: "remote",
@@ -75,7 +60,6 @@ final class TranscriptionRunner {
         )
         allSegments.append(contentsOf: systemSegments)
 
-        // 4. Transcribe mic audio (local) if present
         if let micPath = micAudio {
             let micSegments = try await transcribeStream(
                 audioPath: micPath,
@@ -86,46 +70,32 @@ final class TranscriptionRunner {
             allSegments.append(contentsOf: micSegments)
         }
 
-        // 5. If dual-stream, tag speakers with source prefix
         if isDualStream && !allSegments.isEmpty {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
-            Logger.transcription.debug("Applied source prefix tags for dual-stream")
         }
 
-        // 6. Sort all segments chronologically
         allSegments.sort { $0.start < $1.start }
         Logger.transcription.info("Total segments after merge: \(allSegments.count)")
 
-        // 7. Build audio paths list for metadata
         var audioPaths = [systemAudio]
-        if let mic = micAudio {
-            audioPaths.append(mic)
-        }
+        if let mic = micAudio { audioPaths.append(mic) }
 
-        let detectedLanguage = allSegments.first.flatMap { _ in
-            // Language was detected during transcription; not stored on LabeledSegment.
-            // Use a sensible default.
-            nil as String?
-        } ?? "en"
+        let detectedLanguage = "en"
 
-        let hasDiarization = diarizer != nil
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
             audioPaths: audioPaths,
             outputFormat: config.outputFormat,
             language: detectedLanguage,
             numSpeakers: nil,
-            diarization: hasDiarization,
+            diarization: diarizer != nil,
             dualStream: isDualStream
         )
 
-        // 8. Write JSON output
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
-
         try TranscriptAssembler.write(json, to: jsonPath)
 
-        // Generate format file (SRT/TXT) if output_format != json
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
@@ -138,18 +108,38 @@ final class TranscriptionRunner {
         return TranscriptionResult(jsonPath: jsonPath)
     }
 
-    func setTranscriber(_ engine: any TranscriptionEngine) {
-        self.transcriber = engine
-        self.lastModelKey = engine.name
-        Logger.transcription.info("Transcription engine set: \(engine.name, privacy: .public)")
-    }
-
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
-        Logger.transcription.info("Diarization provider set: \(String(describing: type(of: provider)), privacy: .public)")
     }
 
     // MARK: - Private
+
+    private func createEngine(for id: EngineID, config: Config) throws -> any TranscriptionEngine {
+        guard id.descriptor.isAvailableOnThisOS else {
+            throw RunnerError.engineUnavailable(id.descriptor.displayName)
+        }
+
+        switch id {
+        case .speechAnalyzer:
+            if #available(macOS 26.0, *) {
+                return SpeechAnalyzerEngine()
+            }
+            throw RunnerError.engineUnavailable("SpeechAnalyzer requires macOS 26")
+
+        case .fluidAudio:
+            return FluidAudioEngine()
+
+        case .whisperCpp:
+            let modelPath: URL
+            if let custom = config.whisperCppModelPath {
+                modelPath = URL(fileURLWithPath: NSString(string: custom).expandingTildeInPath)
+            } else {
+                modelPath = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".audio-transcribe/models/ggml-large-v3-turbo.bin")
+            }
+            return WhisperCppEngine(modelPath: modelPath)
+        }
+    }
 
     private func transcribeStream(
         audioPath: URL,
@@ -157,7 +147,6 @@ final class TranscriptionRunner {
         transcriber: any TranscriptionEngine,
         label: String
     ) async throws -> [LabeledSegment] {
-        // Skip empty files (WAV header only = 44 bytes)
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
@@ -166,32 +155,27 @@ final class TranscriptionRunner {
 
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
 
-        // Transcribe (deduplicate is called internally by WhisperKitTranscriber)
         let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil)
 
-        // Diarize if provider is available
         var labeled: [LabeledSegment]
         if let diarizer = diarizer {
-            Logger.transcription.info("Running diarization on \(label, privacy: .public) audio")
             let diarizedSegments = try await diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             labeled = SpeakerAssignment.assign(
                 transcriptSegments: segments,
                 diarizationSegments: diarizedSegments
             )
         } else {
-            // No diarization -- convert TranscriptSegments to LabeledSegments with "Speaker 1"
             labeled = segments.map { seg in
                 LabeledSegment(
                     start: seg.start,
                     end: seg.end,
                     speaker: "Speaker 1",
-                    text: seg.text.trimmingCharacters(in: CharacterSet.whitespaces),
+                    text: seg.text.trimmingCharacters(in: .whitespaces),
                     source: ""
                 )
             }
         }
 
-        // Tag source for dual-stream merging
         for i in labeled.indices {
             labeled[i].source = source
         }
