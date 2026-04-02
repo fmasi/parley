@@ -811,6 +811,145 @@ struct ThresholdSweepResult {
     let speakers: [String: Int]  // speaker -> segment count
 }
 
+// ── Diarization Parameter Sweep ──
+
+struct ParamSweepConfig {
+    let label: String
+    let excludeOverlap: Bool
+    let Fa: Double
+    let Fb: Double
+    let threshold: Double
+}
+
+struct ParamSweepResult {
+    let config: ParamSweepConfig
+    let speakerCount: Int
+    let segmentCount: Int
+    let wallClockSeconds: Double
+    let speakers: [String: Int]
+}
+
+func runDiarizationParamSweep(audioPath: URL, audioDuration: Double) async {
+    let configs: [ParamSweepConfig] = [
+        ParamSweepConfig(label: "baseline (overlap off)", excludeOverlap: false, Fa: 0.05, Fb: 0.8, threshold: 0.6),
+        ParamSweepConfig(label: "tight precision, more recall", excludeOverlap: false, Fa: 0.10, Fb: 1.0, threshold: 0.6),
+        ParamSweepConfig(label: "looser, more speakers", excludeOverlap: false, Fa: 0.03, Fb: 0.5, threshold: 0.6),
+        ParamSweepConfig(label: "default Fa/Fb, overlap off", excludeOverlap: false, Fa: 0.07, Fb: 0.8, threshold: 0.6),
+        ParamSweepConfig(label: "original defaults (overlap on)", excludeOverlap: true, Fa: 0.07, Fb: 0.8, threshold: 0.6),
+        ParamSweepConfig(label: "Fa=0.05, Fb=1.0, thr=0.55", excludeOverlap: false, Fa: 0.05, Fb: 1.0, threshold: 0.55),
+    ]
+
+    print("\n╔═══════════════════════════════════════════╗")
+    print("║  Diarization Parameter Sweep              ║")
+    print("╚═══════════════════════════════════════════╝")
+    print("Audio: \(audioPath.lastPathComponent)")
+    print("Duration: \(Int(audioDuration) / 60)m \(Int(audioDuration) % 60)s")
+    print("Configs: \(configs.count)")
+    print("")
+    fflush(stdout)
+
+    // Pre-load models once
+    print("Preparing diarization models (one-time)...")
+    let modelLoadStart = ContinuousClock.now
+    let warmupMgr = OfflineDiarizerManager()
+    do {
+        try await warmupMgr.prepareModels()
+    } catch {
+        print("ERROR: Failed to load models: \(error.localizedDescription)")
+        return
+    }
+    let modelLoadElapsed = ContinuousClock.now - modelLoadStart
+    print("Models ready in \(String(format: "%.1f", Double(modelLoadElapsed.components.seconds)))s\n")
+
+    var results: [ParamSweepResult] = []
+
+    for (i, cfg) in configs.enumerated() {
+        print("── [\(i + 1)/\(configs.count)] \(cfg.label) ──")
+        print("  excludeOverlap=\(cfg.excludeOverlap), Fa=\(cfg.Fa), Fb=\(cfg.Fb), threshold=\(cfg.threshold)")
+
+        let diarizerConfig = OfflineDiarizerConfig(
+            clusteringThreshold: cfg.threshold,
+            Fa: cfg.Fa,
+            Fb: cfg.Fb,
+            embeddingExcludeOverlap: cfg.excludeOverlap
+        )
+        let mgr = OfflineDiarizerManager(config: diarizerConfig)
+        do {
+            try await mgr.prepareModels()  // fast — models already cached
+            let runStart = ContinuousClock.now
+            let result = try await mgr.process(audioPath)
+            let elapsed = ContinuousClock.now - runStart
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+
+            var speakerCounts: [String: Int] = [:]
+            for seg in result.segments {
+                speakerCounts[seg.speakerId, default: 0] += 1
+            }
+            let speakerCount = speakerCounts.count
+
+            let sweepResult = ParamSweepResult(
+                config: cfg,
+                speakerCount: speakerCount,
+                segmentCount: result.segments.count,
+                wallClockSeconds: seconds,
+                speakers: speakerCounts
+            )
+            results.append(sweepResult)
+
+            print("  Speakers: \(speakerCount), Segments: \(result.segments.count), Time: \(String(format: "%.1f", seconds))s")
+            for (speaker, count) in speakerCounts.sorted(by: { $0.value > $1.value }) {
+                print("    \(speaker): \(count) segments")
+            }
+            fflush(stdout)
+        } catch {
+            print("  ERROR: \(error.localizedDescription)")
+            fflush(stdout)
+        }
+        print("")
+    }
+
+    // Summary table
+    print("══════ Parameter Sweep Summary ══════\n")
+    print("  # | excl_overlap | Fa   | Fb  | thr  | Speakers | Segments | Time")
+    print("  --|--------------|------|-----|------|----------|----------|------")
+    for (i, r) in results.enumerated() {
+        let c = r.config
+        let overlapStr = (c.excludeOverlap ? "true" : "false").padding(toLength: 12, withPad: " ", startingAt: 0)
+        print("  \(i + 1) | \(overlapStr) | \(String(format: "%.2f", c.Fa)) | \(String(format: "%.1f", c.Fb)) | \(String(format: "%.2f", c.threshold)) | \(String(format: "%8d", r.speakerCount)) | \(String(format: "%8d", r.segmentCount)) | \(String(format: "%.1f", r.wallClockSeconds))s")
+    }
+    print("")
+    for (i, r) in results.enumerated() {
+        let speakerList = r.speakers.sorted(by: { $0.value > $1.value }).map { "\($0.key):\($0.value)" }.joined(separator: ", ")
+        print("  \(i + 1). \(r.config.label): \(speakerList)")
+    }
+
+    // Save report
+    let reportDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".audio-transcribe/benchmark")
+    try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd-HHmmss"
+    let reportPath = reportDir.appendingPathComponent("diarize-params-\(formatter.string(from: Date())).txt")
+
+    var lines = [
+        "Diarization Parameter Sweep",
+        "Audio: \(audioPath.lastPathComponent)",
+        "Duration: \(Int(audioDuration) / 60)m \(Int(audioDuration) % 60)s",
+        "Date: \(Date())",
+        "",
+        "# | excl_overlap | Fa   | Fb  | thr  | Speakers | Segments | Time | Label",
+    ]
+    for (i, r) in results.enumerated() {
+        let c = r.config
+        let speakerList = r.speakers.sorted(by: { $0.value > $1.value }).map { "\($0.key):\($0.value)" }.joined(separator: ", ")
+        lines.append("\(i + 1) | \(c.excludeOverlap) | \(String(format: "%.2f", c.Fa)) | \(String(format: "%.1f", c.Fb)) | \(String(format: "%.2f", c.threshold)) | \(r.speakerCount) | \(r.segmentCount) | \(String(format: "%.1f", r.wallClockSeconds))s | \(c.label)")
+        lines.append("  speakers: \(speakerList)")
+    }
+    try? lines.joined(separator: "\n").write(to: reportPath, atomically: true, encoding: .utf8)
+    print("\nReport saved: \(reportPath.path)")
+    fflush(stdout)
+}
+
 func runDiarizationSweep(audioPath: URL, audioDuration: Double, thresholds: [Double]) async {
     print("\n╔═══════════════════════════════════════════╗")
     print("║  Diarization Threshold Sweep              ║")
@@ -1308,6 +1447,7 @@ struct EngineBenchmarkCLI {
             print("  --diarize              Also benchmark FluidAudio speaker diarization")
             print("  --diarize-sweep        Sweep clustering thresholds (0.35-0.70) for speaker count tuning")
             print("  --thresholds <list>    Custom thresholds for sweep (comma-separated, e.g. 0.4,0.5,0.6)")
+            print("  --diarize-params       Sweep excludeOverlap, Fa, Fb params (6 combos, ~3-4 min)")
             Foundation.exit(1)
         }
 
@@ -1377,6 +1517,20 @@ struct EngineBenchmarkCLI {
         }
 
         let audioDuration = getAudioDuration(url: audioPath)
+
+        // Diarization-only modes (skip engine benchmarks)
+        if args.contains("--diarize-sweep") {
+            var thresholds = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+            if let idx = args.firstIndex(of: "--thresholds"), idx + 1 < args.count {
+                thresholds = args[idx + 1].split(separator: ",").compactMap { Double($0) }
+            }
+            await runDiarizationSweep(audioPath: audioPath, audioDuration: audioDuration, thresholds: thresholds)
+            return
+        }
+        if args.contains("--diarize-params") {
+            await runDiarizationParamSweep(audioPath: audioPath, audioDuration: audioDuration)
+            return
+        }
 
         // Set up log file (tee output to file + stdout)
         let logDir = FileManager.default.homeDirectoryForCurrentUser
@@ -1506,16 +1660,6 @@ struct EngineBenchmarkCLI {
             print("\n── Diarization: FluidAudio ──")
             let dr = await benchmarkFluidDiarization(audioPath: audioPath, audioDuration: audioDuration)
             printDiarizationResult(dr)
-        }
-
-        // Diarization threshold sweep
-        if args.contains("--diarize-sweep") {
-            var thresholds = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
-            if let idx = args.firstIndex(of: "--thresholds"), idx + 1 < args.count {
-                thresholds = args[idx + 1].split(separator: ",").compactMap { Double($0) }
-            }
-            await runDiarizationSweep(audioPath: audioPath, audioDuration: audioDuration, thresholds: thresholds)
-            return  // sweep is standalone, skip summary
         }
 
         // Compute WER if ground truth available
