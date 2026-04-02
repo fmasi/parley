@@ -43,10 +43,11 @@ struct SettingsView: View {
                 )
             }
 
-            Section("Transcription Model") {
-                Picker("Model", selection: $config.whisperModel) {
-                    ForEach(ModelManager.availableModels) { model in
-                        Text(model.displayName).tag(model.id)
+            // TODO: Task 5 will add engine picker here
+            Section("Transcription Engine") {
+                Picker("Engine", selection: $config.engine) {
+                    ForEach(EngineID.availableEngines) { engine in
+                        Text(engine.descriptor.displayName).tag(engine)
                     }
                 }
             }

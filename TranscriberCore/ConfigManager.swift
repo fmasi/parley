@@ -24,7 +24,7 @@ public final class ConfigManager {
             Logger.config.info("Config not found or invalid, using defaults")
             return .default
         }
-        Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), whisperModel: \(config.whisperModel, privacy: .public)")
+        Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), engine: \(config.engine.rawValue, privacy: .public)")
         return config
     }
 

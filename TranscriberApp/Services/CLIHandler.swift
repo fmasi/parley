@@ -38,8 +38,8 @@ enum CLIHandler {
 
     private static func handleTranscribe(_ opts: TranscribeOptions) async throws {
         let config = ConfigManager.shared.config
-        let model = opts.model ?? config.whisperModel
-        let storagePath = ModelManager.resolveStoragePath(config.modelStoragePath)
+        let model = opts.model ?? "large-v3-turbo" // TODO: Task 4 will use engine-based selection
+        let storagePath = ModelManager.resolveStoragePath("~/.audio-transcribe/models")
 
         // Validate inputs exist
         let inputURLs = opts.inputs.map { URL(fileURLWithPath: $0) }
@@ -71,7 +71,7 @@ enum CLIHandler {
         }
 
         var runConfig = config
-        runConfig.whisperModel = model
+        // TODO: Task 4 will set engine-based config
         runConfig.outputFormat = opts.format
 
         let result = try await runner.run(

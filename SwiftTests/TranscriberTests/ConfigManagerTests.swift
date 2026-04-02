@@ -79,13 +79,13 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { config in
-            config.whisperModel = "large-v3"
+            config.engine = .fluidAudio
         }
-        #expect(manager.config.whisperModel == "large-v3")
+        #expect(manager.config.engine == .fluidAudio)
 
         // Verify persisted
         let reloaded = ConfigManager(configDir: dir)
-        #expect(reloaded.config.whisperModel == "large-v3")
+        #expect(reloaded.config.engine == .fluidAudio)
     }
 
     // MARK: - Partial JSON merges with defaults (unknown keys ignored)
@@ -140,9 +140,9 @@ struct ConfigManagerTests {
 
         let manager = ConfigManager(configDir: dir)
         manager.update { $0.outputFormat = "srt" }
-        manager.update { $0.whisperModel = "large-v3" }
+        manager.update { $0.engine = .whisperCpp }
 
         #expect(manager.config.outputFormat == "srt")
-        #expect(manager.config.whisperModel == "large-v3")
+        #expect(manager.config.engine == .whisperCpp)
     }
 }

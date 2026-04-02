@@ -37,22 +37,24 @@ final class TranscriptionRunner {
         let startTime = ContinuousClock.now
 
         // 1. Resolve model path and verify the model exists on disk
-        let storagePath = ModelManager.resolveStoragePath(config.modelStoragePath)
-        let modelDir = storagePath.appendingPathComponent(config.whisperModel)
+        // TODO: Task 4 will replace this with engine-based selection
+        let storagePath = ModelManager.resolveStoragePath("~/.audio-transcribe/models")
+        let whisperModel = "large-v3-turbo"
+        let modelDir = storagePath.appendingPathComponent(whisperModel)
 
         guard FileManager.default.fileExists(atPath: modelDir.path) else {
             Logger.transcription.error("Model not found at \(modelDir.path, privacy: .private)")
-            throw RunnerError.modelNotDownloaded(config.whisperModel)
+            throw RunnerError.modelNotDownloaded(whisperModel)
         }
 
         // 2. Lazy-init transcriber, reuse if same model for caching benefit
-        let modelKey = "\(storagePath.path)/\(config.whisperModel)"
+        let modelKey = "\(storagePath.path)/\(whisperModel)"
         if transcriber == nil || lastModelKey != modelKey {
-            Logger.transcription.info("Creating WhisperKitTranscriber — model: \(config.whisperModel, privacy: .public)")
+            Logger.transcription.info("Creating WhisperKitTranscriber — model: \(whisperModel, privacy: .public)")
             transcriber = WhisperKitTranscriber(
                 modelPath: storagePath,
-                model: config.whisperModel,
-                unloadTimeoutMinutes: config.modelUnloadTimeout
+                model: whisperModel,
+                unloadTimeoutMinutes: 60
             )
             lastModelKey = modelKey
         }

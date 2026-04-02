@@ -8,9 +8,8 @@ public struct Config: Codable, Equatable {
     public var launchOnStartup: Bool
     public var suppressCaptureWarning: Bool
     public var lastMicrophoneDeviceId: String?
-    public var whisperModel: String
-    public var modelStoragePath: String
-    public var modelUnloadTimeout: Int
+    public var engine: EngineID
+    public var whisperCppModelPath: String?
 
     public static let `default` = Config(
         recordingDirectory: NSHomeDirectory() + "/Documents/Recordings",
@@ -20,9 +19,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: true,
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
-        whisperModel: "large-v3-turbo",
-        modelStoragePath: "~/.audio-transcribe/models",
-        modelUnloadTimeout: 60
+        engine: .speechAnalyzer,
+        whisperCppModelPath: nil
     )
 
     public init(
@@ -33,9 +31,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
-        whisperModel: String = "large-v3-turbo",
-        modelStoragePath: String = "~/.audio-transcribe/models",
-        modelUnloadTimeout: Int = 60
+        engine: EngineID = .speechAnalyzer,
+        whisperCppModelPath: String? = nil
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -44,9 +41,8 @@ public struct Config: Codable, Equatable {
         self.launchOnStartup = launchOnStartup
         self.suppressCaptureWarning = suppressCaptureWarning
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
-        self.whisperModel = whisperModel
-        self.modelStoragePath = modelStoragePath
-        self.modelUnloadTimeout = modelUnloadTimeout
+        self.engine = engine
+        self.whisperCppModelPath = whisperCppModelPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -57,9 +53,8 @@ public struct Config: Codable, Equatable {
         case launchOnStartup = "launch_on_startup"
         case suppressCaptureWarning = "suppress_capture_warning"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
-        case whisperModel = "whisper_model"
-        case modelStoragePath = "model_storage_path"
-        case modelUnloadTimeout = "model_unload_timeout"
+        case engine
+        case whisperCppModelPath = "whisper_cpp_model_path"
     }
 
     public init(from decoder: Decoder) throws {
@@ -71,8 +66,7 @@ public struct Config: Codable, Equatable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
-        whisperModel = try c.decodeIfPresent(String.self, forKey: .whisperModel) ?? "large-v3-turbo"
-        modelStoragePath = try c.decodeIfPresent(String.self, forKey: .modelStoragePath) ?? "~/.audio-transcribe/models"
-        modelUnloadTimeout = try c.decodeIfPresent(Int.self, forKey: .modelUnloadTimeout) ?? 60
+        engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .speechAnalyzer
+        whisperCppModelPath = try c.decodeIfPresent(String.self, forKey: .whisperCppModelPath)
     }
 }
