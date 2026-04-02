@@ -33,6 +33,14 @@ You are monitoring the ASR (speech-to-text) ecosystem for developments relevant 
 - Any new Swift-native diarization packages (e.g., speech-swift by soniqo — 508 stars, created Feb 2026)
 - Pyannote upstream: FluidAudio's offline pipeline is based on pyannote — monitor pyannote model improvements that FluidAudio might adopt
 
+**FluidAudio integration features to track:**
+- Qwen3 ASR (30+ languages, encoder-decoder) — watch for stability, benchmark comparisons vs Parakeet
+- StreamingAsrManager / NemotronStreamingAsrManager — real-time transcription API maturity
+- VadManager (Silero VAD) — pre-filtering silence before transcription
+- Speaker embeddings (`TimedSpeakerSegment.embedding`) — cross-session speaker recognition potential
+- TextNormalizer (ITN) improvements — more languages, phone number formatting, currency
+- Custom vocabulary boosting (CTC word boost) — mentioned in docs, API surface unclear
+
 **What matters most:**
 - Performance benchmarks on M-series chips (especially M4/M5 Pro)
 - CoreML runtime improvements that close the gap with MLX/Metal
@@ -40,6 +48,7 @@ You are monitoring the ASR (speech-to-text) ecosystem for developments relevant 
 - New models with better speed/quality tradeoff than Whisper large-v3-turbo
 - Multilingual and code-switching improvements (FR, PT, ES, EN priority)
 - **Speaker diarization advances (HIGH PRIORITY)** — on-device, CoreML, especially Apple-native solutions. If Apple adds diarization to SpeechAnalyzer, flag immediately.
+- **Speaker embeddings / cross-session recognition** — FluidAudio exposes embeddings per speaker; track best practices for building persistent speaker databases
 - Streaming/real-time transcription + diarization capabilities (LS-EEND, Sortformer advances)
 
 **Version tracking — flag if any of these release a new non-bugfix version:**

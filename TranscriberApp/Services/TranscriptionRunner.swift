@@ -84,7 +84,13 @@ final class TranscriptionRunner {
         var audioPaths = [systemAudio]
         if let mic = micAudio { audioPaths.append(mic) }
 
-        let detectedLanguage = detectedLanguages.first ?? "auto"
+        let uniqueLanguages = Set(detectedLanguages)
+        let detectedLanguage: String
+        switch uniqueLanguages.count {
+        case 0: detectedLanguage = "auto"
+        case 1: detectedLanguage = uniqueLanguages.first!
+        default: detectedLanguage = "multilingual"
+        }
 
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
@@ -188,7 +194,8 @@ final class TranscriptionRunner {
                     speaker: "Speaker 1",
                     text: seg.text.trimmingCharacters(in: .whitespaces),
                     source: "",
-                    confidence: seg.confidence
+                    confidence: seg.confidence,
+                    language: seg.language
                 )
             }
         }

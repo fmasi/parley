@@ -35,6 +35,9 @@ public enum TranscriptAssembler {
             if let confidence = seg.confidence {
                 dict["confidence"] = confidence
             }
+            if let language = seg.language {
+                dict["language"] = language
+            }
             return dict
         }
 

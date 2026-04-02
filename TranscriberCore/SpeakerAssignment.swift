@@ -24,14 +24,16 @@ public struct LabeledSegment: Sendable {
     public var text: String
     public var source: String
     public var confidence: Float?
+    public var language: String?
 
-    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil) {
+    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil, language: String? = nil) {
         self.start = start
         self.end = end
         self.speaker = speaker
         self.text = text
         self.source = source
         self.confidence = confidence
+        self.language = language
     }
 }
 
@@ -99,7 +101,8 @@ public enum SpeakerAssignment {
                 speaker: bestSpeaker,
                 text: seg.text.trimmingCharacters(in: .whitespaces),
                 source: "",
-                confidence: seg.confidence
+                confidence: seg.confidence,
+                language: seg.language
             )
         }
     }
