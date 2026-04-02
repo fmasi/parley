@@ -1028,33 +1028,34 @@ func runBatchBenchmark(
         }
     }
 
-    // Pre-download SpeechAnalyzer locale models
+    // Pre-download SpeechAnalyzer locale models (max 5 concurrent locales)
+    // Cache transcribers by locale identifier to reuse across files
+    var speechTranscribers: [String: SpeechTranscriber] = [:]
     if engines.contains("speech") {
         if #available(macOS 26.0, *) {
             print("  SpeechAnalyzer: checking locale models...")
+            let neededLocales = Array(Set(audioFiles.map { localeForLanguage(inferLanguage(from: $0.lastPathComponent)) }))
             let installedLocales = await SpeechTranscriber.installedLocales
-            // Collect unique languages from audio files to pre-download
-            let neededLocales = Set(audioFiles.map { localeForLanguage(inferLanguage(from: $0.lastPathComponent)) })
+
             for locale in neededLocales {
+                let transcriber = SpeechTranscriber(
+                    locale: locale,
+                    preset: SpeechTranscriber.Preset(
+                        transcriptionOptions: [],
+                        reportingOptions: [.volatileResults],
+                        attributeOptions: [.audioTimeRange]
+                    )
+                )
                 if !installedLocales.contains(locale) {
                     print("    Downloading \(locale.identifier) model...")
-                    let transcriber = SpeechTranscriber(
-                        locale: locale,
-                        preset: SpeechTranscriber.Preset(
-                            transcriptionOptions: [],
-                            reportingOptions: [.volatileResults],
-                            attributeOptions: [.audioTimeRange]
-                        )
-                    )
                     if let request = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
                         try? await request.downloadAndInstall()
-                        print("    \(locale.identifier): ready")
-                    } else {
-                        print("    \(locale.identifier): not available")
                     }
                 }
+                speechTranscribers[locale.identifier] = transcriber
+                print("    \(locale.identifier): ready")
             }
-            print("  SpeechAnalyzer: ready")
+            print("  SpeechAnalyzer: \(speechTranscribers.count) locales loaded")
         }
     }
 
@@ -1156,67 +1157,53 @@ func runBatchBenchmark(
             }
         }
 
-        // SpeechAnalyzer (set locale per language, download model if needed)
+        // SpeechAnalyzer (reuse pre-loaded transcriber per locale)
         if engines.contains("speech") {
             if #available(macOS 26.0, *) {
                 let locale = localeForLanguage(lang)
-                print("  SpeechAnalyzer (\(locale.identifier))...")
-                let start = ContinuousClock.now
-                do {
-                    let transcriber = SpeechTranscriber(
-                        locale: locale,
-                        preset: SpeechTranscriber.Preset(
-                            transcriptionOptions: [],
-                            reportingOptions: [.volatileResults],
-                            attributeOptions: [.audioTimeRange]
-                        )
-                    )
+                if let transcriber = speechTranscribers[locale.identifier] {
+                    print("  SpeechAnalyzer (\(locale.identifier))...")
+                    let start = ContinuousClock.now
+                    do {
+                        let analyzer = SpeechAnalyzer(modules: [transcriber])
+                        let audioFileObj = try AVAudioFile(forReading: audioFile)
 
-                    // Download locale model if not installed
-                    if !(await SpeechTranscriber.installedLocales).contains(locale) {
-                        print("    Downloading \(locale.identifier) model...")
-                        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                            try await request.downloadAndInstall()
-                            print("    Model ready")
+                        let analysisTask = Task {
+                            do {
+                                if let lastSample = try await analyzer.analyzeSequence(from: audioFileObj) {
+                                    try await analyzer.finalizeAndFinish(through: lastSample)
+                                } else { await analyzer.cancelAndFinishNow() }
+                            } catch { await analyzer.cancelAndFinishNow(); throw error }
                         }
-                    }
 
-                    let analyzer = SpeechAnalyzer(modules: [transcriber])
-                    let audioFileObj = try AVAudioFile(forReading: audioFile)
-
-                    let analysisTask = Task {
-                        do {
-                            if let lastSample = try await analyzer.analyzeSequence(from: audioFileObj) {
-                                try await analyzer.finalizeAndFinish(through: lastSample)
-                            } else { await analyzer.cancelAndFinishNow() }
-                        } catch { await analyzer.cancelAndFinishNow(); throw error }
-                    }
-
-                    var allText = ""
-                    var segCount = 0
-                    for try await result in transcriber.results {
-                        if result.isFinal {
-                            segCount += 1
-                            allText += String(result.text.characters) + " "
+                        var allText = ""
+                        var segCount = 0
+                        for try await result in transcriber.results {
+                            if result.isFinal {
+                                segCount += 1
+                                allText += String(result.text.characters) + " "
+                            }
                         }
-                    }
-                    try await analysisTask.value
+                        try await analysisTask.value
 
-                    let elapsed = ContinuousClock.now - start
-                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                    fileResults.append(BenchmarkResult(
-                        engine: "SpeechAnalyzer", wallClockSeconds: seconds,
-                        segmentCount: segCount, sampleSegments: [],
-                        audioDurationSeconds: duration,
-                        fullText: allText.trimmingCharacters(in: .whitespaces), error: nil
-                    ))
-                } catch {
-                    let s = Double((ContinuousClock.now - start).components.seconds)
-                    fileResults.append(BenchmarkResult(
-                        engine: "SpeechAnalyzer", wallClockSeconds: s,
-                        segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
-                        fullText: "", error: error.localizedDescription
-                    ))
+                        let elapsed = ContinuousClock.now - start
+                        let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                        fileResults.append(BenchmarkResult(
+                            engine: "SpeechAnalyzer", wallClockSeconds: seconds,
+                            segmentCount: segCount, sampleSegments: [],
+                            audioDurationSeconds: duration,
+                            fullText: allText.trimmingCharacters(in: .whitespaces), error: nil
+                        ))
+                    } catch {
+                        let s = Double((ContinuousClock.now - start).components.seconds)
+                        fileResults.append(BenchmarkResult(
+                            engine: "SpeechAnalyzer", wallClockSeconds: s,
+                            segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                            fullText: "", error: error.localizedDescription
+                        ))
+                    }
+                } else {
+                    print("  SpeechAnalyzer: no transcriber for \(locale.identifier)")
                 }
             }
         }
