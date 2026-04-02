@@ -388,15 +388,25 @@ func benchmarkSpeechAnalyzer(audioPath: URL, audioDuration: Double) async -> Ben
 
     do {
         print("  Setting up SpeechAnalyzer...")
+        let locale = Locale.autoupdatingCurrent
         // Use preset with audioTimeRange to get timestamps
         let transcriber = SpeechTranscriber(
-            locale: Locale.autoupdatingCurrent,
+            locale: locale,
             preset: SpeechTranscriber.Preset(
                 transcriptionOptions: [],
                 reportingOptions: [.volatileResults],
                 attributeOptions: [.audioTimeRange]
             )
         )
+
+        // Download locale model if not installed
+        if !(await SpeechTranscriber.installedLocales).contains(locale) {
+            print("  Downloading \(locale.identifier) model...")
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                try await request.downloadAndInstall()
+            }
+        }
+
         let analyzer = SpeechAnalyzer(modules: [transcriber])
 
         print("  Transcribing...")
@@ -1018,6 +1028,36 @@ func runBatchBenchmark(
         }
     }
 
+    // Pre-download SpeechAnalyzer locale models
+    if engines.contains("speech") {
+        if #available(macOS 26.0, *) {
+            print("  SpeechAnalyzer: checking locale models...")
+            let installedLocales = await SpeechTranscriber.installedLocales
+            // Collect unique languages from audio files to pre-download
+            let neededLocales = Set(audioFiles.map { localeForLanguage(inferLanguage(from: $0.lastPathComponent)) })
+            for locale in neededLocales {
+                if !installedLocales.contains(locale) {
+                    print("    Downloading \(locale.identifier) model...")
+                    let transcriber = SpeechTranscriber(
+                        locale: locale,
+                        preset: SpeechTranscriber.Preset(
+                            transcriptionOptions: [],
+                            reportingOptions: [.volatileResults],
+                            attributeOptions: [.audioTimeRange]
+                        )
+                    )
+                    if let request = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                        try? await request.downloadAndInstall()
+                        print("    \(locale.identifier): ready")
+                    } else {
+                        print("    \(locale.identifier): not available")
+                    }
+                }
+            }
+            print("  SpeechAnalyzer: ready")
+        }
+    }
+
     // ── Run benchmarks per file ──
     print("\n══════ Running batch benchmarks ══════")
     var batchResults: [BatchResult] = []
@@ -1116,11 +1156,11 @@ func runBatchBenchmark(
             }
         }
 
-        // SpeechAnalyzer (no pre-loaded state needed, but set locale per language)
+        // SpeechAnalyzer (set locale per language, download model if needed)
         if engines.contains("speech") {
             if #available(macOS 26.0, *) {
-                print("  SpeechAnalyzer...")
                 let locale = localeForLanguage(lang)
+                print("  SpeechAnalyzer (\(locale.identifier))...")
                 let start = ContinuousClock.now
                 do {
                     let transcriber = SpeechTranscriber(
@@ -1131,6 +1171,16 @@ func runBatchBenchmark(
                             attributeOptions: [.audioTimeRange]
                         )
                     )
+
+                    // Download locale model if not installed
+                    if !(await SpeechTranscriber.installedLocales).contains(locale) {
+                        print("    Downloading \(locale.identifier) model...")
+                        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                            try await request.downloadAndInstall()
+                            print("    Model ready")
+                        }
+                    }
+
                     let analyzer = SpeechAnalyzer(modules: [transcriber])
                     let audioFileObj = try AVAudioFile(forReading: audioFile)
 
