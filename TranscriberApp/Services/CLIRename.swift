@@ -27,7 +27,7 @@ enum CLIRename {
         let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
 
         // Collect speakers — pick the longest segment per speaker for the best sample
-        var candidatesBySpaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
+        var candidatesBySpeaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
         var orderedIds: [String] = []
 
         for seg in segments {
@@ -37,13 +37,13 @@ enum CLIRename {
                   let end = seg["end"] as? Double else { continue }
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            if candidatesBySpaker[speaker] == nil { orderedIds.append(speaker) }
+            if candidatesBySpeaker[speaker] == nil { orderedIds.append(speaker) }
             let source = seg["source"] as? String ?? "remote"
-            candidatesBySpaker[speaker, default: []].append((trimmed, start, end, source))
+            candidatesBySpeaker[speaker, default: []].append((trimmed, start, end, source))
         }
 
         let samples: [SpeakerSample] = orderedIds.compactMap { speaker in
-            guard let best = candidatesBySpaker[speaker]?.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
+            guard let best = candidatesBySpeaker[speaker]?.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
             let audioFile = best.source == "local" ? localAudio : remoteAudio
             return SpeakerSample(id: speaker, sampleText: best.text, audioFile: audioFile, start: best.start, end: best.end)
         }

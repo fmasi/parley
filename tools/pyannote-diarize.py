@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Standalone pyannote 3.1 diarization for comparison testing.
+Standalone pyannote diarization for comparison testing.
+Uses the pyannote/speaker-diarization-3.1 pipeline (compatible with pyannote.audio 3.x and 4.x).
 
 Usage:
     python tools/pyannote-diarize.py <audio.wav> --hf-token <TOKEN>

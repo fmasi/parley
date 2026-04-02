@@ -1271,13 +1271,15 @@ func runBatchBenchmark(
             }
         }
 
-        // SpeechAnalyzer (fresh transcriber per file — 5-locale concurrent limit)
+        // SpeechAnalyzer (fresh transcriber per file, with timeout to handle unsupported locales)
         if engines.contains("speech") {
             if #available(macOS 26.0, *) {
                 let locale = localeForLanguage(lang)
                 print("  SpeechAnalyzer (\(locale.identifier))...")
                 let start = ContinuousClock.now
-                do {
+                let timeoutSeconds = max(30, Int(duration) * 2)  // at least 30s, or 2x audio length
+
+                let speechTask = Task<BenchmarkResult, Error> {
                     let transcriber = SpeechTranscriber(
                         locale: locale,
                         preset: SpeechTranscriber.Preset(
@@ -1300,6 +1302,7 @@ func runBatchBenchmark(
                     var allText = ""
                     var segCount = 0
                     for try await result in transcriber.results {
+                        try Task.checkCancellation()
                         if result.isFinal {
                             segCount += 1
                             allText += String(result.text.characters) + " "
@@ -1309,12 +1312,43 @@ func runBatchBenchmark(
 
                     let elapsed = ContinuousClock.now - start
                     let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                    fileResults.append(BenchmarkResult(
+                    return BenchmarkResult(
                         engine: "SpeechAnalyzer", wallClockSeconds: seconds,
                         segmentCount: segCount, sampleSegments: [],
                         audioDurationSeconds: duration,
                         fullText: allText.trimmingCharacters(in: .whitespaces), error: nil
-                    ))
+                    )
+                }
+
+                // Race against timeout
+                let timeoutTask = Task {
+                    try await Task.sleep(for: .seconds(timeoutSeconds))
+                }
+
+                // Wait for whichever finishes first
+                do {
+                    let result = try await withThrowingTaskGroup(of: BenchmarkResult?.self) { group in
+                        group.addTask { try await speechTask.value }
+                        group.addTask {
+                            try await timeoutTask.value
+                            return nil  // timeout sentinel
+                        }
+                        let first = try await group.next()!
+                        group.cancelAll()
+                        return first
+                    }
+                    if let result {
+                        fileResults.append(result)
+                    } else {
+                        // Timeout
+                        speechTask.cancel()
+                        print("    TIMEOUT after \(timeoutSeconds)s")
+                        fileResults.append(BenchmarkResult(
+                            engine: "SpeechAnalyzer", wallClockSeconds: Double(timeoutSeconds),
+                            segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                            fullText: "", error: "Timeout (\(timeoutSeconds)s) — locale \(locale.identifier) may not be supported"
+                        ))
+                    }
                 } catch {
                     let s = Double((ContinuousClock.now - start).components.seconds)
                     fileResults.append(BenchmarkResult(
@@ -1500,9 +1534,9 @@ struct EngineBenchmarkCLI {
             let reportDir = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".audio-transcribe/benchmark")
             try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
-            let dateStr = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none)
-                .replacingOccurrences(of: "/", with: "-")
-            let reportPath = reportDir.appendingPathComponent("matrix-\(dateStr).md")
+            let matrixFormatter = DateFormatter()
+            matrixFormatter.dateFormat = "yyyyMMdd-HHmmss"
+            let reportPath = reportDir.appendingPathComponent("matrix-\(matrixFormatter.string(from: Date())).md")
             writeMatrixReport(batchResults: batchResults, outputPath: reportPath)
             print("\n══════ Complete ══════")
             print("Matrix report: \(reportPath.path)")
@@ -1536,7 +1570,9 @@ struct EngineBenchmarkCLI {
         let logDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".audio-transcribe/benchmark")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let logPath = logDir.appendingPathComponent("engine-benchmark-\(DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")).log")
+        let logFormatter = DateFormatter()
+        logFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let logPath = logDir.appendingPathComponent("engine-benchmark-\(logFormatter.string(from: Date())).log")
         FileManager.default.createFile(atPath: logPath.path, contents: nil)
         logFileHandle = FileHandle(forWritingAtPath: logPath.path)
 
@@ -1697,7 +1733,9 @@ struct EngineBenchmarkCLI {
         let reportDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".audio-transcribe/benchmark")
         try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
-        let reportPath = reportDir.appendingPathComponent("engine-benchmark-\(DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none).replacingOccurrences(of: "/", with: "-")).txt")
+        let reportFormatter = DateFormatter()
+        reportFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let reportPath = reportDir.appendingPathComponent("engine-benchmark-\(reportFormatter.string(from: Date())).txt")
         writeReport(results: results, audioPath: audioPath, outputPath: reportPath)
         print("\nReport saved: \(reportPath.path)")
     }
