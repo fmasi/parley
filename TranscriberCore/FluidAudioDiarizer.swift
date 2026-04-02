@@ -21,7 +21,8 @@ public final class FluidAudioDiarizer: DiarizationProvider, @unchecked Sendable 
             DiarizedSegment(
                 start: Double(seg.startTimeSeconds),
                 end: Double(seg.endTimeSeconds),
-                speaker: seg.speakerId
+                speaker: seg.speakerId,
+                qualityScore: seg.qualityScore
             )
         }
 

@@ -21,7 +21,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         // No preparation needed — SpeechAnalyzer is a system framework
     }
 
-    public func transcribe(audioPath: URL, language: String? = nil) async throws -> [TranscriptSegment] {
+    public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
         let startTime = ContinuousClock.now
 
         Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with SpeechAnalyzer")

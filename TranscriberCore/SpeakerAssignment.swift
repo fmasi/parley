@@ -6,12 +6,14 @@ public struct TranscriptSegment: Sendable {
     public let end: Double
     public let text: String
     public let language: String?
+    public let confidence: Float?
 
-    public init(start: Double, end: Double, text: String, language: String?) {
+    public init(start: Double, end: Double, text: String, language: String?, confidence: Float? = nil) {
         self.start = start
         self.end = end
         self.text = text
         self.language = language
+        self.confidence = confidence
     }
 }
 
@@ -21,13 +23,15 @@ public struct LabeledSegment: Sendable {
     public var speaker: String
     public var text: String
     public var source: String
+    public var confidence: Float?
 
-    public init(start: Double, end: Double, speaker: String, text: String, source: String) {
+    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil) {
         self.start = start
         self.end = end
         self.speaker = speaker
         self.text = text
         self.source = source
+        self.confidence = confidence
     }
 }
 
@@ -94,7 +98,8 @@ public enum SpeakerAssignment {
                 end: seg.end,
                 speaker: bestSpeaker,
                 text: seg.text.trimmingCharacters(in: .whitespaces),
-                source: ""
+                source: "",
+                confidence: seg.confidence
             )
         }
     }

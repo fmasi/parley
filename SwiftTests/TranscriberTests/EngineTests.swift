@@ -131,4 +131,26 @@ struct EngineTests {
         let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: nil)
         #expect(result[0].language == nil)
     }
+
+    @Test func groupTokensDecimalPointDoesNotSplit() {
+        let timings = [
+            TokenTiming(startTime: 0.0, endTime: 0.5, token: "The budget was"),
+            TokenTiming(startTime: 0.5, endTime: 1.0, token: " 1."),
+            TokenTiming(startTime: 1.0, endTime: 1.5, token: "5 million dollars."),
+        ]
+        let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: "en")
+        #expect(result.count == 1)
+        #expect(result[0].text == "The budget was 1.5 million dollars.")
+    }
+
+    @Test func groupTokensRegularPeriodStillSplits() {
+        let timings = [
+            TokenTiming(startTime: 0.0, endTime: 0.5, token: "Hello."),
+            TokenTiming(startTime: 0.5, endTime: 1.0, token: " Goodbye."),
+        ]
+        let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: "en")
+        #expect(result.count == 2)
+        #expect(result[0].text == "Hello.")
+        #expect(result[1].text == "Goodbye.")
+    }
 }

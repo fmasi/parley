@@ -56,7 +56,8 @@ final class TranscriptionRunner {
             audioPath: systemAudio,
             source: "remote",
             transcriber: transcriber,
-            label: "system"
+            label: "system",
+            audioSource: .system
         )
         allSegments.append(contentsOf: systemSegments)
 
@@ -65,7 +66,8 @@ final class TranscriptionRunner {
                 audioPath: micPath,
                 source: "local",
                 transcriber: transcriber,
-                label: "mic"
+                label: "mic",
+                audioSource: .microphone
             )
             allSegments.append(contentsOf: micSegments)
         }
@@ -145,7 +147,8 @@ final class TranscriptionRunner {
         audioPath: URL,
         source: String,
         transcriber: any TranscriptionEngine,
-        label: String
+        label: String,
+        audioSource: AudioSourceType
     ) async throws -> [LabeledSegment] {
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
@@ -155,7 +158,7 @@ final class TranscriptionRunner {
 
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
 
-        let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil)
+        let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
 
         var labeled: [LabeledSegment]
         if let diarizer = diarizer {
@@ -171,7 +174,8 @@ final class TranscriptionRunner {
                     end: seg.end,
                     speaker: "Speaker 1",
                     text: seg.text.trimmingCharacters(in: .whitespaces),
-                    source: ""
+                    source: "",
+                    confidence: seg.confidence
                 )
             }
         }

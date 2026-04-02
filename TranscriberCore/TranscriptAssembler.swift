@@ -32,6 +32,9 @@ public enum TranscriptAssembler {
             if !seg.source.isEmpty {
                 dict["source"] = seg.source
             }
+            if let confidence = seg.confidence {
+                dict["confidence"] = confidence
+            }
             return dict
         }
 

@@ -21,6 +21,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
     private var manager: AsrManager?
     private let unloadTimeout: TimeInterval
     private var unloadTask: Task<Void, Never>?
+    private lazy var textNormalizer = TextNormalizer()
 
     public nonisolated let name = "FluidAudio"
 
@@ -39,26 +40,41 @@ public actor FluidAudioEngine: TranscriptionEngine {
         let _ = try await ensureLoaded()
     }
 
-    public func transcribe(audioPath: URL, language: String? = nil) async throws -> [TranscriptSegment] {
+    public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
         let mgr = try await ensureLoaded()
         cancelUnloadTimer()
 
         let startTime = ContinuousClock.now
 
-        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with FluidAudio")
+        let fluidSource: AudioSource = audioSource == .microphone ? .microphone : .system
+        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with FluidAudio (source: \(String(describing: fluidSource), privacy: .public))")
 
-        let result = try await mgr.transcribe(audioPath, source: .system)
+        let result = try await mgr.transcribe(audioPath, source: fluidSource)
 
         let elapsed = ContinuousClock.now - startTime
         let seconds = elapsed.components.seconds
+        let confidence = result.confidence
 
         // Group token timings into sentence-level segments by splitting on punctuation
         let timings = (result.tokenTimings ?? []).map { t in
             TokenTiming(startTime: t.startTime, endTime: t.endTime, token: t.token)
         }
-        let segments = Self.groupTokensIntoSegments(timings, language: language)
+        var segments = Self.groupTokensIntoSegments(timings, language: language, confidence: confidence)
 
-        Logger.transcription.info("FluidAudio complete: \(segments.count) segments in \(seconds)s")
+        // Apply Inverse Text Normalization (spoken → written form, e.g. "two hundred" → "200")
+        let normalizer = textNormalizer
+        if normalizer.isNativeAvailable {
+            segments = segments.map { seg in
+                let normalized = normalizer.normalizeSentence(seg.text)
+                if normalized != seg.text {
+                    return TranscriptSegment(start: seg.start, end: seg.end, text: normalized, language: seg.language, confidence: seg.confidence)
+                }
+                return seg
+            }
+            Logger.transcription.debug("ITN applied to \(segments.count) segments")
+        }
+
+        Logger.transcription.info("FluidAudio complete: \(segments.count) segments in \(seconds)s (confidence: \(confidence))")
 
         scheduleUnload()
         return SpeakerAssignment.deduplicate(segments)
@@ -111,7 +127,8 @@ extension FluidAudioEngine {
     /// Pure logic, no SDK dependency — testable.
     public nonisolated static func groupTokensIntoSegments(
         _ timings: [TokenTiming],
-        language: String?
+        language: String?,
+        confidence: Float? = nil
     ) -> [TranscriptSegment] {
         var segments: [TranscriptSegment] = []
         var currentText = ""
@@ -122,15 +139,20 @@ extension FluidAudioEngine {
             if currentText.isEmpty { segStart = t.startTime }
             currentText += t.token
             segEnd = t.endTime
-            let isPunct = t.token.last.map { ".!?".contains($0) } ?? false
-            if isPunct || i == timings.count - 1 {
+            let endsWithPunct = t.token.last.map { ".!?".contains($0) } ?? false
+            // Don't split on "." when the next token starts with a digit (e.g. "1." + "5 million")
+            let isDecimalDot: Bool = endsWithPunct && t.token.last == "." && i + 1 < timings.count
+                && timings[i + 1].token.first?.isNumber == true
+            let isSentenceEnd = (endsWithPunct && !isDecimalDot) || i == timings.count - 1
+            if isSentenceEnd {
                 let trimmed = currentText.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
                     segments.append(TranscriptSegment(
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
-                        language: language
+                        language: language,
+                        confidence: confidence
                     ))
                 }
                 currentText = ""

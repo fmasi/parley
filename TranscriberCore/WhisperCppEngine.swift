@@ -30,7 +30,7 @@ public actor WhisperCppEngine: TranscriptionEngine {
         let _ = try await ensureLoaded()
     }
 
-    public func transcribe(audioPath: URL, language: String? = nil) async throws -> [TranscriptSegment] {
+    public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
         let ctx = try await ensureLoaded()
         cancelUnloadTimer()
 
