@@ -8,23 +8,30 @@ Copy-paste this into Claude Cowork desktop:
 
 You are monitoring the ASR (speech-to-text) ecosystem for developments relevant to a macOS Apple Silicon meeting transcription app. Search the web for news from the past month.
 
-**Current stack:** WhisperKit (CoreML) + SpeakerKit for transcription/diarization. Evaluating: FluidAudio (Parakeet), whisper.cpp, macOS 26 SpeechAnalyzer, mlx-whisper.
+**Current stack:** Three swappable engines — Apple SpeechAnalyzer (default, macOS 26+), FluidAudio (Parakeet, CoreML/ANE), whisper.cpp (GGML, Metal GPU). Diarization via FluidAudio's OfflineDiarizerManager. WhisperKit/SpeakerKit were removed.
 
 **Models & frameworks to track:**
 - WhisperKit (argmaxinc) — new versions, compute unit improvements, CoreML performance fixes
 - FluidAudio (FluidInference) — new Parakeet model versions, language support expansion, performance
 - whisper.cpp (ggerganov) — Metal GPU improvements, new model support
 - WhisperCppKit (Justmalhar/WhisperCppKit) — actively maintained Swift wrapper for whisper.cpp, supports 128-mel models (large-v3/turbo)
-- Apple SpeechAnalyzer/SpeechTranscriber — macOS 26+ updates, new presets, diarization support
+- Apple SpeechAnalyzer/SpeechTranscriber — macOS 26+ updates, new presets, **CRITICAL: monitor for speaker diarization/identification support** (confirmed missing as of macOS 26.4, FB15558523 filed)
 - Moonshine (Moonshine AI) — multilingual release status
 - MLX ecosystem (apple/mlx, mlx-community) — new ASR models ported to MLX, mlx-swift ASR examples
 - OpenAI Whisper — new model versions (v4?)
 - Distil-Whisper — multilingual variants
 
 **Known issues to track for resolution:**
-- SwiftWhisper (exPHAT) is STALLED since Aug 2023, crashes with large-v3 (128-mel). Monitor if it gets updated or confirm it's dead. WhisperCppKit is the replacement candidate.
-- CoreML runtime overhead makes WhisperKit 3.5x slower than MLX GPU for same model. Monitor Apple CoreML improvements.
-- SpeakerKit (argmaxinc) just open-sourced March 2026 — monitor stability and quality reports.
+- SwiftWhisper (exPHAT) is DEAD since Aug 2023. WhisperCppKit replaced it. No need to monitor further.
+- CoreML runtime overhead makes WhisperKit 3.5x slower than MLX GPU for same model. Monitor Apple CoreML improvements (affects FluidAudio too).
+- **FluidAudio bus factor:** Core team is 2 people (Weng brothers). Monitor project health — commit frequency, responsiveness to issues. If activity drops, we need a diarization backup plan.
+- **Apple SpeechAnalyzer diarization gap:** Apple confirmed no speaker ID support (FB15558523). Monitor every macOS beta/WWDC for this — if Apple adds diarization to SpeechAnalyzer, it becomes the obvious default for everything.
+
+**Diarization-specific monitoring:**
+- FluidAudio diarization pipelines: OfflineDiarizerManager (our current), LS-EEND, Sortformer — track quality improvements, new models
+- Apple SpeechAnalyzer: watch for `SpeechTranscriber.ResultAttributeOption` additions related to speakers
+- Any new Swift-native diarization packages (e.g., speech-swift by soniqo — 508 stars, created Feb 2026)
+- Pyannote upstream: FluidAudio's offline pipeline is based on pyannote — monitor pyannote model improvements that FluidAudio might adopt
 
 **What matters most:**
 - Performance benchmarks on M-series chips (especially M4/M5 Pro)
@@ -32,14 +39,14 @@ You are monitoring the ASR (speech-to-text) ecosystem for developments relevant 
 - ANE optimization breakthroughs for large transformer models
 - New models with better speed/quality tradeoff than Whisper large-v3-turbo
 - Multilingual and code-switching improvements (FR, PT, ES, EN priority)
-- Speaker diarization advances (on-device, CoreML)
-- Streaming/real-time transcription capabilities
+- **Speaker diarization advances (HIGH PRIORITY)** — on-device, CoreML, especially Apple-native solutions. If Apple adds diarization to SpeechAnalyzer, flag immediately.
+- Streaming/real-time transcription + diarization capabilities (LS-EEND, Sortformer advances)
 
 **Version tracking — flag if any of these release a new non-bugfix version:**
 - WhisperKit (current: 0.18.0)
 - FluidAudio (current: 0.13.4)
 - WhisperCppKit (current: check latest)
-- SwiftWhisper (current: 1.2.0 — STALLED, likely dead)
+- SwiftWhisper — DEAD, replaced by WhisperCppKit, stop tracking
 - Moonshine (current: v2, English only)
 - mlx-whisper (note current version)
 
