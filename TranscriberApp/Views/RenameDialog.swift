@@ -1,18 +1,23 @@
 import SwiftUI
 import AVFoundation
 
+struct SpeakerSample {
+    let text: String
+    let audioFile: URL?
+    let start: TimeInterval
+    let end: TimeInterval
+}
+
 struct SpeakerEntry: Identifiable {
     let id: String  // "Local Speaker 1", "Remote Speaker 1", etc.
     var displayName: String
-    let sampleText: String
-    let sampleAudioFile: URL?  // source WAV file containing this speaker
-    let sampleStart: TimeInterval  // start time in the source WAV
-    let sampleEnd: TimeInterval    // end time in the source WAV
+    let samples: [SpeakerSample]  // up to 3, sorted by duration (longest first)
 }
 
 struct RenameDialog: View {
     @State private var speakers: [SpeakerEntry]
     @State private var audioPlayer: AVAudioPlayer?
+    @State private var sampleIndices: [String: Int] = [:]  // speaker id → current sample index
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -36,6 +41,10 @@ struct RenameDialog: View {
                 .font(.headline)
 
             ForEach($speakers) { $speaker in
+                let speakerId = speaker.id
+                let sampleIdx = sampleIndices[speakerId, default: 0]
+                let sample = speaker.samples.indices.contains(sampleIdx) ? speaker.samples[sampleIdx] : nil
+
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(speaker.id)
@@ -45,25 +54,46 @@ struct RenameDialog: View {
                         TextField("Name", text: $speaker.displayName)
                             .textFieldStyle(.roundedBorder)
 
-                        if speaker.sampleAudioFile != nil {
+                        if let sample, sample.audioFile != nil {
                             Button {
                                 playSample(
-                                    speaker.sampleAudioFile!,
-                                    from: speaker.sampleStart,
-                                    to: speaker.sampleEnd
+                                    sample.audioFile!,
+                                    from: sample.start,
+                                    to: sample.end
                                 )
                             } label: {
                                 Image(systemName: "play.circle")
                             }
                             .buttonStyle(.borderless)
                         }
+
+                        if speaker.samples.count > 1 {
+                            Button {
+                                let current = sampleIndices[speaker.id] ?? 0
+                                sampleIndices[speaker.id] = (current + 1) % speaker.samples.count
+                            } label: {
+                                Image(systemName: "forward.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Next sample (\(sampleIdx + 1)/\(speaker.samples.count))")
+                        }
                     }
 
-                    Text(speaker.sampleText)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
+                    if let sample {
+                        HStack(spacing: 4) {
+                            if speaker.samples.count > 1 {
+                                Text("\(sampleIdx + 1)/\(speaker.samples.count)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.quaternary)
+                                    .monospacedDigit()
+                            }
+                            Text(sample.text)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(2)
+                        }
                         .padding(.leading, 124)
+                    }
                 }
             }
 

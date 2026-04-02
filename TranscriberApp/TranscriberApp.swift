@@ -46,7 +46,7 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
-    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "benchmark"]
+    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark"]
 
     init() {
         // CLI mode: only enter for known subcommands (not system-injected args)

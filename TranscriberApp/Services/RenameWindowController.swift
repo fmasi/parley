@@ -10,17 +10,21 @@ final class RenameWindowController {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
 
-    func show(jsonPath: URL) {
+    func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         // Close any existing panel
         panel?.close()
 
         let speakers = Self.parseSpeakers(from: jsonPath)
-        guard !speakers.isEmpty else { return }
+        guard !speakers.isEmpty else {
+            onDismiss?()
+            return
+        }
 
         let closePanel = { [weak self] in
             Logger.state.debug("Panel closed: RenameSpeakers")
             self?.panel?.close()
             self?.panel = nil
+            onDismiss?()
         }
 
         let dialog = RenameDialog(
@@ -78,49 +82,62 @@ final class RenameWindowController {
         let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
         let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
 
-        // Collect unique speakers, sample quotes, and first segment timestamps
-        var seen = Set<String>()
-        var sampleTexts: [String: [String]] = [:]
-        var sampleTimes: [String: (start: Double, end: Double, source: String)] = [:]
+        struct CandidateSegment {
+            let start: Double
+            let end: Double
+            let source: String
+            let text: String
+            var duration: Double { end - start }
+        }
+
+        // Collect all segments per speaker
+        var candidates: [String: [CandidateSegment]] = [:]
         var orderedIds: [String] = []
 
         for seg in segments {
             guard let speaker = seg["speaker"] as? String,
-                  let text = seg["text"] as? String else { continue }
-            if !seen.contains(speaker) {
-                seen.insert(speaker)
+                  let text = seg["text"] as? String,
+                  let start = seg["start"] as? Double,
+                  let end = seg["end"] as? Double else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            if candidates[speaker] == nil {
                 orderedIds.append(speaker)
-                sampleTexts[speaker] = []
-                // Use the first segment as the audio sample
-                if let start = seg["start"] as? Double,
-                   let end = seg["end"] as? Double {
-                    let source = seg["source"] as? String ?? "remote"
-                    sampleTimes[speaker] = (start, end, source)
-                }
+                candidates[speaker] = []
             }
-            if let count = sampleTexts[speaker]?.count, count < 2 {
-                let trimmed = text.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty {
-                    sampleTexts[speaker]?.append(trimmed)
-                }
-            }
+            let source = seg["source"] as? String ?? "remote"
+            candidates[speaker]?.append(CandidateSegment(start: start, end: end, source: source, text: trimmed))
         }
 
-        return orderedIds.map { speaker in
-            let times = sampleTimes[speaker]
-            let audioFile: URL? = {
-                guard let times else { return nil }
-                let file = times.source == "local" ? localAudio : remoteAudio
-                guard let file, FileManager.default.fileExists(atPath: file.path) else { return nil }
-                return file
-            }()
+        let maxSamples = 3
+        let minSegments = 5
+
+        // Filter out noise speakers (< minSegments) — they're usually diarization artifacts
+        let significantIds = orderedIds.filter { (candidates[$0]?.count ?? 0) >= minSegments }
+
+        return significantIds.map { speaker in
+            let allCandidates = candidates[speaker] ?? []
+            // Pick the longest segments as samples (best chance of audible, identifiable speech)
+            let best = Array(allCandidates.sorted { $0.duration > $1.duration }.prefix(maxSamples))
+
+            let samples = best.map { candidate in
+                let audioFile: URL? = {
+                    let file = candidate.source == "local" ? localAudio : remoteAudio
+                    guard let file, FileManager.default.fileExists(atPath: file.path) else { return nil }
+                    return file
+                }()
+                return SpeakerSample(
+                    text: candidate.text,
+                    audioFile: audioFile,
+                    start: candidate.start,
+                    end: candidate.end
+                )
+            }
+
             return SpeakerEntry(
                 id: speaker,
                 displayName: speaker,
-                sampleText: sampleTexts[speaker]?.joined(separator: " ") ?? "",
-                sampleAudioFile: audioFile,
-                sampleStart: times?.start ?? 0,
-                sampleEnd: times?.end ?? 0
+                samples: samples
             )
         }
     }

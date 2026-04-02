@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import os
 import TranscriberCore
@@ -12,6 +13,22 @@ enum CLIHandler {
             exit(1)
         }
 
+        // rename-gui needs NSApplication for the NSPanel to be interactive
+        if case .renameGUI(let path) = command {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
+            Task { @MainActor in
+                do {
+                    try await handleRenameGUI(path)
+                } catch {
+                    fputs("Error: \(error.localizedDescription)\n", stderr)
+                }
+                exit(0)
+            }
+            app.run()
+            exit(0)
+        }
+
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
 
@@ -22,6 +39,8 @@ enum CLIHandler {
                     try await handleTranscribe(opts)
                 case .rename(let path):
                     try handleRename(path)
+                case .renameGUI:
+                    break  // handled above, before semaphore
                 case .benchmark(let opts):
                     try await handleBenchmark(opts)
                 }
@@ -86,6 +105,21 @@ enum CLIHandler {
         try CLIRename.run(jsonPath: jsonPath)
     }
 
+    @MainActor
+    private static func handleRenameGUI(_ jsonPathStr: String) async throws {
+        let jsonPath = URL(fileURLWithPath: jsonPathStr)
+        guard FileManager.default.fileExists(atPath: jsonPath.path) else {
+            throw CLIError.fileNotFound(jsonPathStr)
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            RenameWindowController.shared.show(
+                jsonPath: jsonPath,
+                onDismiss: { continuation.resume() }
+            )
+        }
+    }
+
     private static func handleBenchmark(_ opts: BenchmarkOptions) async throws {
         let benchmarkDir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".audio-transcribe/benchmark")
@@ -110,7 +144,10 @@ enum CLIHandler {
             --engine <id>    Engine: speech_analyzer, fluid_audio, whisper_cpp (default: from config)
             --no-diarize     Skip speaker diarization
 
-          rename      Rename speakers in a transcript
+          rename      Rename speakers in a transcript (CLI)
+            -i <file>        Input JSON transcript (required)
+
+          rename-gui  Rename speakers with the GUI dialog
             -i <file>        Input JSON transcript (required)
 
           benchmark   Run performance benchmark
