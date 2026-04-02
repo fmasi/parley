@@ -708,6 +708,374 @@ func writeReport(results: [BenchmarkResult], audioPath: URL, outputPath: URL) {
     try? lines.joined(separator: "\n").write(to: outputPath, atomically: true, encoding: .utf8)
 }
 
+// ── Engine-Language Compatibility ──
+
+/// FluidAudio Parakeet v3 supports 25 European languages.
+/// WhisperKit, WhisperCppKit, SpeechAnalyzer, and mlx-whisper support 99+ languages.
+let fluidAudioLanguages: Set<String> = [
+    "en", "fr", "pt", "es", "tr", "fi", "de", "it", "nl", "pl",
+    "sv", "da", "no", "cs", "sk", "hu", "ro", "bg", "hr", "sl",
+    "lt", "lv", "et", "el", "uk",
+]
+
+/// Returns true if the engine supports the given language code.
+func engineSupportsLanguage(_ engine: String, _ lang: String) -> Bool {
+    if engine == "fluid" {
+        return fluidAudioLanguages.contains(lang)
+    }
+    return true  // all other engines support all languages
+}
+
+/// Infer language code from audio filename (e.g. "fr-fr-fleurs-00.wav" -> "fr", "en-clean-gettysburg.mp3" -> "en").
+func inferLanguage(from filename: String) -> String {
+    let name = filename.lowercased()
+    if name.hasPrefix("en") { return "en" }
+    if name.hasPrefix("fr") { return "fr" }
+    if name.hasPrefix("pt") { return "pt" }
+    if name.hasPrefix("es") { return "es" }
+    if name.hasPrefix("tr") { return "tr" }
+    if name.hasPrefix("fi") { return "fi" }
+    if name.hasPrefix("ko") { return "ko" }
+    if name.hasPrefix("ja") { return "ja" }
+    if name.hasPrefix("de") { return "de" }
+    if name.hasPrefix("it") { return "it" }
+    if name.hasPrefix("zh") { return "zh" }
+    // Default to English
+    return "en"
+}
+
+/// Map language code to Locale for SpeechAnalyzer.
+func localeForLanguage(_ lang: String) -> Locale {
+    let localeMap: [String: String] = [
+        "en": "en-US", "fr": "fr-FR", "pt": "pt-BR", "es": "es-ES",
+        "tr": "tr-TR", "fi": "fi-FI", "ko": "ko-KR", "ja": "ja-JP",
+        "de": "de-DE", "it": "it-IT", "zh": "zh-CN",
+    ]
+    return Locale(identifier: localeMap[lang] ?? "en-US")
+}
+
+// ── Batch Benchmark ──
+
+struct BatchResult {
+    let filename: String
+    let language: String
+    let engineResults: [BenchmarkResult]
+}
+
+/// Run benchmarks across all audio files in a directory.
+/// Loads each engine model once, reuses across files.
+func runBatchBenchmark(
+    directory: URL,
+    engines: Set<String>,
+    groundTruth: [String: String]
+) async -> [BatchResult] {
+    let fm = FileManager.default
+    let extensions: Set<String> = ["wav", "mp3", "flac", "m4a"]
+
+    guard let contents = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+        print("ERROR: Cannot read directory \(directory.path)")
+        return []
+    }
+
+    let audioFiles = contents
+        .filter { extensions.contains($0.pathExtension.lowercased()) }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+    guard !audioFiles.isEmpty else {
+        print("ERROR: No audio files found in \(directory.path)")
+        return []
+    }
+
+    print("Found \(audioFiles.count) audio files in \(directory.path)")
+
+    // ── Pre-load models once ──
+    print("\n══════ Loading models (one-time) ══════")
+
+    var whisperKitInstance: WhisperKit?
+    if engines.contains("whisperkit") {
+        print("  WhisperKit...")
+        whisperKitInstance = try? await WhisperKit(model: "large-v3_turbo", verbose: false, prewarm: true)
+        print("  WhisperKit: \(whisperKitInstance != nil ? "ready" : "failed")")
+    }
+
+    var fluidModels: AsrModels?
+    var fluidManager: AsrManager?
+    if engines.contains("fluid") {
+        print("  FluidAudio...")
+        do {
+            let models = try await AsrModels.downloadAndLoad()
+            let mgr = AsrManager()
+            try await mgr.initialize(models: models)
+            fluidModels = models
+            fluidManager = mgr
+            print("  FluidAudio: ready")
+        } catch {
+            print("  FluidAudio: failed — \(error.localizedDescription)")
+        }
+    }
+
+    var whisperCtx: WhisperContext?
+    if engines.contains("whisper-cpp") {
+        let modelPath = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".audio-transcribe/models/ggml-large-v3-turbo.bin")
+        if fm.fileExists(atPath: modelPath.path) {
+            print("  WhisperCppKit...")
+            whisperCtx = try? WhisperContext(modelPath: modelPath.path)
+            print("  WhisperCppKit: \(whisperCtx != nil ? "ready" : "failed")")
+        } else {
+            print("  WhisperCppKit: GGML model not found, skipping")
+        }
+    }
+
+    // ── Run benchmarks per file ──
+    print("\n══════ Running batch benchmarks ══════")
+    var batchResults: [BatchResult] = []
+
+    for audioFile in audioFiles {
+        let filename = audioFile.lastPathComponent
+        let lang = inferLanguage(from: filename)
+        let duration = getAudioDuration(url: audioFile)
+
+        print("\n━━━ \(filename) (\(lang), \(Int(duration))s) ━━━")
+
+        var fileResults: [BenchmarkResult] = []
+
+        // WhisperKit (reuse instance)
+        if engines.contains("whisperkit"), let kit = whisperKitInstance {
+            print("  WhisperKit...")
+            let start = ContinuousClock.now
+            do {
+                let options = DecodingOptions(
+                    skipSpecialTokens: true, wordTimestamps: true,
+                    compressionRatioThreshold: 1.8, noSpeechThreshold: 0.8
+                )
+                let results = try await kit.transcribe(audioPath: audioFile.path, decodeOptions: options)
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                var segments: [(Double, Double, String)] = []
+                for r in results { for s in r.segments { segments.append((Double(s.start), Double(s.end), s.text)) } }
+                let fullText = segments.map(\.2).joined(separator: " ")
+                fileResults.append(BenchmarkResult(
+                    engine: "WhisperKit", wallClockSeconds: seconds,
+                    segmentCount: segments.count, sampleSegments: Array(segments.prefix(3)),
+                    audioDurationSeconds: duration, fullText: fullText, error: nil
+                ))
+            } catch {
+                let s = Double((ContinuousClock.now - start).components.seconds)
+                fileResults.append(BenchmarkResult(
+                    engine: "WhisperKit", wallClockSeconds: s,
+                    segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                    fullText: "", error: error.localizedDescription
+                ))
+            }
+        }
+
+        // FluidAudio (reuse manager — skip if language unsupported)
+        if engines.contains("fluid"), engineSupportsLanguage("fluid", lang), let mgr = fluidManager {
+            print("  FluidAudio...")
+            let start = ContinuousClock.now
+            do {
+                let result = try await mgr.transcribe(audioFile, source: .system)
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                fileResults.append(BenchmarkResult(
+                    engine: "FluidAudio", wallClockSeconds: seconds,
+                    segmentCount: result.tokenTimings?.count ?? 0,
+                    sampleSegments: [], audioDurationSeconds: duration,
+                    fullText: result.text, error: nil
+                ))
+            } catch {
+                let s = Double((ContinuousClock.now - start).components.seconds)
+                fileResults.append(BenchmarkResult(
+                    engine: "FluidAudio", wallClockSeconds: s,
+                    segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                    fullText: "", error: error.localizedDescription
+                ))
+            }
+        } else if engines.contains("fluid") && !engineSupportsLanguage("fluid", lang) {
+            print("  FluidAudio: skipped (language \(lang) not supported)")
+        }
+
+        // WhisperCppKit (reuse context)
+        if engines.contains("whisper-cpp"), let ctx = whisperCtx {
+            print("  WhisperCppKit...")
+            let start = ContinuousClock.now
+            do {
+                let (samples, _) = try loadAudioAsFloats(url: audioFile)
+                var options = WhisperOptions()
+                options.language = lang == "en" ? "en" : nil  // auto-detect for non-English
+                options.translateToEnglish = false
+                let segments = try ctx.transcribe(pcm16k: samples, options: options)
+                let elapsed = ContinuousClock.now - start
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                let fullText = segments.map(\.text).joined(separator: " ")
+                let sampleSegs = segments.prefix(3).map { ($0.startTime, $0.endTime, $0.text) }
+                fileResults.append(BenchmarkResult(
+                    engine: "WhisperCppKit", wallClockSeconds: seconds,
+                    segmentCount: segments.count, sampleSegments: Array(sampleSegs),
+                    audioDurationSeconds: duration, fullText: fullText, error: nil
+                ))
+            } catch {
+                let s = Double((ContinuousClock.now - start).components.seconds)
+                fileResults.append(BenchmarkResult(
+                    engine: "WhisperCppKit", wallClockSeconds: s,
+                    segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                    fullText: "", error: error.localizedDescription
+                ))
+            }
+        }
+
+        // SpeechAnalyzer (no pre-loaded state needed, but set locale per language)
+        if engines.contains("speech") {
+            if #available(macOS 26.0, *) {
+                print("  SpeechAnalyzer...")
+                let locale = localeForLanguage(lang)
+                let start = ContinuousClock.now
+                do {
+                    let transcriber = SpeechTranscriber(
+                        locale: locale,
+                        preset: SpeechTranscriber.Preset(
+                            transcriptionOptions: [],
+                            reportingOptions: [.volatileResults],
+                            attributeOptions: [.audioTimeRange]
+                        )
+                    )
+                    let analyzer = SpeechAnalyzer(modules: [transcriber])
+                    let audioFileObj = try AVAudioFile(forReading: audioFile)
+
+                    let analysisTask = Task {
+                        do {
+                            if let lastSample = try await analyzer.analyzeSequence(from: audioFileObj) {
+                                try await analyzer.finalizeAndFinish(through: lastSample)
+                            } else { await analyzer.cancelAndFinishNow() }
+                        } catch { await analyzer.cancelAndFinishNow(); throw error }
+                    }
+
+                    var allText = ""
+                    var segCount = 0
+                    for try await result in transcriber.results {
+                        if result.isFinal {
+                            segCount += 1
+                            allText += String(result.text.characters) + " "
+                        }
+                    }
+                    try await analysisTask.value
+
+                    let elapsed = ContinuousClock.now - start
+                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    fileResults.append(BenchmarkResult(
+                        engine: "SpeechAnalyzer", wallClockSeconds: seconds,
+                        segmentCount: segCount, sampleSegments: [],
+                        audioDurationSeconds: duration,
+                        fullText: allText.trimmingCharacters(in: .whitespaces), error: nil
+                    ))
+                } catch {
+                    let s = Double((ContinuousClock.now - start).components.seconds)
+                    fileResults.append(BenchmarkResult(
+                        engine: "SpeechAnalyzer", wallClockSeconds: s,
+                        segmentCount: 0, sampleSegments: [], audioDurationSeconds: duration,
+                        fullText: "", error: error.localizedDescription
+                    ))
+                }
+            }
+        }
+
+        // Compute WER for each result
+        if let reference = groundTruth[filename] {
+            for i in fileResults.indices {
+                if fileResults[i].error == nil && !fileResults[i].fullText.isEmpty {
+                    fileResults[i].wer = computeWER(reference: reference, hypothesis: fileResults[i].fullText)
+                }
+            }
+        }
+
+        // Print per-file summary
+        for r in fileResults {
+            if let error = r.error {
+                print("    \(r.engine): ERROR — \(error.prefix(60))")
+            } else {
+                let werStr = r.wer.map { String(format: "%.1f%%", $0 * 100) } ?? "-"
+                print("    \(r.engine): \(String(format: "%.1f", r.realtimeFactor))x RT, WER \(werStr)")
+            }
+        }
+
+        batchResults.append(BatchResult(filename: filename, language: lang, engineResults: fileResults))
+    }
+
+    return batchResults
+}
+
+/// Write a markdown matrix report from batch results.
+func writeMatrixReport(batchResults: [BatchResult], outputPath: URL) {
+    var lines: [String] = []
+    lines.append("# ASR Engine Benchmark Matrix")
+    lines.append("")
+    lines.append("Date: \(Date())")
+    lines.append("")
+
+    // Collect all unique engines across all results
+    var allEngines: [String] = []
+    for br in batchResults {
+        for er in br.engineResults {
+            if !allEngines.contains(er.engine) { allEngines.append(er.engine) }
+        }
+    }
+
+    // Header row
+    var header = "| File | Lang |"
+    for e in allEngines { header += " \(e) WER | \(e) RTF |" }
+    lines.append(header)
+
+    var sep = "|------|------|"
+    for _ in allEngines { sep += "---:|---:|" }
+    lines.append(sep)
+
+    // Data rows
+    for br in batchResults {
+        var row = "| \(br.filename) | \(br.language) |"
+        for engineName in allEngines {
+            if let er = br.engineResults.first(where: { $0.engine == engineName }) {
+                if er.error != nil {
+                    row += " ERR | - |"
+                } else {
+                    let werStr = er.wer.map { String(format: "%.1f%%", $0 * 100) } ?? "-"
+                    row += " \(werStr) | \(String(format: "%.1fx", er.realtimeFactor)) |"
+                }
+            } else {
+                row += " - | - |"
+            }
+        }
+        lines.append(row)
+    }
+
+    // Per-language averages
+    lines.append("")
+    lines.append("## Average by Language")
+    lines.append("")
+    lines.append("| Language |" + allEngines.map { " \($0) WER |" }.joined())
+    lines.append("|----------|" + allEngines.map { _ in "---:|" }.joined())
+
+    let languages = Array(Set(batchResults.map(\.language))).sorted()
+    for lang in languages {
+        let langResults = batchResults.filter { $0.language == lang }
+        var row = "| \(lang) |"
+        for engineName in allEngines {
+            let wers = langResults.flatMap(\.engineResults)
+                .filter { $0.engine == engineName && $0.wer != nil }
+                .compactMap(\.wer)
+            if wers.isEmpty {
+                row += " - |"
+            } else {
+                let avg = wers.reduce(0, +) / Double(wers.count)
+                row += " \(String(format: "%.1f%%", avg * 100)) |"
+            }
+        }
+        lines.append(row)
+    }
+
+    try? lines.joined(separator: "\n").write(to: outputPath, atomically: true, encoding: .utf8)
+}
+
 // ── Main ──
 
 @main
@@ -716,9 +1084,10 @@ struct EngineBenchmarkCLI {
         let args = CommandLine.arguments
 
         guard args.count >= 2 else {
-            print("Usage: EngineBenchmark <audio.wav> [--engines whisperkit,whisper-cpp,fluid,speech] [--ground-truth gt.json]")
+            print("Usage: EngineBenchmark <audio.wav> [options]")
+            print("       EngineBenchmark --batch <directory> [options]")
             print("")
-            print("Engines:")
+            print("Engines (--engines flag):")
             print("  whisperkit   — WhisperKit (CoreML, large-v3-turbo)")
             print("  whisper-cpp  — WhisperCppKit / whisper.cpp (Metal GPU)")
             print("  fluid        — FluidAudio (Parakeet, CoreML/ANE)")
@@ -728,16 +1097,11 @@ struct EngineBenchmarkCLI {
             print("")
             print("Options:")
             print("  --ground-truth <path>  JSON file with reference transcripts for WER scoring")
+            print("  --batch <directory>    Run all audio files in directory (loads models once)")
             Foundation.exit(1)
         }
 
-        let audioPath = URL(fileURLWithPath: args[1])
-        guard FileManager.default.fileExists(atPath: audioPath.path) else {
-            print("ERROR: Audio file not found: \(audioPath.path)")
-            Foundation.exit(1)
-        }
-
-        // Parse --engines flag
+        // Parse --engines flag (shared between single and batch modes)
         var engines = Set(["whisperkit", "whisper-cpp", "fluid", "speech", "mlx"])
         if let idx = args.firstIndex(of: "--engines"), idx + 1 < args.count {
             engines = Set(args[idx + 1].split(separator: ",").map(String.init))
@@ -753,6 +1117,53 @@ struct EngineBenchmarkCLI {
             } else {
                 print("Ground truth: \(groundTruth.count) entries loaded")
             }
+        }
+
+        // ── Batch mode ──
+        if let idx = args.firstIndex(of: "--batch"), idx + 1 < args.count {
+            let batchDir = URL(fileURLWithPath: args[idx + 1])
+
+            // Auto-load ground truth from directory if not specified
+            if groundTruth.isEmpty {
+                let autoGT = batchDir.appendingPathComponent("ground-truth.json")
+                if FileManager.default.fileExists(atPath: autoGT.path) {
+                    groundTruth = loadGroundTruth(path: autoGT)
+                    print("Ground truth: auto-loaded \(groundTruth.count) entries from \(autoGT.path)")
+                }
+            }
+
+            // Exclude mlx from batch mode (subprocess overhead per file, no model reuse)
+            var batchEngines = engines
+            batchEngines.remove("mlx")
+
+            log("╔═══════════════════════════════════════════╗")
+            log("║  ASR Engine Benchmark — Batch Mode        ║")
+            log("╚═══════════════════════════════════════════╝")
+
+            let batchResults = await runBatchBenchmark(
+                directory: batchDir,
+                engines: batchEngines,
+                groundTruth: groundTruth
+            )
+
+            // Save matrix report
+            let reportDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".audio-transcribe/benchmark")
+            try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
+            let dateStr = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none)
+                .replacingOccurrences(of: "/", with: "-")
+            let reportPath = reportDir.appendingPathComponent("matrix-\(dateStr).md")
+            writeMatrixReport(batchResults: batchResults, outputPath: reportPath)
+            print("\n══════ Complete ══════")
+            print("Matrix report: \(reportPath.path)")
+            return
+        }
+
+        // ── Single-file mode ──
+        let audioPath = URL(fileURLWithPath: args[1])
+        guard FileManager.default.fileExists(atPath: audioPath.path) else {
+            print("ERROR: Audio file not found: \(audioPath.path)")
+            Foundation.exit(1)
         }
 
         let audioDuration = getAudioDuration(url: audioPath)
