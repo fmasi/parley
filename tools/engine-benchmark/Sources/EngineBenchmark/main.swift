@@ -1179,20 +1179,27 @@ func runBatchBenchmark(
                     proc.standardError = Pipe()
                     do {
                         try proc.run()
+                        // Read pipes before waitUntilExit to avoid deadlock if pipe buffer fills
+                        let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                         proc.waitUntilExit()
 
                         let elapsed = ContinuousClock.now - start
                         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                        let output = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        let output = String(data: outputData, encoding: .utf8) ?? ""
 
                         if proc.terminationStatus == 0 {
+                            let lines = output.components(separatedBy: "\n")
                             // Parse text from output: "Text: ..."
-                            let fullText = output.components(separatedBy: "\n")
+                            let fullText = lines
                                 .first(where: { $0.hasPrefix("Text: ") })
                                 .map { String($0.dropFirst(6)) } ?? ""
+                            // Parse segment count: "Segments: N"
+                            let segCount = lines
+                                .first(where: { $0.hasPrefix("Segments: ") })
+                                .flatMap { Int($0.dropFirst(10)) } ?? 1
                             fileResults.append(BenchmarkResult(
                                 engine: "SpeechAnalyzer", wallClockSeconds: seconds,
-                                segmentCount: 1, sampleSegments: [],
+                                segmentCount: segCount, sampleSegments: [],
                                 audioDurationSeconds: duration,
                                 fullText: fullText, error: nil
                             ))
