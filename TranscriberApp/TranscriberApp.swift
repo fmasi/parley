@@ -24,13 +24,14 @@ final class LaunchGate {
         permissionManager = PermissionManager(checker: checker)
     }
 
-    func checkAndGate() async {
+    func checkAndGate(configManager: ConfigManager) async {
         await permissionManager.checkAll()
         if permissionManager.allRequiredGranted {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(
-                permissionManager: permissionManager
+                permissionManager: permissionManager,
+                configManager: configManager
             ) { [weak self] in
                 self?.permissionsReady = true
             }
@@ -57,8 +58,9 @@ struct TranscriberApp: App {
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         let gate = launchGate
+        let cm = configManager
         Task { @MainActor in
-            await gate.checkAndGate()
+            await gate.checkAndGate(configManager: cm)
         }
     }
 

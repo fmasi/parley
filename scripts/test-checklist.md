@@ -1,5 +1,12 @@
 # Test Checklist — Engine Abstraction + FluidAudio Integration
 
+## Setup screen (first launch)
+- [ ] Engine picker appears below optional permissions with available engines listed
+- [ ] Selecting FluidAudio immediately starts background download — progress bar + % appears
+- [ ] Switching back to SpeechAnalyzer clears the progress UI
+- [ ] Continue button stays enabled during download (download runs in background)
+- [ ] Engine choice persists to config.json (visible in Settings after setup)
+
 ## Settings
 - [ ] Engine picker shows all available engines (FluidAudio, SpeechAnalyzer on macOS 26+)
 - [ ] Switching engine persists to config.json
