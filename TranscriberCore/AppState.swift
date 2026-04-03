@@ -19,6 +19,10 @@ public final class AppState {
     }
     public var lastTranscriptPath: String?
     public var lastJsonPath: String?
+    /// Non-nil when recording was interrupted and auto-recovered.
+    /// Shown as a warning in the menu. Cleared when user opens the menu.
+    public var interruptionWarning: String?
+
     public var errorMessage: String? {
         didSet {
             if let msg = self.errorMessage {
@@ -56,7 +60,9 @@ public final class AppState {
         if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
         case .idle: return "mic"
-        case .recording: return "microphone.and.signal.meter.fill"
+        case .recording:
+            if interruptionWarning != nil { return "exclamationmark.bubble" }
+            return "microphone.and.signal.meter.fill"
         case .transcribing: return "hourglass"
         }
     }
