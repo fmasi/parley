@@ -8,6 +8,7 @@ struct AudioPaths {
     let micAudio: URL
 }
 
+@MainActor
 final class AudioCaptureClient {
     private var connection: NSXPCConnection?
 
