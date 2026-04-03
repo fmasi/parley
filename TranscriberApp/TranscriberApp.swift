@@ -26,7 +26,11 @@ final class LaunchGate {
 
     func checkAndGate(configManager: ConfigManager) async {
         await permissionManager.checkAll()
-        if permissionManager.allRequiredGranted {
+        let engine = configManager.config.engine
+        let modelReady = !engine.descriptor.requiresModelDownload
+            || FluidAudioEngine.isModelCached()
+
+        if permissionManager.allRequiredGranted && modelReady {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(

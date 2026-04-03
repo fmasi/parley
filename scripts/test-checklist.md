@@ -8,6 +8,7 @@
 - [ ] Download complete → green checkmark; Continue becomes enabled
 - [ ] Download fails → "Retry" button appears in red; Continue stays disabled
 - [ ] Switching engine mid-download resets progress UI; Download button reappears if needed
+- [ ] After Screen Recording relaunch: Setup screen re-appears with permissions checked + Download still required
 - [ ] Engine choice persists to config.json (visible in Settings after setup)
 
 ## Settings
