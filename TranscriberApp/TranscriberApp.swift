@@ -1,6 +1,7 @@
 import SwiftUI
 import UserNotifications
 import TranscriberCore
+import os
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationDelegate()
@@ -56,9 +57,96 @@ struct TranscriberApp: App {
         }
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
+
+        // Crash recovery: check sentinel before anything else
+        let client = captureClient
+        let state = appState
+        Task { @MainActor in
+            await Self.recoverIfNeeded(captureClient: client, appState: state)
+        }
+
         let gate = launchGate
         Task { @MainActor in
             await gate.checkAndGate()
+        }
+
+        if !LaunchAgentManager.isInstalled() {
+            try? LaunchAgentManager.install()
+        }
+    }
+
+    @MainActor
+    private static func recoverIfNeeded(
+        captureClient: AudioCaptureClient,
+        appState: AppState
+    ) async {
+        guard let sentinel = RecordingSentinel.read() else { return }
+
+        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .public), segment: \(sentinel.segment))")
+
+        // Check if sentinel is stale (from before last boot)
+        let bootTime = ProcessInfo.processInfo.systemUptime
+        let bootDate = Date().addingTimeInterval(-bootTime)
+        if sentinel.startedAt < bootDate {
+            Logger.state.info("Stale sentinel from before last boot — cleaning up")
+            RecordingSentinel.delete()
+            return
+        }
+
+        // Flow A: Is XPC service still alive and capturing?
+        let isAlive = await captureClient.isCapturing()
+        if isAlive {
+            Logger.state.info("XPC service alive — re-attaching (Flow A)")
+            appState.phase = .recording(since: sentinel.startedAt)
+            return
+        }
+
+        // Flow B: XPC is dead — check for partial audio files
+        let sysSize = (try? FileManager.default.attributesOfItem(
+            atPath: sentinel.systemAudioPath
+        )[.size] as? Int) ?? 0
+
+        if sysSize > 44 {
+            Logger.state.info("Partial audio found (\(sysSize) bytes) — restarting recording (Flow B)")
+
+            let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+            let seg = sentinel.segment + 1
+            let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+
+            let newSentinel = sentinel.incrementedSegment(
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+            )
+
+            do {
+                try await captureClient.start(
+                    outputDirectory: outputDir,
+                    baseName: baseName,
+                    microphoneDeviceId: sentinel.micDeviceUID
+                )
+                try RecordingSentinel.write(newSentinel)
+                appState.phase = .recording(since: sentinel.startedAt)
+                appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
+
+                // Send notification
+                if Bundle.main.bundleIdentifier != nil {
+                    let content = UNMutableNotificationContent()
+                    content.title = "Recording Resumed"
+                    content.body = "Recording was briefly interrupted. Some audio may have been lost."
+                    content.sound = .default
+                    content.interruptionLevel = .timeSensitive
+                    let request = UNNotificationRequest(
+                        identifier: UUID().uuidString, content: content, trigger: nil
+                    )
+                    try? await UNUserNotificationCenter.current().add(request)
+                }
+            } catch {
+                Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
+                RecordingSentinel.delete()
+            }
+        } else {
+            Logger.state.info("No usable audio files — cleaning up sentinel")
+            RecordingSentinel.delete()
         }
     }
 
@@ -77,6 +165,7 @@ struct TranscriberApp: App {
                     .disabled(true)
                 Divider()
                 Button("Quit") {
+                    LaunchAgentManager.uninstall()
                     NSApplication.shared.terminate(nil)
                 }
                 .keyboardShortcut("q")

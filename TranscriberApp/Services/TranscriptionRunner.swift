@@ -51,27 +51,38 @@ final class TranscriptionRunner {
             throw RunnerError.failed("Failed to initialize transcription engine")
         }
 
+        let segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: micAudio ?? systemAudio)
         let isDualStream = micAudio != nil
         var allSegments: [LabeledSegment] = []
+        var audioPaths: [URL] = []
 
-        let systemSegments = try await transcribeStream(
-            audioPath: systemAudio,
-            source: "remote",
-            transcriber: transcriber,
-            label: "system",
-            audioSource: .system
-        )
-        allSegments.append(contentsOf: systemSegments)
+        for (index, segmentPair) in segments.enumerated() {
+            if index > 0 {
+                Logger.transcription.info("Transcribing recovery segment \(index + 1)")
+            }
 
-        if let micPath = micAudio {
-            let micSegments = try await transcribeStream(
-                audioPath: micPath,
-                source: "local",
+            let systemSegments = try await transcribeStream(
+                audioPath: segmentPair.system,
+                source: "remote",
                 transcriber: transcriber,
-                label: "mic",
-                audioSource: .microphone
+                label: "system\(index > 0 ? "-\(index + 1)" : "")",
+                audioSource: .system
             )
-            allSegments.append(contentsOf: micSegments)
+            allSegments.append(contentsOf: systemSegments)
+            audioPaths.append(segmentPair.system)
+
+            let micPath = segmentPair.mic
+            if FileManager.default.fileExists(atPath: micPath.path) {
+                let micSegments = try await transcribeStream(
+                    audioPath: micPath,
+                    source: "local",
+                    transcriber: transcriber,
+                    label: "mic\(index > 0 ? "-\(index + 1)" : "")",
+                    audioSource: .microphone
+                )
+                allSegments.append(contentsOf: micSegments)
+                audioPaths.append(micPath)
+            }
         }
 
         if isDualStream && !allSegments.isEmpty {
@@ -80,9 +91,6 @@ final class TranscriptionRunner {
 
         allSegments.sort { $0.start < $1.start }
         Logger.transcription.info("Total segments after merge: \(allSegments.count)")
-
-        var audioPaths = [systemAudio]
-        if let mic = micAudio { audioPaths.append(mic) }
 
         let uniqueLanguages = Set(detectedLanguages)
         let detectedLanguage: String
@@ -127,6 +135,13 @@ final class TranscriptionRunner {
     }
 
     // MARK: - Private
+
+    static func discoverSegments(
+        systemAudio: URL,
+        micAudio: URL
+    ) -> [(system: URL, mic: URL)] {
+        TranscriberCore.discoverSegments(systemAudio: systemAudio, micAudio: micAudio)
+    }
 
     private func createEngine(for id: EngineID, config: Config) throws -> any TranscriptionEngine {
         guard id.descriptor.isAvailableOnThisOS else {
