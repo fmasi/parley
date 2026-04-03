@@ -90,6 +90,11 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 def do_kill() -> None:
     step("Killing AudioTranscribe if running")
+    # Unload LaunchAgent first to prevent KeepAlive from restarting the app
+    plist = Path.home() / "Library" / "LaunchAgents" / f"{BUNDLE_ID}.plist"
+    if plist.exists():
+        subprocess.run(["launchctl", "unload", str(plist)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["pkill", "-x", "AudioTranscribe"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
