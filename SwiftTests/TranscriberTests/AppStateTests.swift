@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TranscriberCore
 
+@MainActor
 struct AppStateTests {
 
     // MARK: - Initial state
