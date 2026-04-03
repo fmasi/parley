@@ -69,7 +69,7 @@ public enum AudioSourceResolver {
         let localPath = outputDirectory.appendingPathComponent("\(baseName)_split_mic.wav")
         let remotePath = outputDirectory.appendingPathComponent("\(baseName)_split_system.wav")
 
-        let asset = AVAsset(url: stereoAac)
+        let asset = AVURLAsset(url: stereoAac)
         let reader = try AVAssetReader(asset: asset)
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
             throw AudioSourceResolverError.noAudioFiles(baseName: baseName, directory: outputDirectory)
@@ -107,7 +107,7 @@ public enum AudioSourceResolver {
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
             let length = CMBlockBufferGetDataLength(blockBuffer)
             var data = Data(count: length)
-            data.withUnsafeMutableBytes { rawPtr in
+            _ = data.withUnsafeMutableBytes { rawPtr in
                 CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: rawPtr.baseAddress!)
             }
 
