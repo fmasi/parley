@@ -8,18 +8,21 @@ struct MicSwitchDialog: View {
 
     let currentDeviceId: String?
     let devices: [AudioInputDevice]
+    let buttonLabel: String
     let onSwitch: (String?) async throws -> Void
     let onCancel: () -> Void
 
     init(
         currentDeviceId: String?,
         devices: [AudioInputDevice],
+        buttonLabel: String,
         onSwitch: @escaping (String?) async throws -> Void,
         onCancel: @escaping () -> Void
     ) {
         self._selectedDeviceId = State(initialValue: currentDeviceId)
         self.currentDeviceId = currentDeviceId
         self.devices = devices
+        self.buttonLabel = buttonLabel
         self.onSwitch = onSwitch
         self.onCancel = onCancel
     }
@@ -44,7 +47,7 @@ struct MicSwitchDialog: View {
                 Spacer()
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
-                Button("Switch") { performSwitch() }
+                Button(buttonLabel) { performSwitch() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(isSwitching || selectedDeviceId == currentDeviceId)
             }
