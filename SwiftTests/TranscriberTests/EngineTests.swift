@@ -26,6 +26,61 @@ struct EngineTests {
         #expect(engine.isReady() == cached)
     }
 
+    @Test func isModelCachedIsStable() {
+        // Repeated calls must return the same value (no flaky disk check)
+        let a = FluidAudioEngine.isModelCached()
+        let b = FluidAudioEngine.isModelCached()
+        let c = FluidAudioEngine.isModelCached()
+        #expect(a == b)
+        #expect(b == c)
+    }
+
+    // MARK: - FluidAudioDiarizer cache check
+
+    @Test func isDiarizationCachedReturnsBool() {
+        // Smoke test: must not crash. In CI false; on dev machine true.
+        let cached = FluidAudioDiarizer.isDiarizationCached()
+        // Second call must agree (stable disk check)
+        #expect(cached == FluidAudioDiarizer.isDiarizationCached())
+    }
+
+    // MARK: - FluidAudioEngineError
+
+    @Test func errorDescriptionIsActionable() {
+        let error = FluidAudioEngineError.modelNotDownloaded
+        let desc = error.errorDescription ?? ""
+        #expect(!desc.isEmpty)
+        #expect(desc.contains("Settings"))
+    }
+
+    @Test func errorConformsToLocalizedError() {
+        let error: any LocalizedError = FluidAudioEngineError.modelNotDownloaded
+        #expect(error.errorDescription != nil)
+    }
+
+    // MARK: - Airgap guard: prepare() throws when model not cached
+
+    @Test(
+        .enabled(if: !FluidAudioEngine.isModelCached())
+    )
+    func prepareThrowsWhenAsrModelNotCached() async throws {
+        let engine = FluidAudioEngine()
+        await #expect(throws: FluidAudioEngineError.self) {
+            try await engine.prepare()
+        }
+    }
+
+    @Test(
+        .enabled(if: !FluidAudioDiarizer.isDiarizationCached())
+    )
+    func diarizeThrowsWhenModelNotCached() async throws {
+        let diarizer = FluidAudioDiarizer()
+        let dummyPath = URL(fileURLWithPath: "/nonexistent.wav")
+        await #expect(throws: FluidAudioEngineError.self) {
+            try await diarizer.diarize(audioPath: dummyPath, numSpeakers: nil)
+        }
+    }
+
     // MARK: - SpeechAnalyzerEngine properties
 
     #if compiler(>=6.2)
