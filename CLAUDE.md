@@ -15,7 +15,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
-- `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service
+- `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service, crash detection via `onServiceCrash` callback, `isCapturing()` ping for recovery
 - `TranscriberApp/Services/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
@@ -32,13 +32,13 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol via ScreenCaptureKit
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters, auto-detects sample format (Float32/Int16) and channel count
-- `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point
+- `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point, shared service instance, connection invalidation handler
 
 ### Shared Protocol (AudioCaptureProtocol target)
 - `AudioCaptureProtocol/AudioCaptureProtocol.swift` -- @objc XPC protocol + service name constant
 
 ### Shared Logic (TranscriberCore target)
-- `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle
+- `TranscriberCore/AppState.swift` -- Observable state machine: idle → recording → transcribing → idle, `interruptionWarning` for crash recovery UI
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata
@@ -48,7 +48,11 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
-- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough
+- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32→Int16 conversion + direct Int16 passthrough, 0.5s periodic sync
+- `TranscriberCore/RecordingSentinel.swift` -- crash recovery sentinel file (JSON at ~/.audio-transcribe/recording.json), atomic write/read/delete
+- `TranscriberCore/LaunchAgentManager.swift` -- install/unload macOS LaunchAgent (KeepAlive) for auto-relaunch on crash
+- `TranscriberCore/SegmentDiscovery.swift` -- discover multi-segment audio files from crash recovery (base, -2, -3, ...)
+- `TranscriberCore/SegmentNaming.swift` -- segment filename computation: strip `-N` suffix, append new segment number
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
 - `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
@@ -77,7 +81,7 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# ~186 tests across 16 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, etc.)
+# ~219 tests across ~20 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -117,6 +121,12 @@ cd audio_capture_helper && bash build.sh
 26. **Decimal-point sentence splitting:** The token grouper must not split on `.` when the next token starts with a digit (e.g. "1.5 million"), or it creates broken segments.
 27. **Config default engine:** Must use `.resolvedDefault` (not `.speechAnalyzer`) so fresh installs on macOS 15 get FluidAudio instead of an unavailable engine.
 28. **CLI entry detection:** Check for known subcommands (`transcribe`, `rename`, `benchmark`) not just `arguments.count > 1` — LaunchServices can inject extra arguments.
+29. **Crash recovery sentinel:** `~/.audio-transcribe/recording.json` is written on recording start, deleted on clean stop. If it exists on launch, a crash happened. Check `RecordingSentinel.read()` and compare `startedAt` with system boot time to detect stale sentinels from a previous boot.
+30. **LaunchAgent lifecycle:** `LaunchAgentManager.install()` on first launch, `LaunchAgentManager.uninstall()` before `NSApplication.terminate()` on explicit quit. Forgetting to unload means macOS restarts the app after every quit.
+31. **XPC shared service instance:** `main.swift` uses a single `AudioCaptureService()` shared across all connections so a reconnecting client re-attaches to the same live session. Don't create per-connection instances.
+32. **Multi-segment file naming:** Crash recovery creates segment files as `base-2.wav`, `base-3.wav`. Use `segmentBaseName()` from `SegmentNaming.swift` to strip/append segment suffixes — don't inline the regex.
+33. **WAV periodic sync:** `WavFileWriter` calls `synchronizeFile()` every 0.5s. Without this, a crash could lose up to ~30s of buffered audio. The sync is cheap (~0.05ms on SSD).
+34. **Recovery runs before permissions gate:** In `TranscriberApp.init()`, the recovery Task must be launched before the permissions check. Recording must resume even while the permission setup window is shown.
 
 ## Debugging with Unified Logging
 All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.

@@ -133,6 +133,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
+    func stopAndFinalize() {
+        guard isCapturing else { return }
+        Logger.audio.info("Stopping capture due to client disconnect")
+
+        if let stream = stream {
+            Task {
+                try? await stream.stopCapture()
+                self.handler?.finalizeAll()
+                self.isCapturing = false
+                self.stream = nil
+                self.handler = nil
+                Logger.audio.info("Capture finalized after client disconnect")
+            }
+        } else {
+            handler?.finalizeAll()
+            isCapturing = false
+            handler = nil
+        }
+    }
+
     private func cleanupAfterFailure() {
         handler?.finalizeAll()
         if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }

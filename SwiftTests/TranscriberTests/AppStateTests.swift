@@ -141,6 +141,58 @@ struct AppStateTests {
         #expect(state.lastJsonPath == "/tmp/transcript.json")
     }
 
+    // MARK: - Interruption warning
+
+    @Test func interruptionWarningChangesIcon() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.interruptionWarning = "Recording briefly interrupted"
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    @Test func clearingWarningRestoresRecordingIcon() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.interruptionWarning = "test"
+        state.interruptionWarning = nil
+        #expect(state.menuBarIcon == "microphone.and.signal.meter.fill")
+    }
+
+    // MARK: - Interruption warning edge cases
+
+    @Test func interruptionWarningDoesNotAffectIdleIcon() {
+        let state = AppState()
+        state.interruptionWarning = "Recording briefly interrupted"
+        // idle phase: interruptionWarning branch is only reached inside .recording
+        #expect(state.menuBarIcon == "mic")
+    }
+
+    @Test func interruptionWarningDoesNotAffectTranscribingIcon() {
+        let state = AppState()
+        state.phase = .transcribing(progress: "Processing...")
+        state.interruptionWarning = "Recording briefly interrupted"
+        // transcribing phase: interruptionWarning branch is only reached inside .recording
+        #expect(state.menuBarIcon == "hourglass")
+    }
+
+    @Test func errorTakesPriorityOverInterruption() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.interruptionWarning = "Recording briefly interrupted"
+        state.errorMessage = "Fatal error"
+        // errorMessage check happens before the phase switch, so error wins
+        #expect(state.menuBarIcon == "exclamationmark.triangle")
+    }
+
+    @Test func interruptionWarningPreservedAcrossPhaseChange() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.interruptionWarning = "Recording briefly interrupted"
+        state.phase = .idle
+        // phase change does not clear interruptionWarning
+        #expect(state.interruptionWarning == "Recording briefly interrupted")
+    }
+
     // MARK: - Truncated error message
 
     @Test func truncatedErrorMessageIsNilWhenNoError() {

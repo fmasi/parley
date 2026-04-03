@@ -8,6 +8,8 @@ public final class WavFileWriter {
     private var sampleRate: UInt32 = 0
     private var channelCount: UInt16 = 1
     private var firstWriteLogged = false
+    private var lastSyncTime: ContinuousClock.Instant = .now
+    private static let syncInterval: Duration = .milliseconds(500)
 
     public init(path: String) throws {
         self.path = path
@@ -35,6 +37,7 @@ public final class WavFileWriter {
         fileHandle.write(bytes)
         dataByteCount += UInt32(bytes.count)
         logFirstWrite()
+        syncIfNeeded()
     }
 
     /// Write Int16 PCM samples directly (no conversion needed).
@@ -43,6 +46,14 @@ public final class WavFileWriter {
         fileHandle.write(bytes)
         dataByteCount += UInt32(bytes.count)
         logFirstWrite()
+        syncIfNeeded()
+    }
+
+    private func syncIfNeeded() {
+        let now = ContinuousClock.Instant.now
+        guard now - lastSyncTime >= Self.syncInterval else { return }
+        fileHandle.synchronizeFile()
+        lastSyncTime = now
     }
 
     private func logFirstWrite() {
