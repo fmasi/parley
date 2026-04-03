@@ -81,11 +81,13 @@ public actor VadSpeechMap {
 
     /// Check if the Silero VAD model is present in the local cache.
     public nonisolated static func isModelCached() -> Bool {
-        let baseDir = FileManager.default.urls(
+        guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
-        ).first!.appendingPathComponent("FluidAudio", isDirectory: true)
-        let modelsDir = baseDir.appendingPathComponent("Models")
-        let vadDir = modelsDir.appendingPathComponent(Repo.vad.folderName)
+        ).first else { return false }
+        let vadDir = appSupport
+            .appendingPathComponent("FluidAudio", isDirectory: true)
+            .appendingPathComponent("Models")
+            .appendingPathComponent(Repo.vad.folderName)
         return ModelNames.VAD.requiredModels.allSatisfy {
             FileManager.default.fileExists(atPath: vadDir.appendingPathComponent($0).path)
         }

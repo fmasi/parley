@@ -689,22 +689,19 @@ git commit -m "feat: add vadSpeechThreshold to Config"
 **Files:**
 - Modify: `TranscriberCore/FluidAudioDiarizer.swift:39-57`
 
-- [ ] **Step 1: Update isDiarizationCached to include VAD model**
+- [ ] **Step 1: Add isFullyReady and keep isDiarizationCached unchanged**
 
-In `TranscriberCore/FluidAudioDiarizer.swift`, modify `isDiarizationCached()`:
+In `TranscriberCore/FluidAudioDiarizer.swift`, keep `isDiarizationCached()` as diarization-only (used by `ensureLoaded()`), and add a new `isFullyReady()` for the UI:
 
 ```swift
-    /// Returns true if all diarization AND VAD model files are present in the local cache.
-    public static func isDiarizationCached() -> Bool {
-        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
-        let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
-        let fm = FileManager.default
-        let diarizerCached = ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
-            fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
-        }
-        return diarizerCached && VadSpeechMap.isModelCached()
+    /// Returns true if ALL models (diarization + VAD) are present.
+    /// Used by Setup/Settings UI to gate "ready" state — ensures full capability after setup.
+    public static func isFullyReady() -> Bool {
+        isDiarizationCached() && VadSpeechMap.isModelCached()
     }
 ```
+
+Then update all UI call sites (`SetupView`, `SettingsView`, `TranscriberApp`) to use `isFullyReady()` instead of `isDiarizationCached()`.
 
 - [ ] **Step 2: Update preDownloadModels to also download VAD model**
 

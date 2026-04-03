@@ -98,15 +98,16 @@ Default thresholds (tunable):
 - `vadSpeechThreshold`: 0.5 (fraction of segment that must overlap with speech)
 - `qualityScoreThreshold`: configurable, needs benchmarking to determine initial value
 
-When `speechMap` is nil (model not cached), the function falls back to current behavior (no VAD filtering, qualityScore still applied).
+When `speechMap` is nil (model not cached), the function falls back to current behavior: all filtering is skipped, including both VAD-based filtering and `qualityScore`-based filtering.
 
 ### Changed Component: `FluidAudioDiarizer`
 
 **File:** `TranscriberCore/FluidAudioDiarizer.swift`
 
-Model download integration:
+Model download and readiness:
 - `preDownloadModels()` also downloads the Silero VAD model
-- `isDiarizationCached()` also checks for VAD model presence
+- `isDiarizationCached()` remains a diarization-only cache/readiness check (used by `ensureLoaded()` — existing installs keep working)
+- `isFullyReady()` checks that both diarization and VAD models are available (used by Setup/Settings UI to gate "ready" state)
 
 The diarizer itself is unchanged — it still processes the original audio. VAD runs as a separate step.
 

@@ -203,7 +203,8 @@ final class TranscriptionRunner {
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
             let diarizedSegments = try await diarizedResult
-            let speechMap = try? await speechMapResult  // nil on failure = graceful degradation
+            // analyze() returns [SpeechRegion]? — flatten the try? double-optional
+            let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
             labeled = SpeakerAssignment.assign(
                 transcriptSegments: segments,
