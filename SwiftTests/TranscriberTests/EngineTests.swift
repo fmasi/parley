@@ -11,9 +11,19 @@ struct EngineTests {
         #expect(engine.name == "FluidAudio")
     }
 
-    @Test func fluidAudioEngineIsAlwaysReady() {
+    @Test func fluidAudioEngineIsReadyReflectsCacheState() {
         let engine = FluidAudioEngine()
-        #expect(engine.isReady() == true)
+        // isReady() reports the actual cache state — must match isModelCached()
+        #expect(engine.isReady() == FluidAudioEngine.isModelCached())
+    }
+
+    @Test func isModelCachedReturnsBool() {
+        // Smoke test: must not crash and returns a sensible value.
+        // In CI (no model downloaded) we expect false; on a dev machine
+        // it may be true — either is valid as long as it's consistent.
+        let cached = FluidAudioEngine.isModelCached()
+        let engine = FluidAudioEngine()
+        #expect(engine.isReady() == cached)
     }
 
     // MARK: - SpeechAnalyzerEngine properties

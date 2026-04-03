@@ -46,6 +46,10 @@
 - [ ] "JSON transcript written" line
 - [ ] "Format file written" line (if output_format is srt/txt)
 
-## Model download (first run)
-- [ ] FluidAudio Parakeet model downloads automatically on first transcription (~500MB)
-- [ ] Diarization models download automatically on first use (~10MB)
+## Model download (Settings save — eager download)
+- [ ] Select FluidAudio in Settings — hint reads "Model will download ~500MB when you save" (if not yet cached)
+- [ ] Click Save — progress bar + live % appear; Save button disabled during download
+- [ ] After download: hint changes to "Model downloaded" (green checkmark)
+- [ ] Re-open Settings — hint shows "Model ready" (already cached; no re-download on next Save)
+- [ ] Start a recording right after Save — no download delay at recording start or transcription end
+- [ ] Diarization models still download automatically on first use (~10MB)
