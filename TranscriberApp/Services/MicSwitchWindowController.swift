@@ -10,6 +10,7 @@ final class MicSwitchWindowController {
 
     func show(
         currentDeviceId: String?,
+        buttonLabel: String,
         onSwitch: @escaping (String?) async throws -> Void
     ) {
         panel?.close()
@@ -28,6 +29,7 @@ final class MicSwitchWindowController {
         let dialog = MicSwitchDialog(
             currentDeviceId: resolvedId,
             devices: devices,
+            buttonLabel: buttonLabel,
             onSwitch: { newDeviceId in
                 try await onSwitch(newDeviceId)
                 await MainActor.run { closePanel() }
@@ -46,7 +48,7 @@ final class MicSwitchWindowController {
         newPanel.isOpaque = false
         let hostingView = NSHostingView(rootView: dialog)
         hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = .clear
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         newPanel.contentView = hostingView
         newPanel.isFloatingPanel = true
         newPanel.hidesOnDeactivate = false
