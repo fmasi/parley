@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import os
 
+@MainActor
 @Observable
 public final class AppState {
     public enum Phase: Equatable {
