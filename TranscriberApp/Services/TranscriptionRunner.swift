@@ -27,6 +27,7 @@ final class TranscriptionRunner {
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
+    private let vadSpeechMap = VadSpeechMap()
 
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
@@ -72,7 +73,8 @@ final class TranscriptionRunner {
                 source: "remote",
                 transcriber: transcriber,
                 label: "system\(index > 0 ? "-\(index + 1)" : "")",
-                audioSource: .system
+                audioSource: .system,
+                config: config
             )
             allSegments.append(contentsOf: systemSegments)
             audioPaths.append(segmentPair.system)
@@ -85,7 +87,8 @@ final class TranscriptionRunner {
                         source: "local",
                         transcriber: transcriber,
                         label: "mic\(index > 0 ? "-\(index + 1)" : "")",
-                        audioSource: .microphone
+                        audioSource: .microphone,
+                        config: config
                     )
                     allSegments.append(contentsOf: micSegments)
                     audioPaths.append(micPath)
@@ -175,7 +178,8 @@ final class TranscriptionRunner {
         source: String,
         transcriber: any TranscriptionEngine,
         label: String,
-        audioSource: AudioSourceType
+        audioSource: AudioSourceType,
+        config: Config
     ) async throws -> [LabeledSegment] {
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
@@ -194,10 +198,18 @@ final class TranscriptionRunner {
 
         var labeled: [LabeledSegment]
         if let diarizer = diarizer {
-            let diarizedSegments = try await diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
+            // Run VAD concurrently with diarization (both read the same audio file)
+            async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
+            async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
+
+            let diarizedSegments = try await diarizedResult
+            let speechMap = try? await speechMapResult  // nil on failure = graceful degradation
+
             labeled = SpeakerAssignment.assign(
                 transcriptSegments: segments,
-                diarizationSegments: diarizedSegments
+                diarizationSegments: diarizedSegments,
+                speechMap: speechMap,
+                vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
             )
         } else {
             labeled = segments.map { seg in
