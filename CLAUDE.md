@@ -58,6 +58,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 - `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
+- `TranscriberCore/AudioSourceResolver.swift` -- detects input format (dual WAV or stereo AAC), splits stereo AAC channels (L=local mic, R=remote system) for pipeline re-ingestion
+- `TranscriberCore/AudioArchiver.swift` -- converts dual WAV (system+mic) to stereo AAC archive (L=mic, R=system) via AVAssetWriter, deletes source WAVs on success
+- `TranscriberCore/StorageManager.swift` -- enforces audio archive storage quota in hours, deletes oldest .m4a files first, never deletes transcripts
 
 ### Standalone Swift CLI (legacy, still functional)
 - `audio_capture_helper/` -- Swift Package Manager project, standalone binary for CLI use
@@ -65,7 +68,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams from ScreenCaptureKit)
-- `.audio` output type = system audio only (at config sampleRate)
+- `.audio` output type = system audio only (at 48 kHz, hardcoded)
 - `.microphone` output type = microphone only (at NATIVE device rate, varies: 16kHz, 24kHz, 48kHz)
 - There is NO Apple API to get a pre-mixed stream (verified in SDK headers through macOS 26)
 - Handler must be stored to prevent deallocation
@@ -127,6 +130,10 @@ cd audio_capture_helper && bash build.sh
 32. **Multi-segment file naming:** Crash recovery creates segment files as `base-2.wav`, `base-3.wav`. Use `segmentBaseName()` from `SegmentNaming.swift` to strip/append segment suffixes — don't inline the regex.
 33. **WAV periodic sync:** `WavFileWriter` calls `synchronizeFile()` every 0.5s. Without this, a crash could lose up to ~30s of buffered audio. The sync is cheap (~0.05ms on SSD).
 34. **Recovery runs before permissions gate:** In `TranscriberApp.init()`, the recovery Task must be launched before the permissions check. Recording must resume even while the permission setup window is shown.
+35. **Stereo AAC channel convention:** L=local microphone, R=remote system audio. This is the contract between AudioArchiver (producer) and AudioSourceResolver (consumer). Never swap channels.
+36. **System audio capture rate:** Hardcoded to 48 kHz in SCStreamConfiguration. The `sample_rate` config field is deprecated — log a warning if present.
+37. **Audio archive quota:** Enforced in hours via static calculation (hours × bitrate → bytes). Only .m4a files count toward quota. Transcripts are never deleted. The just-archived file is always protected from cleanup.
+38. **AudioArchiver error safety:** If AAC encoding fails at any step, source WAV files are kept intact. Never delete WAVs before verifying the archive is valid.
 
 ## Debugging with Unified Logging
 All Swift components log via `os.Logger` with subsystem `com.audio-transcribe.app`. Categories: `audio`, `transcription`, `state`, `config`, `permissions`, `files`.
