@@ -104,10 +104,15 @@ public actor FluidAudioEngine: TranscriptionEngine {
             return mgr
         }
 
-        let loadStart = ContinuousClock.now
-        Logger.transcription.info("Loading FluidAudio model (Parakeet)...")
+        guard Self.isModelCached() else {
+            Logger.transcription.error("FluidAudio model not cached — download from Settings first")
+            throw FluidAudioEngineError.modelNotDownloaded
+        }
 
-        let models = try await AsrModels.downloadAndLoad()
+        let loadStart = ContinuousClock.now
+        Logger.transcription.info("Loading FluidAudio model (Parakeet) from cache...")
+
+        let models = try await AsrModels.loadFromCache()
         let mgr = AsrManager()
         try await mgr.initialize(models: models)
 
@@ -175,5 +180,13 @@ extension FluidAudioEngine {
             }
         }
         return segments
+    }
+}
+
+public enum FluidAudioEngineError: LocalizedError {
+    case modelNotDownloaded
+
+    public var errorDescription: String? {
+        "FluidAudio model not downloaded. Open Settings and select the engine to download it."
     }
 }

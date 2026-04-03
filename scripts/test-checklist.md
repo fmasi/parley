@@ -63,4 +63,4 @@
 - [ ] After download: hint changes to "Model downloaded" (green checkmark)
 - [ ] Re-open Settings — hint shows "Model ready" (already cached; no re-download on next Save)
 - [ ] Start a recording right after Save — no download delay at recording start or transcription end
-- [ ] Diarization models still download automatically on first use (~10MB)
+- [ ] Diarization models included in download (no lazy download during transcription)

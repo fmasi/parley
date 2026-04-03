@@ -130,7 +130,7 @@ struct SettingsView: View {
     private var engineModelStatus: some View {
         switch downloadState {
         case .idle:
-            if FluidAudioEngine.isModelCached() {
+            if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached() {
                 Label("Model ready", systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -160,15 +160,19 @@ struct SettingsView: View {
     }
 
     private func triggerDownloadIfNeeded() {
-        guard config.engine == .fluidAudio, !FluidAudioEngine.isModelCached() else { return }
+        guard config.engine == .fluidAudio else { return }
+        let allCached = FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached()
+        guard !allCached else { return }
         downloadState = .downloading(0)
         Task {
             do {
                 try await FluidAudioEngine.preDownloadModel { fraction in
                     Task { @MainActor in
-                        downloadState = .downloading(fraction)
+                        downloadState = .downloading(fraction * 0.98)
                     }
                 }
+                await MainActor.run { downloadState = .downloading(0.98) }
+                try await FluidAudioDiarizer.preDownloadModels()
                 await MainActor.run { downloadState = .done }
             } catch {
                 await MainActor.run {

@@ -11,7 +11,7 @@ struct SetupView: View {
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
-            || FluidAudioEngine.isModelCached()
+            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached())
             || downloadState == .done
     }
 
@@ -139,7 +139,7 @@ struct SetupView: View {
         if selectedEngine.descriptor.requiresModelDownload {
             switch downloadState {
             case .idle:
-                if FluidAudioEngine.isModelCached() {
+                if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached() {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 } else {
@@ -163,11 +163,16 @@ struct SetupView: View {
         downloadState = .downloading(0)
         Task {
             do {
+                // ASR model (~500MB) — reports progress
                 try await FluidAudioEngine.preDownloadModel { fraction in
                     Task { @MainActor in
-                        downloadState = .downloading(fraction)
+                        // ASR is ~98% of total download weight
+                        downloadState = .downloading(fraction * 0.98)
                     }
                 }
+                // Diarization models (~10MB) — fast, no granular progress
+                await MainActor.run { downloadState = .downloading(0.98) }
+                try await FluidAudioDiarizer.preDownloadModels()
                 await MainActor.run { downloadState = .done }
             } catch {
                 await MainActor.run { downloadState = .failed("") }
