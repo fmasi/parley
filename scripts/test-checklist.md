@@ -70,3 +70,15 @@
 ## Edge Cases
 - [ ] Reboot machine, then launch app — stale sentinel is cleaned up (no recovery attempt)
 - [ ] Start recording, immediately Cmd+Q — clean exit, no restart
+
+## Mic Indicator (menu bar)
+- [ ] Mic indicator visible when idle — shows "System Default" or saved device name
+- [ ] Mic indicator visible while recording
+- [ ] Mic indicator visible while transcribing
+- [ ] Shows correct device name after selecting a non-default mic in a prior session
+- [ ] Clicking when idle: panel opens with "Set Default" button; selecting a different device + clicking "Set Default" persists to config (reopen menu to verify name updated)
+- [ ] Clicking when idle: Cancel closes panel without changing config
+- [ ] Clicking when recording: panel opens with "Switch" button; selecting a different device + clicking "Switch" hot-swaps the mic live
+- [ ] Clicking when transcribing: panel opens with "Set Default" button (same as idle)
+- [ ] Level meter is active in the picker panel (breathe into mic to verify)
+- [ ] "Change Microphone..." menu item is gone (was recording-only, now replaced)
