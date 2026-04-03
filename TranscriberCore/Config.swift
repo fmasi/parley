@@ -9,6 +9,7 @@ public struct Config: Codable, Equatable {
     public var suppressCaptureWarning: Bool
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
+    public var vadSpeechThreshold: Double?
 
     public static let `default` = Config(
         recordingDirectory: NSHomeDirectory() + "/Documents/Recordings",
@@ -18,7 +19,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: true,
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
-        engine: .resolvedDefault
+        engine: .resolvedDefault,
+        vadSpeechThreshold: nil
     )
 
     public init(
@@ -29,7 +31,8 @@ public struct Config: Codable, Equatable {
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
-        engine: EngineID = .resolvedDefault
+        engine: EngineID = .resolvedDefault,
+        vadSpeechThreshold: Double? = nil
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -39,6 +42,7 @@ public struct Config: Codable, Equatable {
         self.suppressCaptureWarning = suppressCaptureWarning
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
+        self.vadSpeechThreshold = vadSpeechThreshold
     }
 
     enum CodingKeys: String, CodingKey {
@@ -50,6 +54,7 @@ public struct Config: Codable, Equatable {
         case suppressCaptureWarning = "suppress_capture_warning"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
+        case vadSpeechThreshold = "vad_speech_threshold"
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,5 +67,6 @@ public struct Config: Codable, Equatable {
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
+        vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
     }
 }

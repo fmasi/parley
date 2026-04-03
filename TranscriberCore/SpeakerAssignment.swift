@@ -107,6 +107,122 @@ public enum SpeakerAssignment {
         }
     }
 
+    /// Assign speaker labels with VAD + qualityScore filtering.
+    ///
+    /// Decision matrix:
+    /// - High speech + high quality → assign speaker
+    /// - High speech + low quality → assign "Unknown"
+    /// - Low speech + high quality → trust diarizer (assign speaker)
+    /// - Low speech + low quality → filter from output
+    ///
+    /// When speechMap is nil, falls back to original behavior (no VAD filtering).
+    /// When vadSpeechThreshold is 0.0, VAD filtering is disabled but qualityScore is still applied.
+    public static func assign(
+        transcriptSegments: [TranscriptSegment],
+        diarizationSegments: [DiarizedSegment],
+        speechMap: [SpeechRegion]?,
+        vadSpeechThreshold: Double = 0.5,
+        qualityScoreThreshold: Float = 0.3
+    ) -> [LabeledSegment] {
+        var uniqueSpeakers: [String] = []
+        for seg in diarizationSegments {
+            if !uniqueSpeakers.contains(seg.speaker) {
+                uniqueSpeakers.append(seg.speaker)
+            }
+        }
+        let speakerMap = Dictionary(
+            uniqueKeysWithValues: uniqueSpeakers.enumerated().map { (i, s) in
+                (s, "Speaker \(i + 1)")
+            }
+        )
+
+        Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .public)")
+
+        var results: [LabeledSegment] = []
+
+        for seg in transcriptSegments {
+            let segMid = (seg.start + seg.end) / 2
+            var bestSpeaker = "Unknown"
+            var bestOverlap: Double = 0
+            var bestQuality: Float? = nil
+
+            for sp in diarizationSegments {
+                let overlapStart = max(seg.start, sp.start)
+                let overlapEnd = min(seg.end, sp.end)
+                let overlap = max(0, overlapEnd - overlapStart)
+
+                if overlap > bestOverlap {
+                    bestOverlap = overlap
+                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    bestQuality = sp.qualityScore
+                }
+
+                if sp.start <= segMid && segMid <= sp.end && overlap >= bestOverlap {
+                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    bestQuality = sp.qualityScore
+                }
+            }
+
+            let speechOverlap: Double
+            if let speechMap, vadSpeechThreshold > 0 {
+                speechOverlap = SpeechRegion.speechOverlap(
+                    regions: speechMap, start: seg.start, end: seg.end, threshold: 0.5
+                )
+            } else {
+                speechOverlap = 1.0
+            }
+
+            // When speechMap is nil, bypass all filtering (original behavior).
+            if speechMap == nil {
+                results.append(LabeledSegment(
+                    start: seg.start, end: seg.end, speaker: bestSpeaker,
+                    text: seg.text.trimmingCharacters(in: .whitespaces),
+                    source: "", confidence: seg.confidence, language: seg.language
+                ))
+                continue
+            }
+
+            let hasHighSpeech = speechOverlap >= vadSpeechThreshold
+            let quality = bestQuality ?? 1.0
+            let hasHighQuality = quality >= qualityScoreThreshold
+
+            let finalSpeaker: String
+            let shouldInclude: Bool
+
+            if hasHighSpeech && hasHighQuality {
+                finalSpeaker = bestSpeaker
+                shouldInclude = true
+            } else if hasHighSpeech && !hasHighQuality {
+                finalSpeaker = "Unknown"
+                shouldInclude = true
+            } else if !hasHighSpeech && hasHighQuality {
+                finalSpeaker = bestSpeaker
+                shouldInclude = true
+            } else {
+                finalSpeaker = bestSpeaker
+                shouldInclude = false
+                Logger.transcription.debug(
+                    "VAD filtered [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] \(bestSpeaker, privacy: .public): speechOverlap=\(speechOverlap, privacy: .public), quality=\(quality, privacy: .public)"
+                )
+            }
+
+            if shouldInclude {
+                results.append(LabeledSegment(
+                    start: seg.start, end: seg.end, speaker: finalSpeaker,
+                    text: seg.text.trimmingCharacters(in: .whitespaces),
+                    source: "", confidence: seg.confidence, language: seg.language
+                ))
+            }
+        }
+
+        let filtered = transcriptSegments.count - results.count
+        if filtered > 0 {
+            Logger.transcription.info("VAD quality filter: \(filtered) segments filtered from \(transcriptSegments.count) total")
+        }
+
+        return results
+    }
+
     /// Tag labeled segments with source prefix for dual-stream mode.
     public static func tagWithSourcePrefix(_ segments: inout [LabeledSegment]) {
         for i in segments.indices {

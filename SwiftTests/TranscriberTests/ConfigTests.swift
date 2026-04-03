@@ -157,6 +157,29 @@ struct ConfigTests {
         #expect(config.lastMicrophoneDeviceId == nil)
     }
 
+    // MARK: - vadSpeechThreshold
+
+    @Test func vadSpeechThresholdDefaultsToNil() {
+        let config = Config.default
+        #expect(config.vadSpeechThreshold == nil)
+    }
+
+    @Test func vadSpeechThresholdRoundTrips() throws {
+        var config = Config.default
+        config.vadSpeechThreshold = 0.7
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.vadSpeechThreshold == 0.7)
+    }
+
+    @Test func missingVadSpeechThresholdDecodesToNil() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.vadSpeechThreshold == nil)
+    }
+
     // MARK: - Engine
 
     @Test func decodesUnknownEngineToDefault() throws {

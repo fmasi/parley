@@ -12,7 +12,7 @@ struct SetupView: View {
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
-            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached())
+            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
             || downloadState == .done
     }
 
@@ -142,7 +142,7 @@ struct SetupView: View {
         if selectedEngine.descriptor.requiresModelDownload {
             switch downloadState {
             case .idle:
-                if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached() {
+                if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady() {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 } else {
