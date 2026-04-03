@@ -9,8 +9,14 @@ struct SetupView: View {
     @State private var selectedEngine: EngineID
     @State private var downloadState: DownloadState = .idle
 
+    private var modelReady: Bool {
+        !selectedEngine.descriptor.requiresModelDownload
+            || FluidAudioEngine.isModelCached()
+            || downloadState == .done
+    }
+
     private var canContinue: Bool {
-        permissionManager.allRequiredGranted
+        permissionManager.allRequiredGranted && modelReady
     }
 
     init(permissionManager: PermissionManager, configManager: ConfigManager, onReady: @escaping () -> Void) {
@@ -40,9 +46,7 @@ struct SetupView: View {
                     name: "Screen Recording",
                     detail: "Capture system audio from meeting apps",
                     status: permissionManager.screenRecording,
-                    onGrant: { Task {
-                        await permissionManager.requestScreenRecording()
-                    }}
+                    onGrant: { Task { await permissionManager.requestScreenRecording() } }
                 )
 
                 Divider()
@@ -73,27 +77,7 @@ struct SetupView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 12) {
-                    Image(systemName: "waveform")
-                        .frame(width: 20)
-                        .foregroundStyle(.secondary)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Picker("Engine", selection: $selectedEngine) {
-                            ForEach(EngineID.availableEngines) { engine in
-                                Text(engine.descriptor.displayName).tag(engine)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .onChange(of: selectedEngine) { _, newEngine in
-                            configManager.update { $0.engine = newEngine }
-                            startDownloadIfNeeded(for: newEngine)
-                        }
-
-                        engineModelStatus
-                    }
-                }
+                engineRow
             }
 
             HStack {
@@ -108,45 +92,74 @@ struct SetupView: View {
     }
 
     @ViewBuilder
-    private var engineModelStatus: some View {
-        switch downloadState {
-        case .idle:
-            if selectedEngine.descriptor.requiresModelDownload {
-                if FluidAudioEngine.isModelCached() {
-                    Label("Model ready", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Model will download ~\(selectedEngine.descriptor.approximateSizeMB)MB in the background")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        case .downloading(let fraction):
-            HStack(spacing: 8) {
-                ProgressView(value: fraction)
-                    .frame(maxWidth: 160)
-                Text("\(Int(fraction * 100))%")
-                    .font(.caption)
+    private var engineRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform")
+                    .frame(width: 20)
                     .foregroundStyle(.secondary)
-                    .monospacedDigit()
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Engine").fontWeight(.medium)
+                    Picker("Engine", selection: $selectedEngine) {
+                        ForEach(EngineID.availableEngines) { engine in
+                            Text(engine.descriptor.displayName).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .onChange(of: selectedEngine) { _, newEngine in
+                        configManager.update { $0.engine = newEngine }
+                        downloadState = .idle
+                    }
+                }
+
+                Spacer()
+
+                engineBadge
             }
-        case .done:
-            Label("Model downloaded", systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-        case .failed:
-            Label("Download failed — check your connection", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
+
+            // Full-width progress bar shown while downloading
+            if case .downloading(let fraction) = downloadState {
+                HStack(spacing: 8) {
+                    ProgressView(value: fraction)
+                    Text("\(Int(fraction * 100))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 30, alignment: .trailing)
+                }
+                .padding(.leading, 32)
+            }
         }
     }
 
-    private func startDownloadIfNeeded(for engine: EngineID) {
-        guard engine == .fluidAudio, !FluidAudioEngine.isModelCached() else {
-            if engine != .fluidAudio { downloadState = .idle }
-            return
+    @ViewBuilder
+    private var engineBadge: some View {
+        if selectedEngine.descriptor.requiresModelDownload {
+            switch downloadState {
+            case .idle:
+                if FluidAudioEngine.isModelCached() {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Download") { startDownload() }
+                        .controlSize(.small)
+                }
+            case .downloading:
+                EmptyView()
+            case .done:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .failed:
+                Button("Retry") { startDownload() }
+                    .controlSize(.small)
+                    .foregroundStyle(.red)
+            }
         }
+    }
+
+    private func startDownload() {
         downloadState = .downloading(0)
         Task {
             do {

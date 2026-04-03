@@ -2,9 +2,12 @@
 
 ## Setup screen (first launch)
 - [ ] Engine picker appears below optional permissions with available engines listed
-- [ ] Selecting FluidAudio immediately starts background download — progress bar + % appears
-- [ ] Switching back to SpeechAnalyzer clears the progress UI
-- [ ] Continue button stays enabled during download (download runs in background)
+- [ ] FluidAudio selected + not cached → "Download" button appears (mirrors "Grant" pattern)
+- [ ] Clicking Download → progress bar + live % appears; Download button disappears
+- [ ] Continue is disabled until both: required permissions granted AND download complete
+- [ ] Download complete → green checkmark; Continue becomes enabled
+- [ ] Download fails → "Retry" button appears in red; Continue stays disabled
+- [ ] Switching engine mid-download resets progress UI; Download button reappears if needed
 - [ ] Engine choice persists to config.json (visible in Settings after setup)
 
 ## Settings
