@@ -36,8 +36,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     }
 
     /// Returns true if all diarization model files are present in the local cache.
-    /// VAD model is checked separately — VadSpeechMap.analyze() degrades gracefully if absent.
-    /// This prevents existing installs from losing diarization after an update that adds VAD.
+    /// Used by ensureLoaded() — does NOT require VAD so existing installs keep working.
     public static func isDiarizationCached() -> Bool {
         let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
@@ -45,6 +44,12 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         return ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
             fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
         }
+    }
+
+    /// Returns true if ALL models (diarization + VAD) are present.
+    /// Used by Setup/Settings UI to gate "ready" state — ensures full capability after setup.
+    public static func isFullyReady() -> Bool {
+        isDiarizationCached() && VadSpeechMap.isModelCached()
     }
 
     /// Download diarization + VAD models to the local cache without keeping them in memory.

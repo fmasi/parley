@@ -138,7 +138,7 @@ struct SettingsView: View {
     private var engineModelStatus: some View {
         switch downloadState {
         case .idle:
-            if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached() {
+            if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady() {
                 Label("Model ready", systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -169,7 +169,7 @@ struct SettingsView: View {
 
     private func triggerDownloadIfNeeded() {
         guard config.engine == .fluidAudio else { return }
-        let allCached = FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached()
+        let allCached = FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady()
         guard !allCached else { return }
         downloadState = .downloading(0)
         downloadTask = Task {

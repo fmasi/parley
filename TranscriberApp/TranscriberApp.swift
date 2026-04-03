@@ -29,7 +29,7 @@ final class LaunchGate {
         await permissionManager.checkAll()
         let engine = configManager.config.engine
         let modelReady = !engine.descriptor.requiresModelDownload
-            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached())
+            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
 
         if permissionManager.allRequiredGranted && modelReady {
             permissionsReady = true
