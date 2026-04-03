@@ -23,8 +23,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
 - `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter)
 - `TranscriberApp/Views/MenuView.swift` -- menu bar dropdown content
-- `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section
-- `TranscriberApp/Views/SetupView.swift` -- permission setup window content (shown at first launch)
+- `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section; triggers eager model download on Save when engine requires it
+- `TranscriberApp/Views/SetupView.swift` -- permission + engine setup window (shown at first launch or when model not cached); gates Continue on permissions AND model download
 - `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet with sample text and audio playback from source WAV timestamps
 - `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording (includes mic picker)
 - `TranscriberApp/Views/MicrophonePicker.swift` -- mic device dropdown + live level meter (used in SessionNameDialog)
@@ -43,8 +43,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata
 - `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines + AudioSourceType enum
-- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization
-- `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores
+- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization; isModelCached()/preDownloadModel() for eager download; ensureLoaded() is load-only (never downloads)
+- `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores; isDiarizationCached()/preDownloadModels() for eager download; ensureLoaded() is load-only (never downloads)
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
@@ -81,7 +81,7 @@ swift build
 # Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# ~211 tests across ~20 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, etc.)
+# ~219 tests across ~20 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -114,7 +114,7 @@ cd audio_capture_helper && bash build.sh
 19. Ad-hoc re-signing invalidates TCC grants -- always reset TCC permissions after a fresh build
 20. **macOS 26 Liquid Glass panels (requires macOS 26.0+):** Floating panels use `panel.isOpaque = false` + `panel.backgroundColor = .clear` + `hostingView.layer?.backgroundColor = .clear`. Apply `.glassEffect(in: .rect(...))` as a **view modifier** on the content (not on a background shape — `.glassEffect()` on a shape defaults to capsule/oval). Use `GlassBackgroundModifier` for consistent glass with `.regularMaterial` fallback on macOS 15. Top corners use 0 radius to sit flush against the title bar.
 21. **NSPanel `hidesOnDeactivate`:** Defaults to `true` — panels disappear when the menu bar app loses focus. Always set `panel.hidesOnDeactivate = false` on floating panels (SessionName, Rename).
-22. **Engine model downloads:** FluidAudio downloads its Parakeet model on first use (~500MB). SpeechAnalyzer uses the system framework (no download).
+22. **Engine model downloads (airgap guarantee):** ALL models (ASR ~500MB + diarization ~10MB) are downloaded eagerly during Setup or Settings Save — NEVER at recording/transcription time. `ensureLoaded()` in both `FluidAudioEngine` and `FluidAudioDiarizer` will throw `FluidAudioEngineError.modelNotDownloaded` if cache is missing rather than silently downloading. Use `FluidAudioEngine.isModelCached()` and `FluidAudioDiarizer.isDiarizationCached()` to check cache; `preDownloadModel(progress:)` and `preDownloadModels()` to trigger downloads. SpeechAnalyzer uses the system framework (no download).
 23. **SpeechAnalyzerEngine compile guard:** `SpeechAnalyzer`/`SpeechTranscriber` types require the macOS 26 SDK (Swift 6.2+). The entire file is wrapped in `#if compiler(>=6.2)` and references in TranscriptionRunner/tests are similarly guarded. Remove when CI gains a macOS 26 runner.
 24. **FluidAudio AudioSource:** Pass `.microphone` or `.system` to `AsrManager.transcribe()` based on stream type — affects audio preprocessing. Map from `AudioSourceType` enum in `TranscriptionEngine` protocol.
 25. **FluidAudio ITN:** `TextNormalizer` converts spoken numbers to written form (e.g. "three hundred" → "300"). Uses a native C library via `dlsym` — gracefully no-ops if unavailable (`isNativeAvailable`). Applied per-segment after token grouping.

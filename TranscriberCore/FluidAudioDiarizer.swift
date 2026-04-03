@@ -4,7 +4,7 @@ import FluidAudio
 
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
-/// Models download automatically on first use (~10MB).
+/// Models must be pre-downloaded via preDownloadModels() during setup.
 public actor FluidAudioDiarizer: DiarizationProvider {
     private var manager: OfflineDiarizerManager?
 
@@ -35,13 +35,39 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         return segments
     }
 
+    /// Returns true if all diarization model files are present in the local cache.
+    public static func isDiarizationCached() -> Bool {
+        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
+        let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
+        let fm = FileManager.default
+        return ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
+            fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
+        }
+    }
+
+    /// Download diarization models to the local cache without keeping them in memory.
+    /// Safe to call if already cached — OfflineDiarizerManager skips re-download.
+    public static func preDownloadModels(
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
+        let mgr = OfflineDiarizerManager()
+        try await mgr.prepareModels()
+        // Manager and loaded models are discarded — just ensures files are on disk
+        Logger.transcription.info("FluidAudio diarization model pre-download complete")
+    }
+
     private func ensureLoaded() async throws -> OfflineDiarizerManager {
         if let mgr = manager {
             return mgr
         }
 
+        guard Self.isDiarizationCached() else {
+            Logger.transcription.error("Diarization models not cached — download from Settings first")
+            throw FluidAudioEngineError.modelNotDownloaded
+        }
+
         let loadStart = ContinuousClock.now
-        Logger.transcription.info("Loading FluidAudio diarization models...")
+        Logger.transcription.info("Loading FluidAudio diarization models from cache...")
 
         let mgr = OfflineDiarizerManager()
         try await mgr.prepareModels()

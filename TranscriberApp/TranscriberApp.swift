@@ -25,13 +25,18 @@ final class LaunchGate {
         permissionManager = PermissionManager(checker: checker)
     }
 
-    func checkAndGate() async {
+    func checkAndGate(configManager: ConfigManager) async {
         await permissionManager.checkAll()
-        if permissionManager.allRequiredGranted {
+        let engine = configManager.config.engine
+        let modelReady = !engine.descriptor.requiresModelDownload
+            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached())
+
+        if permissionManager.allRequiredGranted && modelReady {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(
-                permissionManager: permissionManager
+                permissionManager: permissionManager,
+                configManager: configManager
             ) { [weak self] in
                 self?.permissionsReady = true
             }
@@ -66,8 +71,9 @@ struct TranscriberApp: App {
         }
 
         let gate = launchGate
+        let cm = configManager
         Task { @MainActor in
-            await gate.checkAndGate()
+            await gate.checkAndGate(configManager: cm)
         }
 
         if !LaunchAgentManager.isInstalled() {

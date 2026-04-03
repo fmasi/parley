@@ -30,14 +30,30 @@ public actor FluidAudioEngine: TranscriptionEngine {
     }
 
     public nonisolated func isReady() -> Bool {
-        // FluidAudio downloads models on first use via AsrModels.downloadAndLoad().
-        // We can't cheaply check if the model is cached without hitting disk,
-        // so we report true and let prepare() handle any download.
-        true
+        Self.isModelCached()
     }
 
     public func prepare() async throws {
         let _ = try await ensureLoaded()
+    }
+
+    /// Returns true if the Parakeet model files are already present in the local cache.
+    /// This is a synchronous disk check — cheap but not free.
+    public static func isModelCached() -> Bool {
+        AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory())
+    }
+
+    /// Download the Parakeet model files to the local cache without loading them into memory.
+    /// Safe to call even if models are already cached — returns immediately in that case.
+    public static func preDownloadModel(
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
+        _ = try await AsrModels.download(
+            progressHandler: progress.map { handler in
+                { @Sendable p in handler(p.fractionCompleted) }
+            }
+        )
+        Logger.transcription.info("FluidAudio model pre-download complete")
     }
 
     public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
@@ -88,10 +104,15 @@ public actor FluidAudioEngine: TranscriptionEngine {
             return mgr
         }
 
-        let loadStart = ContinuousClock.now
-        Logger.transcription.info("Loading FluidAudio model (Parakeet)...")
+        guard Self.isModelCached() else {
+            Logger.transcription.error("FluidAudio model not cached — download from Settings first")
+            throw FluidAudioEngineError.modelNotDownloaded
+        }
 
-        let models = try await AsrModels.downloadAndLoad()
+        let loadStart = ContinuousClock.now
+        Logger.transcription.info("Loading FluidAudio model (Parakeet) from cache...")
+
+        let models = try await AsrModels.loadFromCache()
         let mgr = AsrManager()
         try await mgr.initialize(models: models)
 
@@ -159,5 +180,13 @@ extension FluidAudioEngine {
             }
         }
         return segments
+    }
+}
+
+public enum FluidAudioEngineError: LocalizedError {
+    case modelNotDownloaded
+
+    public var errorDescription: String? {
+        "FluidAudio model not downloaded. Complete Setup or open Settings to download it."
     }
 }

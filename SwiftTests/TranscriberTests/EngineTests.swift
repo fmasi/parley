@@ -1,8 +1,9 @@
 import Testing
 import Foundation
 @testable import TranscriberCore
+import FluidAudio
 
-struct EngineTests {
+@Suite(.serialized) struct EngineTests {
 
     // MARK: - FluidAudioEngine properties
 
@@ -11,9 +12,96 @@ struct EngineTests {
         #expect(engine.name == "FluidAudio")
     }
 
-    @Test func fluidAudioEngineIsAlwaysReady() {
+    @Test func fluidAudioEngineIsReadyReflectsCacheState() {
         let engine = FluidAudioEngine()
-        #expect(engine.isReady() == true)
+        // isReady() reports the actual cache state — must match isModelCached()
+        #expect(engine.isReady() == FluidAudioEngine.isModelCached())
+    }
+
+    @Test func isModelCachedReturnsBool() {
+        // Smoke test: must not crash and returns a sensible value.
+        // In CI (no model downloaded) we expect false; on a dev machine
+        // it may be true — either is valid as long as it's consistent.
+        let cached = FluidAudioEngine.isModelCached()
+        let engine = FluidAudioEngine()
+        #expect(engine.isReady() == cached)
+    }
+
+    @Test func isModelCachedIsStable() {
+        // Repeated calls must return the same value (no flaky disk check)
+        let a = FluidAudioEngine.isModelCached()
+        let b = FluidAudioEngine.isModelCached()
+        let c = FluidAudioEngine.isModelCached()
+        #expect(a == b)
+        #expect(b == c)
+    }
+
+    // MARK: - FluidAudioDiarizer cache check
+
+    @Test func isDiarizationCachedReturnsBool() {
+        // Smoke test: must not crash. In CI false; on dev machine true.
+        let cached = FluidAudioDiarizer.isDiarizationCached()
+        // Second call must agree (stable disk check)
+        #expect(cached == FluidAudioDiarizer.isDiarizationCached())
+    }
+
+    // MARK: - FluidAudioEngineError
+
+    @Test func errorDescriptionIsActionable() {
+        let error = FluidAudioEngineError.modelNotDownloaded
+        let desc = error.errorDescription ?? ""
+        #expect(!desc.isEmpty)
+        #expect(desc.contains("Setup") || desc.contains("Settings"))
+    }
+
+    @Test func errorConformsToLocalizedError() {
+        let error: any LocalizedError = FluidAudioEngineError.modelNotDownloaded
+        #expect(error.errorDescription != nil)
+    }
+
+    // MARK: - Airgap guard: prepare/diarize throw when model not cached
+    //
+    // These tests temporarily rename the cache directory to simulate a
+    // missing model, then restore it via defer. Works on dev machines
+    // (models cached) and CI (nothing to rename — already missing).
+
+    @Test func prepareThrowsWhenAsrModelNotCached() async throws {
+        let cacheDir = AsrModels.defaultCacheDirectory()
+        let hiddenDir = cacheDir.deletingLastPathComponent()
+            .appendingPathComponent("asr-hidden-\(UUID().uuidString)")
+        let fm = FileManager.default
+        let wasCached = fm.fileExists(atPath: cacheDir.path)
+        if wasCached {
+            try? fm.removeItem(at: hiddenDir)
+            try fm.moveItem(at: cacheDir, to: hiddenDir)
+        }
+        defer { if wasCached { try? fm.moveItem(at: hiddenDir, to: cacheDir) } }
+
+        #expect(!FluidAudioEngine.isModelCached())
+        let engine = FluidAudioEngine()
+        await #expect(throws: FluidAudioEngineError.self) {
+            try await engine.prepare()
+        }
+    }
+
+    @Test func diarizeThrowsWhenModelNotCached() async throws {
+        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
+        let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
+        let hiddenDir = baseDir.appendingPathComponent("diar-hidden-\(UUID().uuidString)")
+        let fm = FileManager.default
+        let wasCached = fm.fileExists(atPath: repoDir.path)
+        if wasCached {
+            try? fm.removeItem(at: hiddenDir)
+            try fm.moveItem(at: repoDir, to: hiddenDir)
+        }
+        defer { if wasCached { try? fm.moveItem(at: hiddenDir, to: repoDir) } }
+
+        #expect(!FluidAudioDiarizer.isDiarizationCached())
+        let diarizer = FluidAudioDiarizer()
+        let dummyPath = URL(fileURLWithPath: "/nonexistent.wav")
+        await #expect(throws: FluidAudioEngineError.self) {
+            try await diarizer.diarize(audioPath: dummyPath, numSpeakers: nil)
+        }
     }
 
     // MARK: - SpeechAnalyzerEngine properties

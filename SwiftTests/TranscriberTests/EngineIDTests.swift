@@ -65,4 +65,15 @@ struct EngineIDTests {
         let decoded = try JSONDecoder().decode(EngineID.self, from: json)
         #expect(decoded == .resolvedDefault)
     }
+
+    @Test func speechAnalyzerNeverRequiresDownload() {
+        // SpeechAnalyzer uses the system framework — no model gate needed
+        #expect(EngineID.speechAnalyzer.descriptor.requiresModelDownload == false)
+    }
+
+    @Test func fluidAudioRequiresDownload() {
+        // FluidAudio must be gated on model download in Setup/Settings
+        #expect(EngineID.fluidAudio.descriptor.requiresModelDownload == true)
+        #expect(EngineID.fluidAudio.descriptor.approximateSizeMB > 0)
+    }
 }

@@ -41,3 +41,6 @@ bin/audio-capture-helper
 
 # Build output
 dist/
+
+# Git worktrees
+.worktrees/

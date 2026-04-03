@@ -3,10 +3,28 @@ import TranscriberCore
 
 struct SetupView: View {
     @Bindable var permissionManager: PermissionManager
+    let configManager: ConfigManager
     let onReady: () -> Void
 
+    @State private var selectedEngine: EngineID
+    @State private var downloadState: DownloadState = .idle
+    @State private var downloadTask: Task<Void, Never>?
+
+    private var modelReady: Bool {
+        !selectedEngine.descriptor.requiresModelDownload
+            || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached())
+            || downloadState == .done
+    }
+
     private var canContinue: Bool {
-        permissionManager.allRequiredGranted
+        permissionManager.allRequiredGranted && modelReady
+    }
+
+    init(permissionManager: PermissionManager, configManager: ConfigManager, onReady: @escaping () -> Void) {
+        self.permissionManager = permissionManager
+        self.configManager = configManager
+        self.onReady = onReady
+        self._selectedEngine = State(initialValue: configManager.config.engine)
     }
 
     var body: some View {
@@ -29,9 +47,7 @@ struct SetupView: View {
                     name: "Screen Recording",
                     detail: "Capture system audio from meeting apps",
                     status: permissionManager.screenRecording,
-                    onGrant: { Task {
-                        await permissionManager.requestScreenRecording()
-                    }}
+                    onGrant: { Task { await permissionManager.requestScreenRecording() } }
                 )
 
                 Divider()
@@ -55,6 +71,14 @@ struct SetupView: View {
                     status: permissionManager.notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
                 )
+
+                Divider()
+
+                Text("Transcription Engine")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                engineRow
             }
 
             HStack {
@@ -67,6 +91,107 @@ struct SetupView: View {
         .padding(24)
         .frame(width: 420)
     }
+
+    @ViewBuilder
+    private var engineRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform")
+                    .frame(width: 20)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Engine").fontWeight(.medium)
+                    Picker("Engine", selection: $selectedEngine) {
+                        ForEach(EngineID.availableEngines) { engine in
+                            Text(engine.descriptor.displayName).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .onChange(of: selectedEngine) { _, newEngine in
+                        configManager.update { $0.engine = newEngine }
+                        downloadTask?.cancel()
+                        downloadTask = nil
+                        downloadState = .idle
+                    }
+                }
+
+                Spacer()
+
+                engineBadge
+            }
+
+            // Full-width progress bar shown while downloading
+            if case .downloading(let fraction) = downloadState {
+                HStack(spacing: 8) {
+                    ProgressView(value: fraction)
+                    Text("\(Int(fraction * 100))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 30, alignment: .trailing)
+                }
+                .padding(.leading, 32)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var engineBadge: some View {
+        if selectedEngine.descriptor.requiresModelDownload {
+            switch downloadState {
+            case .idle:
+                if FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached() {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Download") { startDownload() }
+                        .controlSize(.small)
+                }
+            case .downloading:
+                EmptyView()
+            case .done:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .failed:
+                Button("Retry") { startDownload() }
+                    .controlSize(.small)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func startDownload() {
+        downloadState = .downloading(0)
+        downloadTask = Task {
+            do {
+                try await FluidAudioEngine.preDownloadModel { fraction in
+                    Task { @MainActor in
+                        guard !Task.isCancelled else { return }
+                        downloadState = .downloading(fraction * 0.98)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { downloadState = .downloading(0.98) }
+                try await FluidAudioDiarizer.preDownloadModels()
+                guard !Task.isCancelled else { return }
+                await MainActor.run { downloadState = .done }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    downloadState = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+}
+
+private enum DownloadState: Equatable {
+    case idle
+    case downloading(Double)
+    case done
+    case failed(String)
 }
 
 private struct PermissionRow: View {
