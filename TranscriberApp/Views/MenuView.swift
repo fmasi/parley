@@ -36,17 +36,8 @@ struct MenuView: View {
         }
         .disabled(appState.isTranscribing)
 
-        if appState.isRecording {
-            Button("Change Microphone...") {
-                MicSwitchWindowController.shared.show(
-                    currentDeviceId: configManager.config.lastMicrophoneDeviceId
-                ) { newDeviceId in
-                    try await captureClient.updateMicrophone(deviceId: newDeviceId)
-                    await MainActor.run {
-                        configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
-                    }
-                }
-            }
+        Button { openMicPicker() } label: {
+            Label(activeMicName, systemImage: "mic")
         }
 
         Divider()
@@ -230,6 +221,35 @@ struct MenuView: View {
             appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
             appState.phase = .idle
             RecordingSentinel.delete()
+        }
+    }
+
+    private var activeMicName: String {
+        AudioDeviceEnumerator.availableDevices()
+            .first(where: { $0.id == configManager.config.lastMicrophoneDeviceId })?.name
+            ?? "System Default"
+    }
+
+    private func openMicPicker() {
+        if appState.isRecording {
+            MicSwitchWindowController.shared.show(
+                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
+                buttonLabel: "Switch"
+            ) { newDeviceId in
+                try await captureClient.updateMicrophone(deviceId: newDeviceId)
+                await MainActor.run {
+                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                }
+            }
+        } else {
+            MicSwitchWindowController.shared.show(
+                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
+                buttonLabel: "Set Default"
+            ) { newDeviceId in
+                await MainActor.run {
+                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                }
+            }
         }
     }
 
