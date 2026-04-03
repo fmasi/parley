@@ -12,6 +12,15 @@ struct MenuView: View {
     let calendarService: CalendarService
 
     var body: some View {
+        if let warning = appState.interruptionWarning {
+            Button("⚠ \(warning)") {}
+                .disabled(true)
+            Button("Dismiss") {
+                appState.interruptionWarning = nil
+            }
+            Divider()
+        }
+
         if let errorText = appState.truncatedErrorMessage {
             Button("⚠ Error: \(errorText)") {}
                 .disabled(true)
@@ -63,6 +72,7 @@ struct MenuView: View {
         Divider()
 
         Button("Quit") {
+            LaunchAgentManager.uninstall()
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
@@ -109,14 +119,33 @@ struct MenuView: View {
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
             .appendingPathComponent(dayDir)
 
+        captureClient.onServiceCrash = { [appState, captureClient] in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                await self.handleXPCCrash(appState: appState, captureClient: captureClient)
+            }
+        }
+
         do {
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
                 microphoneDeviceId: microphoneDeviceId
             )
+
+            let sentinel = RecordingSentinel(
+                startedAt: Date(),
+                sessionName: sanitized.isEmpty ? "Recording" : sessionName,
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
+                micDeviceUID: microphoneDeviceId,
+                segment: 1
+            )
+            try RecordingSentinel.write(sentinel)
+
             appState.phase = .recording(since: Date())
         } catch {
+            RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Recording Failed", body: error.localizedDescription)
         }
@@ -125,13 +154,29 @@ struct MenuView: View {
     private func stopRecording() async {
         Logger.state.info("Recording stopped")
         do {
+            let sentinel = RecordingSentinel.read()
             let paths = try await captureClient.stop()
+            RecordingSentinel.delete()
             appState.phase = .transcribing(progress: "Transcribing...")
 
+            // Use original segment-1 paths for multi-segment discovery
+            let systemAudio: URL
+            let micAudio: URL?
+            if let sentinel, sentinel.segment > 1 {
+                // Get the original base name (strip segment suffix)
+                let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
+                let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+                systemAudio = dir.appendingPathComponent(origBase + ".wav")
+                micAudio = dir.appendingPathComponent(origBase + "_mic.wav")
+            } else {
+                systemAudio = paths.systemAudio
+                micAudio = paths.micAudio
+            }
+
             let result = try await transcriptionRunner.run(
-                systemAudio: paths.systemAudio,
-                micAudio: paths.micAudio,
-                outputDirectory: paths.systemAudio.deletingLastPathComponent(),
+                systemAudio: systemAudio,
+                micAudio: micAudio,
+                outputDirectory: systemAudio.deletingLastPathComponent(),
                 config: configManager.config
             )
 
@@ -142,9 +187,49 @@ struct MenuView: View {
 
             RenameWindowController.shared.show(jsonPath: result.jsonPath)
         } catch {
+            RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle
+        }
+    }
+
+    private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
+        Logger.state.warning("XPC service crashed during recording — restarting capture")
+
+        guard let sentinel = RecordingSentinel.read() else {
+            Logger.state.error("No sentinel found during crash recovery")
+            appState.errorMessage = "Recording interrupted — no recovery data"
+            appState.phase = .idle
+            return
+        }
+
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        let seg = sentinel.segment + 1
+        let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+
+        let newSentinel = sentinel.incrementedSegment(
+            systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+            micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+        )
+
+        do {
+            try await captureClient.start(
+                outputDirectory: outputDir,
+                baseName: baseName,
+                microphoneDeviceId: sentinel.micDeviceUID
+            )
+            try RecordingSentinel.write(newSentinel)
+            appState.interruptionWarning = "Recording briefly interrupted. Resuming."
+            sendNotification(
+                title: "Recording Resumed",
+                body: "Recording was briefly interrupted and has been restarted."
+            )
+        } catch {
+            Logger.state.error("Failed to restart capture after XPC crash: \(error, privacy: .public)")
+            appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+            appState.phase = .idle
+            RecordingSentinel.delete()
         }
     }
 
