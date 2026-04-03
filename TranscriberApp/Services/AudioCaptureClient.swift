@@ -8,6 +8,7 @@ struct AudioPaths {
     let micAudio: URL
 }
 
+@MainActor
 final class AudioCaptureClient {
     private var connection: NSXPCConnection?
 
@@ -20,9 +21,11 @@ final class AudioCaptureClient {
             with: AudioCaptureProtocol.self
         )
         conn.invalidationHandler = { [weak self] in
-            Logger.audio.warning("XPC connection invalidated")
-            self?.connection = nil
-            self?.onServiceCrash?()
+            Task { @MainActor in
+                Logger.audio.warning("XPC connection invalidated")
+                self?.connection = nil
+                self?.onServiceCrash?()
+            }
         }
         conn.resume()
         Logger.audio.debug("XPC connection established")
