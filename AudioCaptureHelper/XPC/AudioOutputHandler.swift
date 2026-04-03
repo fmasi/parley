@@ -75,7 +75,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
         }
-        Logger.audio.debug("System frame: \(totalLength) bytes")
     }
 
     // MARK: - Mic audio (normalized via AudioConverter)
@@ -124,7 +123,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             let result = try micConverter.convert(pcmBuffer)
             result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
-            Logger.audio.debug("Mic frame: \(frameCount) in → \(result.samples.count) out (48kHz mono)")
         } catch {
             Logger.audio.error("Mic audio conversion failed: \(error, privacy: .public)")
         }
