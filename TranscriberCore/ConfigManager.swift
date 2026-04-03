@@ -24,6 +24,10 @@ public final class ConfigManager {
             Logger.config.info("Config not found or invalid, using defaults")
             return .default
         }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           json["sample_rate"] != nil {
+            Logger.config.warning("Config field 'sample_rate' is deprecated and ignored — system audio is captured at 48 kHz")
+        }
         Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), engine: \(config.engine.rawValue, privacy: .public)")
         return config
     }

@@ -10,6 +10,8 @@ public struct Config: Codable, Equatable {
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
     public var vadSpeechThreshold: Double?
+    public var archiveBitrateKbps: Int
+    public var audioArchiveLimitHours: Int
 
     public static let `default` = Config(
         recordingDirectory: NSHomeDirectory() + "/Documents/Recordings",
@@ -20,7 +22,9 @@ public struct Config: Codable, Equatable {
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
-        vadSpeechThreshold: nil
+        vadSpeechThreshold: nil,
+        archiveBitrateKbps: 64,
+        audioArchiveLimitHours: 15
     )
 
     public init(
@@ -32,7 +36,9 @@ public struct Config: Codable, Equatable {
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
         engine: EngineID = .resolvedDefault,
-        vadSpeechThreshold: Double? = nil
+        vadSpeechThreshold: Double? = nil,
+        archiveBitrateKbps: Int = 64,
+        audioArchiveLimitHours: Int = 15
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -43,6 +49,8 @@ public struct Config: Codable, Equatable {
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
         self.vadSpeechThreshold = vadSpeechThreshold
+        self.archiveBitrateKbps = archiveBitrateKbps
+        self.audioArchiveLimitHours = audioArchiveLimitHours
     }
 
     enum CodingKeys: String, CodingKey {
@@ -55,6 +63,8 @@ public struct Config: Codable, Equatable {
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
         case vadSpeechThreshold = "vad_speech_threshold"
+        case archiveBitrateKbps = "archive_bitrate_kbps"
+        case audioArchiveLimitHours = "audio_archive_limit_hours"
     }
 
     public init(from decoder: Decoder) throws {
@@ -68,5 +78,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
+        archiveBitrateKbps = try c.decodeIfPresent(Int.self, forKey: .archiveBitrateKbps) ?? 64
+        audioArchiveLimitHours = try c.decodeIfPresent(Int.self, forKey: .audioArchiveLimitHours) ?? 15
     }
 }

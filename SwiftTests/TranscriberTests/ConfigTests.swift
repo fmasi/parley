@@ -180,6 +180,57 @@ struct ConfigTests {
         #expect(config.vadSpeechThreshold == nil)
     }
 
+    // MARK: - Archive fields
+
+    @Test func archiveBitrateDefaultsTo64() {
+        let config = Config.default
+        #expect(config.archiveBitrateKbps == 64)
+    }
+
+    @Test func audioArchiveLimitDefaultsTo15() {
+        let config = Config.default
+        #expect(config.audioArchiveLimitHours == 15)
+    }
+
+    @Test func archiveFieldsRoundTrip() throws {
+        var config = Config.default
+        config.archiveBitrateKbps = 128
+        config.audioArchiveLimitHours = 24
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.archiveBitrateKbps == 128)
+        #expect(decoded.audioArchiveLimitHours == 24)
+    }
+
+    @Test func archiveFieldsSnakeCaseKeys() throws {
+        let config = Config.default
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(json["archive_bitrate_kbps"] != nil)
+        #expect(json["audio_archive_limit_hours"] != nil)
+    }
+
+    @Test func decodesLegacyConfigWithoutArchiveFields() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.archiveBitrateKbps == 64)
+        #expect(config.audioArchiveLimitHours == 15)
+    }
+
+    @Test func deprecatedSampleRateFieldIsIgnored() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false,"sample_rate":44100}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.archiveBitrateKbps == 64)
+    }
+
     // MARK: - Engine
 
     @Test func decodesUnknownEngineToDefault() throws {
