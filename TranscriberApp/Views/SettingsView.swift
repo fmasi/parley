@@ -2,11 +2,19 @@ import SwiftUI
 import ServiceManagement
 import TranscriberCore
 
+private enum DownloadState: Equatable {
+    case idle
+    case downloading(Double)
+    case done
+    case failed(String)
+}
+
 struct SettingsView: View {
     let configManager: ConfigManager
     @Bindable var permissionManager: PermissionManager
     @State private var config: Config
     @State private var saveStatus: String?
+    @State private var downloadState: DownloadState = .idle
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
@@ -52,9 +60,7 @@ struct SettingsView: View {
                 }
 
                 if config.engine.descriptor.requiresModelDownload {
-                    Text("First use will download ~\(config.engine.descriptor.approximateSizeMB)MB")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    engineModelStatus
                 }
             }
 
@@ -110,13 +116,63 @@ struct SettingsView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         saveStatus = nil
                     }
-                    // Pre-download FluidAudio model in background when selected
-                    if config.engine == .fluidAudio {
-                        Task.detached(priority: .utility) {
-                            let engine = FluidAudioEngine()
-                            try? await engine.prepare()
-                        }
+                    triggerDownloadIfNeeded()
+                }
+                .disabled(downloadState == .downloading(0) || {
+                    if case .downloading = downloadState { return true }
+                    return false
+                }())
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var engineModelStatus: some View {
+        switch downloadState {
+        case .idle:
+            if FluidAudioEngine.isModelCached() {
+                Label("Model ready", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Model will download ~\(config.engine.descriptor.approximateSizeMB)MB when you save")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .downloading(let fraction):
+            HStack(spacing: 8) {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 160)
+                Text("\(Int(fraction * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        case .done:
+            Label("Model downloaded", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+    }
+
+    private func triggerDownloadIfNeeded() {
+        guard config.engine == .fluidAudio, !FluidAudioEngine.isModelCached() else { return }
+        downloadState = .downloading(0)
+        Task {
+            do {
+                try await FluidAudioEngine.preDownloadModel { fraction in
+                    Task { @MainActor in
+                        downloadState = .downloading(fraction)
                     }
+                }
+                await MainActor.run { downloadState = .done }
+            } catch {
+                await MainActor.run {
+                    downloadState = .failed("Download failed — check your connection")
                 }
             }
         }
