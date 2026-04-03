@@ -1,8 +1,9 @@
 import Testing
 import Foundation
 @testable import TranscriberCore
+import FluidAudio
 
-struct EngineTests {
+@Suite(.serialized) struct EngineTests {
 
     // MARK: - FluidAudioEngine properties
 
@@ -58,22 +59,35 @@ struct EngineTests {
         #expect(error.errorDescription != nil)
     }
 
-    // MARK: - Airgap guard: prepare() throws when model not cached
+    // MARK: - Airgap guard: prepare/diarize throw when model not cached
+    //
+    // These tests temporarily rename the cache directory to simulate a
+    // missing model, then restore it via defer. Works on dev machines
+    // (models cached) and CI (nothing to rename — already missing).
 
-    @Test(
-        .enabled(if: !FluidAudioEngine.isModelCached())
-    )
-    func prepareThrowsWhenAsrModelNotCached() async throws {
+    @Test func prepareThrowsWhenAsrModelNotCached() async throws {
+        let cacheDir = AsrModels.defaultCacheDirectory()
+        let hiddenDir = cacheDir.appendingPathExtension("test-hidden")
+        let wasCached = FileManager.default.fileExists(atPath: cacheDir.path)
+        if wasCached { try FileManager.default.moveItem(at: cacheDir, to: hiddenDir) }
+        defer { if wasCached { try? FileManager.default.moveItem(at: hiddenDir, to: cacheDir) } }
+
+        #expect(!FluidAudioEngine.isModelCached())
         let engine = FluidAudioEngine()
         await #expect(throws: FluidAudioEngineError.self) {
             try await engine.prepare()
         }
     }
 
-    @Test(
-        .enabled(if: !FluidAudioDiarizer.isDiarizationCached())
-    )
-    func diarizeThrowsWhenModelNotCached() async throws {
+    @Test func diarizeThrowsWhenModelNotCached() async throws {
+        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
+        let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
+        let hiddenDir = repoDir.appendingPathExtension("test-hidden")
+        let wasCached = FileManager.default.fileExists(atPath: repoDir.path)
+        if wasCached { try FileManager.default.moveItem(at: repoDir, to: hiddenDir) }
+        defer { if wasCached { try? FileManager.default.moveItem(at: hiddenDir, to: repoDir) } }
+
+        #expect(!FluidAudioDiarizer.isDiarizationCached())
         let diarizer = FluidAudioDiarizer()
         let dummyPath = URL(fileURLWithPath: "/nonexistent.wav")
         await #expect(throws: FluidAudioEngineError.self) {
