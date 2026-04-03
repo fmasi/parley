@@ -114,7 +114,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
 
         let models = try await AsrModels.loadFromCache()
         let mgr = AsrManager()
-        try await mgr.initialize(models: models)
+        try await mgr.loadModels(models)
 
         let loadElapsed = ContinuousClock.now - loadStart
         Logger.transcription.info("FluidAudio model loaded in \(loadElapsed.components.seconds)s")

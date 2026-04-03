@@ -10,7 +10,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/orchetect/SettingsAccess", from: "2.0.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.13.5"),
     ],
     targets: [
         .target(

@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.18.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.13.5"),
     ],
     targets: [
         .executableTarget(

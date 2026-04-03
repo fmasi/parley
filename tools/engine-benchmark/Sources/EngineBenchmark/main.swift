@@ -248,7 +248,7 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
         print("  Downloading/loading FluidAudio model...")
         let models = try await AsrModels.downloadAndLoad()
         let manager = AsrManager()
-        try await manager.initialize(models: models)
+        try await manager.loadModels(models)
 
         print("  Transcribing...")
         let result = try await manager.transcribe(audioPath, source: .system)
@@ -1071,7 +1071,7 @@ func runBatchBenchmark(
         do {
             let models = try await AsrModels.downloadAndLoad()
             let mgr = AsrManager()
-            try await mgr.initialize(models: models)
+            try await mgr.loadModels(models)
             fluidManager = mgr
             _ = models  // models retained by manager
             print("  FluidAudio: ready")
