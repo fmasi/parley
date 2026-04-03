@@ -51,7 +51,7 @@ import FluidAudio
         let error = FluidAudioEngineError.modelNotDownloaded
         let desc = error.errorDescription ?? ""
         #expect(!desc.isEmpty)
-        #expect(desc.contains("Settings"))
+        #expect(desc.contains("Setup") || desc.contains("Settings"))
     }
 
     @Test func errorConformsToLocalizedError() {
@@ -67,10 +67,15 @@ import FluidAudio
 
     @Test func prepareThrowsWhenAsrModelNotCached() async throws {
         let cacheDir = AsrModels.defaultCacheDirectory()
-        let hiddenDir = cacheDir.appendingPathExtension("test-hidden")
-        let wasCached = FileManager.default.fileExists(atPath: cacheDir.path)
-        if wasCached { try FileManager.default.moveItem(at: cacheDir, to: hiddenDir) }
-        defer { if wasCached { try? FileManager.default.moveItem(at: hiddenDir, to: cacheDir) } }
+        let hiddenDir = cacheDir.deletingLastPathComponent()
+            .appendingPathComponent("asr-hidden-\(UUID().uuidString)")
+        let fm = FileManager.default
+        let wasCached = fm.fileExists(atPath: cacheDir.path)
+        if wasCached {
+            try? fm.removeItem(at: hiddenDir)
+            try fm.moveItem(at: cacheDir, to: hiddenDir)
+        }
+        defer { if wasCached { try? fm.moveItem(at: hiddenDir, to: cacheDir) } }
 
         #expect(!FluidAudioEngine.isModelCached())
         let engine = FluidAudioEngine()
@@ -82,10 +87,14 @@ import FluidAudio
     @Test func diarizeThrowsWhenModelNotCached() async throws {
         let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
-        let hiddenDir = repoDir.appendingPathExtension("test-hidden")
-        let wasCached = FileManager.default.fileExists(atPath: repoDir.path)
-        if wasCached { try FileManager.default.moveItem(at: repoDir, to: hiddenDir) }
-        defer { if wasCached { try? FileManager.default.moveItem(at: hiddenDir, to: repoDir) } }
+        let hiddenDir = baseDir.appendingPathComponent("diar-hidden-\(UUID().uuidString)")
+        let fm = FileManager.default
+        let wasCached = fm.fileExists(atPath: repoDir.path)
+        if wasCached {
+            try? fm.removeItem(at: hiddenDir)
+            try fm.moveItem(at: repoDir, to: hiddenDir)
+        }
+        defer { if wasCached { try? fm.moveItem(at: hiddenDir, to: repoDir) } }
 
         #expect(!FluidAudioDiarizer.isDiarizationCached())
         let diarizer = FluidAudioDiarizer()

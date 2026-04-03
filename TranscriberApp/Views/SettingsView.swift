@@ -15,11 +15,17 @@ struct SettingsView: View {
     @State private var config: Config
     @State private var saveStatus: String?
     @State private var downloadState: DownloadState = .idle
+    @State private var downloadTask: Task<Void, Never>?
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
         self.permissionManager = permissionManager
         self._config = State(initialValue: configManager.config)
+    }
+
+    private var isDownloading: Bool {
+        if case .downloading = downloadState { return true }
+        return false
     }
 
     var body: some View {
@@ -57,6 +63,11 @@ struct SettingsView: View {
                         Text(engine.descriptor.displayName)
                         .tag(engine)
                     }
+                }
+                .onChange(of: config.engine) { _, _ in
+                    downloadTask?.cancel()
+                    downloadTask = nil
+                    downloadState = .idle
                 }
 
                 if config.engine.descriptor.requiresModelDownload {
@@ -118,10 +129,7 @@ struct SettingsView: View {
                     }
                     triggerDownloadIfNeeded()
                 }
-                .disabled(downloadState == .downloading(0) || {
-                    if case .downloading = downloadState { return true }
-                    return false
-                }())
+                .disabled(isDownloading)
             }
         }
     }
@@ -164,17 +172,21 @@ struct SettingsView: View {
         let allCached = FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isDiarizationCached()
         guard !allCached else { return }
         downloadState = .downloading(0)
-        Task {
+        downloadTask = Task {
             do {
                 try await FluidAudioEngine.preDownloadModel { fraction in
                     Task { @MainActor in
+                        guard !Task.isCancelled else { return }
                         downloadState = .downloading(fraction * 0.98)
                     }
                 }
+                guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .downloading(0.98) }
                 try await FluidAudioDiarizer.preDownloadModels()
+                guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
             } catch {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     downloadState = .failed("Download failed — check your connection")
                 }

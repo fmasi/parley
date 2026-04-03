@@ -8,6 +8,7 @@ struct SetupView: View {
 
     @State private var selectedEngine: EngineID
     @State private var downloadState: DownloadState = .idle
+    @State private var downloadTask: Task<Void, Never>?
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
@@ -110,6 +111,8 @@ struct SetupView: View {
                     .pickerStyle(.menu)
                     .onChange(of: selectedEngine) { _, newEngine in
                         configManager.update { $0.engine = newEngine }
+                        downloadTask?.cancel()
+                        downloadTask = nil
                         downloadState = .idle
                     }
                 }
@@ -161,21 +164,24 @@ struct SetupView: View {
 
     private func startDownload() {
         downloadState = .downloading(0)
-        Task {
+        downloadTask = Task {
             do {
-                // ASR model (~500MB) — reports progress
                 try await FluidAudioEngine.preDownloadModel { fraction in
                     Task { @MainActor in
-                        // ASR is ~98% of total download weight
+                        guard !Task.isCancelled else { return }
                         downloadState = .downloading(fraction * 0.98)
                     }
                 }
-                // Diarization models (~10MB) — fast, no granular progress
+                guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .downloading(0.98) }
                 try await FluidAudioDiarizer.preDownloadModels()
+                guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
             } catch {
-                await MainActor.run { downloadState = .failed("") }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    downloadState = .failed(error.localizedDescription)
+                }
             }
         }
     }

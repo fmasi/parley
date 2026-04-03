@@ -187,6 +187,6 @@ public enum FluidAudioEngineError: LocalizedError {
     case modelNotDownloaded
 
     public var errorDescription: String? {
-        "FluidAudio model not downloaded. Open Settings and select the engine to download it."
+        "FluidAudio model not downloaded. Complete Setup or open Settings to download it."
     }
 }
