@@ -117,6 +117,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
+        config.sampleRate = 48000
         config.width = 2
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
@@ -186,6 +187,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
+        config.sampleRate = 48000
+        Logger.audio.debug("System audio capture rate: 48000 Hz (fixed)")
         config.width = 2
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
