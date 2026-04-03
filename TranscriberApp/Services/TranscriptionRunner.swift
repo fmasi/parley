@@ -131,6 +131,31 @@ final class TranscriptionRunner {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
 
+        // Archive WAVs to stereo AAC (L=mic, R=system)
+        if isDualStream, let micAudio {
+            do {
+                let archiveResult = try await AudioArchiver.archive(
+                    systemAudio: systemAudio,
+                    micAudio: micAudio,
+                    outputDirectory: outputDirectory,
+                    bitrateKbps: config.archiveBitrateKbps
+                )
+                // Update transcript JSON with new audio path
+                Self.updateAudioPaths(in: jsonPath, to: [archiveResult.archivePath])
+                Logger.files.info("Archived to: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
+
+                // Enforce storage quota
+                try StorageManager.enforceQuota(
+                    in: outputDirectory,
+                    limitHours: config.audioArchiveLimitHours,
+                    bitrateKbps: config.archiveBitrateKbps,
+                    protectedFile: archiveResult.archivePath
+                )
+            } catch {
+                Logger.files.error("Archival failed, keeping WAV files: \(error, privacy: .public)")
+            }
+        }
+
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
@@ -146,6 +171,25 @@ final class TranscriptionRunner {
     }
 
     // MARK: - Private
+
+    /// Update the audio_paths in a transcript JSON file after archival.
+    private static func updateAudioPaths(in jsonPath: URL, to newPaths: [URL]) {
+        guard let data = try? Data(contentsOf: jsonPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var metadata = json["metadata"] as? [String: Any]
+        else { return }
+
+        metadata["audio_paths"] = newPaths.map { $0.path }
+        metadata["audio_files"] = newPaths.map { $0.lastPathComponent }
+        json["metadata"] = metadata
+
+        if let updatedData = try? JSONSerialization.data(
+            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? updatedData.write(to: jsonPath, options: .atomic)
+            Logger.files.info("Updated audio_paths in \(jsonPath.lastPathComponent, privacy: .public)")
+        }
+    }
 
     static func discoverSegments(
         systemAudio: URL,
