@@ -69,6 +69,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading FluidAudio diarization models from cache...")
 
+        // false = include overlap embeddings. On mixed mono streams (Zoom/Teams system audio)
+        // all remote speech is technically "overlapping", so the default true masks most embeddings
+        // and collapses remote speakers into one cluster.
         let config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
