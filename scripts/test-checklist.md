@@ -82,3 +82,12 @@
 - [ ] Clicking when transcribing: panel opens with "Set Default" button (same as idle)
 - [ ] Level meter is active in the picker panel (breathe into mic to verify)
 - [ ] "Change Microphone..." menu item is gone (was recording-only, now replaced)
+
+## VAD Quality Filter
+- [ ] Record with background music → verify music segments filtered, not labeled as speaker
+- [ ] Record meeting with long muted period → verify silence doesn't create phantom speaker
+- [ ] Record with keyboard noise → verify clicks filtered from transcript
+- [ ] Record normal meeting → verify no real speech segments lost (false negative check)
+- [ ] Set vad_speech_threshold to 0.0 in config → verify VAD filtering disabled, all segments present
+- [ ] Delete VAD model from cache → verify graceful degradation (no crash, no filtering)
+- [ ] Check rename dialog → verify filtered segments don't appear as speaker samples
