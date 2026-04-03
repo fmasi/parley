@@ -42,7 +42,10 @@ The app has three layers:
 ScreenCaptureKit delivers `.audio` (system) and `.microphone` (mic) as separate streams at different sample rates. There is no Apple API to get a pre-mixed stream (confirmed via SDK headers through macOS 26). Keeping them separate gives WhisperKit cleaner audio and enables automatic Local vs Remote speaker attribution.
 
 **3. XPC service for audio capture**
-Audio capture runs in a separate XPC service process (`audio-capture-helper-xpc`). This provides process isolation and scopes the TCC permission grant to the app bundle. XPC services only function when embedded inside a `.app` bundle — the bare binary cannot reach the service.
+Audio capture runs in a separate XPC service process (`audio-capture-helper-xpc`). This provides process isolation and scopes the TCC permission grant to the app bundle. XPC services only function when embedded inside a `.app` bundle — the bare binary cannot reach the service. The service detects client disconnection via `invalidationHandler` and stops capture + finalizes WAV files to prevent orphaned recordings.
+
+**7. Crash recovery**
+Recording survives crashes via three mechanisms: (1) a sentinel file (`~/.audio-transcribe/recording.json`) persists recording state; (2) a LaunchAgent (`KeepAlive: true`) auto-restarts the app; (3) `WavFileWriter` syncs data to disk every 0.5s. On relaunch, the app checks the sentinel and either re-attaches to a live XPC session (Flow A) or starts a new capture segment (Flow B). If the XPC service crashes while the UI is alive, the UI detects it instantly via `invalidationHandler` and restarts capture (Flow C). Multi-segment recordings are stitched at transcription time.
 
 **4. Native sample rates, no resampling**
 The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some headphones). The Swift code auto-detects the rate from the first `CMSampleBuffer`'s format description and writes it to the WAV header on `finalize()`. WhisperKit handles any sample rate natively.
@@ -81,7 +84,11 @@ TranscriberCore/                 Shared logic target
   FluidAudioEngine.swift         FluidAudio/Parakeet engine (CoreML/ANE)
   SpeechAnalyzerEngine.swift     Apple SpeechAnalyzer engine (macOS 26+)
   DiarizationProvider.swift      Protocol for speaker diarization
-  WavFileWriter.swift            WAV file writing with deferred sample rate
+  WavFileWriter.swift            WAV file writing with deferred sample rate + 0.5s sync
+  RecordingSentinel.swift        Crash recovery state persistence (JSON sentinel file)
+  LaunchAgentManager.swift       Install/unload KeepAlive LaunchAgent for auto-relaunch
+  SegmentDiscovery.swift         Discover multi-segment audio files from crash recovery
+  SegmentNaming.swift            Segment filename computation (strip/append -N suffix)
   AudioDeviceEnumerator.swift    Lists input devices via AVCaptureDevice
   InputLevelMonitor.swift        Real-time audio level meter
   FilenameUtils.swift            sanitizeFilename helper

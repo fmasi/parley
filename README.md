@@ -12,7 +12,8 @@ On-device meeting transcription for Apple Silicon Macs. Records system audio and
 - **Smart audio source handling** -- mic and system audio are preprocessed differently for better accuracy
 - **Dual-stream speaker labeling** -- Local/Remote speaker tags in dual-stream recordings
 - **CLI tools** -- transcribe, rename speakers, and benchmark from the command line
-- **184 unit tests** across 16 test suites
+- **Crash recovery** -- recording survives UI and XPC crashes with auto-relaunch and silent re-attach
+- **211 unit tests** across 20 test suites
 - **Fully Swift-native** -- no Python runtime, no virtual audio devices, no cloud APIs
 
 ---
@@ -88,7 +89,7 @@ Click the menu bar icon to access:
 | **Open Recordings Folder** | Opens the recordings directory in Finder |
 | **Rename Speakers** | Rename detected speakers in the latest transcript |
 | **Settings** | Configure engine, recordings directory, output format, permissions |
-| **Quit** | Stops the app |
+| **Quit** | Stops the app (unloads auto-relaunch agent) |
 
 ### Microphone selection
 
@@ -107,7 +108,24 @@ Records **both your microphone and system audio** simultaneously:
 
 ```
 IDLE --> [Start Recording] --> RECORDING --> [Stop Recording] --> TRANSCRIBING --> IDLE
+                                  |
+                            [UI/XPC crash]
+                                  |
+                            auto-relaunch
+                                  |
+                          re-attach / restart
 ```
+
+### Crash recovery
+
+Recording survives crashes automatically:
+
+- **UI crash** -- LaunchAgent restarts the app in ~1-2s, silently re-attaches to the running XPC capture session (zero data loss)
+- **XPC crash** -- UI instantly detects the disconnect, restarts the capture service, creates a new audio segment (~300-800ms gap)
+- **Both crash** -- LaunchAgent restarts the app, which starts a new capture segment and notifies the user
+- **Multi-segment stitching** -- when recording has multiple segments from crash recovery, all segments are transcribed and merged into a single output
+
+A sentinel file (`~/.audio-transcribe/recording.json`) persists recording state to disk. WAV files are synced every 0.5s to minimize data loss.
 
 ---
 
@@ -215,6 +233,7 @@ See [tools/engine-benchmark/README.md](tools/engine-benchmark/README.md) for det
 | Exit code 2 from capture service | Grant "Screen & System Audio Recording" in System Settings |
 | TCC permission not persisting | Run as `.app` bundle so macOS ties the grant to the bundle ID |
 | 0-byte WAV files | Rebuild with `bash package_app.sh` |
+| App keeps restarting after quit | The LaunchAgent should unload on quit; if not, run `launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.app.plist` |
 | Menu bar icon not visible | Hold Cmd and drag other menu bar icons to make space |
 
 ---

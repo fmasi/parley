@@ -1,51 +1,53 @@
-# Test Checklist — Engine Abstraction + FluidAudio Integration
+# Test Checklist — Crash Recovery
 
-## Settings
-- [ ] Engine picker shows all available engines (FluidAudio, SpeechAnalyzer on macOS 26+)
-- [ ] Switching engine persists to config.json
-- [ ] Output Format picker still works (txt/srt/json)
+## Normal Recording (regression check)
+- [ ] Start recording, stop, verify transcription works as before
+- [ ] No sentinel file left behind (`ls ~/.audio-transcribe/recording.json` — should not exist)
+- [ ] Quit app normally (Cmd+Q) — verify it does NOT restart
 
-## Transcription (FluidAudio engine)
-- [ ] Record a short clip (15-30s) with system audio, stop recording
-- [ ] Status shows "Transcribing..." during processing
-- [ ] `.json` file appears in recording folder
-- [ ] Format file (`.srt` or `.txt`) appears alongside JSON
-- [ ] JSON segments have timestamps, speaker labels, and text
-- [ ] Segments include `"confidence"` field (float from FluidAudio)
+## Flow A: UI Crash, XPC Alive
+- [ ] Start recording
+- [ ] Kill UI process: `kill -9 $(pgrep -f AudioTranscribe | head -1)`
+- [ ] Verify app relaunches within ~2s (LaunchAgent)
+- [ ] Menu bar icon shows recording state (re-attach)
+- [ ] No notification or alert (silent recovery)
+- [ ] Stop recording normally — transcription works
 
-## Rename Speakers Dialog
-- [ ] Rename dialog opens after transcription
-- [ ] Play button plays audio from the longest segment (not first segment)
-- [ ] Forward button cycles through up to 3 sample clips per speaker
-- [ ] Sample counter shows "1/3", "2/3", etc.
-- [ ] Sample text updates when cycling
-- [ ] Speakers with < 5 segments are hidden from dialog
-- [ ] After rename, format file updated with new speaker names
-- [ ] `rename-gui` CLI: `.build/debug/AudioTranscribe rename-gui -i <json>` opens GUI dialog
+## Flow B: Both Crashed
+- [ ] Start recording
+- [ ] Kill both: `kill -9 $(pgrep -f AudioTranscribe); kill -9 $(pgrep -f audio-capture-helper-xpc)`
+- [ ] Verify app relaunches within ~2s
+- [ ] Notification appears: "Recording was briefly interrupted..."
+- [ ] Warning icon in menu bar (exclamationmark.bubble)
+- [ ] Warning dismisses when user clicks Dismiss
+- [ ] New audio segment files appear in session directory (-2 suffix)
+- [ ] Stop recording — both segments are transcribed
 
-## Dual-stream (system + mic)
-- [ ] Record with both system audio and mic
-- [ ] JSON shows segments from both streams with source tags (Remote/Local)
-- [ ] Mic audio transcribed with correct AudioSource (check log for "source: microphone")
-- [ ] System audio transcribed with correct AudioSource (check log for "source: system")
+## Flow C: XPC Crash, UI Alive
+- [ ] Start recording
+- [ ] Kill XPC service: `kill -9 $(pgrep -f audio-capture-helper-xpc)`
+- [ ] UI shows "Recording briefly interrupted" warning
+- [ ] Notification appears: "Recording Resumed"
+- [ ] New audio segment files appear (-2 suffix)
+- [ ] Recording continues (menu still shows recording state)
+- [ ] Stop recording — both segments are transcribed
 
-## Diarization (FluidAudio)
-- [ ] Multi-speaker recording produces distinct Speaker 1, Speaker 2, etc.
-- [ ] Diarization quality scores logged (check log stream)
-- [ ] On multi-remote-speaker calls, check that remote speakers are separated (not merged)
+## Multi-Segment Transcription
+- [ ] After a crash-recovered recording with 2+ segments:
+- [ ] Output JSON contains text from all segments
+- [ ] Segments are sorted by timestamp
+- [ ] No missing audio between segments (only ~1s gap)
 
-## Text Normalization (ITN)
-- [ ] Numbers spoken as words appear as digits in transcript (e.g. "two hundred" -> "200")
-- [ ] Check log for "ITN applied to N segments" (or absent if native lib unavailable — still OK)
+## LaunchAgent
+- [ ] `ls ~/Library/LaunchAgents/com.audio-transcribe.app.plist` exists after first launch
+- [ ] Quit app — plist is removed
+- [ ] Relaunch app — plist is re-created
 
-## Logging (check via `log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)
-- [ ] "Loading FluidAudio model (Parakeet)..." on first transcription
-- [ ] "FluidAudio already loaded" on subsequent transcriptions
-- [ ] "FluidAudio complete: N segments in Xs (confidence: X.XX)" with timing
-- [ ] "FluidAudio diarization complete: N segments, M speakers" after diarization
-- [ ] "JSON transcript written" line
-- [ ] "Format file written" line (if output_format is srt/txt)
+## WAV File Integrity
+- [ ] After killing XPC during recording, check WAV files are valid:
+  - `file ~/.audio-transcribe/.../*.wav` should show "RIFF (little-endian) data, WAVE audio"
+  - File size should be > 44 bytes (not just header)
 
-## Model download (first run)
-- [ ] FluidAudio Parakeet model downloads automatically on first transcription (~500MB)
-- [ ] Diarization models download automatically on first use (~10MB)
+## Edge Cases
+- [ ] Reboot machine, then launch app — stale sentinel is cleaned up (no recovery attempt)
+- [ ] Start recording, immediately Cmd+Q — clean exit, no restart
