@@ -51,8 +51,14 @@ final class TranscriptionRunner {
             throw RunnerError.failed("Failed to initialize transcription engine")
         }
 
-        let segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: micAudio ?? systemAudio)
         let isDualStream = micAudio != nil
+        let segments: [(system: URL, mic: URL)]
+        if let micAudio {
+            segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: micAudio)
+        } else {
+            // No mic — create tuples with system-only URLs (mic will be skipped below)
+            segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: systemAudio)
+        }
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
 
@@ -71,17 +77,19 @@ final class TranscriptionRunner {
             allSegments.append(contentsOf: systemSegments)
             audioPaths.append(segmentPair.system)
 
-            let micPath = segmentPair.mic
-            if FileManager.default.fileExists(atPath: micPath.path) {
-                let micSegments = try await transcribeStream(
-                    audioPath: micPath,
-                    source: "local",
-                    transcriber: transcriber,
-                    label: "mic\(index > 0 ? "-\(index + 1)" : "")",
-                    audioSource: .microphone
-                )
-                allSegments.append(contentsOf: micSegments)
-                audioPaths.append(micPath)
+            if isDualStream {
+                let micPath = segmentPair.mic
+                if FileManager.default.fileExists(atPath: micPath.path) {
+                    let micSegments = try await transcribeStream(
+                        audioPath: micPath,
+                        source: "local",
+                        transcriber: transcriber,
+                        label: "mic\(index > 0 ? "-\(index + 1)" : "")",
+                        audioSource: .microphone
+                    )
+                    allSegments.append(contentsOf: micSegments)
+                    audioPaths.append(micPath)
+                }
             }
         }
 

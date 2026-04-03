@@ -13,7 +13,7 @@ public enum LaunchAgentManager {
     // MARK: - Plist generation
 
     /// Returns an XML plist string for a LaunchAgent that keeps the app alive.
-    public static func generatePlist(bundlePath: String) -> String {
+    public static func generatePlist(executablePath: String) -> String {
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -21,8 +21,10 @@ public enum LaunchAgentManager {
         <dict>
             <key>Label</key>
             <string>\(label)</string>
-            <key>BundlePath</key>
-            <string>\(bundlePath)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(executablePath)</string>
+            </array>
             <key>KeepAlive</key>
             <true/>
             <key>ProcessType</key>
@@ -37,22 +39,22 @@ public enum LaunchAgentManager {
     /// Installs the LaunchAgent plist and optionally loads it with `launchctl`.
     ///
     /// - Parameters:
-    ///   - bundlePath: Path to the `.app` bundle. Defaults to `Bundle.main.bundlePath`.
+    ///   - executablePath: Path to the app executable. Defaults to `Bundle.main.executablePath`.
     ///   - launchAgentsDir: Directory to write the plist into. Defaults to `~/Library/LaunchAgents`.
     ///   - loadAgent: When `true`, calls `launchctl load` after writing the plist. Pass `false` in tests.
     public static func install(
-        bundlePath: String? = nil,
+        executablePath: String? = nil,
         launchAgentsDir: URL? = nil,
         loadAgent: Bool = true
     ) throws {
-        let appPath = bundlePath ?? Bundle.main.bundlePath
+        let exePath = executablePath ?? Bundle.main.executablePath ?? Bundle.main.bundlePath
         let agentsDir = launchAgentsDir ?? defaultLaunchAgentsDir()
 
         // Ensure the LaunchAgents directory exists.
         try FileManager.default.createDirectory(at: agentsDir, withIntermediateDirectories: true)
 
         let plistURL = agentsDir.appendingPathComponent(plistName)
-        let content = generatePlist(bundlePath: appPath)
+        let content = generatePlist(executablePath: exePath)
         try content.write(to: plistURL, atomically: true, encoding: .utf8)
         Logger.config.info("LaunchAgentManager: wrote plist to \(plistURL.path)")
 

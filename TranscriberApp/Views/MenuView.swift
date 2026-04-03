@@ -12,8 +12,8 @@ struct MenuView: View {
     let calendarService: CalendarService
 
     var body: some View {
-        if appState.interruptionWarning != nil {
-            Button("⚠ \(appState.interruptionWarning!)") {}
+        if let warning = appState.interruptionWarning {
+            Button("⚠ \(warning)") {}
                 .disabled(true)
             Button("Dismiss") {
                 appState.interruptionWarning = nil
@@ -164,9 +164,7 @@ struct MenuView: View {
             let micAudio: URL?
             if let sentinel, sentinel.segment > 1 {
                 // Get the original base name (strip segment suffix)
-                let origBase = URL(fileURLWithPath: sentinel.systemAudioPath)
-                    .deletingPathExtension().lastPathComponent
-                    .replacingOccurrences(of: #"-\d+$"#, with: "", options: .regularExpression)
+                let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
                 let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
                 systemAudio = dir.appendingPathComponent(origBase + ".wav")
                 micAudio = dir.appendingPathComponent(origBase + "_mic.wav")

@@ -20,7 +20,7 @@ public final class AppState {
     public var lastTranscriptPath: String?
     public var lastJsonPath: String?
     /// Non-nil when recording was interrupted and auto-recovered.
-    /// Shown as a warning in the menu. Cleared when user opens the menu.
+    /// Shown as a warning in the menu until the user explicitly dismisses it.
     public var interruptionWarning: String?
 
     public var errorMessage: String? {

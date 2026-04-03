@@ -98,6 +98,7 @@ struct TranscriberApp: App {
         if isAlive {
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             appState.phase = .recording(since: sentinel.startedAt)
+            setupCrashHandler(captureClient: captureClient, appState: appState)
             return
         }
 
@@ -127,6 +128,7 @@ struct TranscriberApp: App {
                 try RecordingSentinel.write(newSentinel)
                 appState.phase = .recording(since: sentinel.startedAt)
                 appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
+                setupCrashHandler(captureClient: captureClient, appState: appState)
 
                 // Send notification
                 if Bundle.main.bundleIdentifier != nil {
@@ -147,6 +149,54 @@ struct TranscriberApp: App {
         } else {
             Logger.state.info("No usable audio files — cleaning up sentinel")
             RecordingSentinel.delete()
+        }
+    }
+
+    @MainActor
+    private static func setupCrashHandler(
+        captureClient: AudioCaptureClient,
+        appState: AppState
+    ) {
+        captureClient.onServiceCrash = {
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                guard let sentinel = RecordingSentinel.read() else { return }
+
+                let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+                let seg = sentinel.segment + 1
+                let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+
+                let newSentinel = sentinel.incrementedSegment(
+                    systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                    micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+                )
+
+                do {
+                    try await captureClient.start(
+                        outputDirectory: outputDir,
+                        baseName: baseName,
+                        microphoneDeviceId: sentinel.micDeviceUID
+                    )
+                    try RecordingSentinel.write(newSentinel)
+                    appState.interruptionWarning = "Recording briefly interrupted. Resuming."
+
+                    if Bundle.main.bundleIdentifier != nil {
+                        let content = UNMutableNotificationContent()
+                        content.title = "Recording Resumed"
+                        content.body = "Recording was briefly interrupted and has been restarted."
+                        content.sound = .default
+                        content.interruptionLevel = .timeSensitive
+                        let request = UNNotificationRequest(
+                            identifier: UUID().uuidString, content: content, trigger: nil
+                        )
+                        try? await UNUserNotificationCenter.current().add(request)
+                    }
+                } catch {
+                    appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+                    appState.phase = .idle
+                    RecordingSentinel.delete()
+                }
+            }
         }
     }
 

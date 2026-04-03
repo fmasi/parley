@@ -17,9 +17,11 @@ struct LaunchAgentManagerTests {
     // MARK: - generatePlist
 
     @Test func generatesPlistWithCorrectLabel() {
-        let plist = LaunchAgentManager.generatePlist(bundlePath: "/Applications/Transcriber.app")
+        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe")
         #expect(plist.contains("com.audio-transcribe.app"))
-        #expect(plist.contains("/Applications/Transcriber.app"))
+        #expect(plist.contains("ProgramArguments"))
+        #expect(plist.contains("/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe"))
+        #expect(!plist.contains("BundlePath"))
         #expect(plist.contains("KeepAlive"))
         #expect(plist.contains("<true/>"))
         #expect(plist.contains("ProcessType"))
@@ -33,7 +35,7 @@ struct LaunchAgentManagerTests {
         defer { cleanup(dir) }
 
         try LaunchAgentManager.install(
-            bundlePath: "/Applications/Transcriber.app",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
             launchAgentsDir: dir,
             loadAgent: false
         )
@@ -43,7 +45,8 @@ struct LaunchAgentManagerTests {
 
         let content = try String(contentsOf: plistURL, encoding: .utf8)
         #expect(content.contains("com.audio-transcribe.app"))
-        #expect(content.contains("/Applications/Transcriber.app"))
+        #expect(content.contains("ProgramArguments"))
+        #expect(content.contains("/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe"))
         #expect(content.contains("KeepAlive"))
     }
 
@@ -55,7 +58,7 @@ struct LaunchAgentManagerTests {
 
         // First install
         try LaunchAgentManager.install(
-            bundlePath: "/Applications/Transcriber.app",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
             launchAgentsDir: dir,
             loadAgent: false
         )
@@ -83,7 +86,7 @@ struct LaunchAgentManagerTests {
         defer { cleanup(dir) }
 
         try LaunchAgentManager.install(
-            bundlePath: "/Applications/Transcriber.app",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
             launchAgentsDir: dir,
             loadAgent: false
         )
