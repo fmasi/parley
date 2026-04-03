@@ -51,8 +51,45 @@ struct StorageManagerTests {
         )
 
         #expect(!deleted.isEmpty)
-        #expect(deleted.contains(old))
+        #expect(!FileManager.default.fileExists(atPath: old.path))
         #expect(FileManager.default.fileExists(atPath: new.path))
+    }
+
+    @Test func deletesOldestAcrossSubdirectories() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("storage-test-\(UUID().uuidString)")
+        let subA = dir.appendingPathComponent("2026-03-31")
+        let subB = dir.appendingPathComponent("2026-04-01")
+        try FileManager.default.createDirectory(at: subA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: subB, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tenMB = 10_000_000
+        let oldFile = subA.appendingPathComponent("old-meeting.m4a")
+        try Self.createFakeM4a(at: oldFile, sizeBytes: tenMB)
+        Thread.sleep(forTimeInterval: 0.05)
+        let newFile = subB.appendingPathComponent("new-meeting.m4a")
+        try Self.createFakeM4a(at: newFile, sizeBytes: tenMB)
+
+        // Quota for 1 hour at 64 kbps ≈ 28.8 MB — both files (20 MB) fit
+        let deletedUnder = try StorageManager.enforceQuota(
+            in: dir, limitHours: 1, bitrateKbps: 64, protectedFile: nil
+        )
+        #expect(deletedUnder.isEmpty)
+
+        // Add a third file to push over a tighter quota
+        Thread.sleep(forTimeInterval: 0.05)
+        let extraFile = subB.appendingPathComponent("extra.m4a")
+        try Self.createFakeM4a(at: extraFile, sizeBytes: tenMB)
+
+        // 30 MB total, quota ~28.8 MB — oldest should be deleted
+        let deleted = try StorageManager.enforceQuota(
+            in: dir, limitHours: 1, bitrateKbps: 64, protectedFile: nil
+        )
+        #expect(!deleted.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: oldFile.path))
+        #expect(FileManager.default.fileExists(atPath: newFile.path))
+        #expect(FileManager.default.fileExists(atPath: extraFile.path))
     }
 
     @Test func neverDeletesProtectedFile() throws {
@@ -92,12 +129,14 @@ struct StorageManagerTests {
     @Test func currentUsageBytes() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("storage-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let sub = dir.appendingPathComponent("2026-04-01")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
         try Self.createFakeM4a(at: dir.appendingPathComponent("a.m4a"), sizeBytes: 1000)
-        try Self.createFakeM4a(at: dir.appendingPathComponent("b.m4a"), sizeBytes: 2000)
-        try Data(repeating: 0, count: 9999).write(to: dir.appendingPathComponent("c.json"))
+        try Self.createFakeM4a(at: sub.appendingPathComponent("b.m4a"), sizeBytes: 2000)
+        // Non-m4a should not be counted
+        try Data(repeating: 0, count: 9999).write(to: sub.appendingPathComponent("c.json"))
 
         let usage = StorageManager.currentUsageBytes(in: dir)
         #expect(usage == 3000)
