@@ -11,6 +11,8 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
 
+    @State private var cachedDevices: [AudioInputDevice] = AudioDeviceEnumerator.availableDevices()
+
     var body: some View {
         if let warning = appState.interruptionWarning {
             Button("⚠ \(warning)") {}
@@ -225,7 +227,7 @@ struct MenuView: View {
     }
 
     private var activeMicName: String {
-        AudioDeviceEnumerator.availableDevices()
+        cachedDevices
             .first(where: { $0.id == configManager.config.lastMicrophoneDeviceId })?.name
             ?? "System Default"
     }
