@@ -69,7 +69,8 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading FluidAudio diarization models from cache...")
 
-        let mgr = OfflineDiarizerManager()
+        let config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+        let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
 
         let elapsed = ContinuousClock.now - loadStart
