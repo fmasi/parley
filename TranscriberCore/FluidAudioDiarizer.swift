@@ -35,25 +35,27 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         return segments
     }
 
-    /// Returns true if all diarization model files are present in the local cache.
+    /// Returns true if all diarization AND VAD model files are present in the local cache.
     public static func isDiarizationCached() -> Bool {
         let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
         let fm = FileManager.default
-        return ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
+        let diarizerCached = ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
             fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
         }
+        return diarizerCached && VadSpeechMap.isModelCached()
     }
 
-    /// Download diarization models to the local cache without keeping them in memory.
-    /// Safe to call if already cached — OfflineDiarizerManager skips re-download.
+    /// Download diarization + VAD models to the local cache without keeping them in memory.
+    /// Safe to call if already cached — managers skip re-download.
     public static func preDownloadModels(
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
         let mgr = OfflineDiarizerManager()
         try await mgr.prepareModels()
-        // Manager and loaded models are discarded — just ensures files are on disk
         Logger.transcription.info("FluidAudio diarization model pre-download complete")
+
+        try await VadSpeechMap.preDownloadModel()
     }
 
     private func ensureLoaded() async throws -> OfflineDiarizerManager {
