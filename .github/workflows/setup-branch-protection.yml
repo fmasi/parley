@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Configure main branch protection
+        # Status check context "test" matches the job name in .github/workflows/test.yml (workflow: Tests)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
