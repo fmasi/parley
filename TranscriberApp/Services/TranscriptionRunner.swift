@@ -162,6 +162,112 @@ final class TranscriptionRunner {
         return TranscriptionResult(jsonPath: jsonPath)
     }
 
+    /// Finalize a chunked recording session: reconcile speakers, merge chunks, write transcript.
+    func finalize(
+        sessionState: SessionState,
+        outputDirectory: URL,
+        config: Config
+    ) async throws -> TranscriptionResult {
+        let startTime = ContinuousClock.now
+
+        // 1. Speaker reconciliation
+        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
+        let speakerMapping = SpeakerReconciler.reconcile(
+            chunks: sessionState.chunks,
+            threshold: 0.65
+        )
+
+        // 2. Merge chunks
+        let mergeResult = TranscriptMerger.merge(
+            chunks: sessionState.chunks,
+            speakerMapping: speakerMapping,
+            meetingStart: sessionState.meetingStart
+        )
+
+        // 3. Convert MergedSegments to LabeledSegments for existing assembler
+        var allSegments: [LabeledSegment] = []
+        for chunk in sessionState.chunks {
+            let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
+            let chunkMapping = speakerMapping[chunk.index] ?? [:]
+            for seg in chunk.segments {
+                let elapsed = chunkOffset + seg.start
+                let elapsedEnd = chunkOffset + seg.end
+                let globalSpeaker = chunkMapping[seg.speaker] ?? seg.speaker
+                allSegments.append(LabeledSegment(
+                    start: elapsed,
+                    end: elapsedEnd,
+                    speaker: globalSpeaker,
+                    text: seg.text,
+                    source: seg.source,
+                    confidence: seg.qualityScore
+                ))
+            }
+        }
+        allSegments.sort { $0.start < $1.start }
+
+        // 4. Dual-stream tagging
+        let isDualStream = allSegments.contains { $0.source == "local" }
+        if isDualStream {
+            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+        }
+
+        // 5. Audio paths from chunks
+        let audioPaths = sessionState.chunks.map {
+            outputDirectory.appendingPathComponent($0.audioPath)
+        }
+
+        // 6. Language detection
+        let languages = Set(allSegments.compactMap(\.language))
+        let detectedLanguage: String
+        switch languages.count {
+        case 0: detectedLanguage = "auto"
+        case 1: detectedLanguage = languages.first!
+        default: detectedLanguage = "multilingual"
+        }
+
+        // 7. Assemble JSON
+        let json = TranscriptAssembler.assemble(
+            segments: allSegments,
+            audioPaths: audioPaths,
+            outputFormat: config.outputFormat,
+            language: detectedLanguage,
+            numSpeakers: nil,
+            diarization: true,
+            dualStream: isDualStream
+        )
+
+        let baseName = sessionState.sessionId
+        let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+        try TranscriptAssembler.write(json, to: jsonPath)
+
+        // 8. Write format file
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+        }
+
+        // 9. Storage quota enforcement
+        do {
+            try StorageManager.enforceQuota(
+                in: outputDirectory,
+                limitHours: config.audioArchiveLimitHours,
+                bitrateKbps: config.archiveBitrateKbps,
+                protectedFile: audioPaths.last
+            )
+        } catch {
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+        }
+
+        // 10. Clean up session.json
+        SessionState.delete(directory: outputDirectory)
+
+        let elapsed = ContinuousClock.now - startTime
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
+
+        return TranscriptionResult(jsonPath: jsonPath)
+    }
+
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
     }
