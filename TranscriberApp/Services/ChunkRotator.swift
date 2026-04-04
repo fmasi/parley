@@ -2,6 +2,7 @@ import Foundation
 import os
 import TranscriberCore
 
+@MainActor
 final class ChunkRotator {
     struct FinalizedChunk {
         let index: Int

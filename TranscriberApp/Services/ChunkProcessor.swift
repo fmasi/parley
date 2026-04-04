@@ -10,10 +10,10 @@ final class ChunkProcessor {
     private let transcriber: any TranscriptionEngine
     private let diarizer: (any DiarizationProvider)?
     private let vadSpeechMap = VadSpeechMap()
-    private let processingQueue: DispatchQueue
     private var sessionState: SessionState
     private let sessionLock = NSLock()
     private let wavHeaderSize = 44
+    private let taskPriority: TaskPriority
 
     init(
         config: Config,
@@ -27,16 +27,19 @@ final class ChunkProcessor {
         self.sessionState = sessionState
         self.transcriber = transcriber
         self.diarizer = diarizer
-        self.processingQueue = DispatchQueue(
-            label: "com.audio-transcribe.chunk-processor",
-            qos: DispatchQoS(qosClass: config.resolvedQos, relativePriority: 0)
-        )
+        self.taskPriority = switch config.resolvedQos {
+        case .userInteractive: .high
+        case .userInitiated: .medium
+        case .background: .background
+        default: .utility
+        }
     }
 
     /// Process a finalized chunk in the background (non-blocking).
     func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
-        processingQueue.async {
-            Task { await self.processChunkAsync(chunk) }
+        let priority = taskPriority
+        Task(priority: priority) {
+            await self.processChunkAsync(chunk)
         }
     }
 
@@ -60,26 +63,26 @@ final class ChunkProcessor {
             "Chunk \(chunk.index, privacy: .public) processing started (qos: \(self.config.chunkProcessingQos, privacy: .public))"
         )
 
-        // 1. Transcribe system audio
+        // 1. Transcribe + diarize system audio
         let systemURL = URL(fileURLWithPath: chunk.systemPath)
-        let systemSegments = await transcribeStream(
+        let systemResult = await transcribeStream(
             audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
         )
 
         // 2. Transcribe mic audio (skip if file missing or empty)
         let micURL = URL(fileURLWithPath: chunk.micPath)
-        let micSegments: [LabeledSegment]
+        let micResult: StreamResult
         if FileManager.default.fileExists(atPath: chunk.micPath) {
-            micSegments = await transcribeStream(
+            micResult = await transcribeStream(
                 audioPath: micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
             )
         } else {
-            micSegments = []
+            micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
 
         // 3. Merge segments
-        var allSegments = systemSegments + micSegments
-        let hasDualStream = !micSegments.isEmpty
+        var allSegments = systemResult.segments + micResult.segments
+        let hasDualStream = !micResult.segments.isEmpty
         if hasDualStream && !allSegments.isEmpty {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
@@ -97,10 +100,8 @@ final class ChunkProcessor {
             )
         }
 
-        // 5. Extract speaker database from diarization (collected during transcribeStream)
-        // The speaker database is populated per-chunk from diarization results.
-        // For now, pass empty — cross-chunk reconciliation is handled by SpeakerReconciler.
-        let speakerDatabase: [String: [Float]] = [:]
+        // 5. Speaker database from system audio diarization (used for cross-chunk reconciliation)
+        let speakerDatabase = systemResult.speakerDatabase
 
         // 6. Archive WAV → AAC
         var audioPath = systemURL.path
@@ -159,18 +160,24 @@ final class ChunkProcessor {
         return sessionState
     }
 
+    /// Result from transcribing a single stream, including speaker database if diarized.
+    private struct StreamResult {
+        let segments: [LabeledSegment]
+        let speakerDatabase: [String: [Float]]
+    }
+
     /// Transcribe a single audio stream, with optional diarization + VAD.
     private func transcribeStream(
         audioPath: URL,
         source: String,
         audioSource: AudioSourceType,
         label: String
-    ) async -> [LabeledSegment] {
+    ) async -> StreamResult {
         // Skip empty files (WAV header only)
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
-            return []
+            return StreamResult(segments: [], speakerDatabase: [:])
         }
 
         Logger.transcription.info("Transcribing \(label, privacy: .public): \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
@@ -180,10 +187,11 @@ final class ChunkProcessor {
             segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
         } catch {
             Logger.transcription.error("Transcription failed for \(label, privacy: .public): \(error, privacy: .public)")
-            return []
+            return StreamResult(segments: [], speakerDatabase: [:])
         }
 
         var labeled: [LabeledSegment]
+        var speakerDatabase: [String: [Float]] = [:]
         if let diarizer {
             do {
                 // Run diarization + VAD concurrently
@@ -199,9 +207,9 @@ final class ChunkProcessor {
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
                 )
+                speakerDatabase = diarizationResult.speakerDatabase
             } catch {
                 Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
-                // Fall back to unlabeled segments
                 labeled = segments.map { seg in
                     LabeledSegment(
                         start: seg.start, end: seg.end, speaker: "Speaker 1",
@@ -225,6 +233,6 @@ final class ChunkProcessor {
         }
 
         Logger.transcription.info("\(label.capitalized, privacy: .public) transcription: \(labeled.count) segments")
-        return labeled
+        return StreamResult(segments: labeled, speakerDatabase: speakerDatabase)
     }
 }
