@@ -6,9 +6,10 @@ import ScreenCaptureKit
 import TranscriberCore
 
 final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let systemWriter: WavFileWriter
-    private let micWriter: WavFileWriter
+    private var systemWriter: WavFileWriter
+    private var micWriter: WavFileWriter
     private var detectedSystemRate = false
+    private var systemFormatInfo: FormatInfo?
     private let micConverter = AudioConverter()
 
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
@@ -23,6 +24,34 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     func finalizeAll() {
         systemWriter.finalize()
         micWriter.finalize()
+    }
+
+    /// Swap writers for chunk rotation. MUST be called on the audio callback queue.
+    /// Returns the old writers' file paths after finalizing them.
+    func swapWriters(
+        newSystemWriter: WavFileWriter,
+        newMicWriter: WavFileWriter
+    ) -> (systemPath: String, micPath: String) {
+        // Finalize current writers
+        systemWriter.finalize()
+        micWriter.finalize()
+
+        let oldSystemPath = systemWriter.path
+        let oldMicPath = micWriter.path
+
+        // Configure new writers with detected formats
+        if let info = systemFormatInfo {
+            newSystemWriter.setSampleRate(UInt32(info.rate))
+            newSystemWriter.setChannelCount(UInt16(info.channels))
+        }
+        newMicWriter.setSampleRate(UInt32(AudioConverter.outputSampleRate))
+        newMicWriter.setChannelCount(UInt16(AudioConverter.outputChannelCount))
+
+        // Atomic swap
+        systemWriter = newSystemWriter
+        micWriter = newMicWriter
+
+        return (oldSystemPath, oldMicPath)
     }
 
     func stream(
@@ -47,6 +76,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         if !detectedSystemRate {
             detectedSystemRate = true
             if let info = formatInfo(from: sampleBuffer) {
+                systemFormatInfo = info
                 systemWriter.setSampleRate(UInt32(info.rate))
                 systemWriter.setChannelCount(UInt16(info.channels))
                 Logger.audio.info("System audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")

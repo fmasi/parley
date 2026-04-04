@@ -10,6 +10,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
+    private var audioQueue: DispatchQueue?
 
     func startCapture(
         outputDirectory: String,
@@ -90,6 +91,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self.handler = nil
             self.systemPath = nil
             self.micPath = nil
+            self.audioQueue = nil
             reply(sys, mic, nil)
         }
     }
@@ -162,6 +164,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         handler = nil
         systemPath = nil
         micPath = nil
+        audioQueue = nil
     }
 
     private func configureAndStart(handler: AudioOutputHandler, microphoneDeviceId: String?) async throws {
@@ -196,18 +199,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let captureStream = SCStream(
             filter: filter, configuration: config, delegate: handler
         )
-        try captureStream.addStreamOutput(
-            handler, type: .audio,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
-        )
-        try captureStream.addStreamOutput(
-            handler, type: .microphone,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
-        )
-        try captureStream.addStreamOutput(
-            handler, type: .screen,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.screen")
-        )
+        let sharedQueue = DispatchQueue(label: "audio-capture.shared")
+        self.audioQueue = sharedQueue
+
+        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .microphone, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: sharedQueue)
 
         self.stream = captureStream
         try await captureStream.startCapture()

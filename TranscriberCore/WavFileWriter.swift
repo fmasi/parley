@@ -3,7 +3,7 @@ import os
 
 public final class WavFileWriter {
     private let fileHandle: FileHandle
-    private let path: String
+    public let path: String
     private var dataByteCount: UInt32 = 0
     private var sampleRate: UInt32 = 0
     private var channelCount: UInt16 = 1
