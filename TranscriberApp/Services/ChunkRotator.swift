@@ -48,7 +48,9 @@ final class ChunkRotator {
     func start() {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .public)")
         timer = Timer.scheduledTimer(withTimeInterval: chunkDuration, repeats: true) { [weak self] _ in
-            self?.rotate()
+            Task { @MainActor in
+                self?.rotate()
+            }
         }
     }
 
