@@ -1,4 +1,4 @@
-# Test Checklist — v0.6.0 Audio Archive
+# Test Checklist — v0.6.0
 
 ## Audio Archive
 - [ ] Record a meeting (system + mic), verify .m4a created after transcription
@@ -17,6 +17,19 @@
 - [ ] Archive limit stepper works, shows hours with MiB estimate
 - [ ] Current usage displays correctly (0 MiB on fresh install)
 
+## Chunked Recording
+- [ ] Start recording — verify chunk-0 files created with `-0` suffix in output dir
+- [ ] Wait past chunk duration (set to 1min for testing) — verify rotation in logs (new `-1` files)
+- [ ] Stop after rotation — verify final transcript has all speech from both chunks
+- [ ] Short meeting (< chunk duration) — verify single-chunk pipeline works identically
+- [ ] Check session.json created during recording, deleted after transcription
+- [ ] Check speaker labels consistent across chunks in final transcript
+- [ ] Check absolute timestamps in transcript JSON (ISO 8601 `timestamp` field)
+- [ ] Verify WAV files deleted after archival to AAC per chunk
+- [ ] Verify log output shows chunk lifecycle events (`log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)
+- [ ] Kill app mid-recording, relaunch — verify crash recovery reprocesses only missing chunks
+
 ## Regression
 - [ ] Start recording, stop, verify transcription completes
 - [ ] Rename dialog works after transcription
+- [ ] XPC crash during recording — verify recovery and segment stitching still works
