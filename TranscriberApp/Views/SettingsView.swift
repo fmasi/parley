@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var saveStatus: String?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
+    @State private var archiveUsageBytes: Int = 0
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
@@ -103,16 +104,18 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                let usageBytes = StorageManager.currentUsageBytes(
-                    in: URL(fileURLWithPath: config.recordingDirectory)
-                )
-                let usageMiB = usageBytes / 1_048_576
+                let usageMiB = archiveUsageBytes / 1_048_576
                 let usageHours = config.archiveBitrateKbps > 0
-                    ? usageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
+                    ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
                     : 0
                 Text("\(usageMiB) MiB used (≈ \(usageHours) hours)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .task {
+                        archiveUsageBytes = StorageManager.currentUsageBytes(
+                            in: URL(fileURLWithPath: config.recordingDirectory)
+                        )
+                    }
             }
 
             Section("Silence Detection") {

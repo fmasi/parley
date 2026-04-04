@@ -173,6 +173,9 @@ struct MenuView: View {
                 )
                 await processor.processLastChunk(lastChunk)
 
+                // Wait for any background chunks still processing
+                await processor.awaitAllProcessed()
+
                 // Final merge
                 let sessionState = await processor.getSessionState()
                 let outputDir = paths.systemAudio.deletingLastPathComponent()

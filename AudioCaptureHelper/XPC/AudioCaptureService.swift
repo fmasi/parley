@@ -87,19 +87,23 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             } catch {
                 // Stream may already be stopped — proceed with finalization
             }
-            // Drain audio callback queue before finalizing (C1 fix)
-            self.stateLock.sync {
-                self.audioQueue?.sync { self.handler?.finalizeAll() }
+            // Snapshot under state lock, then drain audio queue outside it
+            // to avoid lock-order inversion with rotateChunk.
+            let (queue, handler) = self.stateLock.sync {
+                (self.audioQueue, self.handler)
+            }
+            queue?.sync { handler?.finalizeAll() }
+            let (sys, mic) = self.stateLock.sync {
+                let result = (self.systemPath, self.micPath)
                 self.isCapturing = false
-                let sys = self.systemPath
-                let mic = self.micPath
                 self.stream = nil
                 self.handler = nil
                 self.systemPath = nil
                 self.micPath = nil
                 self.audioQueue = nil
-                reply(sys, mic, nil)
+                return result
             }
+            reply(sys, mic, nil)
         }
     }
 
@@ -164,19 +168,21 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             let newSystemWriter = try WavFileWriter(path: newSysPath)
             let newMicWriter = try WavFileWriter(path: newMicPath)
 
-            // Dispatch swap on the audio callback queue for zero-gap guarantee
+            // Swap on the audio queue for zero-gap guarantee, then update
+            // state outside to avoid lock-order inversion with stopCapture.
+            var oldPaths: (systemPath: String, micPath: String)!
             queue.sync {
-                let oldPaths = currentHandler.swapWriters(
+                oldPaths = currentHandler.swapWriters(
                     newSystemWriter: newSystemWriter,
                     newMicWriter: newMicWriter
                 )
-                self.stateLock.sync {
-                    self.systemPath = newSysPath
-                    self.micPath = newMicPath
-                }
-                Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .public)")
-                reply(oldPaths.systemPath, oldPaths.micPath, nil)
             }
+            self.stateLock.sync {
+                self.systemPath = newSysPath
+                self.micPath = newMicPath
+            }
+            Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .public)")
+            reply(oldPaths.systemPath, oldPaths.micPath, nil)
         } catch {
             Logger.audio.error("Chunk rotation failed: \(error, privacy: .public)")
             reply(nil, nil, "Rotation failed: \(error.localizedDescription)")

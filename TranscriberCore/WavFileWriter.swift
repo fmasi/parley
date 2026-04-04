@@ -56,14 +56,14 @@ public final class WavFileWriter {
 
     /// Returns data clamped to remaining WAV capacity, or nil if full.
     private func clampedData(_ bytes: Data) -> Data? {
-        let remaining = Self.maxDataBytes - dataByteCount
-        guard remaining > 0 else {
+        guard dataByteCount < Self.maxDataBytes else {
             if !overflowWarned {
                 Logger.audio.warning("WAV 4 GB limit reached, dropping samples: \(self.path, privacy: .private)")
                 overflowWarned = true
             }
             return nil
         }
+        let remaining = Self.maxDataBytes - dataByteCount
         if bytes.count > remaining {
             if !overflowWarned {
                 Logger.audio.warning("WAV 4 GB limit reached, truncating final write: \(self.path, privacy: .private)")

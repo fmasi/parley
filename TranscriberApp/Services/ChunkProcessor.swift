@@ -13,6 +13,7 @@ final class ChunkProcessor {
     private let stateStore: StateStore
     private let wavHeaderSize = 44
     private let taskPriority: TaskPriority
+    private var inFlightTasks: [Task<Void, Never>] = []
 
     /// Actor-isolated mutable session state — replaces NSLock.
     private actor StateStore {
@@ -55,14 +56,23 @@ final class ChunkProcessor {
     /// Process a finalized chunk in the background (non-blocking).
     func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
         let priority = taskPriority
-        Task(priority: priority) {
+        let task = Task(priority: priority) {
             await self.processChunkAsync(chunk)
         }
+        inFlightTasks.append(task)
     }
 
     /// Process the final chunk synchronously (called at end-of-recording).
     func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
         await processChunkAsync(chunk)
+    }
+
+    /// Wait for all background chunk processing to complete before merging.
+    func awaitAllProcessed() async {
+        for task in inFlightTasks {
+            await task.value
+        }
+        inFlightTasks.removeAll()
     }
 
     /// Actor-isolated access to current session state.
