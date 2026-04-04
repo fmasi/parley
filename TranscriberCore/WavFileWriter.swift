@@ -8,6 +8,9 @@ public final class WavFileWriter {
     private var sampleRate: UInt32 = 0
     private var channelCount: UInt16 = 1
     private var firstWriteLogged = false
+    private var overflowWarned = false
+    // WAV format uses 32-bit size fields; max data payload is ~4.29 GB.
+    private static let maxDataBytes: UInt32 = UInt32.max - 36
     private var lastSyncTime: ContinuousClock.Instant = .now
     private static let syncInterval: Duration = .milliseconds(500)
 
@@ -34,8 +37,9 @@ public final class WavFileWriter {
             pcm[i] = Int16(clamped * 32767.0)
         }
         let bytes = pcm.withUnsafeBytes { Data($0) }
-        fileHandle.write(bytes)
-        dataByteCount += UInt32(bytes.count)
+        guard let toWrite = clampedData(bytes) else { return }
+        fileHandle.write(toWrite)
+        dataByteCount += UInt32(toWrite.count)
         logFirstWrite()
         syncIfNeeded()
     }
@@ -43,10 +47,31 @@ public final class WavFileWriter {
     /// Write Int16 PCM samples directly (no conversion needed).
     public func appendInt16(_ samples: UnsafeBufferPointer<Int16>) {
         let bytes = samples.withMemoryRebound(to: UInt8.self) { Data($0) }
-        fileHandle.write(bytes)
-        dataByteCount += UInt32(bytes.count)
+        guard let toWrite = clampedData(bytes) else { return }
+        fileHandle.write(toWrite)
+        dataByteCount += UInt32(toWrite.count)
         logFirstWrite()
         syncIfNeeded()
+    }
+
+    /// Returns data clamped to remaining WAV capacity, or nil if full.
+    private func clampedData(_ bytes: Data) -> Data? {
+        let remaining = Self.maxDataBytes - dataByteCount
+        guard remaining > 0 else {
+            if !overflowWarned {
+                Logger.audio.warning("WAV 4 GB limit reached, dropping samples: \(self.path, privacy: .private)")
+                overflowWarned = true
+            }
+            return nil
+        }
+        if bytes.count > remaining {
+            if !overflowWarned {
+                Logger.audio.warning("WAV 4 GB limit reached, truncating final write: \(self.path, privacy: .private)")
+                overflowWarned = true
+            }
+            return bytes.prefix(Int(remaining))
+        }
+        return bytes
     }
 
     private func syncIfNeeded() {

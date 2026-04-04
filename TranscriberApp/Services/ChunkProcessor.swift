@@ -10,10 +10,27 @@ final class ChunkProcessor {
     private let transcriber: any TranscriptionEngine
     private let diarizer: (any DiarizationProvider)?
     private let vadSpeechMap = VadSpeechMap()
-    private var sessionState: SessionState
-    private let sessionLock = NSLock()
+    private let stateStore: StateStore
     private let wavHeaderSize = 44
     private let taskPriority: TaskPriority
+
+    /// Actor-isolated mutable session state — replaces NSLock.
+    private actor StateStore {
+        var sessionState: SessionState
+
+        init(sessionState: SessionState) {
+            self.sessionState = sessionState
+        }
+
+        func appendChunk(_ chunk: ProcessedChunk) -> SessionState {
+            sessionState.chunks.append(chunk)
+            return sessionState
+        }
+
+        func getSessionState() -> SessionState {
+            sessionState
+        }
+    }
 
     init(
         config: Config,
@@ -24,7 +41,7 @@ final class ChunkProcessor {
     ) {
         self.config = config
         self.outputDirectory = outputDirectory
-        self.sessionState = sessionState
+        self.stateStore = StateStore(sessionState: sessionState)
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.taskPriority = switch config.resolvedQos {
@@ -48,11 +65,9 @@ final class ChunkProcessor {
         await processChunkAsync(chunk)
     }
 
-    /// Thread-safe access to current session state.
-    func getSessionState() -> SessionState {
-        sessionLock.lock()
-        defer { sessionLock.unlock() }
-        return sessionState
+    /// Actor-isolated access to current session state.
+    func getSessionState() async -> SessionState {
+        await stateStore.getSessionState()
     }
 
     // MARK: - Private
@@ -137,8 +152,8 @@ final class ChunkProcessor {
             speakerDatabase: speakerDatabase
         )
 
-        // 8. Thread-safe append + persist
-        let snapshot = appendChunk(processed)
+        // 8. Actor-isolated append + persist
+        let snapshot = await stateStore.appendChunk(processed)
 
         do {
             try SessionState.write(snapshot, directory: outputDirectory)
@@ -150,14 +165,6 @@ final class ChunkProcessor {
         Logger.transcription.info(
             "Chunk \(chunk.index, privacy: .public) processing complete — \(elapsed.components.seconds, privacy: .public)s, \(chunkSegments.count, privacy: .public) segments"
         )
-    }
-
-    /// Thread-safe: append a chunk and return the updated session state snapshot.
-    private func appendChunk(_ chunk: ProcessedChunk) -> SessionState {
-        sessionLock.lock()
-        defer { sessionLock.unlock() }
-        sessionState.chunks.append(chunk)
-        return sessionState
     }
 
     /// Result from transcribing a single stream, including speaker database if diarized.

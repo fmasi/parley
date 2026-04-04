@@ -90,7 +90,8 @@ public enum SpeakerAssignment {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                 }
 
-                if sp.start <= segMid && segMid <= sp.end && overlap >= bestOverlap {
+                // Strict `>`: first match wins on ties (stable ordering).
+                if sp.start <= segMid && segMid <= sp.end && overlap > bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                 }
             }
@@ -157,7 +158,8 @@ public enum SpeakerAssignment {
                     bestQuality = sp.qualityScore
                 }
 
-                if sp.start <= segMid && segMid <= sp.end && overlap >= bestOverlap {
+                // Strict `>`: first match wins on ties (stable ordering).
+                if sp.start <= segMid && segMid <= sp.end && overlap > bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore
                 }

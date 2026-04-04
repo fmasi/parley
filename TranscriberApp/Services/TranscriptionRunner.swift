@@ -6,6 +6,7 @@ struct TranscriptionResult {
     let jsonPath: URL
 }
 
+@MainActor
 final class TranscriptionRunner {
     enum RunnerError: LocalizedError {
         case engineNotReady(String)
@@ -274,7 +275,6 @@ final class TranscriptionRunner {
     // MARK: - Chunked Pipeline
 
     /// Set up chunked recording pipeline.
-    @MainActor
     func setupChunkedPipeline(
         captureClient: AudioCaptureClient,
         outputDirectory: URL,
@@ -321,17 +321,14 @@ final class TranscriptionRunner {
         self.chunkRotator = rotator
     }
 
-    @MainActor
     func startChunkRotation() {
         chunkRotator?.start()
     }
 
-    @MainActor
     func stopChunkRotation() {
         chunkRotator?.stop()
     }
 
-    @MainActor
     func teardownChunkedPipeline() {
         chunkRotator = nil
         chunkProcessor = nil

@@ -174,7 +174,7 @@ struct MenuView: View {
                 await processor.processLastChunk(lastChunk)
 
                 // Final merge
-                let sessionState = processor.getSessionState()
+                let sessionState = await processor.getSessionState()
                 let outputDir = paths.systemAudio.deletingLastPathComponent()
                 let result = try await transcriptionRunner.finalize(
                     sessionState: sessionState,
