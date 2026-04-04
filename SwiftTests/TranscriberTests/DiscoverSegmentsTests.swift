@@ -117,4 +117,39 @@ struct DiscoverSegmentsTests {
             #expect(result.count == 1)
         }
     }
+
+    // 0-indexed mode: meeting-0.wav + meeting-1.wav → 2 pairs in order
+    @Test func discoversZeroIndexedChunks() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiscoverChunks-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for i in 0...1 {
+            try Data([0x00]).write(to: dir.appendingPathComponent("meeting-\(i).wav"))
+            try Data([0x00]).write(to: dir.appendingPathComponent("meeting-\(i)_mic.wav"))
+        }
+
+        let base = dir.appendingPathComponent("meeting-0.wav")
+        let baseMic = dir.appendingPathComponent("meeting-0_mic.wav")
+        let segments = discoverSegments(systemAudio: base, micAudio: baseMic)
+
+        #expect(segments.count == 2)
+        #expect(segments[0].system.lastPathComponent == "meeting-0.wav")
+        #expect(segments[1].system.lastPathComponent == "meeting-1.wav")
+    }
+
+    // 0-indexed mode: no files on disk → fallback to original pair
+    @Test func zeroIndexedFallbackWhenNoFilesExist() throws {
+        try withTempDir { dir in
+            let base = dir.appendingPathComponent("rec-0.wav")
+            let baseMic = dir.appendingPathComponent("rec-0_mic.wav")
+
+            let result = discoverSegments(systemAudio: base, micAudio: baseMic)
+
+            #expect(result.count == 1)
+            #expect(result[0].system == base)
+            #expect(result[0].mic == baseMic)
+        }
+    }
 }

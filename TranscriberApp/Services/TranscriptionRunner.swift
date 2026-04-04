@@ -6,6 +6,7 @@ struct TranscriptionResult {
     let jsonPath: URL
 }
 
+@MainActor
 final class TranscriptionRunner {
     enum RunnerError: LocalizedError {
         case engineNotReady(String)
@@ -28,6 +29,9 @@ final class TranscriptionRunner {
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
     private let vadSpeechMap = VadSpeechMap()
+
+    private(set) var chunkRotator: ChunkRotator?
+    private(set) var chunkProcessor: ChunkProcessor?
 
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
@@ -131,10 +135,203 @@ final class TranscriptionRunner {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
 
+        // Archive WAVs to stereo AAC (L=mic, R=system)
+        if isDualStream, let micAudio {
+            do {
+                let archiveResult = try await AudioArchiver.archive(
+                    systemAudio: systemAudio,
+                    micAudio: micAudio,
+                    outputDirectory: outputDirectory,
+                    bitrateKbps: config.archiveBitrateKbps
+                )
+                // Update transcript JSON with new audio path
+                Self.updateAudioPaths(in: jsonPath, to: [archiveResult.archivePath])
+                Logger.files.info("Archived to: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
+
+                // Enforce storage quota
+                try StorageManager.enforceQuota(
+                    in: outputDirectory,
+                    limitHours: config.audioArchiveLimitHours,
+                    bitrateKbps: config.archiveBitrateKbps,
+                    protectedFile: archiveResult.archivePath
+                )
+            } catch {
+                Logger.files.error("Archival failed, keeping WAV files: \(error, privacy: .public)")
+            }
+        }
+
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// Finalize a chunked recording session: reconcile speakers, merge chunks, write transcript.
+    func finalize(
+        sessionState: SessionState,
+        outputDirectory: URL,
+        config: Config
+    ) async throws -> TranscriptionResult {
+        let startTime = ContinuousClock.now
+
+        // 1. Speaker reconciliation
+        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
+        let speakerMapping = SpeakerReconciler.reconcile(
+            chunks: sessionState.chunks,
+            threshold: 0.65
+        )
+
+        // 2. Merge chunks
+        let mergeResult = TranscriptMerger.merge(
+            chunks: sessionState.chunks,
+            speakerMapping: speakerMapping,
+            meetingStart: sessionState.meetingStart
+        )
+
+        // 3. Convert MergedSegments to LabeledSegments for existing assembler
+        var allSegments: [LabeledSegment] = []
+        for chunk in sessionState.chunks {
+            let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
+            let chunkMapping = speakerMapping[chunk.index] ?? [:]
+            for seg in chunk.segments {
+                let elapsed = chunkOffset + seg.start
+                let elapsedEnd = chunkOffset + seg.end
+                let globalSpeaker = chunkMapping[seg.speaker] ?? seg.speaker
+                allSegments.append(LabeledSegment(
+                    start: elapsed,
+                    end: elapsedEnd,
+                    speaker: globalSpeaker,
+                    text: seg.text,
+                    source: seg.source,
+                    confidence: seg.qualityScore
+                ))
+            }
+        }
+        allSegments.sort { $0.start < $1.start }
+
+        // 4. Dual-stream tagging
+        let isDualStream = allSegments.contains { $0.source == "local" }
+        if isDualStream {
+            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+        }
+
+        // 5. Audio paths from chunks
+        let audioPaths = sessionState.chunks.map {
+            outputDirectory.appendingPathComponent($0.audioPath)
+        }
+
+        // 6. Language detection
+        let languages = Set(allSegments.compactMap(\.language))
+        let detectedLanguage: String
+        switch languages.count {
+        case 0: detectedLanguage = "auto"
+        case 1: detectedLanguage = languages.first!
+        default: detectedLanguage = "multilingual"
+        }
+
+        // 7. Assemble JSON
+        let json = TranscriptAssembler.assemble(
+            segments: allSegments,
+            audioPaths: audioPaths,
+            outputFormat: config.outputFormat,
+            language: detectedLanguage,
+            numSpeakers: nil,
+            diarization: true,
+            dualStream: isDualStream
+        )
+
+        let baseName = sessionState.sessionId
+        let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+        try TranscriptAssembler.write(json, to: jsonPath)
+
+        // 8. Write format file
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+        }
+
+        // 9. Storage quota enforcement
+        do {
+            try StorageManager.enforceQuota(
+                in: outputDirectory,
+                limitHours: config.audioArchiveLimitHours,
+                bitrateKbps: config.archiveBitrateKbps,
+                protectedFile: audioPaths.last
+            )
+        } catch {
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+        }
+
+        // 10. Clean up session.json
+        SessionState.delete(directory: outputDirectory)
+
+        let elapsed = ContinuousClock.now - startTime
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
+
+        return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    // MARK: - Chunked Pipeline
+
+    /// Set up chunked recording pipeline.
+    func setupChunkedPipeline(
+        captureClient: AudioCaptureClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config
+    ) throws {
+        let engineID = config.engine
+        if transcriber == nil || lastEngineID != engineID {
+            Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
+            transcriber = try createEngine(for: engineID, config: config)
+            lastEngineID = engineID
+        }
+
+        guard let transcriber else {
+            throw RunnerError.failed("Failed to initialize transcription engine")
+        }
+
+        let sessionState = SessionState(
+            sessionId: sessionBaseName,
+            meetingStart: Date(),
+            engine: engineID.rawValue,
+            chunkDurationMinutes: config.validatedChunkDuration,
+            chunks: []
+        )
+
+        let processor = ChunkProcessor(
+            config: config,
+            outputDirectory: outputDirectory,
+            sessionState: sessionState,
+            transcriber: transcriber,
+            diarizer: diarizer
+        )
+        self.chunkProcessor = processor
+
+        let rotator = ChunkRotator(
+            captureClient: captureClient,
+            outputDirectory: outputDirectory.path,
+            sessionBaseName: sessionBaseName,
+            chunkDurationMinutes: config.validatedChunkDuration,
+            startTime: Date()
+        ) { [weak processor] chunk in
+            processor?.processChunk(chunk)
+        }
+        self.chunkRotator = rotator
+    }
+
+    func startChunkRotation() {
+        chunkRotator?.start()
+    }
+
+    func stopChunkRotation() {
+        chunkRotator?.stop()
+    }
+
+    func teardownChunkedPipeline() {
+        chunkRotator = nil
+        chunkProcessor = nil
     }
 
     func setDiarizer(_ provider: any DiarizationProvider) {
@@ -146,6 +343,25 @@ final class TranscriptionRunner {
     }
 
     // MARK: - Private
+
+    /// Update the audio_paths in a transcript JSON file after archival.
+    private static func updateAudioPaths(in jsonPath: URL, to newPaths: [URL]) {
+        guard let data = try? Data(contentsOf: jsonPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var metadata = json["metadata"] as? [String: Any]
+        else { return }
+
+        metadata["audio_paths"] = newPaths.map { $0.path }
+        metadata["audio_files"] = newPaths.map { $0.lastPathComponent }
+        json["metadata"] = metadata
+
+        if let updatedData = try? JSONSerialization.data(
+            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? updatedData.write(to: jsonPath, options: .atomic)
+            Logger.files.info("Updated audio_paths in \(jsonPath.lastPathComponent, privacy: .public)")
+        }
+    }
 
     static func discoverSegments(
         systemAudio: URL,
@@ -202,7 +418,8 @@ final class TranscriptionRunner {
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
-            let diarizedSegments = try await diarizedResult
+            let diarizationResult = try await diarizedResult
+            let diarizedSegments = diarizationResult.segments
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 

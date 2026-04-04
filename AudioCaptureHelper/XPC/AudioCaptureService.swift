@@ -10,6 +10,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
+    private var audioQueue: DispatchQueue?
+    private let stateLock = DispatchQueue(label: "audio-capture.state")
 
     func startCapture(
         outputDirectory: String,
@@ -17,7 +19,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         microphoneDeviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     ) {
-        guard !isCapturing else {
+        guard !stateLock.sync(execute: { isCapturing }) else {
             reply(false, "Capture already in progress")
             return
         }
@@ -37,15 +39,17 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 systemWriter: systemWriter, micWriter: micWriter
             )
 
-            self.systemPath = sysPath
-            self.micPath = micFilePath
-            self.handler = outputHandler
+            self.stateLock.sync {
+                self.systemPath = sysPath
+                self.micPath = micFilePath
+                self.handler = outputHandler
+            }
 
             Task {
                 do {
                     try await self.configureAndStart(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
                     Logger.audio.info("SCStream started, awaiting frames")
-                    self.isCapturing = true
+                    self.stateLock.sync { self.isCapturing = true }
                     reply(true, nil)
                 } catch {
                     self.cleanupAfterFailure()
@@ -68,7 +72,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     func stopCapture(
         reply: @escaping (String?, String?, String?) -> Void
     ) {
-        guard isCapturing, let stream = stream else {
+        let (capturing, captureStream) = stateLock.sync { (isCapturing, stream) }
+        guard capturing, let captureStream else {
             reply(nil, nil, "No capture in progress")
             return
         }
@@ -77,32 +82,41 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
         Task {
             do {
-                try await stream.stopCapture()
+                try await captureStream.stopCapture()
                 Logger.audio.debug("SCStream stopped")
             } catch {
                 // Stream may already be stopped — proceed with finalization
             }
-            self.handler?.finalizeAll()
-            self.isCapturing = false
-            let sys = self.systemPath
-            let mic = self.micPath
-            self.stream = nil
-            self.handler = nil
-            self.systemPath = nil
-            self.micPath = nil
+            // Snapshot under state lock, then drain audio queue outside it
+            // to avoid lock-order inversion with rotateChunk.
+            let (queue, handler) = self.stateLock.sync {
+                (self.audioQueue, self.handler)
+            }
+            queue?.sync { handler?.finalizeAll() }
+            let (sys, mic) = self.stateLock.sync {
+                let result = (self.systemPath, self.micPath)
+                self.isCapturing = false
+                self.stream = nil
+                self.handler = nil
+                self.systemPath = nil
+                self.micPath = nil
+                self.audioQueue = nil
+                return result
+            }
             reply(sys, mic, nil)
         }
     }
 
     func status(reply: @escaping (Bool, String?) -> Void) {
-        reply(isCapturing, nil)
+        reply(stateLock.sync { isCapturing }, nil)
     }
 
     func updateMicrophone(
         deviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     ) {
-        guard isCapturing, let stream else {
+        let (capturing, captureStream) = stateLock.sync { (isCapturing, stream) }
+        guard capturing, let captureStream else {
             reply(false, "No capture in progress")
             return
         }
@@ -117,13 +131,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
+        config.sampleRate = 48000
         config.width = 2
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await captureStream.updateConfiguration(config)
                 Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .public)")
                 reply(true, nil)
             } catch {
@@ -133,34 +148,85 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
+    func rotateChunk(
+        outputDirectory: String,
+        newBaseName: String,
+        reply: @escaping (String?, String?, String?) -> Void
+    ) {
+        let (capturing, currentHandler, queue) = stateLock.sync { (isCapturing, handler, audioQueue) }
+        guard capturing, let currentHandler, let queue else {
+            reply(nil, nil, "No capture in progress")
+            return
+        }
+
+        Logger.audio.info("Rotating chunk — new base: \(newBaseName, privacy: .public)")
+
+        let newSysPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + ".wav")
+        let newMicPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + "_mic.wav")
+
+        do {
+            let newSystemWriter = try WavFileWriter(path: newSysPath)
+            let newMicWriter = try WavFileWriter(path: newMicPath)
+
+            // Swap on the audio queue for zero-gap guarantee, then update
+            // state outside to avoid lock-order inversion with stopCapture.
+            var oldPaths: (systemPath: String, micPath: String)!
+            queue.sync {
+                oldPaths = currentHandler.swapWriters(
+                    newSystemWriter: newSystemWriter,
+                    newMicWriter: newMicWriter
+                )
+            }
+            self.stateLock.sync {
+                self.systemPath = newSysPath
+                self.micPath = newMicPath
+            }
+            Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .public)")
+            reply(oldPaths.systemPath, oldPaths.micPath, nil)
+        } catch {
+            Logger.audio.error("Chunk rotation failed: \(error, privacy: .public)")
+            reply(nil, nil, "Rotation failed: \(error.localizedDescription)")
+        }
+    }
+
     func stopAndFinalize() {
-        guard isCapturing else { return }
+        let (capturing, captureStream, queue) = stateLock.sync { (isCapturing, stream, audioQueue) }
+        guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
 
-        if let stream = stream {
+        // Finalize synchronously on the audio queue so WAV headers are written
+        // before the XPC service exits (I5 fix).
+        queue?.sync { self.handler?.finalizeAll() }
+
+        if let captureStream {
             Task {
-                try? await stream.stopCapture()
-                self.handler?.finalizeAll()
-                self.isCapturing = false
-                self.stream = nil
-                self.handler = nil
+                try? await captureStream.stopCapture()
+                self.stateLock.sync {
+                    self.isCapturing = false
+                    self.stream = nil
+                    self.handler = nil
+                }
                 Logger.audio.info("Capture finalized after client disconnect")
             }
         } else {
-            handler?.finalizeAll()
-            isCapturing = false
-            handler = nil
+            stateLock.sync {
+                self.isCapturing = false
+                self.handler = nil
+            }
         }
     }
 
     private func cleanupAfterFailure() {
-        handler?.finalizeAll()
-        if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
-        if let mic = micPath { try? FileManager.default.removeItem(atPath: mic) }
-        stream = nil
-        handler = nil
-        systemPath = nil
-        micPath = nil
+        stateLock.sync {
+            audioQueue?.sync { handler?.finalizeAll() }
+            if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
+            if let mic = micPath { try? FileManager.default.removeItem(atPath: mic) }
+            stream = nil
+            handler = nil
+            systemPath = nil
+            micPath = nil
+            audioQueue = nil
+        }
     }
 
     private func configureAndStart(handler: AudioOutputHandler, microphoneDeviceId: String?) async throws {
@@ -186,6 +252,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
+        config.sampleRate = 48000
+        Logger.audio.debug("System audio capture rate: 48000 Hz (fixed)")
         config.width = 2
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
@@ -193,18 +261,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let captureStream = SCStream(
             filter: filter, configuration: config, delegate: handler
         )
-        try captureStream.addStreamOutput(
-            handler, type: .audio,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.audio")
-        )
-        try captureStream.addStreamOutput(
-            handler, type: .microphone,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.microphone")
-        )
-        try captureStream.addStreamOutput(
-            handler, type: .screen,
-            sampleHandlerQueue: DispatchQueue(label: "audio-capture.screen")
-        )
+        let sharedQueue = DispatchQueue(label: "audio-capture.shared")
+        self.audioQueue = sharedQueue
+
+        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .microphone, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: sharedQueue)
 
         self.stream = captureStream
         try await captureStream.startCapture()

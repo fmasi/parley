@@ -10,7 +10,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
     public init() {}
 
-    public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> [DiarizedSegment] {
+    public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
         Logger.transcription.info("FluidAudio diarization starting: \(audioPath.lastPathComponent, privacy: .public)")
 
@@ -26,13 +26,15 @@ public actor FluidAudioDiarizer: DiarizationProvider {
             )
         }
 
+        let speakerDatabase = result.speakerDatabase ?? [:]
+
         let elapsed = ContinuousClock.now - startTime
         let speakerCount = Set(segments.map(\.speaker)).count
         Logger.transcription.info(
             "FluidAudio diarization complete: \(segments.count) segments, \(speakerCount) speakers in \(elapsed.components.seconds)s"
         )
 
-        return segments
+        return DiarizationResult(segments: segments, speakerDatabase: speakerDatabase)
     }
 
     /// Returns true if all diarization model files are present in the local cache.

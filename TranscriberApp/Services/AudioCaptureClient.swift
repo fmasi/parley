@@ -81,6 +81,30 @@ final class AudioCaptureClient {
         }
     }
 
+    func rotateChunk(
+        outputDirectory: String,
+        newBaseName: String
+    ) async throws -> (systemPath: String, micPath: String) {
+        let conn = try getConnection()
+        return try await withCheckedThrowingContinuation { cont in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { error in
+                cont.resume(throwing: CaptureError.rotateChunkFailed(
+                    "XPC connection failed: \(error.localizedDescription)"
+                ))
+            } as! AudioCaptureProtocol
+
+            proxy.rotateChunk(outputDirectory: outputDirectory, newBaseName: newBaseName) { oldSystemPath, oldMicPath, errorMessage in
+                if let sys = oldSystemPath, let mic = oldMicPath {
+                    cont.resume(returning: (systemPath: sys, micPath: mic))
+                } else {
+                    cont.resume(throwing: CaptureError.rotateChunkFailed(
+                        errorMessage ?? "Unknown error"
+                    ))
+                }
+            }
+        }
+    }
+
     func updateMicrophone(deviceId: String?) async throws {
         let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -143,6 +167,7 @@ enum CaptureError: LocalizedError {
     case startFailed(String)
     case stopFailed(String)
     case micSwitchFailed(String)
+    case rotateChunkFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -150,6 +175,7 @@ enum CaptureError: LocalizedError {
         case .startFailed(let msg): return msg
         case .stopFailed(let msg): return msg
         case .micSwitchFailed(let msg): return msg
+        case .rotateChunkFailed(let msg): return msg
         }
     }
 }

@@ -14,6 +14,16 @@ public struct DiarizedSegment: Sendable {
     }
 }
 
+public struct DiarizationResult: Sendable {
+    public let segments: [DiarizedSegment]
+    public let speakerDatabase: [String: [Float]]
+
+    public init(segments: [DiarizedSegment], speakerDatabase: [String: [Float]] = [:]) {
+        self.segments = segments
+        self.speakerDatabase = speakerDatabase
+    }
+}
+
 public protocol DiarizationProvider: Sendable {
-    func diarize(audioPath: URL, numSpeakers: Int?) async throws -> [DiarizedSegment]
+    func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult
 }

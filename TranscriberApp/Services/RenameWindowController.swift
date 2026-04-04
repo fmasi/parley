@@ -94,9 +94,22 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // Build source→audio file mapping from metadata
         let metadata = json["metadata"] as? [String: Any]
         let audioPaths = metadata?["audio_paths"] as? [String] ?? []
-        // First path = system (remote), second = mic (local)
-        let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
-        let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
+
+        let remoteAudio: URL?
+        let localAudio: URL?
+
+        if audioPaths.count == 1, audioPaths[0].hasSuffix(".m4a") {
+            // Stereo AAC archive: single file serves both sources
+            // AVAudioPlayer plays stereo as-is (L=local, R=remote) — works for sample playback
+            let archivePath = URL(fileURLWithPath: audioPaths[0])
+            let exists = FileManager.default.fileExists(atPath: archivePath.path)
+            remoteAudio = exists ? archivePath : nil
+            localAudio = exists ? archivePath : nil
+        } else {
+            // Legacy dual WAV: first = system (remote), second = mic (local)
+            remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
+            localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
+        }
 
         struct CandidateSegment {
             let start: Double

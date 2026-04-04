@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var saveStatus: String?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
+    @State private var archiveUsageBytes: Int = 0
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
@@ -84,6 +85,39 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Audio Archive") {
+                Picker("Encoding Bitrate", selection: $config.archiveBitrateKbps) {
+                    Text("48 kbps").tag(48)
+                    Text("64 kbps").tag(64)
+                    Text("96 kbps").tag(96)
+                    Text("128 kbps").tag(128)
+                }
+
+                Stepper(
+                    "Keep last \(config.audioArchiveLimitHours) hours",
+                    value: $config.audioArchiveLimitHours,
+                    in: 1...999
+                )
+
+                let estimatedMiB = config.audioArchiveLimitHours * config.archiveBitrateKbps * 1000 / 8 * 3600 / 1_048_576
+                Text("≈ \(estimatedMiB) MiB at \(config.archiveBitrateKbps) kbps")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                let usageMiB = archiveUsageBytes / 1_048_576
+                let usageHours = config.archiveBitrateKbps > 0
+                    ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
+                    : 0
+                Text("\(usageMiB) MiB used (≈ \(usageHours) hours)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .task {
+                        archiveUsageBytes = StorageManager.currentUsageBytes(
+                            in: URL(fileURLWithPath: config.recordingDirectory)
+                        )
+                    }
+            }
+
             Section("Silence Detection") {
                 Toggle("Enabled", isOn: $config.silenceDetectionEnabled)
                 if config.silenceDetectionEnabled {
@@ -112,7 +146,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 450, height: 500)
+        .frame(width: 450, height: 600)
         .toolbar {
             ToolbarItem {
                 if let status = saveStatus {

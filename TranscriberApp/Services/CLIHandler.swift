@@ -76,9 +76,9 @@ enum CLIHandler {
             outputDir = systemAudio.deletingLastPathComponent()
         }
 
-        let runner = TranscriptionRunner()
+        let runner = await TranscriptionRunner()
         if opts.noDiarize {
-            runner.disableDiarization()
+            await runner.disableDiarization()
         }
 
         var runConfig = config
