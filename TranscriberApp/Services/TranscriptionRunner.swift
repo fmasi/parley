@@ -246,7 +246,8 @@ final class TranscriptionRunner {
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
-            let diarizedSegments = try await diarizedResult
+            let diarizationResult = try await diarizedResult
+            let diarizedSegments = diarizationResult.segments
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
