@@ -34,6 +34,15 @@ import Foundation
         deviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     )
+
+    /// Rotate the current WAV output files to new paths, returning the old paths.
+    /// Used for chunk recording — seals the current chunk and starts writing to new files.
+    /// Reply: (oldSystemPath: String?, oldMicPath: String?, errorMessage: String?)
+    func rotateChunk(
+        outputDirectory: String,
+        newBaseName: String,
+        reply: @escaping (String?, String?, String?) -> Void
+    )
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

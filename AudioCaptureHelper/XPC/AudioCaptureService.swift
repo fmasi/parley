@@ -136,6 +136,42 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
+    func rotateChunk(
+        outputDirectory: String,
+        newBaseName: String,
+        reply: @escaping (String?, String?, String?) -> Void
+    ) {
+        guard isCapturing, let handler = handler, let audioQueue = audioQueue else {
+            reply(nil, nil, "No capture in progress")
+            return
+        }
+
+        Logger.audio.info("Rotating chunk — new base: \(newBaseName, privacy: .public)")
+
+        let newSysPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + ".wav")
+        let newMicPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + "_mic.wav")
+
+        do {
+            let newSystemWriter = try WavFileWriter(path: newSysPath)
+            let newMicWriter = try WavFileWriter(path: newMicPath)
+
+            // Dispatch swap on the audio callback queue for zero-gap guarantee
+            audioQueue.sync {
+                let oldPaths = handler.swapWriters(
+                    newSystemWriter: newSystemWriter,
+                    newMicWriter: newMicWriter
+                )
+                self.systemPath = newSysPath
+                self.micPath = newMicPath
+                Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .public)")
+                reply(oldPaths.systemPath, oldPaths.micPath, nil)
+            }
+        } catch {
+            Logger.audio.error("Chunk rotation failed: \(error, privacy: .public)")
+            reply(nil, nil, "Rotation failed: \(error.localizedDescription)")
+        }
+    }
+
     func stopAndFinalize() {
         guard isCapturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
