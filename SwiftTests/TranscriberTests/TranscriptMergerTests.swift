@@ -166,4 +166,34 @@ struct TranscriptMergerTests {
         #expect(result.chunkCount == 0)
         #expect(result.meetingStart == meetingStart)
     }
+
+    @Test func mergerSilentChunkProducesNoSegments() {
+        let now = Date()
+        let chunks = [
+            ProcessedChunk(
+                index: 0, startTime: now, audioPath: "m-0.m4a",
+                segments: [.init(start: 0, end: 1, text: "A", speaker: "spk_0", source: "system")],
+                speakerDatabase: [:]
+            ),
+            ProcessedChunk(
+                index: 1, startTime: now.addingTimeInterval(1800), audioPath: "m-1.m4a",
+                segments: [], // Silent chunk
+                speakerDatabase: [:]
+            ),
+            ProcessedChunk(
+                index: 2, startTime: now.addingTimeInterval(3600), audioPath: "m-2.m4a",
+                segments: [.init(start: 0, end: 1, text: "B", speaker: "spk_0", source: "system")],
+                speakerDatabase: [:]
+            )
+        ]
+        let mapping: [Int: [String: String]] = [
+            0: ["spk_0": "spk_0"], 1: [:], 2: ["spk_0": "spk_0"]
+        ]
+
+        let result = TranscriptMerger.merge(chunks: chunks, speakerMapping: mapping, meetingStart: now)
+        #expect(result.segments.count == 2)
+        #expect(result.segments[0].text == "A")
+        #expect(result.segments[1].text == "B")
+        #expect(result.segments[1].elapsed == 3600.0)
+    }
 }

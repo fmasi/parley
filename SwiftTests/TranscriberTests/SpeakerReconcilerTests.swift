@@ -126,4 +126,43 @@ struct SpeakerReconcilerTests {
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk])
         #expect(mapping[0]?.isEmpty == true)
     }
+
+    @Test func reconcileSpeakerLeavesAfterChunk1() {
+        var emb0 = [Float](repeating: 0, count: 256)
+        emb0[0] = 1.0
+        var emb1 = [Float](repeating: 0, count: 256)
+        emb1[1] = 1.0
+
+        let chunks = [
+            ProcessedChunk(
+                index: 0, startTime: Date(), audioPath: "m-0.m4a",
+                segments: [], speakerDatabase: ["spk_0": emb0, "spk_1": emb1]
+            ),
+            ProcessedChunk(
+                index: 1, startTime: Date(), audioPath: "m-1.m4a",
+                segments: [], speakerDatabase: ["spk_0": emb0] // spk_1 left
+            )
+        ]
+
+        let mapping = SpeakerReconciler.reconcile(chunks: chunks, threshold: 0.65)
+        #expect(mapping[1]?["spk_0"] == "spk_0")
+        #expect(mapping[1]?.count == 1)
+    }
+
+    @Test func reconcileSingleSpeakerThroughout() {
+        var emb = [Float](repeating: 0, count: 256)
+        emb[0] = 1.0
+
+        let chunks = (0..<4).map { i in
+            ProcessedChunk(
+                index: i, startTime: Date(), audioPath: "m-\(i).m4a",
+                segments: [], speakerDatabase: ["spk_0": emb]
+            )
+        }
+
+        let mapping = SpeakerReconciler.reconcile(chunks: chunks, threshold: 0.65)
+        for i in 0..<4 {
+            #expect(mapping[i]?["spk_0"] == "spk_0")
+        }
+    }
 }
