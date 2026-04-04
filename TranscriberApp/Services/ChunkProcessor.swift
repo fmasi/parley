@@ -128,8 +128,8 @@ final class ChunkProcessor {
         // 5. Speaker database from system audio diarization (used for cross-chunk reconciliation)
         let speakerDatabase = systemResult.speakerDatabase
 
-        // 6. Archive WAV → AAC
-        var audioPath = systemURL.path
+        // 6. Archive WAV → AAC (store filename only for session.json portability)
+        var audioPath = systemURL.lastPathComponent
         if hasDualStream {
             do {
                 let archiveResult = try await AudioArchiver.archive(
@@ -138,7 +138,7 @@ final class ChunkProcessor {
                     outputDirectory: outputDirectory,
                     bitrateKbps: config.archiveBitrateKbps
                 )
-                audioPath = archiveResult.archivePath.path
+                audioPath = archiveResult.archivePath.lastPathComponent
                 Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
 
                 // Enforce storage quota
