@@ -29,6 +29,9 @@ final class TranscriptionRunner {
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
     private let vadSpeechMap = VadSpeechMap()
 
+    private(set) var chunkRotator: ChunkRotator?
+    private(set) var chunkProcessor: ChunkProcessor?
+
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
 
@@ -266,6 +269,68 @@ final class TranscriptionRunner {
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    // MARK: - Chunked Pipeline
+
+    /// Set up chunked recording pipeline.
+    func setupChunkedPipeline(
+        captureClient: AudioCaptureClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config
+    ) throws {
+        let engineID = config.engine
+        if transcriber == nil || lastEngineID != engineID {
+            Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
+            transcriber = try createEngine(for: engineID, config: config)
+            lastEngineID = engineID
+        }
+
+        guard let transcriber else {
+            throw RunnerError.failed("Failed to initialize transcription engine")
+        }
+
+        let sessionState = SessionState(
+            sessionId: sessionBaseName,
+            meetingStart: Date(),
+            engine: engineID.rawValue,
+            chunkDurationMinutes: config.validatedChunkDuration,
+            chunks: []
+        )
+
+        let processor = ChunkProcessor(
+            config: config,
+            outputDirectory: outputDirectory,
+            sessionState: sessionState,
+            transcriber: transcriber,
+            diarizer: diarizer
+        )
+        self.chunkProcessor = processor
+
+        let rotator = ChunkRotator(
+            captureClient: captureClient,
+            outputDirectory: outputDirectory.path,
+            sessionBaseName: sessionBaseName,
+            chunkDurationMinutes: config.validatedChunkDuration,
+            startTime: Date()
+        ) { [weak processor] chunk in
+            processor?.processChunk(chunk)
+        }
+        self.chunkRotator = rotator
+    }
+
+    func startChunkRotation() {
+        chunkRotator?.start()
+    }
+
+    func stopChunkRotation() {
+        chunkRotator?.stop()
+    }
+
+    func teardownChunkedPipeline() {
+        chunkRotator = nil
+        chunkProcessor = nil
     }
 
     func setDiarizer(_ provider: any DiarizationProvider) {

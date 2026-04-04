@@ -105,7 +105,8 @@ struct MenuView: View {
         let timestamp = timeFormatter.string(from: Date())
 
         let sanitized = sanitizeFilename(sessionName)
-        let baseName = sanitized.isEmpty ? timestamp : "\(timestamp)-\(sanitized)"
+        let chunkBaseName = sanitized.isEmpty ? timestamp : "\(timestamp)-\(sanitized)"
+        let baseName = "\(chunkBaseName)-0"  // 0-indexed for chunk discovery
 
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
             .appendingPathComponent(dayDir)
@@ -124,13 +125,22 @@ struct MenuView: View {
                 microphoneDeviceId: microphoneDeviceId
             )
 
+            try transcriptionRunner.setupChunkedPipeline(
+                captureClient: captureClient,
+                outputDirectory: outputDir,
+                sessionBaseName: chunkBaseName,
+                config: config
+            )
+            transcriptionRunner.startChunkRotation()
+
             let sentinel = RecordingSentinel(
                 startedAt: Date(),
                 sessionName: sanitized.isEmpty ? "Recording" : sessionName,
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
                 micDeviceUID: microphoneDeviceId,
-                segment: 1
+                segment: 1,
+                chunkIndex: 0
             )
             try RecordingSentinel.write(sentinel)
 
@@ -148,37 +158,67 @@ struct MenuView: View {
             let sentinel = RecordingSentinel.read()
             let paths = try await captureClient.stop()
             RecordingSentinel.delete()
+
+            transcriptionRunner.stopChunkRotation()
             appState.phase = .transcribing(progress: "Transcribing...")
 
-            // Use original segment-1 paths for multi-segment discovery
-            let systemAudio: URL
-            let micAudio: URL?
-            if let sentinel, sentinel.segment > 1 {
-                // Get the original base name (strip segment suffix)
-                let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
-                let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                systemAudio = dir.appendingPathComponent(origBase + ".wav")
-                micAudio = dir.appendingPathComponent(origBase + "_mic.wav")
+            if let rotator = transcriptionRunner.chunkRotator,
+               let processor = transcriptionRunner.chunkProcessor {
+                // Process the last chunk via the chunked pipeline
+                let lastChunk = ChunkRotator.FinalizedChunk(
+                    index: rotator.currentChunkInfo.index,
+                    systemPath: paths.systemAudio.path,
+                    micPath: paths.micAudio.path,
+                    startTime: rotator.currentChunkInfo.startTime
+                )
+                await processor.processLastChunk(lastChunk)
+
+                // Final merge
+                let sessionState = processor.getSessionState()
+                let outputDir = paths.systemAudio.deletingLastPathComponent()
+                let result = try await transcriptionRunner.finalize(
+                    sessionState: sessionState,
+                    outputDirectory: outputDir,
+                    config: configManager.config
+                )
+
+                appState.lastJsonPath = result.jsonPath.path
+                appState.lastTranscriptPath = result.jsonPath.path
+                appState.phase = .idle
+                sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
+                RenameWindowController.shared.show(jsonPath: result.jsonPath)
             } else {
-                systemAudio = paths.systemAudio
-                micAudio = paths.micAudio
+                // Fallback: no chunked pipeline (e.g. crash recovery path)
+                let systemAudio: URL
+                let micAudio: URL?
+                if let sentinel, sentinel.segment > 1 {
+                    let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
+                    let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+                    systemAudio = dir.appendingPathComponent(origBase + ".wav")
+                    micAudio = dir.appendingPathComponent(origBase + "_mic.wav")
+                } else {
+                    systemAudio = paths.systemAudio
+                    micAudio = paths.micAudio
+                }
+
+                let result = try await transcriptionRunner.run(
+                    systemAudio: systemAudio,
+                    micAudio: micAudio,
+                    outputDirectory: systemAudio.deletingLastPathComponent(),
+                    config: configManager.config
+                )
+
+                appState.lastJsonPath = result.jsonPath.path
+                appState.lastTranscriptPath = result.jsonPath.path
+                appState.phase = .idle
+                sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
+                RenameWindowController.shared.show(jsonPath: result.jsonPath)
             }
 
-            let result = try await transcriptionRunner.run(
-                systemAudio: systemAudio,
-                micAudio: micAudio,
-                outputDirectory: systemAudio.deletingLastPathComponent(),
-                config: configManager.config
-            )
-
-            appState.lastJsonPath = result.jsonPath.path
-            appState.lastTranscriptPath = result.jsonPath.path
-            appState.phase = .idle
-            sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-
-            RenameWindowController.shared.show(jsonPath: result.jsonPath)
+            transcriptionRunner.teardownChunkedPipeline()
         } catch {
             RecordingSentinel.delete()
+            transcriptionRunner.teardownChunkedPipeline()
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle

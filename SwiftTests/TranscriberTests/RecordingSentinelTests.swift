@@ -196,6 +196,37 @@ struct RecordingSentinelTests {
 
     // MARK: - Segment increments
 
+    @Test func sentinelPreservesChunkIndex() throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+
+        let date = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let original = RecordingSentinel(
+            startedAt: date,
+            sessionName: "Chunk Test",
+            systemAudioPath: "/tmp/system.wav",
+            micAudioPath: "/tmp/mic.wav",
+            micDeviceUID: "UID-ABC",
+            segment: 1,
+            chunkIndex: 3
+        )
+
+        try RecordingSentinel.write(original, directory: dir)
+        let recovered = RecordingSentinel.read(directory: dir)
+
+        #expect(recovered != nil)
+        #expect(recovered?.chunkIndex == 3)
+        #expect(recovered?.segment == 1)
+
+        // Also verify incrementedSegment preserves chunkIndex
+        let incremented = original.incrementedSegment(
+            systemAudioPath: "/tmp/system-2.wav",
+            micAudioPath: "/tmp/mic-2.wav"
+        )
+        #expect(incremented.chunkIndex == 3)
+        #expect(incremented.segment == 2)
+    }
+
     @Test func segmentIncrements() {
         let date = Date(timeIntervalSinceReferenceDate: 800_000_000)
         let original = makeSentinel(startedAt: date, segment: 2)

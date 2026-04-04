@@ -10,6 +10,7 @@ public struct RecordingSentinel: Codable, Equatable {
     public var micAudioPath: String
     public var micDeviceUID: String?
     public var segment: Int
+    public var chunkIndex: Int
 
     public init(
         startedAt: Date,
@@ -17,7 +18,8 @@ public struct RecordingSentinel: Codable, Equatable {
         systemAudioPath: String,
         micAudioPath: String,
         micDeviceUID: String? = nil,
-        segment: Int = 0
+        segment: Int = 0,
+        chunkIndex: Int = 0
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -25,6 +27,20 @@ public struct RecordingSentinel: Codable, Equatable {
         self.micAudioPath = micAudioPath
         self.micDeviceUID = micDeviceUID
         self.segment = segment
+        self.chunkIndex = chunkIndex
+    }
+
+    // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0 if missing)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        sessionName = try container.decode(String.self, forKey: .sessionName)
+        systemAudioPath = try container.decode(String.self, forKey: .systemAudioPath)
+        micAudioPath = try container.decode(String.self, forKey: .micAudioPath)
+        micDeviceUID = try container.decodeIfPresent(String.self, forKey: .micDeviceUID)
+        segment = try container.decode(Int.self, forKey: .segment)
+        chunkIndex = try container.decodeIfPresent(Int.self, forKey: .chunkIndex) ?? 0
     }
 
     // MARK: - File location
@@ -108,7 +124,8 @@ public struct RecordingSentinel: Codable, Equatable {
             systemAudioPath: systemAudioPath,
             micAudioPath: micAudioPath,
             micDeviceUID: micDeviceUID,
-            segment: segment + 1
+            segment: segment + 1,
+            chunkIndex: chunkIndex
         )
     }
 }
