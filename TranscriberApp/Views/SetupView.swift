@@ -197,8 +197,14 @@ struct SetupView: View {
             let url = URL(fileURLWithPath: dir, isDirectory: true)
             do {
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                // Enumerate — same TCC code path as StorageManager.currentUsageBytes.
+                // Enumerate first — hits the same TCC code path as StorageManager.currentUsageBytes,
+                // ensuring the system folder-access prompt fires here rather than later in Settings.
                 _ = try FileManager.default.contentsOfDirectory(atPath: dir)
+                // Write probe — confirms the directory is actually writable, not just readable.
+                // A read-only directory would pass TCC but fail at recording time.
+                let probe = url.appendingPathComponent(".transcriber-write-probe-\(UUID().uuidString)")
+                try Data("probe".utf8).write(to: probe, options: .atomic)
+                try FileManager.default.removeItem(at: probe)
                 return true
             } catch {
                 return false
