@@ -34,7 +34,7 @@ CHECKLIST_FILE = Path(__file__).resolve().parent / "test-checklist.md"
 STEP_FLAGS = ("kill", "build", "install", "launch", "reset_tcc")
 
 DEFAULT_STEPS = {"kill", "build", "install", "launch"}
-TCC_SERVICES = ["Microphone", "ScreenCapture", "Calendar"]
+TCC_SERVICES = ["Microphone", "ScreenCapture", "Calendar", "SystemPolicyDocumentsFolder"]
 
 
 def parse_args() -> argparse.Namespace:

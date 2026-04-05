@@ -258,9 +258,9 @@ private struct FolderAccessRow: View {
                 try FileManager.default.createDirectory(
                     at: url, withIntermediateDirectories: true
                 )
-                let probe = url.appendingPathComponent(".transcriber-probe")
-                try Data().write(to: probe)
-                try? FileManager.default.removeItem(at: probe)
+                // Enumerate the directory — same TCC code path as StorageManager.currentUsageBytes,
+                // so the system prompt fires here (during setup) rather than later in Settings.
+                _ = try FileManager.default.contentsOfDirectory(atPath: dir)
                 return true
             } catch {
                 return false

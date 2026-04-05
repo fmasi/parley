@@ -30,8 +30,9 @@ final class LaunchGate {
         let engine = configManager.config.engine
         let modelReady = !engine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
+        let folderReady = await Self.checkFolderAccess(directory: configManager.config.recordingDirectory)
 
-        if permissionManager.allRequiredGranted && modelReady {
+        if permissionManager.allRequiredGranted && modelReady && folderReady {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(
@@ -41,6 +42,21 @@ final class LaunchGate {
                 self?.permissionsReady = true
             }
         }
+    }
+
+    private static func checkFolderAccess(directory: String) async -> Bool {
+        let dir = ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
+        return await Task.detached {
+            let url = URL(fileURLWithPath: dir, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                // Enumerate — same TCC code path as StorageManager.currentUsageBytes.
+                _ = try FileManager.default.contentsOfDirectory(atPath: dir)
+                return true
+            } catch {
+                return false
+            }
+        }.value
     }
 }
 
