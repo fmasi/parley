@@ -209,6 +209,11 @@ private enum DownloadState: Equatable {
 private struct FolderAccessRow: View {
     let directory: String
     @Binding var isGranted: Bool
+    @State private var denied = false
+
+    private var normalizedDirectory: String {
+        ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -218,7 +223,7 @@ private struct FolderAccessRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Recording Folder").fontWeight(.medium)
-                Text(abbreviatedPath)
+                Text(normalizedDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -230,32 +235,40 @@ private struct FolderAccessRow: View {
             if isGranted {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
+            } else if denied {
+                Button("Open Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
             } else {
-                Button("Grant") { verifyAccess() }
+                Button("Grant") { Task { await verifyAccess() } }
                     .controlSize(.small)
             }
         }
-        .onAppear { verifyAccess() }
+        .task { await verifyAccess() }
     }
 
-    private var abbreviatedPath: String {
-        directory.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-    }
+    private func verifyAccess() async {
+        let dir = normalizedDirectory
+        let result = await Task.detached {
+            let url = URL(fileURLWithPath: dir, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(
+                    at: url, withIntermediateDirectories: true
+                )
+                let probe = url.appendingPathComponent(".transcriber-probe")
+                try Data().write(to: probe)
+                try? FileManager.default.removeItem(at: probe)
+                return true
+            } catch {
+                return false
+            }
+        }.value
 
-    private func verifyAccess() {
-        let url = URL(fileURLWithPath: directory)
-        do {
-            try FileManager.default.createDirectory(
-                at: url, withIntermediateDirectories: true
-            )
-            // Verify write access by creating and removing a temp file
-            let probe = url.appendingPathComponent(".transcriber-probe")
-            FileManager.default.createFile(atPath: probe.path, contents: nil)
-            try? FileManager.default.removeItem(at: probe)
-            isGranted = true
-        } catch {
-            isGranted = false
-        }
+        isGranted = result
+        denied = !result
     }
 }
 
