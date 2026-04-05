@@ -30,9 +30,11 @@ final class LaunchGate {
         let engine = configManager.config.engine
         let modelReady = !engine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
-        let folderReady = await Self.checkFolderAccess(directory: configManager.config.recordingDirectory)
 
-        if permissionManager.allRequiredGranted && modelReady && folderReady {
+        // Folder access is NOT checked here — the user hasn't confirmed their
+        // recording directory until they click Continue in the setup window.
+        // Folder TCC is verified in SetupView.verifyFolderAccess() on Continue.
+        if permissionManager.allRequiredGranted && modelReady {
             permissionsReady = true
         } else {
             SetupWindowController.shared.show(
@@ -42,21 +44,6 @@ final class LaunchGate {
                 self?.permissionsReady = true
             }
         }
-    }
-
-    private static func checkFolderAccess(directory: String) async -> Bool {
-        let dir = ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
-        return await Task.detached {
-            let url = URL(fileURLWithPath: dir, isDirectory: true)
-            do {
-                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                // Enumerate — same TCC code path as StorageManager.currentUsageBytes.
-                _ = try FileManager.default.contentsOfDirectory(atPath: dir)
-                return true
-            } catch {
-                return false
-            }
-        }.value
     }
 }
 
