@@ -9,6 +9,7 @@ struct SetupView: View {
     @State private var selectedEngine: EngineID
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
+    @State private var folderAccessGranted = false
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
@@ -17,7 +18,7 @@ struct SetupView: View {
     }
 
     private var canContinue: Bool {
-        permissionManager.allRequiredGranted && modelReady
+        permissionManager.allRequiredGranted && modelReady && folderAccessGranted
     }
 
     init(permissionManager: PermissionManager, configManager: ConfigManager, onReady: @escaping () -> Void) {
@@ -70,6 +71,17 @@ struct SetupView: View {
                     detail: "Alert you when transcription finishes",
                     status: permissionManager.notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
+                )
+
+                Divider()
+
+                Text("Storage")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                FolderAccessRow(
+                    directory: configManager.config.recordingDirectory,
+                    isGranted: $folderAccessGranted
                 )
 
                 Divider()
@@ -192,6 +204,72 @@ private enum DownloadState: Equatable {
     case downloading(Double)
     case done
     case failed(String)
+}
+
+private struct FolderAccessRow: View {
+    let directory: String
+    @Binding var isGranted: Bool
+    @State private var denied = false
+
+    private var normalizedDirectory: String {
+        ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "folder.fill")
+                .frame(width: 20)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recording Folder").fontWeight(.medium)
+                Text(normalizedDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            if isGranted {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else if denied {
+                Button("Open Settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
+            } else {
+                Button("Grant") { Task { await verifyAccess() } }
+                    .controlSize(.small)
+            }
+        }
+        .task { await verifyAccess() }
+    }
+
+    private func verifyAccess() async {
+        let dir = normalizedDirectory
+        let result = await Task.detached {
+            let url = URL(fileURLWithPath: dir, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(
+                    at: url, withIntermediateDirectories: true
+                )
+                let probe = url.appendingPathComponent(".transcriber-probe")
+                try Data().write(to: probe)
+                try? FileManager.default.removeItem(at: probe)
+                return true
+            } catch {
+                return false
+            }
+        }.value
+
+        isGranted = result
+        denied = !result
+    }
 }
 
 private struct PermissionRow: View {
