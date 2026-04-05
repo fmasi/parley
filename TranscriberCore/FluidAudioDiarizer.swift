@@ -43,6 +43,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
         let fm = FileManager.default
+        // Check directory existence first — primes the VFS metadata cache so
+        // subsequent child-path checks reflect the current on-disk state.
+        guard fm.fileExists(atPath: repoDir.path) else { return false }
         return ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
             fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
         }
