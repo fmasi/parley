@@ -7,6 +7,7 @@ struct SetupView: View {
     let onReady: () -> Void
 
     @State private var selectedEngine: EngineID
+    @State private var recordingDirectory: String
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
     @State private var folderCheckDenied = false
@@ -27,6 +28,7 @@ struct SetupView: View {
         self.configManager = configManager
         self.onReady = onReady
         self._selectedEngine = State(initialValue: configManager.config.engine)
+        self._recordingDirectory = State(initialValue: configManager.config.recordingDirectory)
     }
 
     var body: some View {
@@ -80,8 +82,8 @@ struct SetupView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                FolderInfoRow(
-                    directory: configManager.config.recordingDirectory,
+                FolderPickerRow(
+                    directory: $recordingDirectory,
                     denied: folderCheckDenied
                 )
 
@@ -97,10 +99,12 @@ struct SetupView: View {
             HStack {
                 Spacer()
                 Button(checkingFolder ? "Checking…" : "Continue") {
+                    // Persist the chosen directory before verifying access.
+                    configManager.update { $0.recordingDirectory = recordingDirectory }
                     checkingFolder = true
                     folderCheckDenied = false
                     Task {
-                        let granted = await verifyFolderAccess(configManager.config.recordingDirectory)
+                        let granted = await verifyFolderAccess(recordingDirectory)
                         checkingFolder = false
                         if granted {
                             onReady()
@@ -234,10 +238,10 @@ private enum DownloadState: Equatable {
     case failed(String)
 }
 
-/// Display-only row showing the recording folder path.
+/// Shows the recording folder path with a picker button.
 /// Access is verified when the user clicks Continue, not on appear.
-private struct FolderInfoRow: View {
-    let directory: String
+private struct FolderPickerRow: View {
+    @Binding var directory: String
     let denied: Bool
 
     private var displayPath: String {
@@ -272,6 +276,19 @@ private struct FolderInfoRow: View {
                 Button("Open Settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
                         NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
+            } else {
+                Button("Choose…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.canCreateDirectories = true
+                    panel.prompt = "Select"
+                    panel.message = "Choose where to save recordings"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        directory = url.path
                     }
                 }
                 .controlSize(.small)
