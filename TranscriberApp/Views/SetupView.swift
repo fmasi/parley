@@ -7,9 +7,11 @@ struct SetupView: View {
     let onReady: () -> Void
 
     @State private var selectedEngine: EngineID
+    @State private var recordingDirectory: String
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
-    @State private var folderAccessGranted = false
+    @State private var folderCheckDenied = false
+    @State private var checkingFolder = false
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
@@ -18,7 +20,7 @@ struct SetupView: View {
     }
 
     private var canContinue: Bool {
-        permissionManager.allRequiredGranted && modelReady && folderAccessGranted
+        permissionManager.allRequiredGranted && modelReady && !checkingFolder
     }
 
     init(permissionManager: PermissionManager, configManager: ConfigManager, onReady: @escaping () -> Void) {
@@ -26,6 +28,7 @@ struct SetupView: View {
         self.configManager = configManager
         self.onReady = onReady
         self._selectedEngine = State(initialValue: configManager.config.engine)
+        self._recordingDirectory = State(initialValue: configManager.config.recordingDirectory)
     }
 
     var body: some View {
@@ -79,9 +82,9 @@ struct SetupView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                FolderAccessRow(
-                    directory: configManager.config.recordingDirectory,
-                    isGranted: $folderAccessGranted
+                FolderPickerRow(
+                    directory: $recordingDirectory,
+                    denied: folderCheckDenied
                 )
 
                 Divider()
@@ -95,9 +98,23 @@ struct SetupView: View {
 
             HStack {
                 Spacer()
-                Button("Continue") { onReady() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canContinue)
+                Button(checkingFolder ? "Checking…" : "Continue") {
+                    // Persist the chosen directory before verifying access.
+                    configManager.update { $0.recordingDirectory = recordingDirectory }
+                    checkingFolder = true
+                    folderCheckDenied = false
+                    Task {
+                        let granted = await verifyFolderAccess(recordingDirectory)
+                        checkingFolder = false
+                        if granted {
+                            onReady()
+                        } else {
+                            folderCheckDenied = true
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canContinue)
             }
         }
         .padding(24)
@@ -174,6 +191,27 @@ struct SetupView: View {
         }
     }
 
+    private func verifyFolderAccess(_ directory: String) async -> Bool {
+        let dir = ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
+        return await Task.detached {
+            let url = URL(fileURLWithPath: dir, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                // Enumerate first — hits the same TCC code path as StorageManager.currentUsageBytes,
+                // ensuring the system folder-access prompt fires here rather than later in Settings.
+                _ = try FileManager.default.contentsOfDirectory(atPath: dir)
+                // Write probe — confirms the directory is actually writable, not just readable.
+                // A read-only directory would pass TCC but fail at recording time.
+                let probe = url.appendingPathComponent(".transcriber-write-probe-\(UUID().uuidString)")
+                try Data("probe".utf8).write(to: probe, options: .atomic)
+                try FileManager.default.removeItem(at: probe)
+                return true
+            } catch {
+                return false
+            }
+        }.value
+    }
+
     private func startDownload() {
         downloadState = .downloading(0)
         downloadTask = Task {
@@ -206,13 +244,16 @@ private enum DownloadState: Equatable {
     case failed(String)
 }
 
-private struct FolderAccessRow: View {
-    let directory: String
-    @Binding var isGranted: Bool
-    @State private var denied = false
+/// Shows the recording folder path with a picker button.
+/// Access is verified when the user clicks Continue, not on appear.
+private struct FolderPickerRow: View {
+    @Binding var directory: String
+    let denied: Bool
 
-    private var normalizedDirectory: String {
-        ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
+    private var displayPath: String {
+        let expanded = (directory as NSString).expandingTildeInPath
+        let standardized = (expanded as NSString).standardizingPath
+        return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 
     var body: some View {
@@ -223,52 +264,42 @@ private struct FolderAccessRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Recording Folder").fontWeight(.medium)
-                Text(normalizedDirectory.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                Text(displayPath)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if denied {
+                    Text("Access denied — grant access in System Settings › Privacy & Security › Files and Folders")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
 
             Spacer()
 
-            if isGranted {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else if denied {
+            if denied {
                 Button("Open Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
                         NSWorkspace.shared.open(url)
                     }
                 }
                 .controlSize(.small)
             } else {
-                Button("Grant") { Task { await verifyAccess() } }
-                    .controlSize(.small)
+                Button("Choose…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.canCreateDirectories = true
+                    panel.prompt = "Select"
+                    panel.message = "Choose where to save recordings"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        directory = url.path
+                    }
+                }
+                .controlSize(.small)
             }
         }
-        .task { await verifyAccess() }
-    }
-
-    private func verifyAccess() async {
-        let dir = normalizedDirectory
-        let result = await Task.detached {
-            let url = URL(fileURLWithPath: dir, isDirectory: true)
-            do {
-                try FileManager.default.createDirectory(
-                    at: url, withIntermediateDirectories: true
-                )
-                let probe = url.appendingPathComponent(".transcriber-probe")
-                try Data().write(to: probe)
-                try? FileManager.default.removeItem(at: probe)
-                return true
-            } catch {
-                return false
-            }
-        }.value
-
-        isGranted = result
-        denied = !result
     }
 }
 

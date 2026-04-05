@@ -31,6 +31,9 @@ final class LaunchGate {
         let modelReady = !engine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
 
+        // Folder access is NOT checked here — the user hasn't confirmed their
+        // recording directory until they click Continue in the setup window.
+        // Folder TCC is verified in SetupView.verifyFolderAccess() on Continue.
         if permissionManager.allRequiredGranted && modelReady {
             permissionsReady = true
         } else {
