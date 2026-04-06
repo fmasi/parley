@@ -308,4 +308,52 @@ struct ConfigTests {
         #expect(config.engine == .resolvedDefault)
     }
 
+    // MARK: - Summary config
+
+    @Test func summaryConfigDefaultsToNil() {
+        let config = Config.default
+        #expect(config.summary == nil)
+    }
+
+    @Test func summaryConfigRoundTrips() throws {
+        var config = Config.default
+        config.summary = SummaryConfig(
+            enabled: true,
+            endpoint: "https://api.openai.com/v1",
+            apiKey: "sk-test",
+            model: "gpt-4o-mini"
+        )
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.summary?.enabled == true)
+        #expect(decoded.summary?.endpoint == "https://api.openai.com/v1")
+        #expect(decoded.summary?.apiKey == "sk-test")
+        #expect(decoded.summary?.model == "gpt-4o-mini")
+    }
+
+    @Test func summaryConfigSnakeCaseKeys() throws {
+        var config = Config.default
+        config.summary = SummaryConfig(
+            enabled: true,
+            endpoint: "http://localhost:11434/v1",
+            apiKey: "",
+            model: "llama3"
+        )
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let summaryJSON = json["summary"] as? [String: Any]
+        #expect(summaryJSON != nil)
+        #expect(summaryJSON?["api_key"] != nil)
+    }
+
+    @Test func decodesLegacyConfigWithoutSummary() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.summary == nil)
+    }
+
 }
