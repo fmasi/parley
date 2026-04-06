@@ -1,35 +1,47 @@
-# Test Checklist — v0.6.0
+# Test Checklist — v0.7.x
+
+## Echo Deduplication
+- [ ] Record with YouTube on speakers (no headphones), speak a few sentences
+- [ ] After transcription, check logs: `log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug | grep "Echo dedup"`
+- [ ] Verify embedding scores visible (not `<private>`) — should show cosine values
+- [ ] Verify your speech preserved (Local Speaker segments with your words in transcript)
+- [ ] Verify YouTube bleed removed (`echo_segments_removed > 0` in JSON metadata)
+- [ ] Open transcript JSON — confirm no local segments contain text identical to remote segments
+
+## Summary Generation
+- [ ] Verify LM Studio running with model loaded (or OpenAI endpoint configured)
+- [ ] After transcription + rename dialog, verify summary auto-generates
+- [ ] Check `-summary.md` file created alongside transcript
+- [ ] For dual-stream: verify transcript sent to LLM includes `(local)`/`(remote)` labels
+- [ ] Review summary — no echo content attributed to local speakers
+
+## Rename Dialog
+- [ ] After transcription, rename dialog appears
+- [ ] Play button works — audio plays through both speakers (mono extraction)
+- [ ] Correct channel: local speaker plays mic audio, remote speaker plays system audio
+- [ ] Multiple samples: forward button cycles through samples
+- [ ] Rename and save — verify names updated in JSON and SRT/TXT
+
+## CLI AAC Re-processing
+- [ ] `AudioTranscribe transcribe -i file.m4a` — splits and processes stereo AAC
+- [ ] `--debug` flag streams logs to stderr
+- [ ] Echo dedup runs (check `echo_segments_removed` in output JSON)
+- [ ] Output JSON written to same directory as input (or `--output-dir`)
 
 ## Audio Archive
-- [ ] Record a meeting (system + mic), verify .m4a created after transcription
-- [ ] Verify .m4a is stereo (L=mic, R=system) — play in QuickTime, check both channels
-- [ ] Verify source WAV files are deleted after successful archival
-- [ ] Verify transcript JSON audio_paths points to .m4a after archival
-- [ ] Open rename dialog after archival — verify speaker samples play correctly
-- [ ] Change archive bitrate in Settings, record again, verify file size matches expected bitrate
-- [ ] Set archive limit to 1 hour, record multiple sessions, verify oldest .m4a is cleaned up
-- [ ] Verify transcript JSON/SRT/TXT files are never deleted by quota enforcement
-- [ ] If archival fails (simulate by making output dir read-only), verify WAV files are preserved
-
-## Audio Archive Settings
-- [ ] Open Settings → Audio Archive section visible
-- [ ] Bitrate picker shows 48/64/96/128 kbps options, default 64
-- [ ] Archive limit stepper works, shows hours with MiB estimate
-- [ ] Current usage displays correctly (0 MiB on fresh install)
+- [ ] Record a meeting (system + mic), verify `.m4a` created after transcription
+- [ ] Verify `.m4a` is stereo (L=mic, R=system)
+- [ ] Verify source WAV files deleted after successful archival
+- [ ] Verify transcript JSON `audio_paths` points to `.m4a`
 
 ## Chunked Recording
-- [ ] Start recording — verify chunk-0 files created with `-0` suffix in output dir
-- [ ] Wait past chunk duration (set to 1min for testing) — verify rotation in logs (new `-1` files)
-- [ ] Stop after rotation — verify final transcript has all speech from both chunks
-- [ ] Short meeting (< chunk duration) — verify single-chunk pipeline works identically
-- [ ] Check session.json created during recording, deleted after transcription
-- [ ] Check speaker labels consistent across chunks in final transcript
-- [ ] Check absolute timestamps in transcript JSON (ISO 8601 `timestamp` field)
-- [ ] Verify WAV files deleted after archival to AAC per chunk
-- [ ] Verify log output shows chunk lifecycle events (`log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)
-- [ ] Kill app mid-recording, relaunch — verify crash recovery reprocesses only missing chunks
+- [ ] Start recording — verify chunk-0 files created with `-0` suffix
+- [ ] Wait past chunk duration (set to 1min for testing) — verify rotation in logs
+- [ ] Stop after rotation — verify final transcript has speech from both chunks
+- [ ] Speaker labels consistent across chunks in final transcript
 
 ## Regression
 - [ ] Start recording, stop, verify transcription completes
 - [ ] Rename dialog works after transcription
-- [ ] XPC crash during recording — verify recovery and segment stitching still works
+- [ ] Settings save and reload correctly
+- [ ] XPC crash during recording — verify recovery
