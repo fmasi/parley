@@ -40,20 +40,30 @@ public enum AudioArchiver {
 
         Logger.files.info("AudioArchiver: starting archive '\(baseName)'")
 
-        // 1. Read both WAVs into Float32 PCM buffers.
-        let (micBuffer, sampleRate) = try readMonoFloat32(url: micAudio, label: "mic")
-        let (sysBuffer, _) = try readMonoFloat32(url: systemAudio, label: "system")
+        // 1. Open both WAVs (no bulk load — files are streamed in blocks).
+        let micFile: AVAudioFile
+        let sysFile: AVAudioFile
+        do {
+            micFile = try AVAudioFile(forReading: micAudio)
+        } catch {
+            throw AudioArchiverError.cannotReadAudio("mic: \(error.localizedDescription)")
+        }
+        do {
+            sysFile = try AVAudioFile(forReading: systemAudio)
+        } catch {
+            throw AudioArchiverError.cannotReadAudio("system: \(error.localizedDescription)")
+        }
 
-        // 2. Interleave into stereo [L=mic, R=system].
-        let stereoBuffer = try interleave(mic: micBuffer, system: sysBuffer)
+        let sampleRate = micFile.processingFormat.sampleRate
 
-        // 3. Remove any stale output.
+        // 2. Remove any stale output.
         try? FileManager.default.removeItem(at: outputURL)
 
-        // 4. Encode to AAC.
+        // 3. Stream-encode to AAC.
         do {
-            try await encodeAAC(
-                stereoBuffer: stereoBuffer,
+            try await streamEncodeAAC(
+                micFile: micFile,
+                sysFile: sysFile,
                 sampleRate: sampleRate,
                 outputURL: outputURL,
                 bitrateKbps: bitrateKbps
@@ -65,10 +75,10 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed(error.localizedDescription)
         }
 
-        // 5. Verify output.
+        // 4. Verify output.
         try await verify(outputURL: outputURL)
 
-        // 6. Delete source WAVs.
+        // 5. Delete source WAVs.
         try? FileManager.default.removeItem(at: systemAudio)
         try? FileManager.default.removeItem(at: micAudio)
 
@@ -78,56 +88,12 @@ public enum AudioArchiver {
 
     // MARK: - Private helpers
 
-    /// Read a mono WAV into a [Float] array. Returns (samples, sampleRate).
-    private static func readMonoFloat32(url: URL, label: String) throws -> ([Float], Double) {
-        let file: AVAudioFile
-        do {
-            file = try AVAudioFile(forReading: url)
-        } catch {
-            throw AudioArchiverError.cannotReadAudio("\(label): \(error.localizedDescription)")
-        }
-
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: file.processingFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
-
-        let frameCount = AVAudioFrameCount(file.length)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            throw AudioArchiverError.cannotReadAudio("\(label): cannot allocate buffer")
-        }
-
-        do {
-            try file.read(into: buffer)
-        } catch {
-            throw AudioArchiverError.cannotReadAudio("\(label): read failed — \(error.localizedDescription)")
-        }
-
-        let count = Int(buffer.frameLength)
-        guard let ptr = buffer.floatChannelData?[0] else {
-            throw AudioArchiverError.cannotReadAudio("\(label): no float channel data")
-        }
-        let samples = Array(UnsafeBufferPointer(start: ptr, count: count))
-        return (samples, file.processingFormat.sampleRate)
-    }
-
-    /// Interleave mic (L) and system (R) samples into a stereo buffer.
-    /// Pads the shorter channel with silence.
-    private static func interleave(mic: [Float], system: [Float]) throws -> [Float] {
-        let frameCount = max(mic.count, system.count)
-        var stereo = [Float](repeating: 0, count: frameCount * 2)
-        for i in 0..<frameCount {
-            stereo[i * 2]     = i < mic.count    ? mic[i]    : 0  // L = mic
-            stereo[i * 2 + 1] = i < system.count ? system[i] : 0  // R = system
-        }
-        return stereo
-    }
-
-    /// Encode interleaved stereo Float32 samples to AAC .m4a via AVAssetWriter.
-    private static func encodeAAC(
-        stereoBuffer: [Float],
+    /// Stream both mono WAVs into a stereo AAC .m4a via AVAssetWriter.
+    /// Reads fixed-size blocks, interleaves on the fly, and releases each block
+    /// before reading the next. Memory usage is O(blockFrames) — ~1 MB.
+    private static func streamEncodeAAC(
+        micFile: AVAudioFile,
+        sysFile: AVAudioFile,
         sampleRate: Double,
         outputURL: URL,
         bitrateKbps: Int
@@ -157,12 +123,25 @@ public enum AudioArchiver {
         }
         writer.startSession(atSourceTime: .zero)
 
-        // Chunk size: 4096 frames per buffer.
-        let chunkFrames = 4096
-        let totalFrames = stereoBuffer.count / 2
-        var offset = 0
+        // Block size: 65536 frames (~1.4s at 48kHz, ~512KB stereo float32).
+        let blockFrames: AVAudioFrameCount = 65536
+        let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
 
-        // Build the ASBD for interleaved stereo Float32 at the source sample rate.
+        // Reusable read buffers — allocated once, refilled each iteration.
+        guard let micBlock = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: blockFrames),
+              let sysBlock = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: blockFrames) else {
+            throw AudioArchiverError.encodingFailed("Cannot allocate read buffers")
+        }
+
+        let totalFrames = max(micFile.length, sysFile.length)
+        var frameOffset: Int64 = 0
+
+        // Build ASBD for interleaved stereo Float32.
         var asbd = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -175,7 +154,6 @@ public enum AudioArchiver {
             mReserved: 0
         )
 
-        // Create format description.
         var fmtDesc: CMAudioFormatDescription?
         let fmtStatus = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
@@ -191,19 +169,55 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed("Cannot create format description (OSStatus \(fmtStatus))")
         }
 
-        while offset < totalFrames {
+        // Reusable interleave buffer.
+        var stereoBlock = [Float](repeating: 0, count: Int(blockFrames) * 2)
+
+        while frameOffset < totalFrames {
             guard input.isReadyForMoreMediaData else {
-                // Yield to the run loop briefly.
                 await Task.yield()
                 continue
             }
 
-            let framesThisChunk = min(chunkFrames, totalFrames - offset)
-            let byteCount = framesThisChunk * 2 * MemoryLayout<Float>.size  // interleaved stereo
+            let framesToProcess = Int(min(Int64(blockFrames), totalFrames - frameOffset))
 
-            let pts = CMTime(value: CMTimeValue(offset), timescale: CMTimeScale(sampleRate))
+            // Read mic block (zeros past EOF).
+            let micFrames: Int
+            if micFile.framePosition < micFile.length {
+                let toRead = AVAudioFrameCount(min(
+                    Int64(framesToProcess),
+                    micFile.length - micFile.framePosition
+                ))
+                try micFile.read(into: micBlock, frameCount: toRead)
+                micFrames = Int(micBlock.frameLength)
+            } else {
+                micFrames = 0
+            }
 
-            // Copy chunk into a CMBlockBuffer.
+            // Read system block (zeros past EOF).
+            let sysFrames: Int
+            if sysFile.framePosition < sysFile.length {
+                let toRead = AVAudioFrameCount(min(
+                    Int64(framesToProcess),
+                    sysFile.length - sysFile.framePosition
+                ))
+                try sysFile.read(into: sysBlock, frameCount: toRead)
+                sysFrames = Int(sysBlock.frameLength)
+            } else {
+                sysFrames = 0
+            }
+
+            // Interleave [L=mic, R=system], padding shorter channel with silence.
+            let micPtr = micBlock.floatChannelData?[0]
+            let sysPtr = sysBlock.floatChannelData?[0]
+            for i in 0..<framesToProcess {
+                stereoBlock[i * 2]     = i < micFrames ? micPtr![i] : 0  // L = mic
+                stereoBlock[i * 2 + 1] = i < sysFrames ? sysPtr![i] : 0  // R = system
+            }
+
+            let byteCount = framesToProcess * 2 * MemoryLayout<Float>.size
+            let pts = CMTime(value: CMTimeValue(frameOffset), timescale: CMTimeScale(sampleRate))
+
+            // Copy interleaved chunk into a CMBlockBuffer.
             var blockBuffer: CMBlockBuffer?
             let allocStatus = CMBlockBufferCreateWithMemoryBlock(
                 allocator: kCFAllocatorDefault,
@@ -220,11 +234,9 @@ public enum AudioArchiver {
                 throw AudioArchiverError.encodingFailed("CMBlockBuffer alloc failed (\(allocStatus))")
             }
 
-            // Fill block buffer with samples.
-            let chunkStart = offset * 2
-            let writeStatus = stereoBuffer.withUnsafeBufferPointer { ptr in
+            let writeStatus = stereoBlock.withUnsafeBufferPointer { ptr in
                 CMBlockBufferReplaceDataBytes(
-                    with: ptr.baseAddress! + chunkStart,
+                    with: ptr.baseAddress!,
                     blockBuffer: bb,
                     offsetIntoDestination: 0,
                     dataLength: byteCount
@@ -239,7 +251,7 @@ public enum AudioArchiver {
                 allocator: kCFAllocatorDefault,
                 dataBuffer: bb,
                 formatDescription: formatDescription,
-                sampleCount: CMItemCount(framesThisChunk),
+                sampleCount: CMItemCount(framesToProcess),
                 presentationTimeStamp: pts,
                 packetDescriptions: nil,
                 sampleBufferOut: &sampleBuffer
@@ -249,7 +261,7 @@ public enum AudioArchiver {
             }
 
             input.append(sb)
-            offset += framesThisChunk
+            frameOffset += Int64(framesToProcess)
         }
 
         input.markAsFinished()
