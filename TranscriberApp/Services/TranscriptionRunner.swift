@@ -40,7 +40,8 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        config: Config
+        config: Config,
+        legacyDedup: Bool = false
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -66,13 +67,15 @@ final class TranscriptionRunner {
         }
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
+        var localSpeakerDb: [String: [Float]] = [:]
+        var remoteSpeakerDb: [String: [Float]] = [:]
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
                 Logger.transcription.info("Transcribing recovery segment \(index + 1)")
             }
 
-            let systemSegments = try await transcribeStream(
+            let systemResult = try await transcribeStream(
                 audioPath: segmentPair.system,
                 source: "remote",
                 transcriber: transcriber,
@@ -80,13 +83,14 @@ final class TranscriptionRunner {
                 audioSource: .system,
                 config: config
             )
-            allSegments.append(contentsOf: systemSegments)
+            allSegments.append(contentsOf: systemResult.segments)
+            remoteSpeakerDb.merge(systemResult.speakerDatabase) { _, new in new }
             audioPaths.append(segmentPair.system)
 
             if isDualStream {
                 let micPath = segmentPair.mic
                 if FileManager.default.fileExists(atPath: micPath.path) {
-                    let micSegments = try await transcribeStream(
+                    let micResult = try await transcribeStream(
                         audioPath: micPath,
                         source: "local",
                         transcriber: transcriber,
@@ -94,7 +98,8 @@ final class TranscriptionRunner {
                         audioSource: .microphone,
                         config: config
                     )
-                    allSegments.append(contentsOf: micSegments)
+                    allSegments.append(contentsOf: micResult.segments)
+                    localSpeakerDb.merge(micResult.speakerDatabase) { _, new in new }
                     audioPaths.append(micPath)
                 }
             }
@@ -105,7 +110,23 @@ final class TranscriptionRunner {
         }
 
         allSegments.sort { $0.start < $1.start }
-        Logger.transcription.info("Total segments after merge: \(allSegments.count)")
+        Logger.transcription.info("Total segments after merge: \(allSegments.count, privacy: .public)")
+
+        // Echo dedup (remove mic bleed of remote speaker)
+        var echoRemoved = 0
+        if isDualStream {
+            let dedupResult = EchoDeduplicator.deduplicate(
+                segments: allSegments,
+                localSpeakerDatabase: localSpeakerDb,
+                remoteSpeakerDatabase: remoteSpeakerDb,
+                temporalThreshold: config.echoTemporalThreshold,
+                textThreshold: config.echoTextThreshold,
+                embeddingThreshold: config.echoEmbeddingThreshold,
+                legacyMode: legacyDedup
+            )
+            allSegments = dedupResult.segments
+            echoRemoved = dedupResult.removedCount
+        }
 
         let uniqueLanguages = Set(detectedLanguages)
         let detectedLanguage: String
@@ -122,7 +143,8 @@ final class TranscriptionRunner {
             language: detectedLanguage,
             numSpeakers: nil,
             diarization: diarizer != nil,
-            dualStream: isDualStream
+            dualStream: isDualStream,
+            echoSegmentsRemoved: echoRemoved
         )
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
@@ -230,6 +252,7 @@ final class TranscriptionRunner {
         }
 
         // 7. Assemble JSON
+        let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
             audioPaths: audioPaths,
@@ -237,7 +260,8 @@ final class TranscriptionRunner {
             language: detectedLanguage,
             numSpeakers: nil,
             diarization: true,
-            dualStream: isDualStream
+            dualStream: isDualStream,
+            echoSegmentsRemoved: totalEchoRemoved
         )
 
         let baseName = sessionState.sessionId
@@ -389,6 +413,11 @@ final class TranscriptionRunner {
         }
     }
 
+    private struct StreamResult {
+        let segments: [LabeledSegment]
+        let speakerDatabase: [String: [Float]]
+    }
+
     private func transcribeStream(
         audioPath: URL,
         source: String,
@@ -396,11 +425,11 @@ final class TranscriptionRunner {
         label: String,
         audioSource: AudioSourceType,
         config: Config
-    ) async throws -> [LabeledSegment] {
+    ) async throws -> StreamResult {
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
-            return []
+            return StreamResult(segments: [], speakerDatabase: [:])
         }
 
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
@@ -413,6 +442,7 @@ final class TranscriptionRunner {
         }
 
         var labeled: [LabeledSegment]
+        var speakerDatabase: [String: [Float]] = [:]
         if let diarizer = diarizer {
             // Run VAD concurrently with diarization (both read the same audio file)
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
@@ -428,6 +458,11 @@ final class TranscriptionRunner {
                 diarizationSegments: diarizedSegments,
                 speechMap: speechMap,
                 vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
+            )
+            // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
+            let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizedSegments)
+            speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
+                diarizationResult.speakerDatabase, using: dbKeyMap
             )
         } else {
             labeled = segments.map { seg in
@@ -448,6 +483,6 @@ final class TranscriptionRunner {
         }
 
         Logger.transcription.info("\(label.capitalized, privacy: .public) transcription: \(labeled.count) segments")
-        return labeled
+        return StreamResult(segments: labeled, speakerDatabase: speakerDatabase)
     }
 }
