@@ -1,5 +1,67 @@
 import Foundation
 
+public enum SummaryProviderType: String, Codable, Equatable, Sendable {
+    case openai
+    case lmstudio
+}
+
+public struct SummaryConfig: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var provider: SummaryProviderType
+    public var endpoint: String
+    public var apiKey: String
+    public var model: String
+    public var contextLength: Int?
+    /// Safety margin on estimated input tokens (default 10 = 10%).
+    /// Applied before adding maxOutputTokens to get the final context_length.
+    public var contextOverheadPercent: Int?
+    /// Tokens reserved for the summary response (default 2048).
+    public var maxOutputTokens: Int?
+
+    public init(
+        enabled: Bool,
+        provider: SummaryProviderType = .openai,
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        contextLength: Int? = nil,
+        contextOverheadPercent: Int? = nil,
+        maxOutputTokens: Int? = nil
+    ) {
+        self.enabled = enabled
+        self.provider = provider
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+        self.model = model
+        self.contextLength = contextLength
+        self.contextOverheadPercent = contextOverheadPercent
+        self.maxOutputTokens = maxOutputTokens
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case provider
+        case endpoint
+        case apiKey = "api_key"
+        case model
+        case contextLength = "context_length"
+        case contextOverheadPercent = "context_overhead_percent"
+        case maxOutputTokens = "max_output_tokens"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decode(Bool.self, forKey: .enabled)
+        provider = try c.decodeIfPresent(SummaryProviderType.self, forKey: .provider) ?? .openai
+        endpoint = try c.decode(String.self, forKey: .endpoint)
+        apiKey = try c.decode(String.self, forKey: .apiKey)
+        model = try c.decode(String.self, forKey: .model)
+        contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
+        contextOverheadPercent = try c.decodeIfPresent(Int.self, forKey: .contextOverheadPercent)
+        maxOutputTokens = try c.decodeIfPresent(Int.self, forKey: .maxOutputTokens)
+    }
+}
+
 public struct Config: Codable, Equatable {
     public var recordingDirectory: String
     public var silenceTimeoutMinutes: Int
@@ -10,10 +72,14 @@ public struct Config: Codable, Equatable {
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
     public var vadSpeechThreshold: Double?
+    public var echoTemporalThreshold: Double?
+    public var echoTextThreshold: Double?
+    public var echoEmbeddingThreshold: Double?
     public var archiveBitrateKbps: Int
     public var audioArchiveLimitHours: Int
     public var chunkDurationMinutes: Int
     public var chunkProcessingQos: String
+    public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
     public var validatedChunkDuration: Int {
@@ -42,10 +108,14 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
         vadSpeechThreshold: nil,
+        echoTemporalThreshold: nil,
+        echoTextThreshold: nil,
+        echoEmbeddingThreshold: nil,
         archiveBitrateKbps: 64,
         audioArchiveLimitHours: 15,
         chunkDurationMinutes: 30,
-        chunkProcessingQos: "utility"
+        chunkProcessingQos: "utility",
+        summary: nil
     )
 
     public init(
@@ -58,10 +128,14 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: String? = nil,
         engine: EngineID = .resolvedDefault,
         vadSpeechThreshold: Double? = nil,
+        echoTemporalThreshold: Double? = nil,
+        echoTextThreshold: Double? = nil,
+        echoEmbeddingThreshold: Double? = nil,
         archiveBitrateKbps: Int = 64,
         audioArchiveLimitHours: Int = 15,
         chunkDurationMinutes: Int = 30,
-        chunkProcessingQos: String = "utility"
+        chunkProcessingQos: String = "utility",
+        summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
         self.silenceTimeoutMinutes = silenceTimeoutMinutes
@@ -72,10 +146,14 @@ public struct Config: Codable, Equatable {
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
         self.vadSpeechThreshold = vadSpeechThreshold
+        self.echoTemporalThreshold = echoTemporalThreshold
+        self.echoTextThreshold = echoTextThreshold
+        self.echoEmbeddingThreshold = echoEmbeddingThreshold
         self.archiveBitrateKbps = archiveBitrateKbps
         self.audioArchiveLimitHours = audioArchiveLimitHours
         self.chunkDurationMinutes = chunkDurationMinutes
         self.chunkProcessingQos = chunkProcessingQos
+        self.summary = summary
     }
 
     enum CodingKeys: String, CodingKey {
@@ -88,10 +166,14 @@ public struct Config: Codable, Equatable {
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
         case vadSpeechThreshold = "vad_speech_threshold"
+        case echoTemporalThreshold = "echo_temporal_threshold"
+        case echoTextThreshold = "echo_text_threshold"
+        case echoEmbeddingThreshold = "echo_embedding_threshold"
         case archiveBitrateKbps = "archive_bitrate_kbps"
         case audioArchiveLimitHours = "audio_archive_limit_hours"
         case chunkDurationMinutes = "chunk_duration_minutes"
         case chunkProcessingQos = "chunk_processing_qos"
+        case summary
     }
 
     public init(from decoder: Decoder) throws {
@@ -105,9 +187,13 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
+        echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
+        echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
+        echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
         archiveBitrateKbps = try c.decodeIfPresent(Int.self, forKey: .archiveBitrateKbps) ?? 64
         audioArchiveLimitHours = try c.decodeIfPresent(Int.self, forKey: .audioArchiveLimitHours) ?? 15
         chunkDurationMinutes = try c.decodeIfPresent(Int.self, forKey: .chunkDurationMinutes) ?? 30
         chunkProcessingQos = try c.decodeIfPresent(String.self, forKey: .chunkProcessingQos) ?? "utility"
+        summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }

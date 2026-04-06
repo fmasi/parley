@@ -17,11 +17,24 @@ struct SettingsView: View {
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
     @State private var archiveUsageBytes: Int = 0
+    @State private var summaryEnabled: Bool = false
+    @State private var summaryProvider: SummaryProviderType = .openai
+    @State private var summaryEndpoint: String = ""
+    @State private var summaryApiKey: String = ""
+    @State private var summaryModel: String = "gpt-4o-mini"
+    @State private var summaryContextLength: String = ""
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
         self.permissionManager = permissionManager
         self._config = State(initialValue: configManager.config)
+        let s = configManager.config.summary
+        self._summaryEnabled = State(initialValue: s?.enabled ?? false)
+        self._summaryProvider = State(initialValue: s?.provider ?? .openai)
+        self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
+        self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
+        self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
+        self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
     }
 
     private var isDownloading: Bool {
@@ -144,6 +157,31 @@ struct SettingsView: View {
                         }
                     }
             }
+
+            Section("Meeting Summary") {
+                Toggle("Auto-summarize after transcription", isOn: $summaryEnabled)
+                if summaryEnabled {
+                    Picker("Provider", selection: $summaryProvider) {
+                        Text("OpenAI Compatible").tag(SummaryProviderType.openai)
+                        Text("LM Studio").tag(SummaryProviderType.lmstudio)
+                    }
+                    TextField("Endpoint URL", text: $summaryEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .help(summaryProvider == .lmstudio
+                            ? "LM Studio server (e.g. http://127.0.0.1:1234)"
+                            : "OpenAI-compatible endpoint (e.g. https://api.openai.com/v1)")
+                    SecureField("API Key", text: $summaryApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .help("Leave empty for local providers")
+                    TextField("Model", text: $summaryModel)
+                        .textFieldStyle(.roundedBorder)
+                    if summaryProvider == .lmstudio {
+                        TextField("Context Length", text: $summaryContextLength)
+                            .textFieldStyle(.roundedBorder)
+                            .help("Max tokens for context window (leave empty for model default)")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 450, height: 600)
@@ -156,6 +194,18 @@ struct SettingsView: View {
             }
             ToolbarItem {
                 Button("Save") {
+                    if summaryEnabled && !summaryEndpoint.isEmpty {
+                        config.summary = SummaryConfig(
+                            enabled: true,
+                            provider: summaryProvider,
+                            endpoint: summaryEndpoint,
+                            apiKey: summaryApiKey,
+                            model: summaryModel,
+                            contextLength: Int(summaryContextLength)
+                        )
+                    } else {
+                        config.summary = nil
+                    }
                     configManager.update { $0 = config }
                     saveStatus = "Saved"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

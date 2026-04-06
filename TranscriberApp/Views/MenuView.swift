@@ -189,7 +189,14 @@ struct MenuView: View {
                 appState.lastTranscriptPath = result.jsonPath.path
                 appState.phase = .idle
                 sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-                RenameWindowController.shared.show(jsonPath: result.jsonPath)
+                let jsonPath = result.jsonPath
+                let config = configManager.config
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    // Auto-summarize after rename completes (so summary has real speaker names)
+                    Task.detached(priority: .utility) {
+                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
+                    }
+                }
             } else {
                 // Fallback: no chunked pipeline (e.g. crash recovery path)
                 let systemAudio: URL
@@ -215,7 +222,13 @@ struct MenuView: View {
                 appState.lastTranscriptPath = result.jsonPath.path
                 appState.phase = .idle
                 sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-                RenameWindowController.shared.show(jsonPath: result.jsonPath)
+                let jsonPath = result.jsonPath
+                let config = configManager.config
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    Task.detached(priority: .utility) {
+                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
+                    }
+                }
             }
 
             transcriptionRunner.teardownChunkedPipeline()
