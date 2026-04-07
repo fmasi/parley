@@ -11,20 +11,34 @@ struct AudioPaths {
 @MainActor
 final class AudioCaptureClient {
     private var connection: NSXPCConnection?
+    private var crashHandlerFired = false
 
     /// Invoked when the XPC connection is invalidated (e.g. service crash).
     var onServiceCrash: (@Sendable () -> Void)?
 
     func connect() {
+        crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
         conn.remoteObjectInterface = NSXPCInterface(
             with: AudioCaptureProtocol.self
         )
+        conn.interruptionHandler = { [weak self] in
+            Task { @MainActor in
+                guard let self, !self.crashHandlerFired else { return }
+                self.crashHandlerFired = true
+                Logger.audio.warning("XPC service interrupted (crash detected)")
+                self.onServiceCrash?()
+            }
+        }
         conn.invalidationHandler = { [weak self] in
             Task { @MainActor in
                 Logger.audio.warning("XPC connection invalidated")
-                self?.connection = nil
-                self?.onServiceCrash?()
+                guard let self else { return }
+                self.connection = nil
+                if !self.crashHandlerFired {
+                    self.crashHandlerFired = true
+                    self.onServiceCrash?()
+                }
             }
         }
         conn.resume()
@@ -33,6 +47,7 @@ final class AudioCaptureClient {
     }
 
     func start(outputDirectory: URL, baseName: String, microphoneDeviceId: String? = nil) async throws {
+        crashHandlerFired = false
         let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
