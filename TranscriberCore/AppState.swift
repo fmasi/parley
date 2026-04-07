@@ -23,6 +23,9 @@ public final class AppState {
     /// Non-nil when recording was interrupted and auto-recovered.
     /// Shown as a warning in the menu until the user explicitly dismisses it.
     public var interruptionWarning: String?
+    /// Non-nil when recording failed unrecoverably (e.g. XPC crash with failed retry).
+    /// Shown as a critical alert in the menu. Stays until user explicitly dismisses.
+    public var criticalError: String?
 
     public var errorMessage: String? {
         didSet {
@@ -58,6 +61,7 @@ public final class AppState {
     }
 
     public var menuBarIcon: String {
+        if criticalError != nil { return "exclamationmark.triangle.fill" }
         if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
         case .idle: return "mic"
