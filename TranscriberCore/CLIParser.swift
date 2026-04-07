@@ -1,5 +1,14 @@
 import Foundation
 
+public enum SplitMode: Equatable {
+    /// Force L/R channel split (app convention: L=mic, R=system)
+    case split
+    /// Force single-stream processing (external recording)
+    case noSplit
+    /// Prompt the user interactively
+    case ask
+}
+
 public struct TranscribeOptions {
     public let inputs: [String]
     public let outputDir: String?
@@ -8,6 +17,7 @@ public struct TranscribeOptions {
     public let engine: String?
     public let debug: Bool
     public let legacyDedup: Bool
+    public let splitMode: SplitMode
 }
 
 public struct BenchmarkOptions {
@@ -38,12 +48,14 @@ public enum CLIParser {
         case missingSubcommand
         case unknownSubcommand(String)
         case missingRequiredArg(String)
+        case conflictingFlags(String)
 
         public var errorDescription: String? {
             switch self {
             case .missingSubcommand: return "Usage: AudioTranscribe <transcribe|rename|benchmark|summarize>"
             case .unknownSubcommand(let cmd): return "Unknown subcommand: \(cmd)"
             case .missingRequiredArg(let arg): return "Missing required argument: \(arg)"
+            case .conflictingFlags(let msg): return "Conflicting flags: \(msg)"
             }
         }
     }
@@ -78,6 +90,8 @@ public enum CLIParser {
         var engine: String?
         var debug = false
         var legacyDedup = false
+        var hasSplit = false
+        var hasNoSplit = false
 
         var i = 0
         while i < args.count {
@@ -104,6 +118,10 @@ public enum CLIParser {
                 debug = true
             case "--legacy-dedup":
                 legacyDedup = true
+            case "--split":
+                hasSplit = true
+            case "--no-split":
+                hasNoSplit = true
             default:
                 break
             }
@@ -112,10 +130,19 @@ public enum CLIParser {
 
         guard !inputs.isEmpty else { throw ParseError.missingRequiredArg("-i") }
 
+        if hasSplit && hasNoSplit {
+            throw ParseError.conflictingFlags("--split and --no-split cannot be used together")
+        }
+
+        let splitMode: SplitMode
+        if hasSplit { splitMode = .split }
+        else if hasNoSplit { splitMode = .noSplit }
+        else { splitMode = .ask }
+
         return TranscribeOptions(
             inputs: inputs, outputDir: outputDir, format: format,
             noDiarize: noDiarize, engine: engine, debug: debug,
-            legacyDedup: legacyDedup
+            legacyDedup: legacyDedup, splitMode: splitMode
         )
     }
 

@@ -47,7 +47,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle -> recording -> transcribing -> idle, `interruptionWarning` for crash recovery UI
 - `TranscriberCore/AudioConverter.swift` -- converts arbitrary PCM audio buffers to fixed 48kHz mono Int16 via AVAudioConverter, auto-detects source format changes (e.g. mic switch)
 - `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, and atomic JSON persistence
-- `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, benchmark, summarize) with typed option structs
+- `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, benchmark, summarize) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `summary: SummaryConfig`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
 - `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata

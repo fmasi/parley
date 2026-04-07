@@ -94,15 +94,33 @@ enum CLIHandler {
             outputDir = inputURLs[0].deletingLastPathComponent()
         }
 
-        // If a single stereo AAC archive is provided, split into dual mono WAVs
+        // Resolve stereo channel handling for single-file AAC input
         let systemAudio: URL
         let micAudio: URL?
-        if inputURLs.count == 1 && inputURLs[0].pathExtension.lowercased() == "m4a" {
-            let split = try await AudioSourceResolver.splitChannels(
-                stereoAac: inputURLs[0], outputDirectory: outputDir
-            )
-            systemAudio = split.remote
-            micAudio = split.local
+        let isSingleStereoAac = inputURLs.count == 1
+            && inputURLs[0].pathExtension.lowercased() == "m4a"
+
+        if isSingleStereoAac {
+            let shouldSplit: Bool
+            switch opts.splitMode {
+            case .split:
+                shouldSplit = true
+            case .noSplit:
+                shouldSplit = false
+            case .ask:
+                shouldSplit = promptForStereoHandling()
+            }
+
+            if shouldSplit {
+                let split = try await AudioSourceResolver.splitChannels(
+                    stereoAac: inputURLs[0], outputDirectory: outputDir
+                )
+                systemAudio = split.remote
+                micAudio = split.local
+            } else {
+                systemAudio = inputURLs[0]
+                micAudio = nil
+            }
         } else {
             systemAudio = inputURLs[0]
             micAudio = inputURLs.count > 1 ? inputURLs[1] : nil
@@ -201,6 +219,28 @@ enum CLIHandler {
         print("Summary saved to: \(summaryPath.path)")
     }
 
+    /// Prompt the user to choose stereo channel handling. Returns true for split, false for single stream.
+    /// Defaults to single stream (false) when stdin is not a terminal.
+    private static func promptForStereoHandling() -> Bool {
+        guard isatty(fileno(stdin)) != 0 else {
+            fputs("Note: Stereo AAC detected, treating as single stream (use --split to override)\n", stderr)
+            return false
+        }
+
+        print("""
+
+        Stereo audio detected. How should channels be handled?
+          [1] Split L/R channels (app recording: L=mic, R=system)
+          [2] Mix to single stream (external recording)
+        """)
+        print("Choice [2]: ", terminator: "")
+
+        if let input = readLine()?.trimmingCharacters(in: .whitespaces) {
+            return input == "1"
+        }
+        return false
+    }
+
     private static func printUsage() {
         let usage = """
         Usage: AudioTranscribe <subcommand> [options]
@@ -212,8 +252,10 @@ enum CLIHandler {
             -f <format>      Output format: json, srt, txt (default: json)
             --engine <id>    Engine: speech_analyzer, fluid_audio (default: from config)
             --no-diarize     Skip speaker diarization
-                --debug          Stream unified logs to stderr
-                --legacy-dedup   Use original Jaccard-only echo dedup (no window/containment)
+            --split          Force L/R channel split for stereo AAC (L=mic, R=system)
+            --no-split       Force single-stream processing (external recordings)
+            --debug          Stream unified logs to stderr
+            --legacy-dedup   Use original Jaccard-only echo dedup (no window/containment)
 
           rename      Rename speakers in a transcript (CLI)
             -i <file>        Input JSON transcript (required)

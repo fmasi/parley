@@ -70,5 +70,41 @@ struct CLIParserTests {
         }
         #expect(opts.debug == false)
         #expect(opts.legacyDedup == false)
+        #expect(opts.splitMode == .ask)
+    }
+
+    // MARK: - --split and --no-split flags
+
+    @Test func parsesSplitFlag() throws {
+        let cmd = try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.m4a", "--split"])
+        guard case .transcribe(let opts) = cmd else {
+            Issue.record("Expected .transcribe, got \(String(describing: cmd))")
+            return
+        }
+        #expect(opts.splitMode == .split)
+    }
+
+    @Test func parsesNoSplitFlag() throws {
+        let cmd = try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.m4a", "--no-split"])
+        guard case .transcribe(let opts) = cmd else {
+            Issue.record("Expected .transcribe, got \(String(describing: cmd))")
+            return
+        }
+        #expect(opts.splitMode == .noSplit)
+    }
+
+    @Test func defaultsSplitModeToAsk() throws {
+        let cmd = try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.m4a"])
+        guard case .transcribe(let opts) = cmd else {
+            Issue.record("Expected .transcribe, got \(String(describing: cmd))")
+            return
+        }
+        #expect(opts.splitMode == .ask)
+    }
+
+    @Test func conflictingSplitFlagsThrows() {
+        #expect(throws: CLIParser.ParseError.self) {
+            try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.m4a", "--split", "--no-split"])
+        }
     }
 }

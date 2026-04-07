@@ -423,9 +423,22 @@ Options:
   -f, --format <fmt>        Output format: json (default), txt, srt
   --no-diarize              Skip speaker diarization
   --engine <id>             Engine override: fluidAudio, speechAnalyzer
+  --split                   Force L/R channel split for stereo AAC (L=mic, R=system)
+  --no-split                Force single-stream processing (external recordings)
   --debug                   Enable verbose debug logging
   --legacy-dedup            Use legacy (non-windowed) echo dedup mode
 ```
+
+**Stereo channel handling:** When a single `.m4a` file is given without `--split` or `--no-split`, the CLI prompts interactively:
+
+```
+Stereo audio detected. How should channels be handled?
+  [1] Split L/R channels (app recording: L=mic, R=system)
+  [2] Mix to single stream (external recording)
+Choice [2]:
+```
+
+Default is single-stream (option 2). When stdin is not a terminal (piped/scripted), defaults to single-stream silently. Use `--split` for app recordings or `--no-split` for external files to skip the prompt.
 
 ### `rename`
 
