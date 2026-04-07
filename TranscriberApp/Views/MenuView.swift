@@ -10,8 +10,18 @@ struct MenuView: View {
     let transcriptionRunner: TranscriptionRunner
     let configManager: ConfigManager
     let calendarService: CalendarService
+    @State private var xpcRetryCount = 0
 
     var body: some View {
+        if let critical = appState.criticalError {
+            Button("🔴 \(critical)") {}
+                .disabled(true)
+            Button("Acknowledge") {
+                appState.criticalError = nil
+            }
+            Divider()
+        }
+
         if let warning = appState.interruptionWarning {
             Button("⚠ \(warning)") {}
                 .disabled(true)
@@ -119,6 +129,17 @@ struct MenuView: View {
         }
 
         do {
+            let sentinel = RecordingSentinel(
+                startedAt: Date(),
+                sessionName: sanitized.isEmpty ? "Recording" : sessionName,
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
+                micDeviceUID: microphoneDeviceId,
+                segment: 1,
+                chunkIndex: 0
+            )
+            try RecordingSentinel.write(sentinel)
+
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
@@ -133,18 +154,8 @@ struct MenuView: View {
             )
             transcriptionRunner.startChunkRotation()
 
-            let sentinel = RecordingSentinel(
-                startedAt: Date(),
-                sessionName: sanitized.isEmpty ? "Recording" : sessionName,
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
-                micDeviceUID: microphoneDeviceId,
-                segment: 1,
-                chunkIndex: 0
-            )
-            try RecordingSentinel.write(sentinel)
-
             appState.phase = .recording(since: Date())
+            xpcRetryCount = 0
         } catch {
             RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
@@ -242,12 +253,30 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
-        Logger.state.warning("XPC service crashed during recording — restarting capture")
+        xpcRetryCount += 1
+        Logger.state.warning("XPC crash during recording — attempt \(xpcRetryCount) of 2")
 
         guard let sentinel = RecordingSentinel.read() else {
             Logger.state.error("No sentinel found during crash recovery")
-            appState.errorMessage = "Recording interrupted — no recovery data"
+            appState.criticalError = "Recording failed — no recovery data available."
             appState.phase = .idle
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed. No recovery data found."
+            )
+            return
+        }
+
+        // Retry limit: give up after 2 crashes
+        if xpcRetryCount > 2 {
+            Logger.state.error("All retries exhausted after \(xpcRetryCount) crashes")
+            appState.criticalError = "Recording failed — microphone capture crashed repeatedly."
+            appState.phase = .idle
+            RecordingSentinel.delete()
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed after retry. Your recording may be incomplete."
+            )
             return
         }
 
@@ -273,10 +302,14 @@ struct MenuView: View {
                 body: "Recording was briefly interrupted and has been restarted."
             )
         } catch {
-            Logger.state.error("Failed to restart capture after XPC crash: \(error, privacy: .public)")
-            appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+            Logger.state.error("Restart failed: \(error, privacy: .public)")
+            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription)"
             appState.phase = .idle
             RecordingSentinel.delete()
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed and could not restart."
+            )
         }
     }
 
@@ -323,6 +356,31 @@ struct MenuView: View {
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 Logger.state.error("Notification failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    private func sendCriticalNotification(title: String, body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .public)")
+
+        // Floating panel — impossible to miss, no entitlement needed
+        CriticalAlertController.shared.show(title: title, message: body) {
+            // onDismiss syncs with menu bar icon acknowledgment
+        }
+
+        // Also send notification for the record (may land in Notification Center)
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .defaultCritical
+        content.interruptionLevel = .critical
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString, content: content, trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.state.error("Critical notification failed: \(error, privacy: .public)")
             }
         }
     }

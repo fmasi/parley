@@ -153,7 +153,12 @@ struct TranscriberApp: App {
                 }
             } catch {
                 Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
+                appState.criticalError = "Recording failed — could not restart after crash recovery."
                 RecordingSentinel.delete()
+                CriticalAlertController.shared.show(
+                    title: "Recording Failed",
+                    message: "Crash recovery attempted but could not restart recording."
+                )
             }
         } else {
             Logger.state.info("No usable audio files — cleaning up sentinel")
@@ -201,9 +206,14 @@ struct TranscriberApp: App {
                         try? await UNUserNotificationCenter.current().add(request)
                     }
                 } catch {
-                    appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+                    Logger.state.error("Recovery crash handler failed: \(error, privacy: .public)")
+                    appState.criticalError = "Recording failed — capture crashed and could not restart."
                     appState.phase = .idle
                     RecordingSentinel.delete()
+                    CriticalAlertController.shared.show(
+                        title: "Recording Failed",
+                        message: "Capture crashed during recovery and could not restart."
+                    )
                 }
             }
         }
