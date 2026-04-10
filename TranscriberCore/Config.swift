@@ -79,6 +79,7 @@ public struct Config: Codable, Equatable {
     public var audioArchiveLimitHours: Int
     public var chunkDurationMinutes: Int
     public var chunkProcessingQos: String
+    public var mergeChunkedAudio: Bool
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -115,6 +116,7 @@ public struct Config: Codable, Equatable {
         audioArchiveLimitHours: 15,
         chunkDurationMinutes: 30,
         chunkProcessingQos: "utility",
+        mergeChunkedAudio: true,
         summary: nil
     )
 
@@ -135,6 +137,7 @@ public struct Config: Codable, Equatable {
         audioArchiveLimitHours: Int = 15,
         chunkDurationMinutes: Int = 30,
         chunkProcessingQos: String = "utility",
+        mergeChunkedAudio: Bool = true,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -153,6 +156,7 @@ public struct Config: Codable, Equatable {
         self.audioArchiveLimitHours = audioArchiveLimitHours
         self.chunkDurationMinutes = chunkDurationMinutes
         self.chunkProcessingQos = chunkProcessingQos
+        self.mergeChunkedAudio = mergeChunkedAudio
         self.summary = summary
     }
 
@@ -173,6 +177,7 @@ public struct Config: Codable, Equatable {
         case audioArchiveLimitHours = "audio_archive_limit_hours"
         case chunkDurationMinutes = "chunk_duration_minutes"
         case chunkProcessingQos = "chunk_processing_qos"
+        case mergeChunkedAudio = "merge_chunked_audio"
         case summary
     }
 
@@ -194,6 +199,7 @@ public struct Config: Codable, Equatable {
         audioArchiveLimitHours = try c.decodeIfPresent(Int.self, forKey: .audioArchiveLimitHours) ?? 15
         chunkDurationMinutes = try c.decodeIfPresent(Int.self, forKey: .chunkDurationMinutes) ?? 30
         chunkProcessingQos = try c.decodeIfPresent(String.self, forKey: .chunkProcessingQos) ?? "utility"
+        mergeChunkedAudio = try c.decodeIfPresent(Bool.self, forKey: .mergeChunkedAudio) ?? true
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }
