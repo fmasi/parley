@@ -24,9 +24,10 @@ No separate build number — git describe already encodes commit distance from t
 | Plist key | Source | Example |
 |---|---|---|
 | `CFBundleShortVersionString` | latest tag, strip `v` prefix, fallback `0.0.0` | `0.6.1` |
+| `CFBundleVersion` | commit distance from tag (numeric, required by Apple) | `12` |
 | `ATGitDescription` | `git describe --tags --always --dirty` | `v0.6.1-12-ga3f9c12` |
 
-`CFBundleVersion` set to same value as `CFBundleShortVersionString` (Apple requires it).
+`CFBundleVersion` uses the commit distance from the latest tag (the `12` in `v0.6.1-12-ga3f9c12`). On a tagged commit it's `0`. Apple requires this to be numeric.
 
 Values are injected via `plutil` or `sed` on a working copy — the source `packaging/Info.plist` is not modified in git.
 
