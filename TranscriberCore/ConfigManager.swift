@@ -1,6 +1,8 @@
 import Foundation
+import Observation
 import os
 
+@Observable
 public final class ConfigManager {
     public static let shared = ConfigManager()
 
