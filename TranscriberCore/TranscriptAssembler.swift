@@ -21,6 +21,7 @@ public enum TranscriptAssembler {
             "num_speakers": numSpeakers.map { $0 as Any } ?? ("auto" as Any),
             "diarization": diarization,
             "dual_stream": dualStream,
+            "software_version": AppVersion.gitDescription,
         ]
         if echoSegmentsRemoved > 0 {
             metadata["echo_segments_removed"] = echoSegmentsRemoved
