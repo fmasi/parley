@@ -72,6 +72,14 @@ struct MenuView: View {
 
         Divider()
 
+        Button("About Audio Transcribe") {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.orderFrontStandardAboutPanel(options: [
+                .version: AppVersion.displayString,
+                .applicationVersion: "",
+            ])
+        }
+
         Button("Quit") {
             LaunchAgentManager.uninstall()
             NSApplication.shared.terminate(nil)
