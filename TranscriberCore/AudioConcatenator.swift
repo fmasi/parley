@@ -108,14 +108,10 @@ public enum AudioConcatenator {
         guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
             throw AudioConcatenatorError.exportFailed("Cannot create export session for preset \(preset)")
         }
-        session.outputURL = outputURL
-        session.outputFileType = fileType
-
-        await session.export()
-
-        if session.status == .failed {
-            let msg = session.error?.localizedDescription ?? "unknown error"
-            throw AudioConcatenatorError.exportFailed("\(preset): \(msg)")
+        do {
+            try await session.export(to: outputURL, as: fileType)
+        } catch {
+            throw AudioConcatenatorError.exportFailed("\(preset): \(error.localizedDescription)")
         }
         guard FileManager.default.fileExists(atPath: outputURL.path) else {
             throw AudioConcatenatorError.exportFailed("\(preset): output file missing after export")
