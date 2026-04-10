@@ -238,8 +238,29 @@ final class TranscriptionRunner {
         }
 
         // 5. Audio paths from chunks
-        let audioPaths = sessionState.chunks.map {
+        let chunkAudioPaths = sessionState.chunks.map {
             outputDirectory.appendingPathComponent($0.audioPath)
+        }
+
+        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk)
+        let audioPaths: [URL]
+        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
+            do {
+                let concatResult = try await AudioConcatenator.concatenate(
+                    sources: chunkAudioPaths,
+                    outputDirectory: outputDirectory,
+                    outputName: sessionState.sessionId
+                )
+                audioPaths = [concatResult.outputPath]
+                Logger.files.info(
+                    "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .public) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
+                )
+            } catch {
+                Logger.files.error("Audio concatenation failed, keeping separate files: \(error, privacy: .public)")
+                audioPaths = chunkAudioPaths
+            }
+        } else {
+            audioPaths = chunkAudioPaths
         }
 
         // 6. Language detection
