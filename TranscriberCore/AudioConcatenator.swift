@@ -39,6 +39,8 @@ public enum AudioConcatenator {
     ) async throws -> AudioConcatenationResult {
         guard !sources.isEmpty else { throw AudioConcatenatorError.noSources }
 
+        Logger.files.info("AudioConcatenator: stitching \(sources.count, privacy: .public) chunks → \(outputName, privacy: .public).m4a")
+
         // Single source: nothing to stitch.
         if sources.count == 1 {
             return AudioConcatenationResult(outputPath: sources[0], usedPassthrough: true)
@@ -76,7 +78,7 @@ public enum AudioConcatenator {
             preset: AVAssetExportPresetPassthrough,
             fileType: .m4a
         ) {
-            try deleteSources(sources)
+            deleteSources(sources)
             Logger.files.info("AudioConcatenator: passthrough export succeeded → \(outputURL.lastPathComponent, privacy: .public)")
             return AudioConcatenationResult(outputPath: result, usedPassthrough: true)
         }
@@ -90,7 +92,7 @@ public enum AudioConcatenator {
             preset: AVAssetExportPresetAppleM4A,
             fileType: .m4a
         )
-        try deleteSources(sources)
+        deleteSources(sources)
         Logger.files.info("AudioConcatenator: re-encode succeeded → \(outputURL.lastPathComponent, privacy: .public)")
         return AudioConcatenationResult(outputPath: result, usedPassthrough: false)
     }
@@ -118,10 +120,20 @@ public enum AudioConcatenator {
         guard FileManager.default.fileExists(atPath: outputURL.path) else {
             throw AudioConcatenatorError.exportFailed("\(preset): output file missing after export")
         }
+        let attr = try? FileManager.default.attributesOfItem(atPath: outputURL.path)
+        let size = (attr?[.size] as? Int) ?? 0
+        guard size > 0 else {
+            throw AudioConcatenatorError.exportFailed("\(preset): output file is empty")
+        }
+        let asset = AVURLAsset(url: outputURL)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !tracks.isEmpty else {
+            throw AudioConcatenatorError.exportFailed("\(preset): output has no audio tracks")
+        }
         return outputURL
     }
 
-    private static func deleteSources(_ sources: [URL]) throws {
+    private static func deleteSources(_ sources: [URL]) {
         for url in sources {
             try? FileManager.default.removeItem(at: url)
         }

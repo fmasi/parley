@@ -135,7 +135,6 @@ struct AudioConcatenatorTests {
     }
 
     enum ConcatenatorTestError: Error {
-        case cannotCreateBuffer
         case writerFailed(String)
     }
 
