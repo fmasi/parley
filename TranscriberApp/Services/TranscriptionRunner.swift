@@ -256,7 +256,9 @@ final class TranscriptionRunner {
                     "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .public) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
             } catch {
-                Logger.files.error("Audio concatenation failed, keeping separate files: \(error, privacy: .public)")
+                // concatenate() only deletes sources after a verified successful export,
+                // so on throw the chunk files are still intact.
+                Logger.files.error("Audio concatenation failed (\(type(of: error), privacy: .public)), keeping separate files: \(error, privacy: .public)")
                 audioPaths = chunkAudioPaths
             }
         } else {
