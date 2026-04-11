@@ -23,6 +23,8 @@ struct SettingsView: View {
     @State private var summaryApiKey: String = ""
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
+    @State private var settingsMicId: String?
+    @State private var settingsMicDevices: [AudioInputDevice] = []
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
@@ -35,6 +37,7 @@ struct SettingsView: View {
         self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
+        self._settingsMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
     }
 
     private var isDownloading: Bool {
@@ -69,6 +72,19 @@ struct SettingsView: View {
                     status: permissionManager.notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
                 )
+            }
+
+            Section("Default Microphone") {
+                MicrophonePicker(
+                    selectedDeviceId: $settingsMicId,
+                    devices: settingsMicDevices
+                )
+                Text("Sessions will start with this microphone unless changed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                settingsMicDevices = AudioDeviceEnumerator.availableDevices()
             }
 
             Section("Transcription Engine") {
@@ -206,6 +222,7 @@ struct SettingsView: View {
                     } else {
                         config.summary = nil
                     }
+                    config.lastMicrophoneDeviceId = settingsMicId
                     configManager.update { $0 = config }
                     saveStatus = "Saved"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
