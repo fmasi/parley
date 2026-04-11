@@ -11,6 +11,22 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
     @State private var xpcRetryCount = 0
+    @State private var selectedMicId: String?
+
+    init(
+        appState: AppState,
+        captureClient: AudioCaptureClient,
+        transcriptionRunner: TranscriptionRunner,
+        configManager: ConfigManager,
+        calendarService: CalendarService
+    ) {
+        self.appState = appState
+        self.captureClient = captureClient
+        self.transcriptionRunner = transcriptionRunner
+        self.configManager = configManager
+        self.calendarService = calendarService
+        self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
+    }
 
     var body: some View {
         if let critical = appState.criticalError {
@@ -97,11 +113,11 @@ struct MenuView: View {
 
     private func promptAndStartRecording() {
         let suggestedName = calendarService.currentEventTitle()
-        let lastMicId = configManager.config.lastMicrophoneDeviceId
         SessionNameWindowController.shared.show(
             suggestedName: suggestedName,
-            lastMicrophoneDeviceId: lastMicId
+            lastMicrophoneDeviceId: selectedMicId
         ) { sessionName, micDeviceId in
+            selectedMicId = micDeviceId
             Task { await startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
         }
     }
@@ -109,9 +125,6 @@ struct MenuView: View {
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
         Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
         appState.errorMessage = nil
-
-        // Persist the mic choice for next time
-        configManager.update { $0.lastMicrophoneDeviceId = microphoneDeviceId }
 
         let config = configManager.config
         let dateFormatter = DateFormatter()
@@ -323,28 +336,28 @@ struct MenuView: View {
 
     private var activeMicName: String {
         AudioDeviceEnumerator.availableDevices()
-            .first(where: { $0.id == configManager.config.lastMicrophoneDeviceId })?.name
+            .first(where: { $0.id == selectedMicId })?.name
             ?? "System Default"
     }
 
     private func openMicPicker() {
         if appState.isRecording {
             MicSwitchWindowController.shared.show(
-                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
+                currentDeviceId: selectedMicId,
                 buttonLabel: "Switch"
             ) { newDeviceId in
                 try await captureClient.updateMicrophone(deviceId: newDeviceId)
                 await MainActor.run {
-                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                    selectedMicId = newDeviceId
                 }
             }
         } else {
             MicSwitchWindowController.shared.show(
-                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
-                buttonLabel: "Set Default"
+                currentDeviceId: selectedMicId,
+                buttonLabel: "Switch"
             ) { newDeviceId in
                 await MainActor.run {
-                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                    selectedMicId = newDeviceId
                 }
             }
         }
