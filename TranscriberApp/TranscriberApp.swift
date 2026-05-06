@@ -1,6 +1,7 @@
 import SwiftUI
 import UserNotifications
 import TranscriberCore
+import FluidAudio
 import os
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -71,6 +72,24 @@ struct TranscriberApp: App {
         let state = appState
         Task { @MainActor in
             await Self.recoverIfNeeded(captureClient: client, appState: state)
+        }
+
+        Task.detached(priority: .background) {
+            let cacheRoot = AsrModels.defaultCacheDirectory()
+            let result = await ModelManifestService.shared.verify(
+                repo: FluidAudioEngine.parakeetRepoSlug,
+                cacheRoot: cacheRoot
+            )
+            switch result {
+            case .ok:
+                Logger.transcription.info("Manifest verify: OK")
+            case .noManifest:
+                Logger.transcription.info("Manifest verify: no manifest yet (will be written on next download)")
+            case .missing(let paths):
+                Logger.transcription.warning("Manifest verify: missing \(paths.count) file(s) — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
+            case .corrupt(let paths):
+                Logger.transcription.error("Manifest verify: \(paths.count) file(s) corrupt — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
+            }
         }
 
         let gate = launchGate
