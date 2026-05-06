@@ -12,7 +12,13 @@ public enum LaunchAgentManager {
 
     // MARK: - Plist generation
 
-    /// Returns an XML plist string for a LaunchAgent that keeps the app alive.
+    /// Returns an XML plist string for a LaunchAgent that relaunches the app on abnormal exit.
+    ///
+    /// `KeepAlive` is intentionally a dict with `SuccessfulExit: false` (NOT a plain `<true/>`).
+    /// With the boolean form, `launchctl load -w` will spawn the app immediately even when an
+    /// instance is already running via LaunchServices (e.g. dev.py's `open AudioTranscribe.app`),
+    /// producing two menu-bar icons. The dict form scopes relaunch to crash recovery only, which
+    /// matches the actual purpose of this LaunchAgent.
     public static func generatePlist(executablePath: String) -> String {
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -26,7 +32,10 @@ public enum LaunchAgentManager {
                 <string>\(executablePath)</string>
             </array>
             <key>KeepAlive</key>
-            <true/>
+            <dict>
+                <key>SuccessfulExit</key>
+                <false/>
+            </dict>
             <key>ProcessType</key>
             <string>Interactive</string>
         </dict>
