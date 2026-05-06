@@ -74,3 +74,11 @@
 - [ ] Start recording, stop, transcription completes
 - [ ] Settings save and reload correctly
 - [ ] App survives quit and relaunch (LaunchAgent)
+
+## Model manifest
+- [ ] Settings: "Check for model updates online" toggle visible (between Transcription Engine and Recording sections) and OFF by default
+- [ ] Toggle persists across app restart
+- [ ] With toggle ON, "Check now" button appears
+- [ ] "Check now" reports a status within 10s and stays under the toggle
+- [ ] Launch log contains a "Manifest verify:" line within a few seconds of startup (subsystem com.audio-transcribe.app, category transcription)
+- [ ] After deleting a file from the FluidAudio cache root (returned by `AsrModels.defaultCacheDirectory()`), next launch logs `Manifest verify: ... file(s) corrupt -- ...` or `... missing ...`
