@@ -80,6 +80,7 @@ public struct Config: Codable, Equatable {
     public var chunkDurationMinutes: Int
     public var chunkProcessingQos: String
     public var mergeChunkedAudio: Bool
+    public var modelUpdateCheckEnabled: Bool
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -117,6 +118,7 @@ public struct Config: Codable, Equatable {
         chunkDurationMinutes: 30,
         chunkProcessingQos: "utility",
         mergeChunkedAudio: true,
+        modelUpdateCheckEnabled: false,
         summary: nil
     )
 
@@ -138,6 +140,7 @@ public struct Config: Codable, Equatable {
         chunkDurationMinutes: Int = 30,
         chunkProcessingQos: String = "utility",
         mergeChunkedAudio: Bool = true,
+        modelUpdateCheckEnabled: Bool = false,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -157,6 +160,7 @@ public struct Config: Codable, Equatable {
         self.chunkDurationMinutes = chunkDurationMinutes
         self.chunkProcessingQos = chunkProcessingQos
         self.mergeChunkedAudio = mergeChunkedAudio
+        self.modelUpdateCheckEnabled = modelUpdateCheckEnabled
         self.summary = summary
     }
 
@@ -178,6 +182,7 @@ public struct Config: Codable, Equatable {
         case chunkDurationMinutes = "chunk_duration_minutes"
         case chunkProcessingQos = "chunk_processing_qos"
         case mergeChunkedAudio = "merge_chunked_audio"
+        case modelUpdateCheckEnabled = "model_update_check_enabled"
         case summary
     }
 
@@ -200,6 +205,7 @@ public struct Config: Codable, Equatable {
         chunkDurationMinutes = try c.decodeIfPresent(Int.self, forKey: .chunkDurationMinutes) ?? 30
         chunkProcessingQos = try c.decodeIfPresent(String.self, forKey: .chunkProcessingQos) ?? "utility"
         mergeChunkedAudio = try c.decodeIfPresent(Bool.self, forKey: .mergeChunkedAudio) ?? true
+        modelUpdateCheckEnabled = try c.decodeIfPresent(Bool.self, forKey: .modelUpdateCheckEnabled) ?? false
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }
