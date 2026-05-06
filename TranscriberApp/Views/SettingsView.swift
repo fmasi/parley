@@ -17,6 +17,8 @@ struct SettingsView: View {
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
     @State private var archiveUsageBytes: Int = 0
+    @State private var updateCheckInFlight = false
+    @State private var lastUpdateStatus: String?
     @State private var summaryEnabled: Bool = false
     @State private var summaryProvider: SummaryProviderType = .openai
     @State private var summaryEndpoint: String = ""
@@ -102,6 +104,24 @@ struct SettingsView: View {
 
                 if config.engine.descriptor.requiresModelDownload {
                     engineModelStatus
+                }
+            }
+
+            Section("Model Updates") {
+                Toggle("Check for model updates online", isOn: $config.modelUpdateCheckEnabled)
+                Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if config.modelUpdateCheckEnabled {
+                    Button("Check now") {
+                        Task { await runUpdateCheck() }
+                    }
+                    .disabled(updateCheckInFlight)
+                    if let status = lastUpdateStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -265,6 +285,25 @@ struct SettingsView: View {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+    }
+
+    private func runUpdateCheck() async {
+        updateCheckInFlight = true
+        defer { updateCheckInFlight = false }
+        let result = await ModelManifestService.shared.checkForUpdate(
+            repo: FluidAudioEngine.parakeetRepoSlug
+        )
+        switch result {
+        case .upToDate(let sha):
+            lastUpdateStatus = "Up to date (\(String(sha.prefix(7))))"
+        case .updateAvailable(let local, let remote, let when):
+            let date = when.map { " · \($0)" } ?? ""
+            lastUpdateStatus = "Update available: \(String(local.prefix(7))) → \(String(remote.prefix(7)))\(date). Clear the model cache and re-download from Setup to apply."
+        case .noBaseline:
+            lastUpdateStatus = "No baseline manifest yet — re-download the model to record one."
+        case .checkFailed(let reason):
+            lastUpdateStatus = "Check failed: \(reason)"
         }
     }
 
