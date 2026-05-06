@@ -41,11 +41,14 @@ public actor ModelManifestService {
         } catch {
             Logger.config.warning("Manifest: HF head lookup failed (\(error.localizedDescription, privacy: .public)) — recording manifest with empty commit SHA")
         }
+        // Truncate to whole seconds so the Date survives ISO8601 round-trip without
+        // sub-second drift (ISO8601DateEncodingStrategy drops fractional seconds).
+        let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
         let manifest = ModelManifest(
             repo: repo,
             commitSha: commitSha,
             lastModifiedISO: lastModifiedISO,
-            downloadedAt: Date(),
+            downloadedAt: now,
             sdkLabel: sdkLabel,
             files: files
         )
@@ -59,7 +62,9 @@ public actor ModelManifestService {
     public func loadManifest(for repo: String) -> ModelManifest? {
         let url = manifestURL(for: repo)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(ModelManifest.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601  // must match writeManifest's encoder
+        return try? decoder.decode(ModelManifest.self, from: data)
     }
 
     /// Re-hash files in `cacheRoot` and compare against the recorded manifest.

@@ -103,3 +103,69 @@ import Testing
         #expect(entries[0].relativePath == "real.bin")
     }
 }
+
+@Suite struct ModelManifestServicePersistenceTests {
+    private func makeService() -> (ModelManifestService, URL) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-svc-\(UUID().uuidString)")
+        return (ModelManifestService(manifestDir: dir), dir)
+    }
+
+    @Test func recordWritesManifestThatLoadsBack() async throws {
+        let (svc, _) = makeService()
+
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cache-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        try Data([0x01, 0x02]).write(to: cacheRoot.appendingPathComponent("a.bin"))
+
+        // record() will try HF — accept whatever it returns since we treat HF failure as
+        // a soft warning (empty commit sha is fine for this assertion).
+        let manifest = try await svc.record(repo: "Test/example", cacheRoot: cacheRoot, sdkLabel: "test")
+        #expect(manifest.repo == "Test/example")
+        #expect(manifest.files.count == 1)
+
+        let loaded = await svc.loadManifest(for: "Test/example")
+        #expect(loaded == manifest)
+    }
+
+    @Test func verifyDetectsMissingAndCorruptFiles() async throws {
+        let (svc, _) = makeService()
+
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cache-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+
+        let goodFile = cacheRoot.appendingPathComponent("good.bin")
+        let willCorrupt = cacheRoot.appendingPathComponent("flip.bin")
+        let willDelete = cacheRoot.appendingPathComponent("gone.bin")
+        try Data([0xAA]).write(to: goodFile)
+        try Data([0xBB]).write(to: willCorrupt)
+        try Data([0xCC]).write(to: willDelete)
+
+        _ = try await svc.record(repo: "Test/example", cacheRoot: cacheRoot, sdkLabel: "test")
+
+        // Mutate one file and remove another.
+        try Data([0xCD, 0xEF]).write(to: willCorrupt)
+        try FileManager.default.removeItem(at: willDelete)
+
+        let result = await svc.verify(repo: "Test/example", cacheRoot: cacheRoot)
+        switch result {
+        case .missing(let paths):
+            #expect(paths.contains("gone.bin"))
+        case .corrupt(let paths):
+            #expect(paths.contains("flip.bin"))
+        default:
+            Issue.record("Expected missing or corrupt, got \(result)")
+        }
+    }
+
+    @Test func verifyReturnsNoManifestWhenAbsent() async {
+        let (svc, _) = makeService()
+        let dummy = FileManager.default.temporaryDirectory
+        let result = await svc.verify(repo: "Nope/none", cacheRoot: dummy)
+        #expect(result == .noManifest)
+    }
+}
