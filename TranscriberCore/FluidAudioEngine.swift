@@ -53,6 +53,16 @@ public actor FluidAudioEngine: TranscriptionEngine {
                 { @Sendable p in handler(p.fractionCompleted) }
             }
         )
+        let cacheRoot = AsrModels.defaultCacheDirectory()
+        do {
+            _ = try await ModelManifestService.shared.record(
+                repo: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+                cacheRoot: cacheRoot,
+                sdkLabel: "FluidAudio 0.14.x"
+            )
+        } catch {
+            Logger.transcription.warning("Manifest record failed: \(error.localizedDescription, privacy: .public)")
+        }
         Logger.transcription.info("FluidAudio model pre-download complete")
     }
 
@@ -62,17 +72,20 @@ public actor FluidAudioEngine: TranscriptionEngine {
 
         let startTime = ContinuousClock.now
 
-        let fluidSource: AudioSource = audioSource == .microphone ? .microphone : .system
-        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with FluidAudio (source: \(String(describing: fluidSource), privacy: .public))")
+        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with FluidAudio (source: \(String(describing: audioSource), privacy: .public))")
 
-        let result = try await mgr.transcribe(audioPath, source: fluidSource)
+        // FluidAudio v0.14 dropped the `source:` parameter — caller now manages decoder state.
+        // We allocate a fresh state per transcribe() since each call is an offline file pass.
+        var decoderState = try TdtDecoderState()
+        let result = try await mgr.transcribe(audioPath, decoderState: &decoderState, language: nil)
 
         let elapsed = ContinuousClock.now - startTime
         let seconds = elapsed.components.seconds
         let confidence = result.confidence
 
-        // Group token timings into sentence-level segments by splitting on punctuation
-        let timings = (result.tokenTimings ?? []).map { t in
+        // Group token timings into sentence-level segments by splitting on punctuation.
+        // Disambiguate against FluidAudio.TokenTiming which now shares the name in scope.
+        let timings: [TokenTiming] = (result.tokenTimings ?? []).map { t in
             TokenTiming(startTime: t.startTime, endTime: t.endTime, token: t.token)
         }
         var segments = Self.groupTokensIntoSegments(timings, language: language, confidence: confidence)
