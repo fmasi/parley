@@ -385,4 +385,33 @@ struct ConfigTests {
         #expect(decoded.modelUpdateCheckEnabled == true)
     }
 
+    // MARK: - calendarLookaheadMinutes
+
+    @Test func decodingConfigWithoutCalendarLookaheadDefaultsTo10() throws {
+        let json = """
+        {
+          "recording_directory": "/tmp/Recordings",
+          "silence_timeout_minutes": 5,
+          "silence_detection_enabled": true,
+          "output_format": "txt",
+          "launch_on_startup": true,
+          "suppress_capture_warning": false,
+          "engine": "fluid_audio",
+          "archive_bitrate_kbps": 64,
+          "audio_archive_limit_hours": 15,
+          "chunk_duration_minutes": 30
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(Config.self, from: json)
+        #expect(cfg.calendarLookaheadMinutes == 10)
+    }
+
+    @Test func calendarLookaheadCustomValueRoundTrips() throws {
+        var cfg = Config.default
+        cfg.calendarLookaheadMinutes = 5
+        let data = try JSONEncoder().encode(cfg)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.calendarLookaheadMinutes == 5)
+    }
+
 }

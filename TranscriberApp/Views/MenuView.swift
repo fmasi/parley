@@ -112,7 +112,9 @@ struct MenuView: View {
     }
 
     private func promptAndStartRecording() {
-        let suggestedName = calendarService.currentEventTitle()
+        let suggestedName = calendarService.currentEventTitle(
+            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
+        )
         SessionNameWindowController.shared.show(
             suggestedName: suggestedName,
             lastMicrophoneDeviceId: selectedMicId

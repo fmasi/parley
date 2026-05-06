@@ -81,6 +81,11 @@ public struct Config: Codable, Equatable {
     public var chunkProcessingQos: String
     public var mergeChunkedAudio: Bool
     public var modelUpdateCheckEnabled: Bool
+    /// Minutes ahead of `now` to consider scheduled meetings as "imminent" for calendar
+    /// auto-naming. 10 minutes covers the common "I clicked record before the meeting
+    /// actually started" case without dragging unrelated future meetings into the name.
+    /// Set to 0 to disable lookahead entirely (current-meeting-only behavior).
+    public var calendarLookaheadMinutes: Int
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -119,6 +124,7 @@ public struct Config: Codable, Equatable {
         chunkProcessingQos: "utility",
         mergeChunkedAudio: true,
         modelUpdateCheckEnabled: false,
+        calendarLookaheadMinutes: 10,
         summary: nil
     )
 
@@ -141,6 +147,7 @@ public struct Config: Codable, Equatable {
         chunkProcessingQos: String = "utility",
         mergeChunkedAudio: Bool = true,
         modelUpdateCheckEnabled: Bool = false,
+        calendarLookaheadMinutes: Int = 10,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -161,6 +168,7 @@ public struct Config: Codable, Equatable {
         self.chunkProcessingQos = chunkProcessingQos
         self.mergeChunkedAudio = mergeChunkedAudio
         self.modelUpdateCheckEnabled = modelUpdateCheckEnabled
+        self.calendarLookaheadMinutes = calendarLookaheadMinutes
         self.summary = summary
     }
 
@@ -183,6 +191,7 @@ public struct Config: Codable, Equatable {
         case chunkProcessingQos = "chunk_processing_qos"
         case mergeChunkedAudio = "merge_chunked_audio"
         case modelUpdateCheckEnabled = "model_update_check_enabled"
+        case calendarLookaheadMinutes = "calendar_lookahead_minutes"
         case summary
     }
 
@@ -206,6 +215,7 @@ public struct Config: Codable, Equatable {
         chunkProcessingQos = try c.decodeIfPresent(String.self, forKey: .chunkProcessingQos) ?? "utility"
         mergeChunkedAudio = try c.decodeIfPresent(Bool.self, forKey: .mergeChunkedAudio) ?? true
         modelUpdateCheckEnabled = try c.decodeIfPresent(Bool.self, forKey: .modelUpdateCheckEnabled) ?? false
+        calendarLookaheadMinutes = try c.decodeIfPresent(Int.self, forKey: .calendarLookaheadMinutes) ?? 10
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }
