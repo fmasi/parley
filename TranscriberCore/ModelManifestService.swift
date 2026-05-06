@@ -193,12 +193,11 @@ public actor ModelManifestService {
         defer { try? handle.close() }
         var hasher = SHA256()
         let chunkSize = 1 << 20  // 1 MiB
-        while autoreleasepool(invoking: { () -> Bool in
+        while true {
             let data = handle.readData(ofLength: chunkSize)
-            if data.isEmpty { return false }
+            if data.isEmpty { break }
             hasher.update(data: data)
-            return true
-        }) {}
+        }
         let digest = hasher.finalize()
         return digest.map { String(format: "%02x", $0) }.joined()
     }
