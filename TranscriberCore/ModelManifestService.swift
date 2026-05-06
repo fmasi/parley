@@ -166,18 +166,28 @@ public actor ModelManifestService {
     /// — their inclusion is intentional so we record the on-disk reality, not a curated subset.
     static func hashAllFiles(under root: URL) throws -> [ModelManifest.FileEntry] {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) else {
+        // Resolve symlinks once so relative-path stripping survives macOS's /var → /private/var
+        // tmp-directory aliasing (the enumerator yields fully resolved URLs).
+        let resolvedRoot = root.resolvingSymlinksInPath()
+        guard let enumerator = fm.enumerator(at: resolvedRoot, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []) else {
             throw ManifestError.cacheUnreadable(root)
         }
+        let rootPath = resolvedRoot.path
         var entries: [ModelManifest.FileEntry] = []
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values.isRegularFile == true else { continue }
             let size = Int64(values.fileSize ?? 0)
             let sha = try sha256(of: url)
-            let relative = url.path.replacingOccurrences(of: root.path, with: "").trimmingPrefix("/")
+            let absolute = url.resolvingSymlinksInPath().path
+            let relative: String
+            if absolute.hasPrefix(rootPath) {
+                relative = String(absolute.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            } else {
+                relative = absolute
+            }
             entries.append(ModelManifest.FileEntry(
-                relativePath: String(relative),
+                relativePath: relative,
                 size: size,
                 sha256: sha
             ))

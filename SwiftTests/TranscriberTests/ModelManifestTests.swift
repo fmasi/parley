@@ -64,3 +64,42 @@ import Testing
         #expect(a.count == 64)  // hex digest length
     }
 }
+
+@Suite struct ModelManifestServiceWalkTests {
+    @Test func walkProducesStableSortedEntries() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-walk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sub = root.appendingPathComponent("Encoder.mlmodelc")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: sub.appendingPathComponent("weights.bin"))
+        try Data([0x02, 0x03]).write(to: root.appendingPathComponent("vocab.json"))
+
+        let entries = try ModelManifestService.hashAllFiles(under: root)
+        #expect(entries.count == 2)
+        // Sorted alphabetically by relative path.
+        #expect(entries[0].relativePath == "Encoder.mlmodelc/weights.bin")
+        #expect(entries[1].relativePath == "vocab.json")
+        #expect(entries[0].size == 1)
+        #expect(entries[1].size == 2)
+        #expect(!entries[0].sha256.isEmpty)
+    }
+
+    @Test func walkSkipsDirectoryEntriesAndSymlinks() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-walk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("real.bin")
+        try Data([0xAA]).write(to: target)
+        let link = root.appendingPathComponent("alias.bin")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let entries = try ModelManifestService.hashAllFiles(under: root)
+        // Symlink should not be hashed as a regular file.
+        #expect(entries.count == 1)
+        #expect(entries[0].relativePath == "real.bin")
+    }
+}
