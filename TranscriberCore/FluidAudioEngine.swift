@@ -18,6 +18,12 @@ public struct TokenTiming: Sendable {
 /// Transcription engine backed by FluidAudio (Parakeet model, CoreML/ANE).
 /// Fastest engine in benchmarks (~7s for 17min audio). Supports 25 EU languages.
 public actor FluidAudioEngine: TranscriptionEngine {
+    /// Hugging Face repo slug for the Parakeet TDT 0.6B v3 (CoreML) model.
+    /// Bump alongside FluidAudio if the SDK starts pulling a different default repo.
+    public static let parakeetRepoSlug = "FluidInference/parakeet-tdt-0.6b-v3-coreml"
+    /// Label written into manifest records for forensic identification of the SDK at download time.
+    public static let sdkLabel = "FluidAudio 0.14.x"
+
     private var manager: AsrManager?
     private let unloadTimeout: TimeInterval
     private var unloadTask: Task<Void, Never>?
@@ -56,9 +62,9 @@ public actor FluidAudioEngine: TranscriptionEngine {
         let cacheRoot = AsrModels.defaultCacheDirectory()
         do {
             _ = try await ModelManifestService.shared.record(
-                repo: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+                repo: Self.parakeetRepoSlug,
                 cacheRoot: cacheRoot,
-                sdkLabel: "FluidAudio 0.14.x"
+                sdkLabel: Self.sdkLabel
             )
         } catch {
             Logger.transcription.warning("Manifest record failed: \(error.localizedDescription, privacy: .public)")
