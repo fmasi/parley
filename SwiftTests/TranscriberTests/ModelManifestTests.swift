@@ -39,3 +39,28 @@ import Testing
         #expect(json.contains("\"downloaded_at\""))
     }
 }
+
+@Suite struct ModelManifestServiceHashingTests {
+    @Test func sha256OfEmptyFileMatchesKnownDigest() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-empty-\(UUID().uuidString)")
+        try Data().write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sha = try ModelManifestService.sha256(of: tmp)
+        // SHA-256 of empty input
+        #expect(sha == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
+    @Test func sha256OfMultiChunkFileIsStable() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-big-\(UUID().uuidString)")
+        // ~3 MiB so we cross at least three 1 MiB chunks.
+        let chunk = Data(repeating: 0x41, count: 1 << 20)
+        try (chunk + chunk + chunk).write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let a = try ModelManifestService.sha256(of: tmp)
+        let b = try ModelManifestService.sha256(of: tmp)
+        #expect(a == b)
+        #expect(a.count == 64)  // hex digest length
+    }
+}
