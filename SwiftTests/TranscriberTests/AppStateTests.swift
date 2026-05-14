@@ -220,4 +220,38 @@ struct AppStateTests {
         state.errorMessage = String(repeating: "b", count: 80)
         #expect(state.truncatedErrorMessage == String(repeating: "b", count: 80))
     }
+
+    // MARK: - Critical error
+
+    @Test func criticalErrorChangesIconToFilledTriangle() {
+        let state = AppState()
+        state.criticalError = "Recording failed"
+        #expect(state.menuBarIcon == "exclamationmark.triangle.fill")
+    }
+
+    @Test func criticalErrorTakesPriorityOverRegularError() {
+        let state = AppState()
+        state.errorMessage = "Regular error"
+        state.criticalError = "Critical error"
+        #expect(state.menuBarIcon == "exclamationmark.triangle.fill")
+    }
+
+    @Test func criticalErrorTakesPriorityOverRecordingPhase() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.criticalError = "Recording failed"
+        #expect(state.menuBarIcon == "exclamationmark.triangle.fill")
+    }
+
+    @Test func clearingCriticalErrorRestoresNormalIcon() {
+        let state = AppState()
+        state.criticalError = "Recording failed"
+        state.criticalError = nil
+        #expect(state.menuBarIcon == "mic")
+    }
+
+    @Test func criticalErrorIsNilInitially() {
+        let state = AppState()
+        #expect(state.criticalError == nil)
+    }
 }

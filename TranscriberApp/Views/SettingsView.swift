@@ -17,11 +17,29 @@ struct SettingsView: View {
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
     @State private var archiveUsageBytes: Int = 0
+    @State private var updateCheckInFlight = false
+    @State private var lastUpdateStatus: String?
+    @State private var summaryEnabled: Bool = false
+    @State private var summaryProvider: SummaryProviderType = .openai
+    @State private var summaryEndpoint: String = ""
+    @State private var summaryApiKey: String = ""
+    @State private var summaryModel: String = "gpt-4o-mini"
+    @State private var summaryContextLength: String = ""
+    @State private var settingsMicId: String?
+    @State private var settingsMicDevices: [AudioInputDevice] = []
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
         self.permissionManager = permissionManager
         self._config = State(initialValue: configManager.config)
+        let s = configManager.config.summary
+        self._summaryEnabled = State(initialValue: s?.enabled ?? false)
+        self._summaryProvider = State(initialValue: s?.provider ?? .openai)
+        self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
+        self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
+        self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
+        self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
+        self._settingsMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
     }
 
     private var isDownloading: Bool {
@@ -58,6 +76,19 @@ struct SettingsView: View {
                 )
             }
 
+            Section("Default Microphone") {
+                MicrophonePicker(
+                    selectedDeviceId: $settingsMicId,
+                    devices: settingsMicDevices
+                )
+                Text("Sessions will start with this microphone unless changed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                settingsMicDevices = AudioDeviceEnumerator.availableDevices()
+            }
+
             Section("Transcription Engine") {
                 Picker("Engine", selection: $config.engine) {
                     ForEach(EngineID.availableEngines) { engine in
@@ -73,6 +104,24 @@ struct SettingsView: View {
 
                 if config.engine.descriptor.requiresModelDownload {
                     engineModelStatus
+                }
+            }
+
+            Section("Model Updates") {
+                Toggle("Check for model updates online", isOn: $config.modelUpdateCheckEnabled)
+                Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if config.modelUpdateCheckEnabled {
+                    Button("Check now") {
+                        Task { await runUpdateCheck() }
+                    }
+                    .disabled(updateCheckInFlight)
+                    if let status = lastUpdateStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -144,6 +193,31 @@ struct SettingsView: View {
                         }
                     }
             }
+
+            Section("Meeting Summary") {
+                Toggle("Auto-summarize after transcription", isOn: $summaryEnabled)
+                if summaryEnabled {
+                    Picker("Provider", selection: $summaryProvider) {
+                        Text("OpenAI Compatible").tag(SummaryProviderType.openai)
+                        Text("LM Studio").tag(SummaryProviderType.lmstudio)
+                    }
+                    TextField("Endpoint URL", text: $summaryEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .help(summaryProvider == .lmstudio
+                            ? "LM Studio server (e.g. http://127.0.0.1:1234)"
+                            : "OpenAI-compatible endpoint (e.g. https://api.openai.com/v1)")
+                    SecureField("API Key", text: $summaryApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .help("Leave empty for local providers")
+                    TextField("Model", text: $summaryModel)
+                        .textFieldStyle(.roundedBorder)
+                    if summaryProvider == .lmstudio {
+                        TextField("Context Length", text: $summaryContextLength)
+                            .textFieldStyle(.roundedBorder)
+                            .help("Max tokens for context window (leave empty for model default)")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 450, height: 600)
@@ -156,6 +230,19 @@ struct SettingsView: View {
             }
             ToolbarItem {
                 Button("Save") {
+                    if summaryEnabled && !summaryEndpoint.isEmpty {
+                        config.summary = SummaryConfig(
+                            enabled: true,
+                            provider: summaryProvider,
+                            endpoint: summaryEndpoint,
+                            apiKey: summaryApiKey,
+                            model: summaryModel,
+                            contextLength: Int(summaryContextLength)
+                        )
+                    } else {
+                        config.summary = nil
+                    }
+                    config.lastMicrophoneDeviceId = settingsMicId
                     configManager.update { $0 = config }
                     saveStatus = "Saved"
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -198,6 +285,25 @@ struct SettingsView: View {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+    }
+
+    private func runUpdateCheck() async {
+        updateCheckInFlight = true
+        defer { updateCheckInFlight = false }
+        let result = await ModelManifestService.shared.checkForUpdate(
+            repo: FluidAudioEngine.parakeetRepoSlug
+        )
+        switch result {
+        case .upToDate(let sha):
+            lastUpdateStatus = "Up to date (\(String(sha.prefix(7))))"
+        case .updateAvailable(let local, let remote, let when):
+            let date = when.map { " · \($0)" } ?? ""
+            lastUpdateStatus = "Update available: \(String(local.prefix(7))) → \(String(remote.prefix(7)))\(date). Clear the model cache and re-download from Setup to apply."
+        case .noBaseline:
+            lastUpdateStatus = "No baseline manifest yet — re-download the model to record one."
+        case .checkFailed(let reason):
+            lastUpdateStatus = "Check failed: \(reason)"
         }
     }
 

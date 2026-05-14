@@ -80,6 +80,21 @@ struct TranscriptAssemblerTests {
         #expect(metadata?["num_speakers"] as? String == "auto")
     }
 
+    @Test func assembleIncludesSoftwareVersion() {
+        let json = TranscriptAssembler.assemble(
+            segments: [],
+            audioPaths: [URL(fileURLWithPath: "/tmp/a.wav")],
+            outputFormat: "json",
+            language: "en",
+            numSpeakers: nil,
+            diarization: true,
+            dualStream: false
+        )
+        let metadata = json["metadata"] as? [String: Any]
+        // In tests, Bundle.main won't have ATGitDescription, so falls back to "unknown"
+        #expect(metadata?["software_version"] as? String != nil)
+    }
+
     @Test func writeAndReadJSON() throws {
         let segments = [
             LabeledSegment(start: 1.0, end: 2.0, speaker: "Speaker 1", text: "test", source: ""),

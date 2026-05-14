@@ -1,35 +1,84 @@
-# Test Checklist — v0.6.0
+# Test Checklist — v0.7.x branch
 
-## Audio Archive
-- [ ] Record a meeting (system + mic), verify .m4a created after transcription
-- [ ] Verify .m4a is stereo (L=mic, R=system) — play in QuickTime, check both channels
-- [ ] Verify source WAV files are deleted after successful archival
-- [ ] Verify transcript JSON audio_paths points to .m4a after archival
-- [ ] Open rename dialog after archival — verify speaker samples play correctly
-- [ ] Change archive bitrate in Settings, record again, verify file size matches expected bitrate
-- [ ] Set archive limit to 1 hour, record multiple sessions, verify oldest .m4a is cleaned up
-- [ ] Verify transcript JSON/SRT/TXT files are never deleted by quota enforcement
-- [ ] If archival fails (simulate by making output dir read-only), verify WAV files are preserved
+## Version Infrastructure (#42 + #33)
+- [ ] About menu item visible between Settings and Quit
+- [ ] Click "About Audio Transcribe" — native About panel appears
+- [ ] About panel shows version like `0.6.1 (xxxxxxx)` (not "dev" or "2.0.0")
+- [ ] Record a short session, check output JSON `"software_version"` in metadata
+- [ ] `software_version` value matches `git describe` format (e.g. `v0.6.1-25-gxxxxxxx`)
 
-## Audio Archive Settings
-- [ ] Open Settings → Audio Archive section visible
-- [ ] Bitrate picker shows 48/64/96/128 kbps options, default 64
-- [ ] Archive limit stepper works, shows hours with MiB estimate
-- [ ] Current usage displays correctly (0 MiB on fresh install)
+## Mic Selection
+- [ ] Menu bar shows config default mic name on launch
+- [ ] Click mic button (idle), switch — label updates immediately
+- [ ] Restart app — mic reverts to config default (session pick not persisted)
+- [ ] Start recording dialog — pre-selects config default
+- [ ] Change mic in start dialog — after recording, restart, default unchanged
+- [ ] Mid-recording mic switch — restart app, default unchanged
+- [ ] Open Settings — default mic picker shows current config default
+- [ ] Change mic in Settings, Save — restart app, new default persists
+
+## Audio Chunk Concatenation
+- [ ] Record session longer than chunk duration — multiple chunks created
+- [ ] After finalization, single merged `.m4a` exists (not per-chunk files)
+- [ ] Merged audio plays back correctly (no gaps, no corruption)
+- [ ] Set `merge_chunked_audio: false` in config — verify per-chunk files preserved
+
+## CLI Stereo Channel Handling
+- [ ] `AudioTranscribe transcribe -i file.m4a` — prompts for stereo channel handling
+- [ ] `--split` flag splits stereo without prompting
+- [ ] `--no-split` flag processes as mono without prompting
+
+## Echo Deduplication
+- [ ] Record with YouTube on speakers (no headphones), speak a few sentences
+- [ ] Verify your speech preserved (Local Speaker segments in transcript)
+- [ ] Verify YouTube bleed removed (`echo_segments_removed > 0` in JSON metadata)
+- [ ] Open transcript JSON — no local segments contain text identical to remote segments
+
+## Summary Generation
+- [ ] Verify LLM endpoint configured (LM Studio or OpenAI)
+- [ ] After transcription + rename dialog, summary auto-generates
+- [ ] `-summary.md` file created alongside transcript
+- [ ] Dual-stream transcripts include `(local)`/`(remote)` labels in summary input
+- [ ] Summary has no echo content attributed to local speakers
+
+## Rename Dialog
+- [ ] After transcription, rename dialog appears
+- [ ] Play button works — audio plays (mono extraction from archive)
+- [ ] Correct channel: local speaker plays mic audio, remote speaker plays system audio
+- [ ] Forward button cycles through samples
+- [ ] Rename and save — names updated in JSON and SRT/TXT
+
+## CLI AAC Re-processing
+- [ ] `AudioTranscribe transcribe -i file.m4a` — splits and processes stereo AAC
+- [ ] `--debug` flag streams logs to stderr
+- [ ] Echo dedup runs (check `echo_segments_removed` in output)
+
+## XPC Crash Recovery
+- [ ] Recording survives XPC crash — auto-restart with warning banner
+- [ ] After 2 consecutive crashes — critical error panel appears
+- [ ] Critical error panel is a floating NSPanel (impossible to miss)
+- [ ] Sentinel file cleaned up after stop or crash escalation
+
+## Streaming AudioArchiver
+- [ ] Record a meeting (system + mic), verify `.m4a` created after transcription
+- [ ] `.m4a` is stereo (L=mic, R=system)
+- [ ] Source WAV files deleted after successful archival
 
 ## Chunked Recording
-- [ ] Start recording — verify chunk-0 files created with `-0` suffix in output dir
-- [ ] Wait past chunk duration (set to 1min for testing) — verify rotation in logs (new `-1` files)
-- [ ] Stop after rotation — verify final transcript has all speech from both chunks
-- [ ] Short meeting (< chunk duration) — verify single-chunk pipeline works identically
-- [ ] Check session.json created during recording, deleted after transcription
-- [ ] Check speaker labels consistent across chunks in final transcript
-- [ ] Check absolute timestamps in transcript JSON (ISO 8601 `timestamp` field)
-- [ ] Verify WAV files deleted after archival to AAC per chunk
-- [ ] Verify log output shows chunk lifecycle events (`log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug`)
-- [ ] Kill app mid-recording, relaunch — verify crash recovery reprocesses only missing chunks
+- [ ] Start recording — chunk-0 files created
+- [ ] Wait past chunk duration — rotation visible in logs
+- [ ] Stop after rotation — final transcript has speech from both chunks
+- [ ] Speaker labels consistent across chunks
 
 ## Regression
-- [ ] Start recording, stop, verify transcription completes
-- [ ] Rename dialog works after transcription
-- [ ] XPC crash during recording — verify recovery and segment stitching still works
+- [ ] Start recording, stop, transcription completes
+- [ ] Settings save and reload correctly
+- [ ] App survives quit and relaunch (LaunchAgent)
+
+## Model manifest
+- [ ] Settings: "Check for model updates online" toggle visible (between Transcription Engine and Recording sections) and OFF by default
+- [ ] Toggle persists across app restart
+- [ ] With toggle ON, "Check now" button appears
+- [ ] "Check now" reports a status within 10s and stays under the toggle
+- [ ] Launch log contains a "Manifest verify:" line within a few seconds of startup (subsystem com.audio-transcribe.app, category transcription)
+- [ ] After deleting a file from the FluidAudio cache root (returned by `AsrModels.defaultCacheDirectory()`), next launch logs `Manifest verify: ... file(s) corrupt -- ...` or `... missing ...`

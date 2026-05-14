@@ -10,9 +10,10 @@ public enum TranscriptAssembler {
         language: String,
         numSpeakers: Int?,
         diarization: Bool,
-        dualStream: Bool
+        dualStream: Bool,
+        echoSegmentsRemoved: Int = 0
     ) -> [String: Any] {
-        let metadata: [String: Any] = [
+        var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
             "audio_paths": audioPaths.map { $0.path },
             "output_format": outputFormat,
@@ -20,7 +21,11 @@ public enum TranscriptAssembler {
             "num_speakers": numSpeakers.map { $0 as Any } ?? ("auto" as Any),
             "diarization": diarization,
             "dual_stream": dualStream,
+            "software_version": AppVersion.gitDescription,
         ]
+        if echoSegmentsRemoved > 0 {
+            metadata["echo_segments_removed"] = echoSegmentsRemoved
+        }
 
         let segmentDicts: [[String: Any]] = segments.map { seg in
             var dict: [String: Any] = [

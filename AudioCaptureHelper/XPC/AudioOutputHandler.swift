@@ -114,7 +114,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }
 
-        let inputFormat = AVAudioFormat(streamDescription: asbd)!
+        guard let inputFormat = AVAudioFormat(streamDescription: asbd) else {
+            Logger.audio.error("Mic audio: unsupported format — rate=\(asbd.pointee.mSampleRate) ch=\(asbd.pointee.mChannelsPerFrame) flags=\(asbd.pointee.mFormatFlags)")
+            return
+        }
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
         guard frameCount > 0 else { return }
 

@@ -226,6 +226,32 @@ public enum SpeakerAssignment {
     }
 
     /// Tag labeled segments with source prefix for dual-stream mode.
+    /// Build the raw→friendly speaker name mapping from diarization segments.
+    /// Same logic used internally by assign() — e.g. ["S2": "Speaker 1", "S3": "Speaker 2"].
+    public static func buildSpeakerMap(from diarizationSegments: [DiarizedSegment]) -> [String: String] {
+        var uniqueSpeakers: [String] = []
+        for seg in diarizationSegments {
+            if !uniqueSpeakers.contains(seg.speaker) {
+                uniqueSpeakers.append(seg.speaker)
+            }
+        }
+        return Dictionary(
+            uniqueKeysWithValues: uniqueSpeakers.enumerated().map { (i, s) in
+                (s, "Speaker \(i + 1)")
+            }
+        )
+    }
+
+    /// Remap speaker database keys using a speaker map (raw ID → friendly name).
+    public static func remapDatabaseKeys(
+        _ database: [String: [Float]],
+        using speakerMap: [String: String]
+    ) -> [String: [Float]] {
+        Dictionary(uniqueKeysWithValues: database.map { (key, value) in
+            (speakerMap[key] ?? key, value)
+        })
+    }
+
     public static func tagWithSourcePrefix(_ segments: inout [LabeledSegment]) {
         for i in segments.indices {
             let source = segments[i].source

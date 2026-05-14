@@ -122,4 +122,51 @@ struct SpeakerAssignmentTests {
         SpeakerAssignment.tagWithSourcePrefix(&segments)
         #expect(segments[0].speaker == "Local")
     }
+
+    // MARK: - buildSpeakerMap
+
+    @Test func buildSpeakerMapMapsRawIDsToFriendlyNames() {
+        let diarization = [
+            DiarizedSegment(start: 0.0, end: 3.0, speaker: "S1"),
+            DiarizedSegment(start: 3.0, end: 6.0, speaker: "S3"),
+            DiarizedSegment(start: 6.0, end: 9.0, speaker: "S1"),
+        ]
+        let map = SpeakerAssignment.buildSpeakerMap(from: diarization)
+        // First unique speaker seen → Speaker 1, second → Speaker 2
+        #expect(map["S1"] == "Speaker 1")
+        #expect(map["S3"] == "Speaker 2")
+        #expect(map.count == 2)
+    }
+
+    @Test func buildSpeakerMapEmptyInput() {
+        let map = SpeakerAssignment.buildSpeakerMap(from: [])
+        #expect(map.isEmpty)
+    }
+
+    // MARK: - remapDatabaseKeys
+
+    @Test func remapDatabaseKeysRenamesKnownKeys() {
+        let database: [String: [Float]] = [
+            "S1": [1.0, 0.5],
+            "S3": [0.3, 0.8],
+        ]
+        let speakerMap = ["S1": "Speaker 1", "S3": "Speaker 2"]
+        let remapped = SpeakerAssignment.remapDatabaseKeys(database, using: speakerMap)
+        #expect(remapped["Speaker 1"] == [1.0, 0.5])
+        #expect(remapped["Speaker 2"] == [0.3, 0.8])
+        #expect(remapped["S1"] == nil)
+        #expect(remapped["S3"] == nil)
+    }
+
+    @Test func remapDatabaseKeysPassesThroughUnknownKeys() {
+        let database: [String: [Float]] = [
+            "S1": [1.0],
+            "UNKNOWN_ID": [0.5],
+        ]
+        let speakerMap = ["S1": "Speaker 1"]
+        let remapped = SpeakerAssignment.remapDatabaseKeys(database, using: speakerMap)
+        #expect(remapped["Speaker 1"] == [1.0])
+        // Key not in map passes through unchanged
+        #expect(remapped["UNKNOWN_ID"] == [0.5])
+    }
 }

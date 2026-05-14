@@ -1,6 +1,7 @@
 import SwiftUI
 import UserNotifications
 import TranscriberCore
+import FluidAudio
 import os
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -55,7 +56,7 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
-    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark"]
+    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark", "summarize"]
 
     init() {
         // CLI mode: only enter for known subcommands (not system-injected args)
@@ -71,6 +72,24 @@ struct TranscriberApp: App {
         let state = appState
         Task { @MainActor in
             await Self.recoverIfNeeded(captureClient: client, appState: state)
+        }
+
+        Task.detached(priority: .background) {
+            let cacheRoot = AsrModels.defaultCacheDirectory()
+            let result = await ModelManifestService.shared.verify(
+                repo: FluidAudioEngine.parakeetRepoSlug,
+                cacheRoot: cacheRoot
+            )
+            switch result {
+            case .ok:
+                Logger.transcription.info("Manifest verify: OK")
+            case .noManifest:
+                Logger.transcription.info("Manifest verify: no manifest yet (will be written on next download)")
+            case .missing(let paths):
+                Logger.transcription.warning("Manifest verify: missing \(paths.count) file(s) — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
+            case .corrupt(let paths):
+                Logger.transcription.error("Manifest verify: \(paths.count) file(s) corrupt — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
+            }
         }
 
         let gate = launchGate
@@ -153,7 +172,12 @@ struct TranscriberApp: App {
                 }
             } catch {
                 Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
+                appState.criticalError = "Recording failed — could not restart after crash recovery."
                 RecordingSentinel.delete()
+                CriticalAlertController.shared.show(
+                    title: "Recording Failed",
+                    message: "Crash recovery attempted but could not restart recording."
+                )
             }
         } else {
             Logger.state.info("No usable audio files — cleaning up sentinel")
@@ -201,9 +225,14 @@ struct TranscriberApp: App {
                         try? await UNUserNotificationCenter.current().add(request)
                     }
                 } catch {
-                    appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+                    Logger.state.error("Recovery crash handler failed: \(error, privacy: .public)")
+                    appState.criticalError = "Recording failed — capture crashed and could not restart."
                     appState.phase = .idle
                     RecordingSentinel.delete()
+                    CriticalAlertController.shared.show(
+                        title: "Recording Failed",
+                        message: "Capture crashed during recovery and could not restart."
+                    )
                 }
             }
         }

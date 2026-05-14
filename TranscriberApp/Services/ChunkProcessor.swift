@@ -113,6 +113,21 @@ final class ChunkProcessor {
         }
         allSegments.sort { $0.start < $1.start }
 
+        // 3b. Remove echo segments (mic bleed of remote speaker)
+        var echoRemoved = 0
+        if hasDualStream {
+            let dedupResult = EchoDeduplicator.deduplicate(
+                segments: allSegments,
+                localSpeakerDatabase: micResult.speakerDatabase,
+                remoteSpeakerDatabase: systemResult.speakerDatabase,
+                temporalThreshold: config.echoTemporalThreshold,
+                textThreshold: config.echoTextThreshold,
+                embeddingThreshold: config.echoEmbeddingThreshold
+            )
+            allSegments = dedupResult.segments
+            echoRemoved = dedupResult.removedCount
+        }
+
         // 4. Convert to ProcessedChunk.Segment
         let chunkSegments = allSegments.map { seg in
             ProcessedChunk.Segment(
@@ -159,7 +174,8 @@ final class ChunkProcessor {
             startTime: chunk.startTime,
             audioPath: audioPath,
             segments: chunkSegments,
-            speakerDatabase: speakerDatabase
+            speakerDatabase: speakerDatabase,
+            echoSegmentsRemoved: echoRemoved
         )
 
         // 8. Actor-isolated append + persist
@@ -224,7 +240,12 @@ final class ChunkProcessor {
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
                 )
-                speakerDatabase = diarizationResult.speakerDatabase
+                // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
+                // so they match the speaker labels in segments (used by echo dedup)
+                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
+                speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
+                    diarizationResult.speakerDatabase, using: dbKeyMap
+                )
             } catch {
                 Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
                 labeled = segments.map { seg in

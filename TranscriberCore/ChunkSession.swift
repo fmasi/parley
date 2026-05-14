@@ -37,19 +37,43 @@ public struct ProcessedChunk: Codable {
     public let audioPath: String
     public let segments: [Segment]
     public let speakerDatabase: [String: [Float]]
+    public let echoSegmentsRemoved: Int
 
     public init(
         index: Int,
         startTime: Date,
         audioPath: String,
         segments: [Segment],
-        speakerDatabase: [String: [Float]]
+        speakerDatabase: [String: [Float]],
+        echoSegmentsRemoved: Int = 0
     ) {
         self.index = index
         self.startTime = startTime
         self.audioPath = audioPath
         self.segments = segments
         self.speakerDatabase = speakerDatabase
+        self.echoSegmentsRemoved = echoSegmentsRemoved
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case index
+        case startTime
+        case audioPath
+        case segments
+        case speakerDatabase
+        case echoSegmentsRemoved = "echo_segments_removed"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        index = try c.decode(Int.self, forKey: .index)
+        startTime = try c.decode(Date.self, forKey: .startTime)
+        audioPath = try c.decode(String.self, forKey: .audioPath)
+        segments = try c.decode([Segment].self, forKey: .segments)
+        speakerDatabase = try c.decode([String: [Float]].self, forKey: .speakerDatabase)
+        echoSegmentsRemoved = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
     }
 }
 

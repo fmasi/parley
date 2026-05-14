@@ -10,8 +10,34 @@ struct MenuView: View {
     let transcriptionRunner: TranscriptionRunner
     let configManager: ConfigManager
     let calendarService: CalendarService
+    @State private var xpcRetryCount = 0
+    @State private var selectedMicId: String?
+
+    init(
+        appState: AppState,
+        captureClient: AudioCaptureClient,
+        transcriptionRunner: TranscriptionRunner,
+        configManager: ConfigManager,
+        calendarService: CalendarService
+    ) {
+        self.appState = appState
+        self.captureClient = captureClient
+        self.transcriptionRunner = transcriptionRunner
+        self.configManager = configManager
+        self.calendarService = calendarService
+        self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
+    }
 
     var body: some View {
+        if let critical = appState.criticalError {
+            Button("🔴 \(critical)") {}
+                .disabled(true)
+            Button("Acknowledge") {
+                appState.criticalError = nil
+            }
+            Divider()
+        }
+
         if let warning = appState.interruptionWarning {
             Button("⚠ \(warning)") {}
                 .disabled(true)
@@ -62,6 +88,14 @@ struct MenuView: View {
 
         Divider()
 
+        Button("About Audio Transcribe") {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.orderFrontStandardAboutPanel(options: [
+                .version: AppVersion.displayString,
+                .applicationVersion: "",
+            ])
+        }
+
         Button("Quit") {
             LaunchAgentManager.uninstall()
             NSApplication.shared.terminate(nil)
@@ -78,12 +112,14 @@ struct MenuView: View {
     }
 
     private func promptAndStartRecording() {
-        let suggestedName = calendarService.currentEventTitle()
-        let lastMicId = configManager.config.lastMicrophoneDeviceId
+        let suggestedName = calendarService.currentEventTitle(
+            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
+        )
         SessionNameWindowController.shared.show(
             suggestedName: suggestedName,
-            lastMicrophoneDeviceId: lastMicId
+            lastMicrophoneDeviceId: selectedMicId
         ) { sessionName, micDeviceId in
+            selectedMicId = micDeviceId
             Task { await startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
         }
     }
@@ -91,9 +127,6 @@ struct MenuView: View {
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
         Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
         appState.errorMessage = nil
-
-        // Persist the mic choice for next time
-        configManager.update { $0.lastMicrophoneDeviceId = microphoneDeviceId }
 
         let config = configManager.config
         let dateFormatter = DateFormatter()
@@ -119,6 +152,17 @@ struct MenuView: View {
         }
 
         do {
+            let sentinel = RecordingSentinel(
+                startedAt: Date(),
+                sessionName: sanitized.isEmpty ? "Recording" : sessionName,
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
+                micDeviceUID: microphoneDeviceId,
+                segment: 1,
+                chunkIndex: 0
+            )
+            try RecordingSentinel.write(sentinel)
+
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
@@ -133,18 +177,8 @@ struct MenuView: View {
             )
             transcriptionRunner.startChunkRotation()
 
-            let sentinel = RecordingSentinel(
-                startedAt: Date(),
-                sessionName: sanitized.isEmpty ? "Recording" : sessionName,
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path,
-                micDeviceUID: microphoneDeviceId,
-                segment: 1,
-                chunkIndex: 0
-            )
-            try RecordingSentinel.write(sentinel)
-
             appState.phase = .recording(since: Date())
+            xpcRetryCount = 0
         } catch {
             RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
@@ -189,7 +223,14 @@ struct MenuView: View {
                 appState.lastTranscriptPath = result.jsonPath.path
                 appState.phase = .idle
                 sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-                RenameWindowController.shared.show(jsonPath: result.jsonPath)
+                let jsonPath = result.jsonPath
+                let config = configManager.config
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    // Auto-summarize after rename completes (so summary has real speaker names)
+                    Task.detached(priority: .utility) {
+                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
+                    }
+                }
             } else {
                 // Fallback: no chunked pipeline (e.g. crash recovery path)
                 let systemAudio: URL
@@ -215,7 +256,13 @@ struct MenuView: View {
                 appState.lastTranscriptPath = result.jsonPath.path
                 appState.phase = .idle
                 sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-                RenameWindowController.shared.show(jsonPath: result.jsonPath)
+                let jsonPath = result.jsonPath
+                let config = configManager.config
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    Task.detached(priority: .utility) {
+                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
+                    }
+                }
             }
 
             transcriptionRunner.teardownChunkedPipeline()
@@ -229,12 +276,30 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
-        Logger.state.warning("XPC service crashed during recording — restarting capture")
+        xpcRetryCount += 1
+        Logger.state.warning("XPC crash during recording — attempt \(xpcRetryCount) of 2")
 
         guard let sentinel = RecordingSentinel.read() else {
             Logger.state.error("No sentinel found during crash recovery")
-            appState.errorMessage = "Recording interrupted — no recovery data"
+            appState.criticalError = "Recording failed — no recovery data available."
             appState.phase = .idle
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed. No recovery data found."
+            )
+            return
+        }
+
+        // Retry limit: give up after 2 crashes
+        if xpcRetryCount > 2 {
+            Logger.state.error("All retries exhausted after \(xpcRetryCount) crashes")
+            appState.criticalError = "Recording failed — microphone capture crashed repeatedly."
+            appState.phase = .idle
+            RecordingSentinel.delete()
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed after retry. Your recording may be incomplete."
+            )
             return
         }
 
@@ -260,37 +325,41 @@ struct MenuView: View {
                 body: "Recording was briefly interrupted and has been restarted."
             )
         } catch {
-            Logger.state.error("Failed to restart capture after XPC crash: \(error, privacy: .public)")
-            appState.errorMessage = "Recording lost — failed to restart: \(error.localizedDescription)"
+            Logger.state.error("Restart failed: \(error, privacy: .public)")
+            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription)"
             appState.phase = .idle
             RecordingSentinel.delete()
+            sendCriticalNotification(
+                title: "Recording Failed",
+                body: "Microphone capture crashed and could not restart."
+            )
         }
     }
 
     private var activeMicName: String {
         AudioDeviceEnumerator.availableDevices()
-            .first(where: { $0.id == configManager.config.lastMicrophoneDeviceId })?.name
+            .first(where: { $0.id == selectedMicId })?.name
             ?? "System Default"
     }
 
     private func openMicPicker() {
         if appState.isRecording {
             MicSwitchWindowController.shared.show(
-                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
+                currentDeviceId: selectedMicId,
                 buttonLabel: "Switch"
             ) { newDeviceId in
                 try await captureClient.updateMicrophone(deviceId: newDeviceId)
                 await MainActor.run {
-                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                    selectedMicId = newDeviceId
                 }
             }
         } else {
             MicSwitchWindowController.shared.show(
-                currentDeviceId: configManager.config.lastMicrophoneDeviceId,
-                buttonLabel: "Set Default"
+                currentDeviceId: selectedMicId,
+                buttonLabel: "Switch"
             ) { newDeviceId in
                 await MainActor.run {
-                    configManager.update { $0.lastMicrophoneDeviceId = newDeviceId }
+                    selectedMicId = newDeviceId
                 }
             }
         }
@@ -310,6 +379,31 @@ struct MenuView: View {
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 Logger.state.error("Notification failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    private func sendCriticalNotification(title: String, body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .public)")
+
+        // Floating panel — impossible to miss, no entitlement needed
+        CriticalAlertController.shared.show(title: title, message: body) {
+            // onDismiss syncs with menu bar icon acknowledgment
+        }
+
+        // Also send notification for the record (may land in Notification Center)
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .defaultCritical
+        content.interruptionLevel = .critical
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString, content: content, trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Logger.state.error("Critical notification failed: \(error, privacy: .public)")
             }
         }
     }

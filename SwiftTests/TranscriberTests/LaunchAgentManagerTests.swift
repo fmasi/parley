@@ -23,9 +23,22 @@ struct LaunchAgentManagerTests {
         #expect(plist.contains("/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe"))
         #expect(!plist.contains("BundlePath"))
         #expect(plist.contains("KeepAlive"))
-        #expect(plist.contains("<true/>"))
         #expect(plist.contains("ProcessType"))
         #expect(plist.contains("Interactive"))
+    }
+
+    @Test func keepAliveScopedToCrashesOnly() {
+        // The LaunchAgent must NOT use the boolean <true/> form of KeepAlive.
+        // That form makes `launchctl load -w` spawn a duplicate instance whenever the
+        // app is launched via LaunchServices (`open`) and the agent is loaded right after,
+        // producing two menu-bar icons. The dict + SuccessfulExit:false form scopes
+        // relaunch to crash recovery only.
+        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe")
+        #expect(plist.contains("<key>SuccessfulExit</key>"))
+        #expect(plist.contains("<false/>"))
+        // Sanity: the boolean form must not slip back in.
+        let keepAliveBoolean = "<key>KeepAlive</key>\n            <true/>"
+        #expect(!plist.contains(keepAliveBoolean))
     }
 
     // MARK: - install

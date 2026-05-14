@@ -35,6 +35,25 @@ fi
 
 BUILD_DIR=".build/arm64-apple-macosx/$CONFIG"
 
+# ── Compute version from git ─────────────────────────────────────────────────
+GIT_DESCRIPTION="$(git describe --tags --always --dirty 2>/dev/null || echo 'unknown')"
+# Strip 'v' prefix for CFBundleShortVersionString: "v0.6.1" -> "0.6.1"
+TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+if [[ -n "$TAG" ]]; then
+    VERSION="${TAG#v}"
+else
+    VERSION="0.0.0"
+fi
+# Commit distance for CFBundleVersion: "v0.6.1-12-ga3f9c12" -> "12", on tag -> "0"
+if [[ "$GIT_DESCRIPTION" == *-*-g* ]]; then
+    # Has distance component
+    DISTANCE="$(echo "$GIT_DESCRIPTION" | sed -E 's/^v?[0-9]+\.[0-9]+\.[0-9]+-([0-9]+)-g.*/\1/')"
+else
+    DISTANCE="0"
+fi
+
+echo "   Version: $VERSION (distance: $DISTANCE, git: $GIT_DESCRIPTION)"
+
 # ── Assemble app bundle ───────────────────────────────────────────────────────
 APP="dist/AudioTranscribe.app"
 CONTENTS="$APP/Contents"
@@ -48,7 +67,11 @@ rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES" "$XPC_MACOS"
 
 # Info plists
-cp packaging/Info.plist                  "$CONTENTS/Info.plist"
+# Info plist with version injection
+cp packaging/Info.plist "$CONTENTS/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$CONTENTS/Info.plist"
+plutil -replace CFBundleVersion -string "$DISTANCE" "$CONTENTS/Info.plist"
+plutil -insert ATGitDescription -string "$GIT_DESCRIPTION" "$CONTENTS/Info.plist"
 cp packaging/AudioCaptureHelper-Info.plist "$XPC_BUNDLE/Contents/Info.plist"
 
 # App icon
