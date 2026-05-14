@@ -44,3 +44,9 @@ dist/
 
 # Git worktrees
 .worktrees/
+
+# Editor settings
+.vscode/
+
+# ASR monitoring research notes (monthly workflow output)
+asr-news-*.md
