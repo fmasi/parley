@@ -16,7 +16,6 @@ public struct TranscribeOptions {
     public let noDiarize: Bool
     public let engine: String?
     public let debug: Bool
-    public let legacyDedup: Bool
     public let splitMode: SplitMode
 }
 
@@ -89,7 +88,6 @@ public enum CLIParser {
         var noDiarize = false
         var engine: String?
         var debug = false
-        var legacyDedup = false
         var hasSplit = false
         var hasNoSplit = false
 
@@ -116,8 +114,6 @@ public enum CLIParser {
                 engine = args[i]
             case "--debug":
                 debug = true
-            case "--legacy-dedup":
-                legacyDedup = true
             case "--split":
                 hasSplit = true
             case "--no-split":
@@ -142,7 +138,7 @@ public enum CLIParser {
         return TranscribeOptions(
             inputs: inputs, outputDir: outputDir, format: format,
             noDiarize: noDiarize, engine: engine, debug: debug,
-            legacyDedup: legacyDedup, splitMode: splitMode
+            splitMode: splitMode
         )
     }
 

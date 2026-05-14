@@ -141,8 +141,7 @@ enum CLIHandler {
             systemAudio: systemAudio,
             micAudio: micAudio,
             outputDirectory: outputDir,
-            config: runConfig,
-            legacyDedup: opts.legacyDedup
+            config: runConfig
         )
 
         print("Output saved to: \(result.jsonPath.path)")
@@ -255,7 +254,6 @@ enum CLIHandler {
             --split          Force L/R channel split for stereo AAC (L=mic, R=system)
             --no-split       Force single-stream processing (external recordings)
             --debug          Stream unified logs to stderr
-            --legacy-dedup   Use original Jaccard-only echo dedup (no window/containment)
 
           rename      Rename speakers in a transcript (CLI)
             -i <file>        Input JSON transcript (required)

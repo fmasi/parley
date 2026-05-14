@@ -40,8 +40,7 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        config: Config,
-        legacyDedup: Bool = false
+        config: Config
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -121,8 +120,7 @@ final class TranscriptionRunner {
                 remoteSpeakerDatabase: remoteSpeakerDb,
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold,
-                legacyMode: legacyDedup
+                embeddingThreshold: config.echoEmbeddingThreshold
             )
             allSegments = dedupResult.segments
             echoRemoved = dedupResult.removedCount

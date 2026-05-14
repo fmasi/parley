@@ -40,7 +40,7 @@ struct CLIParserTests {
         }
     }
 
-    // MARK: - --debug and --legacy-dedup flags
+    // MARK: - --debug flag
 
     @Test func parsesDebugFlag() throws {
         let cmd = try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.wav", "--debug"])
@@ -49,17 +49,6 @@ struct CLIParserTests {
             return
         }
         #expect(opts.debug == true)
-        #expect(opts.legacyDedup == false)
-    }
-
-    @Test func parsesLegacyDedupFlag() throws {
-        let cmd = try CLIParser.parse(["AudioTranscribe", "transcribe", "-i", "test.wav", "--legacy-dedup"])
-        guard case .transcribe(let opts) = cmd else {
-            Issue.record("Expected .transcribe, got \(String(describing: cmd))")
-            return
-        }
-        #expect(opts.legacyDedup == true)
-        #expect(opts.debug == false)
     }
 
     @Test func defaultsFlagsToFalse() throws {
@@ -69,7 +58,6 @@ struct CLIParserTests {
             return
         }
         #expect(opts.debug == false)
-        #expect(opts.legacyDedup == false)
         #expect(opts.splitMode == .ask)
     }
 
