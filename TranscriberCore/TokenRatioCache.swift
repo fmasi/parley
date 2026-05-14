@@ -21,7 +21,8 @@ public final class TokenRatioCache: Sendable {
 
     /// Calibration probe: transcript-style text with timestamps and speaker labels.
     /// Mimics real input to get a representative chars/token ratio.
-    /// 309 chars — large enough that template overhead (~12 tokens) is <15% of total.
+    /// 283 chars — large enough that template overhead (~12 tokens) is <15% of total.
+    /// Unit tests pin probeChars to probeText.utf8.count to prevent drift.
     static let probeText = """
     [00:00:00] Alice: Good morning everyone, let's get started with the weekly standup.
     [00:00:15] Bob: Sure. I finished the authentication module yesterday and started on the API tests.
