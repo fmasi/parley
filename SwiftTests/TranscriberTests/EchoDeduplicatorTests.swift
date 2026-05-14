@@ -324,4 +324,28 @@ struct EchoDeduplicatorTests {
         )
         #expect(result.segments.count == 2)
     }
+
+    /// The local voice matches Remote Speaker 1 by embedding. A different remote
+    /// speaker (Speaker 2) happens to be saying the same text in the same window
+    /// — that overlap must NOT cause the local segment to be dropped, because
+    /// the local voice does not resemble Speaker 2.
+    @Test func keepsLocalWhenOverlappingTextIsFromDifferentRemoteSpeaker() {
+        let segments = [
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Totally different content", source: "remote"),
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 2", text: "The quick brown fox", source: "remote"),
+            LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+        ]
+        // Local Speaker 1 embeds like Remote Speaker 1 (not Speaker 2)
+        let remoteDb: [String: [Float]] = [
+            "Speaker 1": [1.0, 0.5, 0.3, 0.2],
+            "Speaker 2": [0.1, 0.2, 0.9, 0.4],
+        ]
+        let localDb: [String: [Float]] = ["Speaker 1": [0.98, 0.52, 0.31, 0.19]]
+
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
+        )
+        #expect(result.segments.count == 3)
+        #expect(result.removedCount == 0)
+    }
 }

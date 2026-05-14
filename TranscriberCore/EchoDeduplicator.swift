@@ -122,10 +122,12 @@ public enum EchoDeduplicator {
         textThreshold: Double,
         embeddingThreshold: Float
     ) -> Bool {
-        // Gate 3: embedding similarity
-        // Look up local speaker's embedding by name (after tagWithSourcePrefix: "Local Speaker 1" → "Speaker 1")
-        let localSpeakerName = local.speaker
-            .replacingOccurrences(of: "Local ", with: "")
+        // Speaker embedding gate runs first (cheap), then temporal+text per overlap.
+        // Recover the DB key for this local speaker (segments are prefixed by
+        // tagWithSourcePrefix as "Local Speaker N"; DB keys are "Speaker N").
+        let localSpeakerName = local.speaker.hasPrefix("Local ")
+            ? String(local.speaker.dropFirst("Local ".count))
+            : local.speaker
         guard let localEmbedding = localDb[localSpeakerName],
               !localEmbedding.isEmpty else {
             Logger.transcription.debug(
@@ -154,13 +156,20 @@ public enum EchoDeduplicator {
             "Echo dedup: embedding gate PASSED for '\(localSpeakerName, privacy: .public)' — matches '\(bestRemoteKey, privacy: .public)' at \(String(format: "%.3f", bestSimilarity), privacy: .public)"
         )
 
-        // Gate 1 + 2: temporal overlap + text similarity (windowed)
-        // Collect all remote segments that temporally overlap with this local segment,
-        // then compare local text against the concatenated remote text.
-        // This handles misaligned segment boundaries (e.g., one long local segment
-        // covering content that the remote side split into multiple shorter segments).
+        // The local voice resembles `bestRemoteKey`. Only that remote speaker's
+        // segments can be the source of the echo, so filter before the temporal
+        // + text loop (otherwise cross-talk from a different remote speaker can
+        // produce a false positive).
+        let bestRemoteSpeaker = "Remote \(bestRemoteKey)"
+        let candidateRemotes = remoteSegments.filter { $0.speaker == bestRemoteSpeaker }
+
+        // Temporal + text gates (windowed). Collect all candidate remote segments
+        // that temporally overlap with this local segment, then compare local text
+        // against each one (and concatenated, if multiple) to handle misaligned
+        // boundaries — one long local segment covering content that the remote
+        // side split into multiple shorter ones.
         var overlappingRemotes: [(segment: LabeledSegment, overlap: Double)] = []
-        for remote in remoteSegments {
+        for remote in candidateRemotes {
             let overlap = temporalOverlap(
                 aStart: local.start, aEnd: local.end,
                 bStart: remote.start, bEnd: remote.end
