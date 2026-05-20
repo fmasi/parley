@@ -66,8 +66,7 @@ final class TranscriptionRunner {
         }
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
-        var localSpeakerDb: [String: [Float]] = [:]
-        var remoteSpeakerDb: [String: [Float]] = [:]
+        var echoRemoved = 0
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -82,9 +81,15 @@ final class TranscriptionRunner {
                 audioSource: .system,
                 config: config
             )
-            allSegments.append(contentsOf: systemResult.segments)
-            remoteSpeakerDb.merge(systemResult.speakerDatabase) { _, new in new }
             audioPaths.append(segmentPair.system)
+
+            // Per-segment speaker databases. Each recovery segment is diarized
+            // independently, so "Speaker 1" in one segment is unrelated to the next.
+            // Dedup must use this segment's own databases — a cross-segment merge
+            // (last-write-wins) would compare against the wrong speaker's embedding.
+            let remoteDb = systemResult.speakerDatabase
+            var localDb: [String: [Float]] = [:]
+            var segmentSegments = systemResult.segments
 
             if isDualStream {
                 let micPath = segmentPair.mic
@@ -97,34 +102,36 @@ final class TranscriptionRunner {
                         audioSource: .microphone,
                         config: config
                     )
-                    allSegments.append(contentsOf: micResult.segments)
-                    localSpeakerDb.merge(micResult.speakerDatabase) { _, new in new }
+                    segmentSegments.append(contentsOf: micResult.segments)
+                    localDb = micResult.speakerDatabase
                     audioPaths.append(micPath)
                 }
             }
-        }
 
-        if isDualStream && !allSegments.isEmpty {
-            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+            if isDualStream && !segmentSegments.isEmpty {
+                SpeakerAssignment.tagWithSourcePrefix(&segmentSegments)
+            }
+            segmentSegments.sort { $0.start < $1.start }
+
+            // Echo dedup within the segment (remove mic bleed of remote speaker)
+            if isDualStream {
+                let dedupResult = EchoDeduplicator.deduplicate(
+                    segments: segmentSegments,
+                    localSpeakerDatabase: localDb,
+                    remoteSpeakerDatabase: remoteDb,
+                    temporalThreshold: config.echoTemporalThreshold,
+                    textThreshold: config.echoTextThreshold,
+                    embeddingThreshold: config.echoEmbeddingThreshold
+                )
+                segmentSegments = dedupResult.segments
+                echoRemoved += dedupResult.removedCount
+            }
+
+            allSegments.append(contentsOf: segmentSegments)
         }
 
         allSegments.sort { $0.start < $1.start }
         Logger.transcription.info("Total segments after merge: \(allSegments.count, privacy: .public)")
-
-        // Echo dedup (remove mic bleed of remote speaker)
-        var echoRemoved = 0
-        if isDualStream {
-            let dedupResult = EchoDeduplicator.deduplicate(
-                segments: allSegments,
-                localSpeakerDatabase: localSpeakerDb,
-                remoteSpeakerDatabase: remoteSpeakerDb,
-                temporalThreshold: config.echoTemporalThreshold,
-                textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold
-            )
-            allSegments = dedupResult.segments
-            echoRemoved = dedupResult.removedCount
-        }
 
         let uniqueLanguages = Set(detectedLanguages)
         let detectedLanguage: String
