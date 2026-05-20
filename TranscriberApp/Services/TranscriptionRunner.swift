@@ -242,9 +242,14 @@ final class TranscriptionRunner {
             .sorted { $0.index < $1.index }
             .map { outputDirectory.appendingPathComponent($0.audioPath) }
 
-        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk)
+        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
+        // Only merge when every chunk is an archived .m4a: AudioConcatenator deletes its sources
+        // after a successful export, which would destroy kept-WAV evidence — either a chunk whose
+        // AAC archival failed (gotcha #38 keeps the WAV intact) or a single-stream recording that
+        // never archived. The raw archive must never be modified after writing.
         let audioPaths: [URL]
-        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
+        let allArchived = chunkAudioPaths.allSatisfy { $0.pathExtension.lowercased() == "m4a" }
+        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 && allArchived {
             do {
                 let concatResult = try await AudioConcatenator.concatenate(
                     sources: chunkAudioPaths,
@@ -262,6 +267,10 @@ final class TranscriptionRunner {
                 audioPaths = chunkAudioPaths
             }
         } else {
+            if config.mergeChunkedAudio && chunkAudioPaths.count > 1 && !allArchived {
+                let rawCount = chunkAudioPaths.filter { $0.pathExtension.lowercased() != "m4a" }.count
+                Logger.files.info("Skipping audio merge: \(rawCount, privacy: .public) chunk(s) are raw WAV (kept as evidence); leaving chunk files separate")
+            }
             audioPaths = chunkAudioPaths
         }
 
