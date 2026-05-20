@@ -257,6 +257,12 @@ public enum SpeakerAssignment {
             let source = segments[i].source
             let label = source == "local" ? "Local" : "Remote"
             let speaker = segments[i].speaker
+            // Idempotency guard: chunked recordings tag at chunk time (ChunkProcessor)
+            // and again in TranscriptionRunner.finalize(); skip already-tagged segments
+            // so repeated calls don't produce "Local Local Speaker N".
+            if speaker == label || speaker.hasPrefix(label + " ") {
+                continue
+            }
             if !speaker.isEmpty && speaker != "Unknown" {
                 segments[i].speaker = "\(label) \(speaker)"
             } else if speaker != "Unknown" {
