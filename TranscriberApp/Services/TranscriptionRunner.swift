@@ -235,10 +235,12 @@ final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
-        // 5. Audio paths from chunks
-        let chunkAudioPaths = sessionState.chunks.map {
-            outputDirectory.appendingPathComponent($0.audioPath)
-        }
+        // 5. Audio paths from chunks, in recording order. Chunks are stored in
+        // processing-completion order (parallel ChunkProcessor tasks), so sort by
+        // index before concatenation or the merged archive plays out of sequence.
+        let chunkAudioPaths = sessionState.chunks
+            .sorted { $0.index < $1.index }
+            .map { outputDirectory.appendingPathComponent($0.audioPath) }
 
         // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk)
         let audioPaths: [URL]
