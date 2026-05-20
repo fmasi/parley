@@ -45,12 +45,13 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        config: Config
+        config: Config,
+        speakerSelection: SpeakerSelection = .auto
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
 
-        refreshDiarizer(config: config)
+        refreshDiarizer(config: config, speakerSelection: speakerSelection)
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -324,9 +325,10 @@ final class TranscriptionRunner {
         captureClient: AudioCaptureClient,
         outputDirectory: URL,
         sessionBaseName: String,
-        config: Config
+        config: Config,
+        speakerSelection: SpeakerSelection = .auto
     ) throws {
-        refreshDiarizer(config: config)
+        refreshDiarizer(config: config, speakerSelection: speakerSelection)
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -396,9 +398,9 @@ final class TranscriptionRunner {
     /// Rebuild the FluidAudio diarizer from Config-derived tuning (#66) when the
     /// tuning changed. No-op once an explicit override was installed. With all
     /// tuning fields nil this yields a diarizer behaviourally identical to before.
-    private func refreshDiarizer(config: Config) {
+    private func refreshDiarizer(config: Config, speakerSelection: SpeakerSelection = .auto) {
         guard !diarizerOverridden else { return }
-        let tuning = config.diarizationTuning
+        let tuning = config.diarizationTuning.applying(speakerSelection)
         if diarizer == nil || diarizerTuning != tuning {
             diarizer = FluidAudioDiarizer(tuning: tuning)
             diarizerTuning = tuning

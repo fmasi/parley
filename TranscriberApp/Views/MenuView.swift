@@ -13,6 +13,10 @@ struct MenuView: View {
     @State private var xpcRetryCount = 0
     @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
+    /// Speaker-count choice for the current/most-recent recording (#67). Captured
+    /// at start so the fallback `run(...)` path in stopRecording reuses the same
+    /// selection; defaults to `.auto` (behavior-identical to before).
+    @State private var speakerSelection: SpeakerSelection = .auto
 
     init(
         appState: AppState,
@@ -124,13 +128,14 @@ struct MenuView: View {
         SessionNameWindowController.shared.show(
             suggestedName: suggestedName,
             lastMicrophoneDeviceId: selectedMicId
-        ) { sessionName, micDeviceId in
+        ) { sessionName, micDeviceId, selection in
             selectedMicId = micDeviceId
-            Task { await startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            speakerSelection = selection
+            Task { await startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId, speakerSelection: selection) }
         }
     }
 
-    private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+    private func startRecording(sessionName: String, microphoneDeviceId: String?, speakerSelection: SpeakerSelection) async {
         Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
         appState.errorMessage = nil
 
@@ -179,7 +184,8 @@ struct MenuView: View {
                 captureClient: captureClient,
                 outputDirectory: outputDir,
                 sessionBaseName: chunkBaseName,
-                config: config
+                config: config,
+                speakerSelection: speakerSelection
             )
             transcriptionRunner.startChunkRotation()
 
@@ -255,7 +261,8 @@ struct MenuView: View {
                     systemAudio: systemAudio,
                     micAudio: micAudio,
                     outputDirectory: systemAudio.deletingLastPathComponent(),
-                    config: configManager.config
+                    config: configManager.config,
+                    speakerSelection: speakerSelection
                 )
 
                 appState.lastJsonPath = result.jsonPath.path

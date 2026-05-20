@@ -28,6 +28,44 @@ public struct DiarizationTuning: Sendable, Equatable {
     }
 }
 
+/// A per-recording speaker-count choice, merged onto the global `DiarizationTuning`
+/// at recording start (#67). `.auto` (the default) imposes no constraint; `.atLeast`
+/// is a safe minimum floor (never caps, so late joiners still appear); `.exactly` is
+/// a HARD count that forces exactly N clusters (extra speakers get merged/lost).
+public enum SpeakerSelection: Sendable, Equatable {
+    case auto
+    case atLeast(Int)
+    case exactly(Int)
+}
+
+public extension DiarizationTuning {
+    /// Returns a copy of this base tuning with `selection` merged on top (#67).
+    /// - `.auto` → unchanged (keeps whatever the global tuning had).
+    /// - `.atLeast(n)` → `minSpeakers = n`, `exactSpeakers = nil` (a floor, not a
+    ///   cap; `clusteringThreshold`/`maxSpeakers` preserved from base).
+    /// - `.exactly(n)` → `exactSpeakers = n` (overrides min/max per SDK precedence).
+    ///
+    /// Values of `n < 1` are ignored (treated as `.auto`), since a sub-1 speaker
+    /// count is meaningless and the diarizer always finds at least one speaker.
+    func applying(_ selection: SpeakerSelection) -> DiarizationTuning {
+        switch selection {
+        case .auto:
+            return self
+        case .atLeast(let n):
+            guard n >= 1 else { return self }
+            var copy = self
+            copy.minSpeakers = n
+            copy.exactSpeakers = nil
+            return copy
+        case .exactly(let n):
+            guard n >= 1 else { return self }
+            var copy = self
+            copy.exactSpeakers = n
+            return copy
+        }
+    }
+}
+
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models must be pre-downloaded via preDownloadModels() during setup.
