@@ -90,6 +90,15 @@ public struct Config: Codable, Equatable {
     /// actually started" case without dragging unrelated future meetings into the name.
     /// Set to 0 to disable lookahead entirely (current-meeting-only behavior).
     public var calendarLookaheadMinutes: Int
+    /// FluidAudio clustering distance threshold. Higher = more merging = fewer speakers.
+    /// Valid range (0, sqrt(2)]; SDK default is 0.6. nil = use SDK default.
+    public var diarizationClusteringThreshold: Double?
+    /// Lower bound on detected speaker count (ignored if `diarizationExactSpeakers` set). nil = unconstrained.
+    public var diarizationMinSpeakers: Int?
+    /// Upper bound on detected speaker count (ignored if `diarizationExactSpeakers` set). nil = unconstrained.
+    public var diarizationMaxSpeakers: Int?
+    /// Exact speaker count; overrides min/max when set. nil = unconstrained.
+    public var diarizationExactSpeakers: Int?
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -130,6 +139,10 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio: true,
         modelUpdateCheckEnabled: false,
         calendarLookaheadMinutes: 10,
+        diarizationClusteringThreshold: nil,
+        diarizationMinSpeakers: nil,
+        diarizationMaxSpeakers: nil,
+        diarizationExactSpeakers: nil,
         summary: nil
     )
 
@@ -154,6 +167,10 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio: Bool = true,
         modelUpdateCheckEnabled: Bool = false,
         calendarLookaheadMinutes: Int = 10,
+        diarizationClusteringThreshold: Double? = nil,
+        diarizationMinSpeakers: Int? = nil,
+        diarizationMaxSpeakers: Int? = nil,
+        diarizationExactSpeakers: Int? = nil,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -176,6 +193,10 @@ public struct Config: Codable, Equatable {
         self.mergeChunkedAudio = mergeChunkedAudio
         self.modelUpdateCheckEnabled = modelUpdateCheckEnabled
         self.calendarLookaheadMinutes = calendarLookaheadMinutes
+        self.diarizationClusteringThreshold = diarizationClusteringThreshold
+        self.diarizationMinSpeakers = diarizationMinSpeakers
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
+        self.diarizationExactSpeakers = diarizationExactSpeakers
         self.summary = summary
     }
 
@@ -200,6 +221,10 @@ public struct Config: Codable, Equatable {
         case mergeChunkedAudio = "merge_chunked_audio"
         case modelUpdateCheckEnabled = "model_update_check_enabled"
         case calendarLookaheadMinutes = "calendar_lookahead_minutes"
+        case diarizationClusteringThreshold = "diarization_clustering_threshold"
+        case diarizationMinSpeakers = "diarization_min_speakers"
+        case diarizationMaxSpeakers = "diarization_max_speakers"
+        case diarizationExactSpeakers = "diarization_exact_speakers"
         case summary
     }
 
@@ -225,6 +250,24 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio = try c.decodeIfPresent(Bool.self, forKey: .mergeChunkedAudio) ?? true
         modelUpdateCheckEnabled = try c.decodeIfPresent(Bool.self, forKey: .modelUpdateCheckEnabled) ?? false
         calendarLookaheadMinutes = try c.decodeIfPresent(Int.self, forKey: .calendarLookaheadMinutes) ?? 10
+        diarizationClusteringThreshold = try c.decodeIfPresent(Double.self, forKey: .diarizationClusteringThreshold)
+        diarizationMinSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMinSpeakers)
+        diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
+        diarizationExactSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationExactSpeakers)
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
+    }
+}
+
+public extension Config {
+    /// Maps the global diarization tuning fields onto a `DiarizationTuning` value
+    /// for `FluidAudioDiarizer`. All-nil fields produce an all-nil tuning, which
+    /// the diarizer treats as "use SDK defaults" (no behavior change). (#66)
+    var diarizationTuning: DiarizationTuning {
+        DiarizationTuning(
+            clusteringThreshold: diarizationClusteringThreshold,
+            minSpeakers: diarizationMinSpeakers,
+            maxSpeakers: diarizationMaxSpeakers,
+            exactSpeakers: diarizationExactSpeakers
+        )
     }
 }

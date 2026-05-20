@@ -28,6 +28,11 @@ final class TranscriptionRunner {
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
+    /// True once `setDiarizer`/`disableDiarization` was called, so `run()` stops
+    /// auto-rebuilding the diarizer from `Config` and respects the explicit choice.
+    private var diarizerOverridden = false
+    /// Tuning the current auto-created diarizer was built with, to detect Config changes.
+    private var diarizerTuning: DiarizationTuning?
     private let vadSpeechMap = VadSpeechMap()
 
     private(set) var chunkRotator: ChunkRotator?
@@ -44,6 +49,8 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
+
+        refreshDiarizer(config: config)
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -319,6 +326,8 @@ final class TranscriptionRunner {
         sessionBaseName: String,
         config: Config
     ) throws {
+        refreshDiarizer(config: config)
+
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
             Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
@@ -374,13 +383,27 @@ final class TranscriptionRunner {
 
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
+        self.diarizerOverridden = true
     }
 
     func disableDiarization() {
         self.diarizer = nil
+        self.diarizerOverridden = true
     }
 
     // MARK: - Private
+
+    /// Rebuild the FluidAudio diarizer from Config-derived tuning (#66) when the
+    /// tuning changed. No-op once an explicit override was installed. With all
+    /// tuning fields nil this yields a diarizer behaviourally identical to before.
+    private func refreshDiarizer(config: Config) {
+        guard !diarizerOverridden else { return }
+        let tuning = config.diarizationTuning
+        if diarizer == nil || diarizerTuning != tuning {
+            diarizer = FluidAudioDiarizer(tuning: tuning)
+            diarizerTuning = tuning
+        }
+    }
 
     /// Update the audio_paths in a transcript JSON file after archival.
     private static func updateAudioPaths(in jsonPath: URL, to newPaths: [URL]) {

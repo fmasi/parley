@@ -2,13 +2,42 @@ import Foundation
 import os
 import FluidAudio
 
+/// Optional FluidAudio diarizer tuning knobs (issue #66). All nil = SDK defaults
+/// (preserves prior behavior exactly). Threshold tunes over-segmentation; the
+/// speaker-count fields clamp/force the detected speaker count.
+public struct DiarizationTuning: Sendable, Equatable {
+    /// Clustering distance threshold. Higher = more merging = fewer speakers.
+    public var clusteringThreshold: Double?
+    /// Lower bound on speaker count (ignored when `exactSpeakers` is set).
+    public var minSpeakers: Int?
+    /// Upper bound on speaker count (ignored when `exactSpeakers` is set).
+    public var maxSpeakers: Int?
+    /// Exact speaker count; overrides min/max when set.
+    public var exactSpeakers: Int?
+
+    public init(
+        clusteringThreshold: Double? = nil,
+        minSpeakers: Int? = nil,
+        maxSpeakers: Int? = nil,
+        exactSpeakers: Int? = nil
+    ) {
+        self.clusteringThreshold = clusteringThreshold
+        self.minSpeakers = minSpeakers
+        self.maxSpeakers = maxSpeakers
+        self.exactSpeakers = exactSpeakers
+    }
+}
+
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models must be pre-downloaded via preDownloadModels() during setup.
 public actor FluidAudioDiarizer: DiarizationProvider {
     private var manager: OfflineDiarizerManager?
+    private let tuning: DiarizationTuning
 
-    public init() {}
+    public init(tuning: DiarizationTuning = DiarizationTuning()) {
+        self.tuning = tuning
+    }
 
     public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
@@ -85,7 +114,20 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         // false = include overlap embeddings. On mixed mono streams (Zoom/Teams system audio)
         // all remote speech is technically "overlapping", so the default true masks most embeddings
         // and collapses remote speakers into one cluster.
-        let config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+        var config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+
+        // Apply optional tuning (#66). When all knobs are nil this block is a no-op
+        // and `config` stays byte-for-byte equivalent to today's default.
+        if let threshold = tuning.clusteringThreshold {
+            config.clustering.threshold = threshold
+        }
+        if let exact = tuning.exactSpeakers {
+            // Exact count overrides min/max (matches SDK precedence).
+            config = config.withSpeakers(exactly: exact)
+        } else if tuning.minSpeakers != nil || tuning.maxSpeakers != nil {
+            config = config.withSpeakers(min: tuning.minSpeakers, max: tuning.maxSpeakers)
+        }
+
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
 
