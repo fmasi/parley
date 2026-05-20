@@ -140,8 +140,12 @@ final class ChunkProcessor {
             )
         }
 
-        // 5. Speaker database from system audio diarization (used for cross-chunk reconciliation)
+        // 5. Speaker databases for cross-chunk reconciliation. Local (mic) and
+        //    remote (system) pools are kept separate so they are reconciled
+        //    independently in finalize() — a local speaker is never merged with
+        //    a remote one (different audio streams).
         let speakerDatabase = systemResult.speakerDatabase
+        let localSpeakerDatabase = micResult.speakerDatabase
 
         // 6. Archive WAV → AAC (store filename only for session.json portability)
         var audioPath = systemURL.lastPathComponent
@@ -175,7 +179,8 @@ final class ChunkProcessor {
             audioPath: audioPath,
             segments: chunkSegments,
             speakerDatabase: speakerDatabase,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsRemoved: echoRemoved,
+            localSpeakerDatabase: localSpeakerDatabase
         )
 
         // 8. Actor-isolated append + persist

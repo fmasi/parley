@@ -201,46 +201,21 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
 
-        // 1. Speaker reconciliation
+        // 1-3. Reconcile speakers per source pool (local mic / remote system),
+        // then assign readable, deduplicated display names. SpeakerLabeler
+        // reconciles each pool independently (so a local speaker is never merged
+        // with a remote one), strips the source prefix to match reconciliation
+        // keys, and numbers identities per source by first appearance.
         Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
-        let speakerMapping = SpeakerReconciler.reconcile(
+        let allSegments = SpeakerLabeler.label(
             chunks: sessionState.chunks,
+            meetingStart: sessionState.meetingStart,
             threshold: 0.65
         )
 
-        // 2. Merge chunks
-        let mergeResult = TranscriptMerger.merge(
-            chunks: sessionState.chunks,
-            speakerMapping: speakerMapping,
-            meetingStart: sessionState.meetingStart
-        )
-
-        // 3. Convert MergedSegments to LabeledSegments for existing assembler
-        var allSegments: [LabeledSegment] = []
-        for chunk in sessionState.chunks {
-            let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
-            let chunkMapping = speakerMapping[chunk.index] ?? [:]
-            for seg in chunk.segments {
-                let elapsed = chunkOffset + seg.start
-                let elapsedEnd = chunkOffset + seg.end
-                let globalSpeaker = chunkMapping[seg.speaker] ?? seg.speaker
-                allSegments.append(LabeledSegment(
-                    start: elapsed,
-                    end: elapsedEnd,
-                    speaker: globalSpeaker,
-                    text: seg.text,
-                    source: seg.source,
-                    confidence: seg.qualityScore
-                ))
-            }
-        }
-        allSegments.sort { $0.start < $1.start }
-
-        // 4. Dual-stream tagging
+        // 4. Dual-stream flag (display names are already source-prefixed by
+        // SpeakerLabeler, so no tagWithSourcePrefix() pass is needed here).
         let isDualStream = allSegments.contains { $0.source == "local" }
-        if isDualStream {
-            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
-        }
 
         // 5. Audio paths from chunks, in recording order. Chunks are stored in
         // processing-completion order (parallel ChunkProcessor tasks), so sort by
@@ -330,7 +305,7 @@ final class TranscriptionRunner {
         SessionState.delete(directory: outputDirectory)
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(sessionState.chunks.count) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
