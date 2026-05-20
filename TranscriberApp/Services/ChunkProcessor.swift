@@ -239,15 +239,23 @@ final class ChunkProcessor {
                 let diarizationResult = try await diarizedResult
                 let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
+                // Smooth diarized turns BEFORE label assignment: collapse <threshold
+                // fragments into their dominant neighbor and merge adjacent same-speaker
+                // turns, so spurious short turns don't inflate the speaker count (#65).
+                let diarizedSegments = SpeakerAssignment.smoothDiarization(
+                    diarizationResult.segments,
+                    minTurnDuration: config.minSpeakerTurnDuration ?? SpeakerAssignment.defaultMinTurnDuration
+                )
+
                 labeled = SpeakerAssignment.assign(
                     transcriptSegments: segments,
-                    diarizationSegments: diarizationResult.segments,
+                    diarizationSegments: diarizedSegments,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
                 )
                 // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
                 // so they match the speaker labels in segments (used by echo dedup)
-                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
+                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizedSegments)
                 speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
                     diarizationResult.speakerDatabase, using: dbKeyMap
                 )

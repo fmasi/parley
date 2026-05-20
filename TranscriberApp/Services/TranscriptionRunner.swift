@@ -463,7 +463,13 @@ final class TranscriptionRunner {
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
             let diarizationResult = try await diarizedResult
-            let diarizedSegments = diarizationResult.segments
+            // Smooth diarized turns BEFORE label assignment: collapse <threshold
+            // fragments into their dominant neighbor and merge adjacent same-speaker
+            // turns, so spurious short turns don't inflate the speaker count (#65).
+            let diarizedSegments = SpeakerAssignment.smoothDiarization(
+                diarizationResult.segments,
+                minTurnDuration: config.minSpeakerTurnDuration ?? SpeakerAssignment.defaultMinTurnDuration
+            )
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 

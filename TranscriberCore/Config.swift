@@ -72,6 +72,10 @@ public struct Config: Codable, Equatable {
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
     public var vadSpeechThreshold: Double?
+    /// Minimum diarized-turn duration (seconds) for the smoothing pass; turns
+    /// shorter than this are collapsed into their dominant neighbor before
+    /// speaker labels are assigned. When nil, defaults to 0.5s at the call site.
+    public var minSpeakerTurnDuration: Double?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -115,6 +119,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
         vadSpeechThreshold: nil,
+        minSpeakerTurnDuration: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -138,6 +143,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: String? = nil,
         engine: EngineID = .resolvedDefault,
         vadSpeechThreshold: Double? = nil,
+        minSpeakerTurnDuration: Double? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -159,6 +165,7 @@ public struct Config: Codable, Equatable {
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
         self.vadSpeechThreshold = vadSpeechThreshold
+        self.minSpeakerTurnDuration = minSpeakerTurnDuration
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -182,6 +189,7 @@ public struct Config: Codable, Equatable {
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
         case vadSpeechThreshold = "vad_speech_threshold"
+        case minSpeakerTurnDuration = "min_speaker_turn_duration"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -206,6 +214,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
+        minSpeakerTurnDuration = try c.decodeIfPresent(Double.self, forKey: .minSpeakerTurnDuration)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
