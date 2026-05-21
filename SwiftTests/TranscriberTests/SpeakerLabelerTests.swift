@@ -128,6 +128,31 @@ struct SpeakerLabelerTests {
         #expect(speakers == ["Local Speaker 1", "Local Speaker 2"])
     }
 
+    // Crash-recovery path (#70): every chunk shares startTime == meetingStart, so
+    // chunkOffset is 0 and segment times pass through unchanged (elapsed == seg.start).
+    // This is the invariant TranscriptionRunner.run() relies on to preserve timing.
+    @Test func sharedStartTimePreservesSegmentTimesAcrossChunks() {
+        let meetingStart = Date(timeIntervalSince1970: 1_700_000_000)
+        let chunks = [
+            chunk(
+                index: 0, startOffset: 0, meetingStart: meetingStart,
+                segments: [seg(2, 7, "Remote Speaker 1", "remote")],
+                remoteDB: ["Speaker 1": axis(3)]
+            ),
+            chunk(
+                index: 1, startOffset: 0, meetingStart: meetingStart,
+                segments: [seg(4, 9, "Remote Speaker 1", "remote")],
+                remoteDB: ["Speaker 1": axis(5)]
+            )
+        ]
+
+        let result = SpeakerLabeler.label(chunks: chunks, meetingStart: meetingStart)
+            .sorted { $0.start < $1.start }
+        // Times are untouched (no inter-chunk offset added).
+        #expect(result.map(\.start) == [2, 4])
+        #expect(result.map(\.end) == [7, 9])
+    }
+
     // Display numbering follows order of first appearance across time-sorted segments.
     @Test func displayNumbersFollowFirstAppearanceOrder() {
         let meetingStart = Date(timeIntervalSince1970: 1_700_000_000)

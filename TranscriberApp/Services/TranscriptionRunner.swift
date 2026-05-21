@@ -76,6 +76,12 @@ final class TranscriptionRunner {
         var audioPaths: [URL] = []
         var echoRemoved = 0
 
+        // Per-recovery-segment chunks for cross-segment speaker reconciliation (#70).
+        // A single shared meetingStart captured once means every chunk's offset is 0,
+        // so SpeakerLabeler's elapsed == seg.start — identical timing to today.
+        var recoveryChunks: [ProcessedChunk] = []
+        let meetingStart = Date()
+
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
                 Logger.transcription.info("Transcribing recovery segment \(index + 1)")
@@ -122,6 +128,7 @@ final class TranscriptionRunner {
             segmentSegments.sort { $0.start < $1.start }
 
             // Echo dedup within the segment (remove mic bleed of remote speaker)
+            var segmentEchoRemoved = 0
             if isDualStream {
                 let dedupResult = EchoDeduplicator.deduplicate(
                     segments: segmentSegments,
@@ -132,10 +139,46 @@ final class TranscriptionRunner {
                     embeddingThreshold: config.echoEmbeddingThreshold
                 )
                 segmentSegments = dedupResult.segments
+                segmentEchoRemoved = dedupResult.removedCount
                 echoRemoved += dedupResult.removedCount
             }
 
             allSegments.append(contentsOf: segmentSegments)
+
+            // Collect a ProcessedChunk for cross-segment reconciliation (#70).
+            // startTime == meetingStart for every chunk ⇒ chunkOffset == 0.
+            recoveryChunks.append(ProcessedChunk(
+                index: index,
+                startTime: meetingStart,
+                audioPath: segmentPair.system.lastPathComponent,
+                segments: segmentSegments.map { seg in
+                    ProcessedChunk.Segment(
+                        start: seg.start,
+                        end: seg.end,
+                        text: seg.text,
+                        speaker: seg.speaker,
+                        source: seg.source,
+                        qualityScore: seg.confidence
+                    )
+                },
+                speakerDatabase: remoteDb,
+                echoSegmentsRemoved: segmentEchoRemoved,
+                localSpeakerDatabase: localDb
+            ))
+        }
+
+        // Multi-segment recordings (crash recovery) are diarized independently per
+        // segment, so "Speaker 1" in one segment is unrelated to the next. Reconcile
+        // speakers across segments and re-label them consistently (#70). The single-
+        // segment case (the common path, incl. the CLI `transcribe` command) keeps its
+        // inline labels byte-for-byte unchanged.
+        if recoveryChunks.count > 1 {
+            allSegments = SpeakerLabeler.label(
+                chunks: recoveryChunks,
+                meetingStart: meetingStart,
+                threshold: Float(config.reconciliationThreshold ?? 0.65),
+                emaAlpha: Float(config.reconciliationEmaAlpha ?? 0.9)
+            )
         }
 
         allSegments.sort { $0.start < $1.start }
