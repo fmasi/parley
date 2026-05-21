@@ -56,6 +56,107 @@ public enum SpeakerAssignment {
         return cleaned
     }
 
+    /// Default minimum turn duration (seconds) for diarization smoothing.
+    public static let defaultMinTurnDuration: Double = 0.5
+
+    /// Smooth a list of diarized turns before label assignment.
+    ///
+    /// The diarizer (FluidAudio) sometimes splits one speaker into several short
+    /// turns, or emits spurious very-short turns. Left untouched, a speaker that
+    /// only ever appears as a <`minTurnDuration` fragment becomes its own
+    /// "Speaker N" box, inflating the speaker count.
+    ///
+    /// Two passes, run to a fixed point so cascades resolve:
+    /// 1. Any turn shorter than `minTurnDuration` is collapsed into the
+    ///    temporally-dominant adjacent turn — the longer of its immediate
+    ///    previous/next neighbors (if only one neighbor exists, use it). The
+    ///    short turn keeps its own timing but adopts the neighbor's speaker.
+    /// 2. Adjacent turns that now share a speaker are merged into one turn so
+    ///    timing stays clean.
+    ///
+    /// Turns are assumed to be in chronological order (as produced by the
+    /// diarizer). A lone short turn with no neighbors is left unchanged.
+    public static func smoothDiarization(
+        _ turns: [DiarizedSegment],
+        minTurnDuration: Double = defaultMinTurnDuration
+    ) -> [DiarizedSegment] {
+        guard turns.count > 1 else { return turns }
+
+        var working = turns
+
+        // Pass 1: reassign short turns to their dominant neighbor, repeating
+        // until no reassignment happens (a fragment between two fragments may
+        // need its neighbors resolved first).
+        var changed = true
+        while changed {
+            changed = false
+            for i in working.indices {
+                let turn = working[i]
+                let duration = turn.end - turn.start
+                guard duration < minTurnDuration else { continue }
+
+                let prev = i > 0 ? working[i - 1] : nil
+                let next = i < working.count - 1 ? working[i + 1] : nil
+
+                let dominantSpeaker: String?
+                switch (prev, next) {
+                case let (p?, n?):
+                    let prevLen = p.end - p.start
+                    let nextLen = n.end - n.start
+                    dominantSpeaker = prevLen >= nextLen ? p.speaker : n.speaker
+                case let (p?, nil):
+                    dominantSpeaker = p.speaker
+                case let (nil, n?):
+                    dominantSpeaker = n.speaker
+                case (nil, nil):
+                    dominantSpeaker = nil  // lone turn — nothing to absorb into
+                }
+
+                if let dominantSpeaker, dominantSpeaker != turn.speaker {
+                    working[i] = DiarizedSegment(
+                        start: turn.start,
+                        end: turn.end,
+                        speaker: dominantSpeaker,
+                        qualityScore: turn.qualityScore
+                    )
+                    changed = true
+                }
+            }
+        }
+
+        // Pass 2: merge adjacent same-speaker turns.
+        var merged: [DiarizedSegment] = []
+        for turn in working {
+            if let last = merged.last, last.speaker == turn.speaker {
+                merged[merged.count - 1] = DiarizedSegment(
+                    start: last.start,
+                    end: max(last.end, turn.end),
+                    speaker: last.speaker,
+                    // Keep the higher-confidence quality score of the merged pair.
+                    qualityScore: maxQuality(last.qualityScore, turn.qualityScore)
+                )
+            } else {
+                merged.append(turn)
+            }
+        }
+
+        if merged.count != turns.count {
+            Logger.transcription.debug(
+                "Diarization smoothing: \(turns.count) → \(merged.count) turns (minTurnDuration=\(minTurnDuration, privacy: .public))"
+            )
+        }
+        return merged
+    }
+
+    private static func maxQuality(_ a: Float?, _ b: Float?) -> Float? {
+        switch (a, b) {
+        case let (x?, y?): return max(x, y)
+        case let (x?, nil): return x
+        case let (nil, y?): return y
+        case (nil, nil): return nil
+        }
+    }
+
     /// Assign speaker labels to transcript segments based on time overlap with diarization.
     public static func assign(
         transcriptSegments: [TranscriptSegment],

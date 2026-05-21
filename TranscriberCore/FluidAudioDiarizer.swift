@@ -2,13 +2,80 @@ import Foundation
 import os
 import FluidAudio
 
+/// Optional FluidAudio diarizer tuning knobs (issue #66). All nil = SDK defaults
+/// (preserves prior behavior exactly). Threshold tunes over-segmentation; the
+/// speaker-count fields clamp/force the detected speaker count.
+public struct DiarizationTuning: Sendable, Equatable {
+    /// Clustering distance threshold. Higher = more merging = fewer speakers.
+    public var clusteringThreshold: Double?
+    /// Lower bound on speaker count (ignored when `exactSpeakers` is set).
+    public var minSpeakers: Int?
+    /// Upper bound on speaker count (ignored when `exactSpeakers` is set).
+    public var maxSpeakers: Int?
+    /// Exact speaker count; overrides min/max when set.
+    public var exactSpeakers: Int?
+
+    public init(
+        clusteringThreshold: Double? = nil,
+        minSpeakers: Int? = nil,
+        maxSpeakers: Int? = nil,
+        exactSpeakers: Int? = nil
+    ) {
+        self.clusteringThreshold = clusteringThreshold
+        self.minSpeakers = minSpeakers
+        self.maxSpeakers = maxSpeakers
+        self.exactSpeakers = exactSpeakers
+    }
+}
+
+/// A per-recording speaker-count choice, merged onto the global `DiarizationTuning`
+/// at recording start (#67). `.auto` (the default) imposes no constraint; `.atLeast`
+/// is a safe minimum floor (never caps, so late joiners still appear); `.exactly` is
+/// a HARD count that forces exactly N clusters (extra speakers get merged/lost).
+public enum SpeakerSelection: Sendable, Equatable {
+    case auto
+    case atLeast(Int)
+    case exactly(Int)
+}
+
+public extension DiarizationTuning {
+    /// Returns a copy of this base tuning with `selection` merged on top (#67).
+    /// - `.auto` → unchanged (keeps whatever the global tuning had).
+    /// - `.atLeast(n)` → `minSpeakers = n`, `exactSpeakers = nil` (a floor, not a
+    ///   cap; `clusteringThreshold`/`maxSpeakers` preserved from base).
+    /// - `.exactly(n)` → `exactSpeakers = n` (overrides min/max per SDK precedence).
+    ///
+    /// Values of `n < 1` are ignored (treated as `.auto`), since a sub-1 speaker
+    /// count is meaningless and the diarizer always finds at least one speaker.
+    func applying(_ selection: SpeakerSelection) -> DiarizationTuning {
+        switch selection {
+        case .auto:
+            return self
+        case .atLeast(let n):
+            guard n >= 1 else { return self }
+            var copy = self
+            copy.minSpeakers = n
+            copy.exactSpeakers = nil
+            return copy
+        case .exactly(let n):
+            guard n >= 1 else { return self }
+            var copy = self
+            copy.exactSpeakers = n
+            return copy
+        }
+    }
+}
+
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models must be pre-downloaded via preDownloadModels() during setup.
 public actor FluidAudioDiarizer: DiarizationProvider {
     private var manager: OfflineDiarizerManager?
+    private let tuning: DiarizationTuning
 
-    public init() {}
+    public init(tuning: DiarizationTuning = DiarizationTuning()) {
+        self.tuning = tuning
+    }
 
     public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
@@ -85,7 +152,20 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         // false = include overlap embeddings. On mixed mono streams (Zoom/Teams system audio)
         // all remote speech is technically "overlapping", so the default true masks most embeddings
         // and collapses remote speakers into one cluster.
-        let config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+        var config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+
+        // Apply optional tuning (#66). When all knobs are nil this block is a no-op
+        // and `config` stays byte-for-byte equivalent to today's default.
+        if let threshold = tuning.clusteringThreshold {
+            config.clustering.threshold = threshold
+        }
+        if let exact = tuning.exactSpeakers {
+            // Exact count overrides min/max (matches SDK precedence).
+            config = config.withSpeakers(exactly: exact)
+        } else if tuning.minSpeakers != nil || tuning.maxSpeakers != nil {
+            config = config.withSpeakers(min: tuning.minSpeakers, max: tuning.maxSpeakers)
+        }
+
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
 

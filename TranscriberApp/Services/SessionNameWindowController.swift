@@ -11,7 +11,7 @@ final class SessionNameWindowController {
     func show(
         suggestedName: String?,
         lastMicrophoneDeviceId: String?,
-        onStart: @escaping (String, String?) -> Void  // (sessionName, micDeviceId?)
+        onStart: @escaping (String, String?, SpeakerSelection) -> Void  // (sessionName, micDeviceId?, speakerSelection)
     ) {
         panel?.close()
 
@@ -30,9 +30,9 @@ final class SessionNameWindowController {
             suggestedName: suggestedName ?? "",
             initialDeviceId: initialDeviceId,
             devices: devices,
-            onStart: { name, deviceId in
+            onStart: { name, deviceId, speakerSelection in
                 closePanel()
-                onStart(name, deviceId)
+                onStart(name, deviceId, speakerSelection)
             },
             onCancel: closePanel
         )

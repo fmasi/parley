@@ -145,6 +145,116 @@ struct SpeakerAssignmentTests {
         #expect(segments[0].speaker == "Local")
     }
 
+    // MARK: - smoothDiarization
+
+    // A <0.5s fragment of a distinct speaker (B) sandwiched between two longer
+    // turns of speaker A should be absorbed into A, removing B entirely and then
+    // merging the now-adjacent A turns into one.
+    @Test func smoothAbsorbsShortFragmentBetweenLongerTurns() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "A"),
+            DiarizedSegment(start: 5.0, end: 5.3, speaker: "B"),  // 0.3s fragment
+            DiarizedSegment(start: 5.3, end: 10.0, speaker: "A"),
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        // B disappears; A turns merge into a single 0–10 turn.
+        #expect(Set(result.map(\.speaker)) == ["A"])
+        #expect(result.count == 1)
+        #expect(result[0].start == 0.0)
+        #expect(result[0].end == 10.0)
+    }
+
+    // A short fragment at the very start (only a next neighbor) is absorbed into
+    // that neighbor.
+    @Test func smoothAbsorbsShortFragmentAtStart() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 0.2, speaker: "B"),  // 0.2s fragment
+            DiarizedSegment(start: 0.2, end: 6.0, speaker: "A"),
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        #expect(result.count == 1)
+        #expect(result[0].speaker == "A")
+        #expect(result[0].start == 0.0)
+        #expect(result[0].end == 6.0)
+    }
+
+    // A short fragment at the very end (only a previous neighbor) is absorbed
+    // into that neighbor.
+    @Test func smoothAbsorbsShortFragmentAtEnd() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 6.0, speaker: "A"),
+            DiarizedSegment(start: 6.0, end: 6.2, speaker: "B"),  // 0.2s fragment
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        #expect(result.count == 1)
+        #expect(result[0].speaker == "A")
+        #expect(result[0].start == 0.0)
+        #expect(result[0].end == 6.2)
+    }
+
+    // The short turn is reassigned to the LONGER of its two neighbors.
+    @Test func smoothAbsorbsIntoLongerNeighbor() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 1.0, speaker: "A"),   // 1.0s
+            DiarizedSegment(start: 1.0, end: 1.3, speaker: "B"),   // 0.3s fragment
+            DiarizedSegment(start: 1.3, end: 6.0, speaker: "C"),   // 4.7s — dominant
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        // B absorbed into C (the longer neighbor); A and C remain distinct.
+        #expect(result.count == 2)
+        #expect(result[0].speaker == "A")
+        #expect(result[1].speaker == "C")
+        #expect(result[1].start == 1.0)
+        #expect(result[1].end == 6.0)
+    }
+
+    // Adjacent same-speaker turns merge into one even without any short fragment.
+    @Test func smoothMergesAdjacentSameSpeakerTurns() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 3.0, speaker: "A"),
+            DiarizedSegment(start: 3.0, end: 6.0, speaker: "A"),
+            DiarizedSegment(start: 6.0, end: 9.0, speaker: "B"),
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        #expect(result.count == 2)
+        #expect(result[0].speaker == "A")
+        #expect(result[0].start == 0.0)
+        #expect(result[0].end == 6.0)
+        #expect(result[1].speaker == "B")
+    }
+
+    // A legitimately long turn for a distinct speaker is preserved — no over-merging.
+    @Test func smoothPreservesLongDistinctTurns() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "A"),
+            DiarizedSegment(start: 5.0, end: 10.0, speaker: "B"),
+            DiarizedSegment(start: 10.0, end: 15.0, speaker: "A"),
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns, minTurnDuration: 0.5)
+        #expect(result.count == 3)
+        #expect(result.map(\.speaker) == ["A", "B", "A"])
+    }
+
+    @Test func smoothDefaultThresholdIsHalfSecond() {
+        let turns = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "A"),
+            DiarizedSegment(start: 5.0, end: 5.4, speaker: "B"),  // 0.4s < default 0.5
+            DiarizedSegment(start: 5.4, end: 10.0, speaker: "A"),
+        ]
+        let result = SpeakerAssignment.smoothDiarization(turns)
+        #expect(result.count == 1)
+        #expect(result[0].speaker == "A")
+    }
+
+    @Test func smoothEmptyAndSingleInputs() {
+        #expect(SpeakerAssignment.smoothDiarization([]).isEmpty)
+        let single = [DiarizedSegment(start: 0.0, end: 0.1, speaker: "A")]
+        // Single short turn with no neighbors is left as-is (nothing to absorb into).
+        let result = SpeakerAssignment.smoothDiarization(single)
+        #expect(result.count == 1)
+        #expect(result[0].speaker == "A")
+    }
+
     // MARK: - buildSpeakerMap
 
     @Test func buildSpeakerMapMapsRawIDsToFriendlyNames() {

@@ -37,16 +37,41 @@ public enum SpeakerReconciler {
     /// - Parameters:
     ///   - chunks: Ordered array of `ProcessedChunk` values.
     ///   - threshold: Minimum cosine similarity to consider two embeddings a match (default 0.65).
+    ///   - emaAlpha: EMA weight applied to the existing reference embedding when a
+    ///     match updates it (default 0.9; higher = slower drift).
     /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
     public static func reconcile(
         chunks unsortedChunks: [ProcessedChunk],
-        threshold: Float = 0.65
+        threshold: Float = 0.65,
+        emaAlpha: Float = 0.9
+    ) -> [Int: [String: String]] {
+        // Thin wrapper preserving the original behavior: reconcile over each
+        // chunk's remote/system speaker database.
+        let databases = unsortedChunks.map { (chunkIndex: $0.index, database: $0.speakerDatabase) }
+        return reconcile(databases: databases, threshold: threshold, emaAlpha: emaAlpha)
+    }
+
+    /// Reconcile an ordered list of per-chunk speaker databases into a global
+    /// namespace. This is the shared core used by both the remote and local
+    /// speaker pools (called separately so the pools never merge).
+    ///
+    /// - Parameters:
+    ///   - databases: Ordered list of `(chunkIndex, database)` pairs. Sorted by
+    ///     `chunkIndex` internally for deterministic seeding.
+    ///   - threshold: Minimum cosine similarity to consider a match (default 0.65).
+    ///   - emaAlpha: EMA weight applied to the existing reference embedding when a
+    ///     match updates it (default 0.9; higher = slower drift).
+    /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
+    static func reconcile(
+        databases unsortedDatabases: [(chunkIndex: Int, database: [String: [Float]])],
+        threshold: Float = 0.65,
+        emaAlpha: Float = 0.9
     ) -> [Int: [String: String]] {
 
         // Seed the global namespace from the chronologically-first chunk. Callers
         // (TranscriptionRunner.finalize) may pass chunks in processing-completion
         // order, so sort by index to keep reconciliation deterministic.
-        let chunks = unsortedChunks.sorted { $0.index < $1.index }
+        let databases = unsortedDatabases.sorted { $0.chunkIndex < $1.chunkIndex }
 
         var result: [Int: [String: String]] = [:]
         // Global reference embeddings: globalID → embedding
@@ -54,8 +79,9 @@ public enum SpeakerReconciler {
         // Auto-increment counter for new global IDs
         var nextGlobalIndex: Int = 0
 
-        for chunk in chunks {
-            let db = chunk.speakerDatabase
+        for entry in databases {
+            let chunkIndex = entry.chunkIndex
+            let db = entry.database
             var mapping: [String: String] = [:]
 
             if referenceEmbeddings.isEmpty {
@@ -70,7 +96,7 @@ public enum SpeakerReconciler {
                         nextGlobalIndex = max(nextGlobalIndex, n + 1)
                     }
                 }
-                result[chunk.index] = mapping
+                result[chunkIndex] = mapping
                 continue
             }
 
@@ -98,8 +124,8 @@ public enum SpeakerReconciler {
                 assignedLocals.insert(candidate.localID)
                 assignedGlobals.insert(candidate.globalID)
 
-                // EMA update reference embedding (alpha = 0.9)
-                let alpha: Float = 0.9
+                // EMA update reference embedding (alpha defaults to 0.9)
+                let alpha: Float = emaAlpha
                 if let oldRef = referenceEmbeddings[candidate.globalID],
                    let chunkEmb = db[candidate.localID] {
                     let newRef = zip(oldRef, chunkEmb).map { alpha * $0 + (1 - alpha) * $1 }
@@ -107,7 +133,7 @@ public enum SpeakerReconciler {
                 }
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(candidate.localID, privacy: .public) → \(candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
+                    "SpeakerReconciler: chunk \(chunkIndex, privacy: .public) remap \(candidate.localID, privacy: .public) → \(candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
                 )
             }
 
@@ -119,11 +145,11 @@ public enum SpeakerReconciler {
                 referenceEmbeddings[newGlobalID] = embedding
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(localID, privacy: .public) → \(newGlobalID, privacy: .public)"
+                    "SpeakerReconciler: chunk \(chunkIndex, privacy: .public) new speaker \(localID, privacy: .public) → \(newGlobalID, privacy: .public)"
                 )
             }
 
-            result[chunk.index] = mapping
+            result[chunkIndex] = mapping
         }
 
         return result

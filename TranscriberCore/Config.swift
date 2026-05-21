@@ -72,6 +72,10 @@ public struct Config: Codable, Equatable {
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
     public var vadSpeechThreshold: Double?
+    /// Minimum diarized-turn duration (seconds) for the smoothing pass; turns
+    /// shorter than this are collapsed into their dominant neighbor before
+    /// speaker labels are assigned. When nil, defaults to 0.5s at the call site.
+    public var minSpeakerTurnDuration: Double?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -86,6 +90,20 @@ public struct Config: Codable, Equatable {
     /// actually started" case without dragging unrelated future meetings into the name.
     /// Set to 0 to disable lookahead entirely (current-meeting-only behavior).
     public var calendarLookaheadMinutes: Int
+    /// FluidAudio clustering distance threshold. Higher = more merging = fewer speakers.
+    /// Valid range (0, sqrt(2)]; SDK default is 0.6. nil = use SDK default.
+    public var diarizationClusteringThreshold: Double?
+    /// Lower bound on detected speaker count (ignored if `diarizationExactSpeakers` set). nil = unconstrained.
+    public var diarizationMinSpeakers: Int?
+    /// Upper bound on detected speaker count (ignored if `diarizationExactSpeakers` set). nil = unconstrained.
+    public var diarizationMaxSpeakers: Int?
+    /// Exact speaker count; overrides min/max when set. nil = unconstrained.
+    public var diarizationExactSpeakers: Int?
+    /// Cosine similarity threshold for cross-chunk speaker reconciliation. nil = 0.65 (current default).
+    public var reconciliationThreshold: Double?
+    /// EMA alpha used when updating a global speaker's reference embedding during
+    /// reconciliation. Higher = slower drift. nil = 0.9 (current default).
+    public var reconciliationEmaAlpha: Double?
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -115,6 +133,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
         vadSpeechThreshold: nil,
+        minSpeakerTurnDuration: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -125,6 +144,12 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio: true,
         modelUpdateCheckEnabled: false,
         calendarLookaheadMinutes: 10,
+        diarizationClusteringThreshold: nil,
+        diarizationMinSpeakers: nil,
+        diarizationMaxSpeakers: nil,
+        diarizationExactSpeakers: nil,
+        reconciliationThreshold: nil,
+        reconciliationEmaAlpha: nil,
         summary: nil
     )
 
@@ -138,6 +163,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId: String? = nil,
         engine: EngineID = .resolvedDefault,
         vadSpeechThreshold: Double? = nil,
+        minSpeakerTurnDuration: Double? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -148,6 +174,12 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio: Bool = true,
         modelUpdateCheckEnabled: Bool = false,
         calendarLookaheadMinutes: Int = 10,
+        diarizationClusteringThreshold: Double? = nil,
+        diarizationMinSpeakers: Int? = nil,
+        diarizationMaxSpeakers: Int? = nil,
+        diarizationExactSpeakers: Int? = nil,
+        reconciliationThreshold: Double? = nil,
+        reconciliationEmaAlpha: Double? = nil,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -159,6 +191,7 @@ public struct Config: Codable, Equatable {
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
         self.vadSpeechThreshold = vadSpeechThreshold
+        self.minSpeakerTurnDuration = minSpeakerTurnDuration
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -169,6 +202,12 @@ public struct Config: Codable, Equatable {
         self.mergeChunkedAudio = mergeChunkedAudio
         self.modelUpdateCheckEnabled = modelUpdateCheckEnabled
         self.calendarLookaheadMinutes = calendarLookaheadMinutes
+        self.diarizationClusteringThreshold = diarizationClusteringThreshold
+        self.diarizationMinSpeakers = diarizationMinSpeakers
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
+        self.diarizationExactSpeakers = diarizationExactSpeakers
+        self.reconciliationThreshold = reconciliationThreshold
+        self.reconciliationEmaAlpha = reconciliationEmaAlpha
         self.summary = summary
     }
 
@@ -182,6 +221,7 @@ public struct Config: Codable, Equatable {
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
         case vadSpeechThreshold = "vad_speech_threshold"
+        case minSpeakerTurnDuration = "min_speaker_turn_duration"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -192,6 +232,12 @@ public struct Config: Codable, Equatable {
         case mergeChunkedAudio = "merge_chunked_audio"
         case modelUpdateCheckEnabled = "model_update_check_enabled"
         case calendarLookaheadMinutes = "calendar_lookahead_minutes"
+        case diarizationClusteringThreshold = "diarization_clustering_threshold"
+        case diarizationMinSpeakers = "diarization_min_speakers"
+        case diarizationMaxSpeakers = "diarization_max_speakers"
+        case diarizationExactSpeakers = "diarization_exact_speakers"
+        case reconciliationThreshold = "reconciliation_threshold"
+        case reconciliationEmaAlpha = "reconciliation_ema_alpha"
         case summary
     }
 
@@ -206,6 +252,7 @@ public struct Config: Codable, Equatable {
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
+        minSpeakerTurnDuration = try c.decodeIfPresent(Double.self, forKey: .minSpeakerTurnDuration)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
@@ -216,6 +263,26 @@ public struct Config: Codable, Equatable {
         mergeChunkedAudio = try c.decodeIfPresent(Bool.self, forKey: .mergeChunkedAudio) ?? true
         modelUpdateCheckEnabled = try c.decodeIfPresent(Bool.self, forKey: .modelUpdateCheckEnabled) ?? false
         calendarLookaheadMinutes = try c.decodeIfPresent(Int.self, forKey: .calendarLookaheadMinutes) ?? 10
+        diarizationClusteringThreshold = try c.decodeIfPresent(Double.self, forKey: .diarizationClusteringThreshold)
+        diarizationMinSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMinSpeakers)
+        diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
+        diarizationExactSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationExactSpeakers)
+        reconciliationThreshold = try c.decodeIfPresent(Double.self, forKey: .reconciliationThreshold)
+        reconciliationEmaAlpha = try c.decodeIfPresent(Double.self, forKey: .reconciliationEmaAlpha)
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
+    }
+}
+
+public extension Config {
+    /// Maps the global diarization tuning fields onto a `DiarizationTuning` value
+    /// for `FluidAudioDiarizer`. All-nil fields produce an all-nil tuning, which
+    /// the diarizer treats as "use SDK defaults" (no behavior change). (#66)
+    var diarizationTuning: DiarizationTuning {
+        DiarizationTuning(
+            clusteringThreshold: diarizationClusteringThreshold,
+            minSpeakers: diarizationMinSpeakers,
+            maxSpeakers: diarizationMaxSpeakers,
+            exactSpeakers: diarizationExactSpeakers
+        )
     }
 }

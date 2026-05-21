@@ -140,8 +140,12 @@ final class ChunkProcessor {
             )
         }
 
-        // 5. Speaker database from system audio diarization (used for cross-chunk reconciliation)
+        // 5. Speaker databases for cross-chunk reconciliation. Local (mic) and
+        //    remote (system) pools are kept separate so they are reconciled
+        //    independently in finalize() — a local speaker is never merged with
+        //    a remote one (different audio streams).
         let speakerDatabase = systemResult.speakerDatabase
+        let localSpeakerDatabase = micResult.speakerDatabase
 
         // 6. Archive WAV → AAC (store filename only for session.json portability)
         var audioPath = systemURL.lastPathComponent
@@ -175,7 +179,8 @@ final class ChunkProcessor {
             audioPath: audioPath,
             segments: chunkSegments,
             speakerDatabase: speakerDatabase,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsRemoved: echoRemoved,
+            localSpeakerDatabase: localSpeakerDatabase
         )
 
         // 8. Actor-isolated append + persist
@@ -234,15 +239,23 @@ final class ChunkProcessor {
                 let diarizationResult = try await diarizedResult
                 let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
+                // Smooth diarized turns BEFORE label assignment: collapse <threshold
+                // fragments into their dominant neighbor and merge adjacent same-speaker
+                // turns, so spurious short turns don't inflate the speaker count (#65).
+                let diarizedSegments = SpeakerAssignment.smoothDiarization(
+                    diarizationResult.segments,
+                    minTurnDuration: config.minSpeakerTurnDuration ?? SpeakerAssignment.defaultMinTurnDuration
+                )
+
                 labeled = SpeakerAssignment.assign(
                     transcriptSegments: segments,
-                    diarizationSegments: diarizationResult.segments,
+                    diarizationSegments: diarizedSegments,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
                 )
                 // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
                 // so they match the speaker labels in segments (used by echo dedup)
-                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
+                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizedSegments)
                 speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
                     diarizationResult.speakerDatabase, using: dbKeyMap
                 )

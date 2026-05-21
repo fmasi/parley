@@ -36,7 +36,14 @@ public struct ProcessedChunk: Codable {
     public let startTime: Date
     public let audioPath: String
     public let segments: [Segment]
+    /// Voice embeddings for the REMOTE / system-audio speaker pool, keyed by
+    /// friendly label ("Speaker 1"). Used for cross-chunk reconciliation of
+    /// remote speakers. Mic/local speakers live in `localSpeakerDatabase`.
     public let speakerDatabase: [String: [Float]]
+    /// Voice embeddings for the LOCAL / microphone speaker pool, keyed by
+    /// friendly label ("Speaker 1"). Reconciled separately from the remote pool
+    /// so a local speaker is never merged with a remote one.
+    public let localSpeakerDatabase: [String: [Float]]
     public let echoSegmentsRemoved: Int
 
     public init(
@@ -45,7 +52,8 @@ public struct ProcessedChunk: Codable {
         audioPath: String,
         segments: [Segment],
         speakerDatabase: [String: [Float]],
-        echoSegmentsRemoved: Int = 0
+        echoSegmentsRemoved: Int = 0,
+        localSpeakerDatabase: [String: [Float]] = [:]
     ) {
         self.index = index
         self.startTime = startTime
@@ -53,6 +61,7 @@ public struct ProcessedChunk: Codable {
         self.segments = segments
         self.speakerDatabase = speakerDatabase
         self.echoSegmentsRemoved = echoSegmentsRemoved
+        self.localSpeakerDatabase = localSpeakerDatabase
     }
 
     // MARK: - Codable
@@ -64,6 +73,7 @@ public struct ProcessedChunk: Codable {
         case segments
         case speakerDatabase
         case echoSegmentsRemoved = "echo_segments_removed"
+        case localSpeakerDatabase = "local_speaker_database"
     }
 
     public init(from decoder: Decoder) throws {
@@ -74,6 +84,8 @@ public struct ProcessedChunk: Codable {
         segments = try c.decode([Segment].self, forKey: .segments)
         speakerDatabase = try c.decode([String: [Float]].self, forKey: .speakerDatabase)
         echoSegmentsRemoved = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
+        // Backward-compatible: existing session.json files predate this field.
+        localSpeakerDatabase = try c.decodeIfPresent([String: [Float]].self, forKey: .localSpeakerDatabase) ?? [:]
     }
 }
 

@@ -414,4 +414,125 @@ struct ConfigTests {
         #expect(decoded.calendarLookaheadMinutes == 5)
     }
 
+    // MARK: - Diarization tuning fields (#66)
+
+    @Test func diarizationTuningFieldsDefaultToNil() {
+        let config = Config.default
+        #expect(config.diarizationClusteringThreshold == nil)
+        #expect(config.diarizationMinSpeakers == nil)
+        #expect(config.diarizationMaxSpeakers == nil)
+        #expect(config.diarizationExactSpeakers == nil)
+    }
+
+    @Test func diarizationTuningFieldsRoundTrip() throws {
+        var config = Config.default
+        config.diarizationClusteringThreshold = 0.75
+        config.diarizationMinSpeakers = 2
+        config.diarizationMaxSpeakers = 6
+        config.diarizationExactSpeakers = 3
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.diarizationClusteringThreshold == 0.75)
+        #expect(decoded.diarizationMinSpeakers == 2)
+        #expect(decoded.diarizationMaxSpeakers == 6)
+        #expect(decoded.diarizationExactSpeakers == 3)
+    }
+
+    @Test func diarizationTuningSnakeCaseKeys() throws {
+        var config = Config.default
+        config.diarizationClusteringThreshold = 0.7
+        config.diarizationMinSpeakers = 1
+        config.diarizationMaxSpeakers = 4
+        config.diarizationExactSpeakers = 2
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(json["diarization_clustering_threshold"] != nil)
+        #expect(json["diarization_min_speakers"] != nil)
+        #expect(json["diarization_max_speakers"] != nil)
+        #expect(json["diarization_exact_speakers"] != nil)
+        // camelCase keys should NOT be present
+        #expect(json["diarizationClusteringThreshold"] == nil)
+    }
+
+    @Test func decodesFromSnakeCaseDiarizationTuningJSON() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false,\
+        "diarization_clustering_threshold":0.8,"diarization_min_speakers":2,\
+        "diarization_max_speakers":5,"diarization_exact_speakers":3}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.diarizationClusteringThreshold == 0.8)
+        #expect(config.diarizationMinSpeakers == 2)
+        #expect(config.diarizationMaxSpeakers == 5)
+        #expect(config.diarizationExactSpeakers == 3)
+    }
+
+    @Test func decodesLegacyConfigWithoutDiarizationTuning() throws {
+        // Existing config.json files won't have these fields — must decode to nil, not throw
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.diarizationClusteringThreshold == nil)
+        #expect(config.diarizationMinSpeakers == nil)
+        #expect(config.diarizationMaxSpeakers == nil)
+        #expect(config.diarizationExactSpeakers == nil)
+    }
+
+    // MARK: - Reconciliation tuning fields (#69)
+
+    @Test func reconciliationTuningFieldsDefaultToNil() {
+        let config = Config.default
+        #expect(config.reconciliationThreshold == nil)
+        #expect(config.reconciliationEmaAlpha == nil)
+    }
+
+    @Test func reconciliationTuningFieldsRoundTrip() throws {
+        var config = Config.default
+        config.reconciliationThreshold = 0.55
+        config.reconciliationEmaAlpha = 0.8
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(Config.self, from: data)
+        #expect(decoded.reconciliationThreshold == 0.55)
+        #expect(decoded.reconciliationEmaAlpha == 0.8)
+    }
+
+    @Test func reconciliationTuningSnakeCaseKeys() throws {
+        var config = Config.default
+        config.reconciliationThreshold = 0.6
+        config.reconciliationEmaAlpha = 0.85
+        let data = try JSONEncoder().encode(config)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        #expect(json["reconciliation_threshold"] != nil)
+        #expect(json["reconciliation_ema_alpha"] != nil)
+        // camelCase keys should NOT be present
+        #expect(json["reconciliationThreshold"] == nil)
+    }
+
+    @Test func decodesFromSnakeCaseReconciliationTuningJSON() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false,\
+        "reconciliation_threshold":0.7,"reconciliation_ema_alpha":0.95}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.reconciliationThreshold == 0.7)
+        #expect(config.reconciliationEmaAlpha == 0.95)
+    }
+
+    @Test func decodesLegacyConfigWithoutReconciliationTuning() throws {
+        // Existing config.json files won't have these fields — must decode to nil, not throw
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.reconciliationThreshold == nil)
+        #expect(config.reconciliationEmaAlpha == nil)
+    }
+
 }

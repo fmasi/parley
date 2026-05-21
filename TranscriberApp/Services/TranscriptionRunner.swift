@@ -28,6 +28,11 @@ final class TranscriptionRunner {
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
+    /// True once `setDiarizer`/`disableDiarization` was called, so `run()` stops
+    /// auto-rebuilding the diarizer from `Config` and respects the explicit choice.
+    private var diarizerOverridden = false
+    /// Tuning the current auto-created diarizer was built with, to detect Config changes.
+    private var diarizerTuning: DiarizationTuning?
     private let vadSpeechMap = VadSpeechMap()
 
     private(set) var chunkRotator: ChunkRotator?
@@ -40,10 +45,13 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        config: Config
+        config: Config,
+        speakerSelection: SpeakerSelection = .auto
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
+
+        refreshDiarizer(config: config, speakerSelection: speakerSelection)
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -67,6 +75,12 @@ final class TranscriptionRunner {
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
         var echoRemoved = 0
+
+        // Per-recovery-segment chunks for cross-segment speaker reconciliation (#70).
+        // A single shared meetingStart captured once means every chunk's offset is 0,
+        // so SpeakerLabeler's elapsed == seg.start — identical timing to today.
+        var recoveryChunks: [ProcessedChunk] = []
+        let meetingStart = Date()
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -114,6 +128,7 @@ final class TranscriptionRunner {
             segmentSegments.sort { $0.start < $1.start }
 
             // Echo dedup within the segment (remove mic bleed of remote speaker)
+            var segmentEchoRemoved = 0
             if isDualStream {
                 let dedupResult = EchoDeduplicator.deduplicate(
                     segments: segmentSegments,
@@ -124,10 +139,46 @@ final class TranscriptionRunner {
                     embeddingThreshold: config.echoEmbeddingThreshold
                 )
                 segmentSegments = dedupResult.segments
+                segmentEchoRemoved = dedupResult.removedCount
                 echoRemoved += dedupResult.removedCount
             }
 
             allSegments.append(contentsOf: segmentSegments)
+
+            // Collect a ProcessedChunk for cross-segment reconciliation (#70).
+            // startTime == meetingStart for every chunk ⇒ chunkOffset == 0.
+            recoveryChunks.append(ProcessedChunk(
+                index: index,
+                startTime: meetingStart,
+                audioPath: segmentPair.system.lastPathComponent,
+                segments: segmentSegments.map { seg in
+                    ProcessedChunk.Segment(
+                        start: seg.start,
+                        end: seg.end,
+                        text: seg.text,
+                        speaker: seg.speaker,
+                        source: seg.source,
+                        qualityScore: seg.confidence
+                    )
+                },
+                speakerDatabase: remoteDb,
+                echoSegmentsRemoved: segmentEchoRemoved,
+                localSpeakerDatabase: localDb
+            ))
+        }
+
+        // Multi-segment recordings (crash recovery) are diarized independently per
+        // segment, so "Speaker 1" in one segment is unrelated to the next. Reconcile
+        // speakers across segments and re-label them consistently (#70). The single-
+        // segment case (the common path, incl. the CLI `transcribe` command) keeps its
+        // inline labels byte-for-byte unchanged.
+        if recoveryChunks.count > 1 {
+            allSegments = SpeakerLabeler.label(
+                chunks: recoveryChunks,
+                meetingStart: meetingStart,
+                threshold: Float(config.reconciliationThreshold ?? 0.65),
+                emaAlpha: Float(config.reconciliationEmaAlpha ?? 0.9)
+            )
         }
 
         allSegments.sort { $0.start < $1.start }
@@ -201,46 +252,24 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
 
-        // 1. Speaker reconciliation
-        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
-        let speakerMapping = SpeakerReconciler.reconcile(
+        // 1-3. Reconcile speakers per source pool (local mic / remote system),
+        // then assign readable, deduplicated display names. SpeakerLabeler
+        // reconciles each pool independently (so a local speaker is never merged
+        // with a remote one), strips the source prefix to match reconciliation
+        // keys, and numbers identities per source by first appearance.
+        let reconciliationThreshold = Float(config.reconciliationThreshold ?? 0.65)
+        let reconciliationEmaAlpha = Float(config.reconciliationEmaAlpha ?? 0.9)
+        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: \(reconciliationThreshold, privacy: .public), ema alpha: \(reconciliationEmaAlpha, privacy: .public))")
+        let allSegments = SpeakerLabeler.label(
             chunks: sessionState.chunks,
-            threshold: 0.65
+            meetingStart: sessionState.meetingStart,
+            threshold: reconciliationThreshold,
+            emaAlpha: reconciliationEmaAlpha
         )
 
-        // 2. Merge chunks
-        let mergeResult = TranscriptMerger.merge(
-            chunks: sessionState.chunks,
-            speakerMapping: speakerMapping,
-            meetingStart: sessionState.meetingStart
-        )
-
-        // 3. Convert MergedSegments to LabeledSegments for existing assembler
-        var allSegments: [LabeledSegment] = []
-        for chunk in sessionState.chunks {
-            let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
-            let chunkMapping = speakerMapping[chunk.index] ?? [:]
-            for seg in chunk.segments {
-                let elapsed = chunkOffset + seg.start
-                let elapsedEnd = chunkOffset + seg.end
-                let globalSpeaker = chunkMapping[seg.speaker] ?? seg.speaker
-                allSegments.append(LabeledSegment(
-                    start: elapsed,
-                    end: elapsedEnd,
-                    speaker: globalSpeaker,
-                    text: seg.text,
-                    source: seg.source,
-                    confidence: seg.qualityScore
-                ))
-            }
-        }
-        allSegments.sort { $0.start < $1.start }
-
-        // 4. Dual-stream tagging
+        // 4. Dual-stream flag (display names are already source-prefixed by
+        // SpeakerLabeler, so no tagWithSourcePrefix() pass is needed here).
         let isDualStream = allSegments.contains { $0.source == "local" }
-        if isDualStream {
-            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
-        }
 
         // 5. Audio paths from chunks, in recording order. Chunks are stored in
         // processing-completion order (parallel ChunkProcessor tasks), so sort by
@@ -330,7 +359,7 @@ final class TranscriptionRunner {
         SessionState.delete(directory: outputDirectory)
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(sessionState.chunks.count) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
@@ -342,8 +371,11 @@ final class TranscriptionRunner {
         captureClient: AudioCaptureClient,
         outputDirectory: URL,
         sessionBaseName: String,
-        config: Config
+        config: Config,
+        speakerSelection: SpeakerSelection = .auto
     ) throws {
+        refreshDiarizer(config: config, speakerSelection: speakerSelection)
+
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
             Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
@@ -399,13 +431,27 @@ final class TranscriptionRunner {
 
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
+        self.diarizerOverridden = true
     }
 
     func disableDiarization() {
         self.diarizer = nil
+        self.diarizerOverridden = true
     }
 
     // MARK: - Private
+
+    /// Rebuild the FluidAudio diarizer from Config-derived tuning (#66) when the
+    /// tuning changed. No-op once an explicit override was installed. With all
+    /// tuning fields nil this yields a diarizer behaviourally identical to before.
+    private func refreshDiarizer(config: Config, speakerSelection: SpeakerSelection = .auto) {
+        guard !diarizerOverridden else { return }
+        let tuning = config.diarizationTuning.applying(speakerSelection)
+        if diarizer == nil || diarizerTuning != tuning {
+            diarizer = FluidAudioDiarizer(tuning: tuning)
+            diarizerTuning = tuning
+        }
+    }
 
     /// Update the audio_paths in a transcript JSON file after archival.
     private static func updateAudioPaths(in jsonPath: URL, to newPaths: [URL]) {
@@ -488,7 +534,13 @@ final class TranscriptionRunner {
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
             let diarizationResult = try await diarizedResult
-            let diarizedSegments = diarizationResult.segments
+            // Smooth diarized turns BEFORE label assignment: collapse <threshold
+            // fragments into their dominant neighbor and merge adjacent same-speaker
+            // turns, so spurious short turns don't inflate the speaker count (#65).
+            let diarizedSegments = SpeakerAssignment.smoothDiarization(
+                diarizationResult.segments,
+                minTurnDuration: config.minSpeakerTurnDuration ?? SpeakerAssignment.defaultMinTurnDuration
+            )
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
