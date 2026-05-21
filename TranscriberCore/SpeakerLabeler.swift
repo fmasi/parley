@@ -29,21 +29,25 @@ public enum SpeakerLabeler {
     ///   - meetingStart: Wall-clock start used to convert chunk-relative offsets
     ///     to absolute elapsed times.
     ///   - threshold: Cosine similarity threshold for reconciliation (default 0.65).
+    ///   - emaAlpha: EMA weight for reference-embedding updates during reconciliation (default 0.9).
     /// - Returns: Time-sorted `LabeledSegment`s with final display speaker names.
     public static func label(
         chunks: [ProcessedChunk],
         meetingStart: Date,
-        threshold: Float = 0.65
+        threshold: Float = 0.65,
+        emaAlpha: Float = 0.9
     ) -> [LabeledSegment] {
 
         // 1. Reconcile each pool independently.
         let remoteMapping = SpeakerReconciler.reconcile(
             databases: chunks.map { (chunkIndex: $0.index, database: $0.speakerDatabase) },
-            threshold: threshold
+            threshold: threshold,
+            emaAlpha: emaAlpha
         )
         let localMapping = SpeakerReconciler.reconcile(
             databases: chunks.map { (chunkIndex: $0.index, database: $0.localSpeakerDatabase) },
-            threshold: threshold
+            threshold: threshold,
+            emaAlpha: emaAlpha
         )
 
         // 2. Flatten chunks → segments carrying an opaque global identity.

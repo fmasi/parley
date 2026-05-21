@@ -214,11 +214,14 @@ final class TranscriptionRunner {
         // reconciles each pool independently (so a local speaker is never merged
         // with a remote one), strips the source prefix to match reconciliation
         // keys, and numbers identities per source by first appearance.
-        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
+        let reconciliationThreshold = Float(config.reconciliationThreshold ?? 0.65)
+        let reconciliationEmaAlpha = Float(config.reconciliationEmaAlpha ?? 0.9)
+        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: \(reconciliationThreshold, privacy: .public), ema alpha: \(reconciliationEmaAlpha, privacy: .public))")
         let allSegments = SpeakerLabeler.label(
             chunks: sessionState.chunks,
             meetingStart: sessionState.meetingStart,
-            threshold: 0.65
+            threshold: reconciliationThreshold,
+            emaAlpha: reconciliationEmaAlpha
         )
 
         // 4. Dual-stream flag (display names are already source-prefixed by

@@ -99,6 +99,11 @@ public struct Config: Codable, Equatable {
     public var diarizationMaxSpeakers: Int?
     /// Exact speaker count; overrides min/max when set. nil = unconstrained.
     public var diarizationExactSpeakers: Int?
+    /// Cosine similarity threshold for cross-chunk speaker reconciliation. nil = 0.65 (current default).
+    public var reconciliationThreshold: Double?
+    /// EMA alpha used when updating a global speaker's reference embedding during
+    /// reconciliation. Higher = slower drift. nil = 0.9 (current default).
+    public var reconciliationEmaAlpha: Double?
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -143,6 +148,8 @@ public struct Config: Codable, Equatable {
         diarizationMinSpeakers: nil,
         diarizationMaxSpeakers: nil,
         diarizationExactSpeakers: nil,
+        reconciliationThreshold: nil,
+        reconciliationEmaAlpha: nil,
         summary: nil
     )
 
@@ -171,6 +178,8 @@ public struct Config: Codable, Equatable {
         diarizationMinSpeakers: Int? = nil,
         diarizationMaxSpeakers: Int? = nil,
         diarizationExactSpeakers: Int? = nil,
+        reconciliationThreshold: Double? = nil,
+        reconciliationEmaAlpha: Double? = nil,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -197,6 +206,8 @@ public struct Config: Codable, Equatable {
         self.diarizationMinSpeakers = diarizationMinSpeakers
         self.diarizationMaxSpeakers = diarizationMaxSpeakers
         self.diarizationExactSpeakers = diarizationExactSpeakers
+        self.reconciliationThreshold = reconciliationThreshold
+        self.reconciliationEmaAlpha = reconciliationEmaAlpha
         self.summary = summary
     }
 
@@ -225,6 +236,8 @@ public struct Config: Codable, Equatable {
         case diarizationMinSpeakers = "diarization_min_speakers"
         case diarizationMaxSpeakers = "diarization_max_speakers"
         case diarizationExactSpeakers = "diarization_exact_speakers"
+        case reconciliationThreshold = "reconciliation_threshold"
+        case reconciliationEmaAlpha = "reconciliation_ema_alpha"
         case summary
     }
 
@@ -254,6 +267,8 @@ public struct Config: Codable, Equatable {
         diarizationMinSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMinSpeakers)
         diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
         diarizationExactSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationExactSpeakers)
+        reconciliationThreshold = try c.decodeIfPresent(Double.self, forKey: .reconciliationThreshold)
+        reconciliationEmaAlpha = try c.decodeIfPresent(Double.self, forKey: .reconciliationEmaAlpha)
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }

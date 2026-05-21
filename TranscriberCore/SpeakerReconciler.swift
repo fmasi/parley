@@ -37,15 +37,18 @@ public enum SpeakerReconciler {
     /// - Parameters:
     ///   - chunks: Ordered array of `ProcessedChunk` values.
     ///   - threshold: Minimum cosine similarity to consider two embeddings a match (default 0.65).
+    ///   - emaAlpha: EMA weight applied to the existing reference embedding when a
+    ///     match updates it (default 0.9; higher = slower drift).
     /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
     public static func reconcile(
         chunks unsortedChunks: [ProcessedChunk],
-        threshold: Float = 0.65
+        threshold: Float = 0.65,
+        emaAlpha: Float = 0.9
     ) -> [Int: [String: String]] {
         // Thin wrapper preserving the original behavior: reconcile over each
         // chunk's remote/system speaker database.
         let databases = unsortedChunks.map { (chunkIndex: $0.index, database: $0.speakerDatabase) }
-        return reconcile(databases: databases, threshold: threshold)
+        return reconcile(databases: databases, threshold: threshold, emaAlpha: emaAlpha)
     }
 
     /// Reconcile an ordered list of per-chunk speaker databases into a global
@@ -56,10 +59,13 @@ public enum SpeakerReconciler {
     ///   - databases: Ordered list of `(chunkIndex, database)` pairs. Sorted by
     ///     `chunkIndex` internally for deterministic seeding.
     ///   - threshold: Minimum cosine similarity to consider a match (default 0.65).
+    ///   - emaAlpha: EMA weight applied to the existing reference embedding when a
+    ///     match updates it (default 0.9; higher = slower drift).
     /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
     static func reconcile(
         databases unsortedDatabases: [(chunkIndex: Int, database: [String: [Float]])],
-        threshold: Float = 0.65
+        threshold: Float = 0.65,
+        emaAlpha: Float = 0.9
     ) -> [Int: [String: String]] {
 
         // Seed the global namespace from the chronologically-first chunk. Callers
@@ -118,8 +124,8 @@ public enum SpeakerReconciler {
                 assignedLocals.insert(candidate.localID)
                 assignedGlobals.insert(candidate.globalID)
 
-                // EMA update reference embedding (alpha = 0.9)
-                let alpha: Float = 0.9
+                // EMA update reference embedding (alpha defaults to 0.9)
+                let alpha: Float = emaAlpha
                 if let oldRef = referenceEmbeddings[candidate.globalID],
                    let chunkEmb = db[candidate.localID] {
                     let newRef = zip(oldRef, chunkEmb).map { alpha * $0 + (1 - alpha) * $1 }
