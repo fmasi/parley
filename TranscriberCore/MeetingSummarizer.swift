@@ -14,10 +14,16 @@ public enum MeetingSummarizer {
 
         let markdown = try await provider.summarize(segments: segments, metadata: metadata)
 
+        // Deterministically stamp the source transcript filename as a footer so
+        // the notes can always be traced back to their source — independent of
+        // whether the LLM chose to mention it.
+        let body = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stamped = "\(body)\n\n---\n*Source transcript: `\(transcriptPath.lastPathComponent)`*\n"
+
         let baseName = transcriptPath.deletingPathExtension().lastPathComponent
         let summaryPath = transcriptPath.deletingLastPathComponent()
             .appendingPathComponent(baseName + "-summary.md")
-        try markdown.write(to: summaryPath, atomically: true, encoding: .utf8)
+        try stamped.write(to: summaryPath, atomically: true, encoding: .utf8)
 
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
     }
