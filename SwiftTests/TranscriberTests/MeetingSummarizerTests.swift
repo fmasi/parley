@@ -51,6 +51,35 @@ struct MeetingSummarizerTests {
         #expect(content.contains("Executive Summary"))
     }
 
+    @Test func summarizeStampsSourceTranscriptFilename() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [
+                ["start": 0.0, "end": 5.0, "speaker": "Alice", "text": "Ship it"] as [String: Any]
+            ]
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: transcript)
+        let jsonPath = dir.appendingPathComponent("meeting-2026.json")
+        try jsonData.write(to: jsonPath)
+
+        let provider = MockProvider(response: "### Summary\nA productive meeting.")
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+
+        let summaryPath = dir.appendingPathComponent("meeting-2026-summary.md")
+        let content = try String(contentsOf: summaryPath, encoding: .utf8)
+        // Provenance is stamped deterministically (not left to the LLM) so an
+        // agent can trace the notes back to the exact transcript file.
+        #expect(content.contains("meeting-2026.json"))
+        #expect(content.contains("Source transcript"))
+        // Model output is preserved alongside the stamp.
+        #expect(content.contains("A productive meeting."))
+    }
+
     @Test func summarizeExtractsSegmentsAndMetadata() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("summarizer-test-\(UUID().uuidString)")

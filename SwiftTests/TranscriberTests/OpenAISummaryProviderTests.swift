@@ -106,4 +106,43 @@ struct OpenAISummaryProviderTests {
     @Test func dualStreamHintIsNonEmpty() {
         #expect(!OpenAISummaryProvider.dualStreamHint.isEmpty)
     }
+
+    // MARK: - System prompt structure (skimmable, action-first template)
+
+    @Test func systemPromptHasActionFirstSections() {
+        let p = OpenAISummaryProvider.systemPrompt
+        // The revised template leads with a metadata-bearing Summary, then the
+        // actionable record, then supporting discussion.
+        for section in ["### Summary", "### Decisions", "### Action Items", "### Discussion", "### Open Questions"] {
+            #expect(p.contains(section), "missing section: \(section)")
+        }
+        // Old, buried-actionables sections are gone.
+        #expect(!p.contains("### Executive Summary"))
+        #expect(!p.contains("### Key Topics"))
+    }
+
+    @Test func systemPromptOrdersDecisionsBeforeDiscussion() {
+        let p = OpenAISummaryProvider.systemPrompt
+        guard let summary = p.range(of: "### Summary"),
+              let decisions = p.range(of: "### Decisions"),
+              let actions = p.range(of: "### Action Items"),
+              let discussion = p.range(of: "### Discussion")
+        else { Issue.record("sections not found"); return }
+        // Skim order: Summary → Decisions → Action Items → Discussion.
+        #expect(summary.lowerBound < decisions.lowerBound)
+        #expect(decisions.lowerBound < actions.lowerBound)
+        #expect(actions.lowerBound < discussion.lowerBound)
+    }
+
+    @Test func systemPromptEnforcesOwnerLedActionItems() {
+        let p = OpenAISummaryProvider.systemPrompt
+        // Owner-first checklist shape, and no manufactured "no date" placeholder.
+        #expect(p.contains("<Owner>"))
+        #expect(!p.contains("no date"))
+    }
+
+    @Test func systemPromptRestrictsDecisionsToExplicit() {
+        // Curb the model's tendency to log discussion/intent as a "decision".
+        #expect(OpenAISummaryProvider.systemPrompt.contains("explicit"))
+    }
 }
