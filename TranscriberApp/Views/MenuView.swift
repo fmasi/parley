@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import SettingsAccess
 import TranscriberCore
 import UserNotifications
@@ -93,6 +94,7 @@ struct MenuView: View {
             NSApp.orderFrontStandardAboutPanel(options: [
                 .version: AppVersion.displayString,
                 .applicationVersion: "",
+                .credits: aboutCredits,
             ])
         }
 
@@ -101,6 +103,36 @@ struct MenuView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    /// Author + attribution shown in the standard macOS About panel.
+    private var aboutCredits: NSAttributedString {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+
+        func text(_ string: String, size: CGFloat, color: NSColor, bold: Bool = false) -> NSAttributedString {
+            NSAttributedString(string: string, attributes: [
+                .font: bold ? NSFont.boldSystemFont(ofSize: size) : NSFont.systemFont(ofSize: size),
+                .foregroundColor: color,
+                .paragraphStyle: center,
+            ])
+        }
+        func link(_ label: String, _ url: String) -> NSAttributedString {
+            NSAttributedString(string: label, attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .link: URL(string: url)!,
+                .paragraphStyle: center,
+            ])
+        }
+
+        let credits = NSMutableAttributedString()
+        credits.append(text("Built by Frédéric Masi\n", size: 12, color: .labelColor, bold: true))
+        credits.append(text("Private, on-device meeting transcription.\n\n", size: 11, color: .secondaryLabelColor))
+        credits.append(link("LinkedIn", "https://www.linkedin.com/in/fmasi/"))
+        credits.append(text("    ·    ", size: 11, color: .secondaryLabelColor))
+        credits.append(link("GitHub", "https://github.com/fmasi/parley"))
+        credits.append(text("\n\n© 2026 Frédéric Masi · AGPL-3.0", size: 10, color: .tertiaryLabelColor))
+        return credits
     }
 
     private func toggleRecording() async {
