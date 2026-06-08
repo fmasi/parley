@@ -11,6 +11,8 @@
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
+🤝 **Sister project:** [**mailrag**](https://github.com/fmasi/mailrag) — private, self-hosted email RAG. Two halves of one idea: a private, open context stack your AI agents can draw on.
+
 > **What it buys you.** Meeting transcription that's *private by construction* — every byte stays on
 > your Mac, on open models, with nothing phoning home. The default engine transcribes 17 minutes of
 > audio in **~7 seconds (146× real-time)** on the Apple Neural Engine, separates "you" from "them"
