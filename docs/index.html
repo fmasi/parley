@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parley — private, on-device meeting transcription</title>
+<meta name="description" content="Private, on-device meeting transcription for Apple Silicon. Dual-stream mic + system audio, on-device speaker diarization, 146x real-time. Open-source, zero cloud.">
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#11161f; --ink:#e6edf3; --muted:#8b97a7;
+    --line:#1f2733; --accent:#4cc9f0; --accent2:#80ffea; --ok:#3ddc97;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;
+       background-image:radial-gradient(1200px 600px at 70% -10%,rgba(76,201,240,.10),transparent 60%);}
+  .wrap{max-width:960px;margin:0 auto;padding:0 22px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{padding:84px 0 26px}
+  .name{font-family:var(--mono);font-size:14px;letter-spacing:.12em;color:var(--accent2);text-transform:lowercase}
+  h1{font-size:clamp(30px,5vw,50px);line-height:1.12;margin:14px 0 10px;font-weight:780;letter-spacing:-.02em}
+  h1 .hl{color:var(--accent)}
+  .tag{font-size:clamp(16px,2.4vw,20px);color:var(--muted);max-width:680px}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 26px}
+  .badge{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);
+         border:1px solid var(--line);border-radius:999px;padding:5px 11px}
+  .badge.ok{color:var(--ok);border-color:rgba(61,220,151,.35)}
+  .cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:6px}
+  .btn{font-weight:650;border-radius:10px;padding:11px 18px;border:1px solid var(--line);
+       background:var(--panel);color:var(--ink)}
+  .btn.primary{background:linear-gradient(180deg,#1b6fa8,#155a87);border-color:#1c84c6;color:#fff}
+  .btn:hover{text-decoration:none;border-color:var(--accent)}
+  .shot{margin:30px 0 6px;border:1px dashed var(--line);border-radius:14px;background:var(--panel);
+        min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--muted);
+        font-family:var(--mono);font-size:13px;text-align:center;padding:24px}
+  section{padding:34px 0;border-top:1px solid var(--line)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--accent2);margin:0 0 16px}
+  .lead{font-size:18px;color:var(--ink)}
+  .muted{color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h3{margin:0 0 6px;font-size:15px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  ul.hard{list-style:none;padding:0;margin:0;display:grid;gap:14px}
+  ul.hard li{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 18px}
+  ul.hard b{color:var(--ink)}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  td,th{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em}
+  code{font-family:var(--mono);background:#0d1320;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:13px}
+  footer{padding:40px 0 70px;border-top:1px solid var(--line);color:var(--muted);font-size:14.5px}
+  footer a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="name">parley</div>
+    <h1>Your meetings, transcribed <span class="hl">entirely on your Mac</span>.</h1>
+    <p class="tag">Captures your mic <b>and</b> the far side of the call (Zoom, Teams, Meet), and turns
+       them into speaker-attributed transcripts that never leave your machine. 100% open-source,
+       open-model, airgapped.</p>
+    <div class="badges">
+      <span class="badge">macOS 15+</span>
+      <span class="badge">Apple Silicon</span>
+      <span class="badge">Swift</span>
+      <span class="badge ok">cloud: none</span>
+      <span class="badge">146× real-time</span>
+      <span class="badge">AGPL-3.0</span>
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/fmasi/parley">View on GitHub →</a>
+      <a class="btn" href="https://www.linkedin.com/in/fmasi/">Frédéric Masi · LinkedIn</a>
+    </div>
+
+    <!-- SCREENSHOT: replace this box with <img src="assets/hero-menubar.png" style="width:100%;border-radius:14px"> -->
+    <div class="shot">add docs/assets/hero-menubar.png — the menu-bar dropdown — and replace this box with an &lt;img&gt;</div>
+  </header>
+
+  <section>
+    <h2>Why it exists</h2>
+    <p class="lead">Cloud meeting AI means uploading the raw audio of every conversation to someone else's
+       servers. For anything confidential, that's a non-starter.</p>
+    <p class="muted">So I built the opposite: transcription that runs entirely on-device, on open models,
+       with nothing phoning home. And the transcripts aren't just notes — they're <b>private context</b> my
+       own AI agents can draw on for total recall, without renting my memory to anyone. parley
+       covers calls and meetings; <a href="https://github.com/fmasi/mailrag">mailrag</a> covers email.
+       Independent tools; my agents know about both and use what fits.</p>
+  </section>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card"><h3>Dual-stream capture</h3><p>Records your mic and system audio as separate streams, so local and remote voices stay distinguishable. No virtual drivers.</p></div>
+      <div class="card"><h3>On-device diarization</h3><p>Automatic who-said-what (pyannote + WeSpeaker + VBx), with a quality score per segment.</p></div>
+      <div class="card"><h3>Two engines</h3><p>FluidAudio / Parakeet (fastest, 25 EU languages) or Apple SpeechAnalyzer. Swap in Settings.</p></div>
+      <div class="card"><h3>Echo / mic-bleed removal</h3><p>Strips the far-end voice that bleeds into your mic so it isn't mistaken for a phantom speaker.</p></div>
+      <div class="card"><h3>Crash-safe recording</h3><p>Survives UI and XPC crashes with auto-relaunch, silent re-attach, and multi-segment stitching.</p></div>
+      <div class="card"><h3>Open formats</h3><p>JSON, SRT, and TXT with timestamps, speaker labels, confidence scores, and local/remote tags.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it works — the hard parts</h2>
+    <ul class="hard">
+      <li><b>Dual-stream capture (the core constraint).</b> macOS exposes no API for a pre-mixed mic + system stream — verified through the macOS 26 SDK. So the app runs two ScreenCaptureKit streams and treats "local" and "remote" as first-class. That's what makes reliable speaker separation possible.</li>
+      <li><b>Echo / mic-bleed removal.</b> A triple-confirmed gate removes the far-end voice bleeding into your mic: &gt;50% temporal overlap <b>and</b> &gt;70% word overlap <b>and</b> &gt;0.8 speaker-embedding cosine.</li>
+      <li><b>Cross-chunk speaker reconciliation.</b> Audio is chunked and transcribed in parallel; per-chunk speaker IDs are merged into one global identity via greedy cosine matching on embeddings.</li>
+      <li><b>Crash-safe by design.</b> Sentinel file + LaunchAgent restart + multi-segment stitching mean a crash mid-meeting costs ~300–800 ms, not your recording.</li>
+      <li><b>Fully on-device ML.</b> Parakeet ASR + pyannote/WeSpeaker/VBx diarization + VAD, all on the Apple Neural Engine.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Open models, on-device</h2>
+    <table>
+      <tr><th>Component</th><th>Model</th><th>License</th></tr>
+      <tr><td>Speech recognition</td><td>NVIDIA Parakeet TDT 0.6B (CoreML)</td><td>CC-BY-4.0</td></tr>
+      <tr><td>Speaker diarization</td><td>pyannote segmentation + WeSpeaker</td><td>CC-BY-4.0</td></tr>
+      <tr><td>Voice activity</td><td>Silero VAD</td><td>MIT</td></tr>
+      <tr><td>Engine SDK</td><td>FluidAudio</td><td>Apache-2.0</td></tr>
+    </table>
+    <p class="muted" style="margin-top:14px">Get started: <code>git clone https://github.com/fmasi/parley.git &amp;&amp; cd parley &amp;&amp; bash package_app.sh --install</code></p>
+  </section>
+
+  <footer>
+    Built by <a href="https://www.linkedin.com/in/fmasi/">Frédéric Masi</a> — private, on-device context tools for AI agents.<br>
+    Open source under <a href="https://github.com/fmasi/parley/blob/main/LICENSE">AGPL-3.0</a>; commercial licensing available. © 2026 Frédéric Masi.
+  </footer>
+
+</div>
+</body>
+</html>

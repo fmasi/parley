@@ -48,5 +48,9 @@ dist/
 # Editor settings
 .vscode/
 
-# ASR monitoring research notes (monthly workflow output)
+# ASR monitoring research notes (monthly workflow output) — keep local, not published
 asr-news-*.md
+docs/asr-news/
+
+# Claude Code local config, worktrees, and build junk
+.claude/
