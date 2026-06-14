@@ -77,8 +77,19 @@ public final class WavFileWriter {
     private func syncIfNeeded() {
         let now = ContinuousClock.Instant.now
         guard now - lastSyncTime >= Self.syncInterval else { return }
+        flushHeader()
         fileHandle.synchronizeFile()
         lastSyncTime = now
+    }
+
+    /// Rewrite the header in place to reflect the bytes written so far, then
+    /// resume appending. Called periodically so that a crash before `finalize()`
+    /// still leaves a readable WAV (loss bounded to the last sync interval).
+    public func flushHeader() {
+        let rate = sampleRate > 0 ? sampleRate : 16000
+        fileHandle.seek(toFileOffset: 0)
+        writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
+        fileHandle.seekToEndOfFile()
     }
 
     private func logFirstWrite() {
@@ -89,13 +100,49 @@ public final class WavFileWriter {
     }
 
     public func finalize() {
-        let rate = sampleRate > 0 ? sampleRate : 16000
-        fileHandle.seek(toFileOffset: 0)
-        writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
-        fileHandle.seekToEndOfFile()
+        flushHeader()
         fileHandle.closeFile()
         Logger.files.info("WAV finalized: \(self.path, privacy: .private), size: \(self.dataByteCount) bytes")
     }
+
+    /// Repair a WAV whose header underreports its payload — the signature of a
+    /// file orphaned by a crash before `finalize()`/`flushHeader()` ran. The
+    /// format fields (sample rate, channels, bit depth) are preserved as-is; only
+    /// the RIFF and data size fields are rebuilt from the actual file length.
+    ///
+    /// Returns `true` if the header was rewritten, `false` if the file was already
+    /// consistent or could not be repaired (missing, too short, not a WAV).
+    @discardableResult
+    public static func repairHeader(path: String) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileSize = (attrs[.size] as? NSNumber)?.uint64Value,
+              fileSize > 44 else { return false }
+        guard let handle = try? FileHandle(forUpdating: URL(fileURLWithPath: path)) else { return false }
+        defer { try? handle.close() }
+
+        guard let header = try? handle.read(upToCount: 44), header.count == 44,
+              header[0..<4].elementsEqual(Array("RIFF".utf8)),
+              header[36..<40].elementsEqual(Array("data".utf8)) else { return false }
+
+        let actualDataSize = UInt32(min(fileSize - 44, UInt64(UInt32.max - 36)))
+        let declaredDataSize = header[40...43].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian
+        guard actualDataSize > declaredDataSize else { return false }
+
+        // Preserve the format block; rewrite only the two size fields in place.
+        do {
+            try handle.seek(toOffset: 4)
+            try handle.write(contentsOf: le32(36 + actualDataSize))   // RIFF chunk size
+            try handle.seek(toOffset: 40)
+            try handle.write(contentsOf: le32(actualDataSize))        // data chunk size
+            Logger.files.info("WAV header repaired: \(path, privacy: .private), data size \(declaredDataSize) → \(actualDataSize) bytes")
+            return true
+        } catch {
+            Logger.files.error("WAV header repair failed: \(path, privacy: .private): \(error, privacy: .public)")
+            return false
+        }
+    }
+
+    private static func le32(_ v: UInt32) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 4) }
 
     private func writeHeader(sampleRate: UInt32, channels: UInt16, dataSize: UInt32) {
         let blockAlign = channels * 2  // 16-bit samples

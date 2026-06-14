@@ -70,6 +70,11 @@
 - [ ] Stop after rotation — final transcript has speech from both chunks
 - [ ] Speaker labels consistent across chunks
 
+## Crash-safe WAV header (#79)
+- [ ] Record >1s, then force-kill the XPC service (or app) mid-chunk before stop
+- [ ] The orphaned chunk WAV opens with correct duration (not 0s) via `afinfo` — header was flushed during recording
+- [ ] On next transcription, an orphaned chunk's audio appears in the transcript (repairHeader recovered it); log shows `WAV header repaired: ... data size N -> M bytes`
+
 ## Regression
 - [ ] Start recording, stop, transcription completes
 - [ ] Settings save and reload correctly

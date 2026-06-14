@@ -206,6 +206,11 @@ final class ChunkProcessor {
         audioSource: AudioSourceType,
         label: String
     ) async -> StreamResult {
+        // Recover crash-orphaned WAVs: a writer killed before finalize() leaves a
+        // header that underreports the payload, so the file reads as empty/short.
+        // Rebuild the size fields from the real length before reading the audio.
+        WavFileWriter.repairHeader(path: audioPath.path)
+
         // Skip empty files (WAV header only)
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
