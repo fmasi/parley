@@ -7,7 +7,7 @@
 - [ ] App launches as **Parley**; re-grant Screen Recording + Microphone when prompted
 - [ ] Menu/About/Setup windows read "Parley", not "Audio Transcribe"
 - [ ] Full pipeline: record → transcribe → (optional) summarize works end to end
-- [ ] `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows logs during a recording
+- [ ] `/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows logs during a recording
 - [ ] Re-shoot `docs/assets/` screenshots (window titles still say "Audio Transcribe")
 
 ## Version Infrastructure (#42 + #33)

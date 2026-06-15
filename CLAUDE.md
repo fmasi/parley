@@ -130,7 +130,7 @@ See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging refe
 
 ```bash
 # All logs (debug + info + error)
-log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
 
 # Via dev.py (launches app + tails log)
 python3 scripts/dev.py --debug

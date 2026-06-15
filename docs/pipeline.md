@@ -326,28 +326,28 @@ All Swift components log via `os.Logger` with:
 
 ```bash
 # All logs (debug + info + error) — use during development
-log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
 
 # Only errors
-log stream --predicate 'subsystem == "eu.fmasi.parley" AND messageType == error'
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley" AND messageType == error'
 
 # Only audio capture (format detection, frame delivery, chunk rotation)
-log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "audio"' --level debug
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "audio"' --level debug
 
 # Only transcription (ASR, diarization, echo dedup, summary)
-log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "transcription"' --level debug
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "transcription"' --level debug
 
 # Only file operations (archival, transcript writes, storage quota)
-log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "files"' --level debug
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "files"' --level debug
 
 # Historical (last 5 minutes)
-log show --predicate 'subsystem == "eu.fmasi.parley"' --last 5m
+/usr/bin/log show --predicate 'subsystem == "eu.fmasi.parley"' --last 5m
 
 # Save to file (shows in terminal AND writes to file — share for debugging sessions)
-log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug --style compact | tee ~/Desktop/transcriber.log
+/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug --style compact | tee ~/Desktop/transcriber.log
 
 # Dump recent history to file (useful after a crash — no live stream needed)
-log show --predicate 'subsystem == "eu.fmasi.parley"' --last 30m --style compact > ~/Desktop/transcriber.log
+/usr/bin/log show --predicate 'subsystem == "eu.fmasi.parley"' --last 30m --style compact > ~/Desktop/transcriber.log
 
 # Via dev.py (launches app + tails log automatically)
 python3 scripts/dev.py --debug
