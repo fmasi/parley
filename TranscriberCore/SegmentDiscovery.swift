@@ -56,7 +56,7 @@ public func discoverSegments(
             return [(systemAudio, micAudio)]
         }
     } else {
-        // Legacy: base pair is segment 1 (always included); suffixed segments start at 2.
+        // Legacy naming: base is segment "1" (always included); suffixed segments start at -2 (never -1).
         segments = [(systemAudio, micAudio)] + indices.filter { $0 >= 2 }.map(pair)
     }
 

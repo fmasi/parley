@@ -198,7 +198,7 @@ struct DiscoverSegmentsTests {
 
             for name in ["rec-0.wav", "rec-2.wav"] {
                 let data = (try? Data(contentsOf: dir.appendingPathComponent(name))) ?? Data()
-                let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+                let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
                 #expect(dataSize == UInt32(2400 * 2))
             }
         }
