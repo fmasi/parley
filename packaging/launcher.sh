@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Launcher for AudioTranscribe.app
+# Launcher for Parley.app
 # Sets up the embedded Python environment and exec's the service.
 # exec replaces this shell — Python becomes the app process,
 # so TCC grants flow through to subprocesses (audio-capture-helper).

@@ -74,7 +74,7 @@ git clone https://github.com/fmasi/parley.git
 cd parley
 bash package_app.sh --install      # builds the Swift targets, assembles the .app + XPC service,
                                    # ad-hoc signs everything, installs to /Applications
-open /Applications/AudioTranscribe.app
+open /Applications/Parley.app
 ```
 
 On first launch, macOS asks for **Screen & System Audio Recording** permission. The default engine
@@ -139,13 +139,13 @@ record trustworthy.
 
 ```bash
 # Transcribe audio files (system + optional mic stream)
-.build/debug/AudioTranscribe transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
+.build/debug/Parley transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
 
 # Rename detected speakers interactively
-.build/debug/AudioTranscribe rename -i transcript.json
+.build/debug/Parley rename -i transcript.json
 
 # Summarize a transcript with a local/remote LLM
-.build/debug/AudioTranscribe summarize -i transcript.json
+.build/debug/Parley summarize -i transcript.json
 
 # Benchmark engines (speed + WER) across languages
 swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,speech

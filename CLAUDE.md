@@ -49,7 +49,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, and atomic JSON persistence
 - `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, benchmark, summarize) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `summary: SummaryConfig`
-- `TranscriberCore/ConfigManager.swift` -- reads/writes `~/.audio-transcribe/config.json`
+- `TranscriberCore/ConfigManager.swift` -- reads/writes `~/Library/Application Support/Parley/config.json`
 - `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata
 - `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines + AudioSourceType enum
 - `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization; isModelCached()/preDownloadModel() for eager download; ensureLoaded() is load-only (never downloads)
@@ -58,7 +58,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync
-- `TranscriberCore/RecordingSentinel.swift` -- crash recovery sentinel file (JSON at ~/.audio-transcribe/recording.json), atomic write/read/delete
+- `TranscriberCore/RecordingSentinel.swift` -- crash recovery sentinel file (JSON at ~/Library/Application Support/Parley/recording.json), atomic write/read/delete
 - `TranscriberCore/LaunchAgentManager.swift` -- install/unload macOS LaunchAgent (KeepAlive) for auto-relaunch on crash
 - `TranscriberCore/SegmentDiscovery.swift` -- discover multi-segment audio files from crash recovery (base, -2, -3, ...)
 - `TranscriberCore/SegmentNaming.swift` -- segment filename computation: strip `-N` suffix, append new segment number
@@ -80,7 +80,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/OpenAISummaryProvider.swift` -- OpenAI-compatible chat completions provider via /v1/chat/completions (covers OpenAI, Claude proxy, Ollama, LM Studio OpenAI mode)
 - `TranscriberCore/LMStudioSummaryProvider.swift` -- LM Studio native REST API v1 provider via /api/v1/chat with per-request context_length, token stats, and self-correcting retry on context overflow
 - `TranscriberCore/MeetingSummarizer.swift` -- orchestrator: reads transcript JSON, selects provider from config, calls provider, writes -summary.md; createProvider(from:) factory for both provider types
-- `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/.audio-transcribe/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
+- `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/Library/Application Support/Parley/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
 - `TranscriberCore/EchoDeduplicator.swift` -- triple-confirmed echo dedup: removes local segments that are mic bleed of remote speakers (temporal overlap >50% + word overlap >70% + speaker embedding cosine >0.8)
 
 ### Standalone Swift CLI (legacy, still functional)
@@ -102,7 +102,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### Swift (SwiftUI app + XPC service)
 ```bash
 swift build
-# Produces .build/debug/AudioTranscribe and .build/debug/audio-capture-helper-xpc
+# Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 # 384 tests across 38 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
@@ -130,7 +130,7 @@ See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging refe
 
 ```bash
 # All logs (debug + info + error)
-log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug
+log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
 
 # Via dev.py (launches app + tails log)
 python3 scripts/dev.py --debug

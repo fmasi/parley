@@ -33,7 +33,7 @@ final class SetupWindowController {
             backing: .buffered,
             defer: false
         )
-        newWindow.title = "Audio Transcribe Setup"
+        newWindow.title = "Parley Setup"
         newWindow.contentView = hostingView
         newWindow.isReleasedWhenClosed = false
         newWindow.center()

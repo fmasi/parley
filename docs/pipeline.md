@@ -232,7 +232,7 @@ Notes:
 - `TranscriberCore/MeetingSummarizer.swift` — `summarizeIfConfigured()`, `summarize()`, `createProvider(from:)`
 - `TranscriberCore/OpenAISummaryProvider.swift` — `summarize()`, `buildRequest()`
 - `TranscriberCore/LMStudioSummaryProvider.swift` — self-correcting retry on context overflow
-- `TranscriberCore/TokenRatioCache.swift` — `~/.audio-transcribe/token-ratios.json`
+- `TranscriberCore/TokenRatioCache.swift` — `~/Library/Application Support/Parley/token-ratios.json`
 
 ---
 
@@ -304,7 +304,7 @@ When `metadata.dualStream == true`, each transcript line is prefixed with its so
 
 ### Token Ratio Calibration Lifecycle
 
-`TokenRatioCache` (`~/.audio-transcribe/token-ratios.json`) maintains a per-model chars-per-token ratio:
+`TokenRatioCache` (`~/Library/Application Support/Parley/token-ratios.json`) maintains a per-model chars-per-token ratio:
 
 1. **Probe (seed):** On first use for a model, a 283-char calibration probe is sent to the LM Studio REST API. The measured ratio is stored as `isSeed: true`.
 2. **Real measurement:** When a real transcript is summarized (input >2000 chars), the actual `prompt_tokens` value from the response is used to compute a real ratio, stored as `isSeed: false`. Real measurements always replace seeds.
@@ -321,33 +321,33 @@ The ratio is used by `LMStudioSummaryProvider` to estimate token count and selec
 ## 6. Debugging
 
 All Swift components log via `os.Logger` with:
-- **Subsystem:** `com.audio-transcribe.app`
+- **Subsystem:** `eu.fmasi.parley`
 - **Categories:** `audio`, `transcription`, `state`, `config`, `permissions`, `files`
 
 ```bash
 # All logs (debug + info + error) — use during development
-log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug
+log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
 
 # Only errors
-log stream --predicate 'subsystem == "com.audio-transcribe.app" AND messageType == error'
+log stream --predicate 'subsystem == "eu.fmasi.parley" AND messageType == error'
 
 # Only audio capture (format detection, frame delivery, chunk rotation)
-log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "audio"' --level debug
+log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "audio"' --level debug
 
 # Only transcription (ASR, diarization, echo dedup, summary)
-log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "transcription"' --level debug
+log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "transcription"' --level debug
 
 # Only file operations (archival, transcript writes, storage quota)
-log stream --predicate 'subsystem == "com.audio-transcribe.app" AND category == "files"' --level debug
+log stream --predicate 'subsystem == "eu.fmasi.parley" AND category == "files"' --level debug
 
 # Historical (last 5 minutes)
-log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 5m
+log show --predicate 'subsystem == "eu.fmasi.parley"' --last 5m
 
 # Save to file (shows in terminal AND writes to file — share for debugging sessions)
-log stream --predicate 'subsystem == "com.audio-transcribe.app"' --level debug --style compact | tee ~/Desktop/transcriber.log
+log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug --style compact | tee ~/Desktop/transcriber.log
 
 # Dump recent history to file (useful after a crash — no live stream needed)
-log show --predicate 'subsystem == "com.audio-transcribe.app"' --last 30m --style compact > ~/Desktop/transcriber.log
+log show --predicate 'subsystem == "eu.fmasi.parley"' --last 30m --style compact > ~/Desktop/transcriber.log
 
 # Via dev.py (launches app + tails log automatically)
 python3 scripts/dev.py --debug
@@ -373,7 +373,7 @@ Test path: `SwiftTests/TranscriberTests/` (not `Tests/` — APFS case-collision 
 
 ### Plists
 
-- `packaging/Info.plist` — app bundle metadata: `CFBundleIdentifier: com.audio-transcribe.app`, `LSUIElement: true` (menu bar only), TCC usage descriptions (microphone, screen recording, calendar, notifications)
+- `packaging/Info.plist` — app bundle metadata: `CFBundleIdentifier: eu.fmasi.parley`, `LSUIElement: true` (menu bar only), TCC usage descriptions (microphone, screen recording, calendar, notifications)
 - `packaging/AudioCaptureHelper-Info.plist` — XPC service plist: `ServiceType: Application`
 
 ### Build & Run
@@ -415,7 +415,7 @@ Subcommands are parsed by `TranscriberCore/CLIParser.swift` into a `CLICommand` 
 Transcribe one or more audio files.
 
 ```
-AudioTranscribe transcribe -i <path> [-i <path>...] [options]
+Parley transcribe -i <path> [-i <path>...] [options]
 
 Options:
   -i, --input <path>        Input audio file (repeat for multiple files)
@@ -445,7 +445,7 @@ Default is single-stream (option 2). When stdin is not a terminal (piped/scripte
 Interactive CLI speaker rename — parses transcript JSON, collects speaker samples, prompts for new names via stdin.
 
 ```
-AudioTranscribe rename -i <transcript.json>
+Parley rename -i <transcript.json>
 ```
 
 ### `rename-gui`
@@ -453,7 +453,7 @@ AudioTranscribe rename -i <transcript.json>
 Opens the speaker rename dialog as a floating NSPanel (same input as `rename` but GUI).
 
 ```
-AudioTranscribe rename-gui -i <transcript.json>
+Parley rename-gui -i <transcript.json>
 ```
 
 ### `benchmark`
@@ -461,7 +461,7 @@ AudioTranscribe rename-gui -i <transcript.json>
 Run engine benchmark suite against test audio files.
 
 ```
-AudioTranscribe benchmark [--transcription-only | --diarization-only]
+Parley benchmark [--transcription-only | --diarization-only]
 ```
 
 ### `summarize`
@@ -469,7 +469,7 @@ AudioTranscribe benchmark [--transcription-only | --diarization-only]
 Generate an LLM summary from a transcript JSON file. Options override config values.
 
 ```
-AudioTranscribe summarize -i <transcript.json> [options]
+Parley summarize -i <transcript.json> [options]
 
 Options:
   -i, --input <path>           Transcript JSON file

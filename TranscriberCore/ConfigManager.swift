@@ -12,8 +12,7 @@ public final class ConfigManager {
     public private(set) var config: Config
 
     public init(configDir: URL? = nil) {
-        let dir = configDir ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".audio-transcribe")
+        let dir = configDir ?? AppPaths.dataDirectory
         self.configDir = dir
         self.configFile = dir.appendingPathComponent("config.json")
         self.config = Self.load(from: self.configFile)

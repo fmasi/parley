@@ -5,7 +5,7 @@ import Foundation
 struct CLIHandlerTests {
 
     @Test func parseTranscribeMinimal() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "system.wav"]
+        let args = ["Parley", "transcribe", "-i", "system.wav"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
@@ -19,7 +19,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseTranscribeDualInput() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "system.wav", "-i", "mic.wav", "-f", "srt", "--output-dir", "/tmp/out"]
+        let args = ["Parley", "transcribe", "-i", "system.wav", "-i", "mic.wav", "-f", "srt", "--output-dir", "/tmp/out"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
@@ -31,7 +31,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseTranscribeAllFlags() throws {
-        let args = ["AudioTranscribe", "transcribe", "-i", "a.wav", "--no-diarize", "--engine", "fluid_audio"]
+        let args = ["Parley", "transcribe", "-i", "a.wav", "--no-diarize", "--engine", "fluid_audio"]
         let cmd = try CLIParser.parse(args)
         guard case .transcribe(let opts) = cmd else {
             Issue.record("Expected transcribe command")
@@ -42,7 +42,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseRename() throws {
-        let args = ["AudioTranscribe", "rename", "-i", "transcript.json"]
+        let args = ["Parley", "rename", "-i", "transcript.json"]
         let cmd = try CLIParser.parse(args)
         guard case .rename(let path) = cmd else {
             Issue.record("Expected rename command")
@@ -52,7 +52,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseBenchmark() throws {
-        let args = ["AudioTranscribe", "benchmark", "--transcription-only"]
+        let args = ["Parley", "benchmark", "--transcription-only"]
         let cmd = try CLIParser.parse(args)
         guard case .benchmark(let opts) = cmd else {
             Issue.record("Expected benchmark command")
@@ -63,7 +63,7 @@ struct CLIHandlerTests {
     }
 
     @Test func parseNoSubcommandReturnsNil() throws {
-        let cmd = try? CLIParser.parse(["AudioTranscribe"])
+        let cmd = try? CLIParser.parse(["Parley"])
         #expect(cmd == nil)
     }
 }

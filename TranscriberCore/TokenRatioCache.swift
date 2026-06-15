@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Caches measured chars-per-token ratios per model, persisted at `~/.audio-transcribe/token-ratios.json`.
+/// Caches measured chars-per-token ratios per model, persisted at `~/Library/Application Support/Parley/token-ratios.json`.
 ///
 /// Ratios are either "seed" (from a small calibration probe, rough) or "measured" (from real
 /// transcripts, accurate). Real measurements always replace seeds. Subsequent real measurements
@@ -31,10 +31,7 @@ public final class TokenRatioCache: Sendable {
     static let probeChars = 283
 
     init(cacheURL: URL? = nil) {
-        self.cacheURL = cacheURL ?? {
-            let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".audio-transcribe")
-            return dir.appendingPathComponent("token-ratios.json")
-        }()
+        self.cacheURL = cacheURL ?? AppPaths.dataDirectory.appendingPathComponent("token-ratios.json")
     }
 
     // MARK: - Cache entry

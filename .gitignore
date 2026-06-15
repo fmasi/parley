@@ -31,8 +31,8 @@ env/
 *.token
 
 # Plist contains real HF token — keep out of git
-# Use com.audio-transcribe.plist.template for the committed version
-com.audio-transcribe.plist
+# Use eu.fmasi.parley.plist.template for the committed version
+eu.fmasi.parley.plist
 
 # Swift build artifacts
 .build/

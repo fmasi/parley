@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.audio-transcribe.capture-helper</string>
+    <string>eu.fmasi.parley.capture-helper</string>
 
     <key>CFBundleName</key>
     <string>AudioCaptureHelper</string>

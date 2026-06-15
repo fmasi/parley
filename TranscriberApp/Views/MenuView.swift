@@ -89,7 +89,7 @@ struct MenuView: View {
 
         Divider()
 
-        Button("About Audio Transcribe") {
+        Button("About Parley") {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.orderFrontStandardAboutPanel(options: [
                 .version: AppVersion.displayString,

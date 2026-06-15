@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.audio-transcribe</string>
+    <string>eu.fmasi.parley</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/miniconda3/envs/transcribe/bin/python</string>
@@ -15,9 +15,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/REPLACE_WITH_USERNAME/.audio-transcribe/logs/stdout.log</string>
+    <string>/Users/REPLACE_WITH_USERNAME/Library/Application Support/Parley/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/REPLACE_WITH_USERNAME/.audio-transcribe/logs/stderr.log</string>
+    <string>/Users/REPLACE_WITH_USERNAME/Library/Application Support/Parley/logs/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

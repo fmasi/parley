@@ -45,7 +45,7 @@ ScreenCaptureKit delivers `.audio` (system) and `.microphone` (mic) as separate 
 Audio capture runs in a separate XPC service process (`audio-capture-helper-xpc`). This provides process isolation and scopes the TCC permission grant to the app bundle. XPC services only function when embedded inside a `.app` bundle — the bare binary cannot reach the service. The service detects client disconnection via `invalidationHandler` and stops capture + finalizes WAV files to prevent orphaned recordings.
 
 **7. Crash recovery**
-Recording survives crashes via three mechanisms: (1) a sentinel file (`~/.audio-transcribe/recording.json`) persists recording state; (2) a LaunchAgent (`KeepAlive: true`) auto-restarts the app; (3) `WavFileWriter` syncs data to disk every 0.5s. On relaunch, the app checks the sentinel and either re-attaches to a live XPC session (Flow A) or starts a new capture segment (Flow B). If the XPC service crashes while the UI is alive, the UI detects it instantly via `invalidationHandler` and restarts capture (Flow C). Multi-segment recordings are stitched at transcription time.
+Recording survives crashes via three mechanisms: (1) a sentinel file (`~/Library/Application Support/Parley/recording.json`) persists recording state; (2) a LaunchAgent (`KeepAlive: true`) auto-restarts the app; (3) `WavFileWriter` syncs data to disk every 0.5s. On relaunch, the app checks the sentinel and either re-attaches to a live XPC session (Flow A) or starts a new capture segment (Flow B). If the XPC service crashes while the UI is alive, the UI detects it instantly via `invalidationHandler` and restarts capture (Flow C). Multi-segment recordings are stitched at transcription time.
 
 **4. Native sample rates, no resampling**
 The mic sample rate varies by audio device (48kHz with speakers, 24kHz with some headphones). The Swift code auto-detects the rate from the first `CMSampleBuffer`'s format description and writes it to the WAV header on `finalize()`. WhisperKit handles any sample rate natively.
@@ -78,7 +78,7 @@ AudioCaptureProtocol/            Shared protocol target
 TranscriberCore/                 Shared logic target
   AppState.swift                 Observable state machine: idle → recording → transcribing
   Config.swift                   Codable config (snake_case JSON keys, engine selection)
-  ConfigManager.swift            Reads/writes ~/.audio-transcribe/config.json
+  ConfigManager.swift            Reads/writes ~/Library/Application Support/Parley/config.json
   EngineID.swift                 Engine enum + EngineDescriptor metadata
   TranscriptionEngine.swift      Protocol for swappable transcription engines
   FluidAudioEngine.swift         FluidAudio/Parakeet engine (CoreML/ANE)
@@ -98,6 +98,6 @@ TranscriberCore/                 Shared logic target
 
 ## TCC Permissions
 
-Permission is granted to the **app bundle** (`CFBundleIdentifier: com.audio-transcribe.app`). When running as a `.app` bundle the grant is tied to the bundle ID. When running the bare binary from Terminal, macOS ties the grant to Terminal.app — which means it won't carry over to the installed app.
+Permission is granted to the **app bundle** (`CFBundleIdentifier: eu.fmasi.parley`). When running as a `.app` bundle the grant is tied to the bundle ID. When running the bare binary from Terminal, macOS ties the grant to Terminal.app — which means it won't carry over to the installed app.
 
 If you change `CFBundleIdentifier` in `packaging/Info.plist`, macOS treats it as a new app and you must re-grant permissions.

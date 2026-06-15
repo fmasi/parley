@@ -1,7 +1,7 @@
 import os
 
 public extension Logger {
-    private static let subsystem = "com.audio-transcribe.app"
+    private static let subsystem = "eu.fmasi.parley"
 
     /// Audio capture: stream lifecycle, format detection, device selection
     static let audio = Logger(subsystem: subsystem, category: "audio")

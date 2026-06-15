@@ -81,7 +81,7 @@ swift run --package-path tools/engine-benchmark EngineBenchmark ~/Documents/Reco
 # Available engines: whisperkit, whisper-cpp, fluid, speech, mlx
 ```
 
-Reports saved to `~/.audio-transcribe/benchmark/`.
+Reports saved to `~/Library/Application Support/Parley/benchmark/`.
 
 Compare with previous reports to see if framework updates improved performance.
 

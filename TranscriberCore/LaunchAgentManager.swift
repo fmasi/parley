@@ -7,7 +7,7 @@ import os
 /// - Call `install()` at app startup to register the LaunchAgent.
 /// - Call `uninstall()` before a clean quit (Cmd+Q) so macOS does not restart the app.
 public enum LaunchAgentManager {
-    public static let label = "com.audio-transcribe.app"
+    public static let label = "eu.fmasi.parley"
     public static let plistName = "\(label).plist"
 
     // MARK: - Plist generation
@@ -16,7 +16,7 @@ public enum LaunchAgentManager {
     ///
     /// `KeepAlive` is intentionally a dict with `SuccessfulExit: false` (NOT a plain `<true/>`).
     /// With the boolean form, `launchctl load -w` will spawn the app immediately even when an
-    /// instance is already running via LaunchServices (e.g. dev.py's `open AudioTranscribe.app`),
+    /// instance is already running via LaunchServices (e.g. dev.py's `open Parley.app`),
     /// producing two menu-bar icons. The dict form scopes relaunch to crash recovery only, which
     /// matches the actual purpose of this LaunchAgent.
     public static func generatePlist(executablePath: String) -> String {

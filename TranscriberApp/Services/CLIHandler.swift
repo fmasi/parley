@@ -69,7 +69,7 @@ enum CLIHandler {
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/log")
             proc.arguments = [
                 "stream", "--level", "debug", "--style", "compact",
-                "--predicate", "subsystem == \"com.audio-transcribe.app\""
+                "--predicate", "subsystem == \"eu.fmasi.parley\""
             ]
             proc.standardOutput = FileHandle.standardError
             try? proc.run()
@@ -172,7 +172,7 @@ enum CLIHandler {
 
     private static func handleBenchmark(_ opts: BenchmarkOptions) async throws {
         let benchmarkDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".audio-transcribe/benchmark")
+            .appendingPathComponent("Library/Application Support/Parley/benchmark")
 
         guard FileManager.default.fileExists(atPath: benchmarkDir.path) else {
             throw CLIError.noBenchmarkFiles
@@ -242,7 +242,7 @@ enum CLIHandler {
 
     private static func printUsage() {
         let usage = """
-        Usage: AudioTranscribe <subcommand> [options]
+        Usage: Parley <subcommand> [options]
 
         Subcommands:
           transcribe  Transcribe audio files
@@ -284,7 +284,7 @@ enum CLIHandler {
         var errorDescription: String? {
             switch self {
             case .fileNotFound(let path): return "File not found: \(path)"
-            case .noBenchmarkFiles: return "No benchmark files found in ~/.audio-transcribe/benchmark/"
+            case .noBenchmarkFiles: return "No benchmark files found in ~/Library/Application Support/Parley/benchmark/"
             case .missingConfig(let what): return "Missing configuration: \(what)"
             }
         }

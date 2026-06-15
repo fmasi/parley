@@ -17,10 +17,10 @@ struct LaunchAgentManagerTests {
     // MARK: - generatePlist
 
     @Test func generatesPlistWithCorrectLabel() {
-        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe")
-        #expect(plist.contains("com.audio-transcribe.app"))
+        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley")
+        #expect(plist.contains("eu.fmasi.parley"))
         #expect(plist.contains("ProgramArguments"))
-        #expect(plist.contains("/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe"))
+        #expect(plist.contains("/Applications/Transcriber.app/Contents/MacOS/Parley"))
         #expect(!plist.contains("BundlePath"))
         #expect(plist.contains("KeepAlive"))
         #expect(plist.contains("ProcessType"))
@@ -33,7 +33,7 @@ struct LaunchAgentManagerTests {
         // app is launched via LaunchServices (`open`) and the agent is loaded right after,
         // producing two menu-bar icons. The dict + SuccessfulExit:false form scopes
         // relaunch to crash recovery only.
-        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe")
+        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley")
         #expect(plist.contains("<key>SuccessfulExit</key>"))
         #expect(plist.contains("<false/>"))
         // Sanity: the boolean form must not slip back in.
@@ -48,7 +48,7 @@ struct LaunchAgentManagerTests {
         defer { cleanup(dir) }
 
         try LaunchAgentManager.install(
-            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false
         )
@@ -57,9 +57,9 @@ struct LaunchAgentManagerTests {
         #expect(FileManager.default.fileExists(atPath: plistURL.path))
 
         let content = try String(contentsOf: plistURL, encoding: .utf8)
-        #expect(content.contains("com.audio-transcribe.app"))
+        #expect(content.contains("eu.fmasi.parley"))
         #expect(content.contains("ProgramArguments"))
-        #expect(content.contains("/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe"))
+        #expect(content.contains("/Applications/Transcriber.app/Contents/MacOS/Parley"))
         #expect(content.contains("KeepAlive"))
     }
 
@@ -71,7 +71,7 @@ struct LaunchAgentManagerTests {
 
         // First install
         try LaunchAgentManager.install(
-            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false
         )
@@ -99,7 +99,7 @@ struct LaunchAgentManagerTests {
         defer { cleanup(dir) }
 
         try LaunchAgentManager.install(
-            executablePath: "/Applications/Transcriber.app/Contents/MacOS/AudioTranscribe",
+            executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false
         )

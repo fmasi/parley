@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Developer iteration tool for AudioTranscribe.
+"""Developer iteration tool for Parley.
 
 Build, install, and launch the app for manual testing.
 
@@ -22,9 +22,9 @@ import sys
 import time
 from pathlib import Path
 
-BUNDLE_ID = "com.audio-transcribe.app"
-APP_PATH = Path("/Applications/AudioTranscribe.app")
-BINARY_PATH = APP_PATH / "Contents" / "MacOS" / "AudioTranscribe"
+BUNDLE_ID = "eu.fmasi.parley"
+APP_PATH = Path("/Applications/Parley.app")
+BINARY_PATH = APP_PATH / "Contents" / "MacOS" / "Parley"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_SCRIPT = PROJECT_ROOT / "package_app.sh"
@@ -39,13 +39,13 @@ TCC_SERVICES = ["Microphone", "ScreenCapture", "Calendar", "SystemPolicyDocument
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Developer iteration tool for AudioTranscribe.",
+        description="Developer iteration tool for Parley.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
 
     steps = parser.add_argument_group("steps (explicit mode — only selected steps run)")
-    steps.add_argument("--kill", action="store_true", help="Kill running AudioTranscribe")
+    steps.add_argument("--kill", action="store_true", help="Kill running Parley")
     steps.add_argument("--build", action="store_true", help="Build app bundle")
     steps.add_argument("--install", action="store_true", help="Install to /Applications")
     steps.add_argument("--launch", action="store_true", help="Launch via open")
@@ -89,13 +89,13 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def do_kill() -> None:
-    step("Killing AudioTranscribe if running")
+    step("Killing Parley if running")
     # Unload LaunchAgent first to prevent KeepAlive from restarting the app
     plist = Path.home() / "Library" / "LaunchAgents" / f"{BUNDLE_ID}.plist"
     if plist.exists():
         subprocess.run(["launchctl", "unload", str(plist)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["pkill", "-x", "AudioTranscribe"],
+    subprocess.run(["pkill", "-x", "Parley"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
 
@@ -112,7 +112,7 @@ def do_reset_tcc() -> None:
         else:
             print(f"   Reset {service}")
     print("   Note: Notifications can't be reset via tccutil.")
-    print("   To reset: System Settings > Notifications > AudioTranscribe")
+    print("   To reset: System Settings > Notifications > Parley")
 
 
 def do_build(install: bool) -> None:
@@ -129,7 +129,7 @@ def do_build(install: bool) -> None:
 
 
 def do_launch() -> None:
-    step("Launching AudioTranscribe")
+    step("Launching Parley")
     run(["open", str(APP_PATH)])
 
 

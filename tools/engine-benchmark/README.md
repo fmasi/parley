@@ -58,7 +58,7 @@ python3 tools/engine-benchmark/download-test-audio.py
 bash tools/engine-benchmark/run-benchmark-matrix.sh
 ```
 
-Reports are saved to `~/.audio-transcribe/benchmark/`.
+Reports are saved to `~/Library/Application Support/Parley/benchmark/`.
 
 ## Usage
 
@@ -76,7 +76,7 @@ Loads each engine model once, runs all audio files, outputs a comparison matrix:
 
 ```bash
 swift run --package-path tools/engine-benchmark EngineBenchmark \
-  --batch ~/.audio-transcribe/benchmark/test-audio \
+  --batch ~/Library/Application Support/Parley/benchmark/test-audio \
   --engines fluid,speech
 ```
 
