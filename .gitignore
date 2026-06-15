@@ -30,10 +30,6 @@ env/
 .env
 *.token
 
-# Plist contains real HF token — keep out of git
-# Use eu.fmasi.parley.plist.template for the committed version
-eu.fmasi.parley.plist
-
 # Swift build artifacts
 .build/
 audio_capture_helper/.build/
