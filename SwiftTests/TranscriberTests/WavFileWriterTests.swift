@@ -297,4 +297,74 @@ struct WavFileWriterTests {
         let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
         #expect(dataSize == 0)
     }
+
+    // MARK: - Crash-safe header (flush without finalize)
+
+    @Test func flushHeaderMakesFileReadableWithoutFinalize() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        let samples = [Int16](repeating: 1234, count: 4800)  // 0.1s @ 48kHz
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+
+        // Simulate a crash: header is flushed but finalize() is never called.
+        writer.flushHeader()
+
+        // A fresh reader must see the real payload size, not the placeholder 0.
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == UInt32(samples.count * 2))
+        // Sample rate must survive the flush, not revert to the placeholder.
+        let rate: UInt32 = data[24...27].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(rate == 48000)
+        // The audio payload must still be intact after the in-place header patch.
+        #expect(data.count == 44 + samples.count * 2)
+    }
+
+    // MARK: - Orphaned-file recovery
+
+    @Test func repairHeaderRebuildsUnderreportedDataSize() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        // Simulate an orphaned crash file: a correct format header but a stale
+        // data size (the writer died before its size was flushed), with the real
+        // PCM payload sitting on disk behind it.
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        writer.flushHeader()  // header: rate=48000, dataSize=0
+        let samples = [Int16](repeating: 99, count: 2400)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        // No finalize — header still claims dataSize=0.
+
+        let repaired = WavFileWriter.repairHeader(path: path)
+        #expect(repaired == true)
+
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == UInt32(samples.count * 2))
+        // Format fields are preserved, not guessed.
+        let rate: UInt32 = data[24...27].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(rate == 48000)
+    }
+
+    @Test func repairHeaderLeavesConsistentFileUnchanged() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        let samples = [Int16](repeating: 7, count: 1000)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()  // header already correct
+
+        let repaired = WavFileWriter.repairHeader(path: path)
+        #expect(repaired == false)
+
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == UInt32(samples.count * 2))
+    }
 }
