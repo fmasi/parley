@@ -64,6 +64,10 @@ final class TranscriptionRunner {
             // No mic — create tuples with system-only URLs (mic will be skipped below)
             segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: systemAudio)
         }
+        // Repair any orphaned segment whose header was never finalized (writer killed
+        // mid-recording) so the recovered PCM is decodable — the chunked path repairs in
+        // ChunkProcessor, this is the single-file / crash-recovery / CLI path (#85).
+        repairSegmentHeaders(segments)
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
         var localSpeakerDb: [String: [Float]] = [:]
