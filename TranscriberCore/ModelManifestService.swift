@@ -19,8 +19,7 @@ public actor ModelManifestService {
         manifestDir: URL? = nil,
         session: URLSession = .shared
     ) {
-        let dir = manifestDir ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".audio-transcribe")
+        let dir = manifestDir ?? AppPaths.dataDirectory
             .appendingPathComponent("model-manifests")
         self.manifestDir = dir
         self.session = session

@@ -4,13 +4,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.audio-transcribe.app</string>
+    <string>eu.fmasi.parley</string>
 
     <key>CFBundleName</key>
-    <string>Audio Transcribe</string>
+    <string>Parley</string>
 
     <key>CFBundleDisplayName</key>
-    <string>Audio Transcribe</string>
+    <string>Parley</string>
 
     <key>CFBundleVersion</key>
     <string>2.0.0</string>
@@ -19,7 +19,7 @@
     <string>2.0.0</string>
 
     <key>CFBundleExecutable</key>
-    <string>AudioTranscribe</string>
+    <string>Parley</string>
 
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
@@ -34,12 +34,12 @@
     <true/>
 
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Audio Transcribe needs Screen Recording permission to capture system audio from meetings.</string>
+    <string>Parley needs Screen Recording permission to capture system audio from meetings.</string>
 
     <key>NSMicrophoneUsageDescription</key>
-    <string>Audio Transcribe needs microphone access to record your voice.</string>
+    <string>Parley needs microphone access to record your voice.</string>
 
     <key>NSCalendarsUsageDescription</key>
-    <string>Audio Transcribe uses your calendar to suggest a name for the recording based on your current meeting.</string>
+    <string>Parley uses your calendar to suggest a name for the recording based on your current meeting.</string>
 </dict>
 </plist>

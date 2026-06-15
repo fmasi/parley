@@ -23,7 +23,7 @@ struct SegmentNamingTests {
 
     @Test func handlesNestedPath() {
         #expect(segmentBaseName(
-            originalPath: "/Users/x/.audio-transcribe/2026-04-03/143400-weekly-sync-2.wav",
+            originalPath: "/Users/x/Library/Application Support/Parley/2026-04-03/143400-weekly-sync-2.wav",
             segment: 3
         ) == "143400-weekly-sync-3")
     }

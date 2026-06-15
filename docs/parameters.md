@@ -1,6 +1,6 @@
 # Tunable Parameters
 
-All parameters are set in `~/.audio-transcribe/config.json` using `snake_case` keys. Parameters not present use defaults.
+All parameters are set in `~/Library/Application Support/Parley/config.json` using `snake_case` keys. Parameters not present use defaults.
 
 ---
 
@@ -88,7 +88,7 @@ Speaker reconciliation is performed by `SpeakerReconciler` in `TranscriberCore/S
 
 ## Token Ratio Cache
 
-The file `~/.audio-transcribe/token-ratios.json` caches measured chars-per-token ratios for each LLM model used with the summary feature. It is managed automatically by `TokenRatioCache` and does not need manual editing.
+The file `~/Library/Application Support/Parley/token-ratios.json` caches measured chars-per-token ratios for each LLM model used with the summary feature. It is managed automatically by `TokenRatioCache` and does not need manual editing.
 
 **File format** — a JSON object keyed by model name:
 ```json

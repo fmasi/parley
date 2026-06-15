@@ -33,7 +33,7 @@ struct SetupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Audio Transcribe needs a few permissions to work")
+            Text("Parley needs a few permissions to work")
                 .font(.title2)
                 .fontWeight(.semibold)
 

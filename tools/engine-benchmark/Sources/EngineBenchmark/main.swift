@@ -858,7 +858,7 @@ func runDiarizationParamSweep(audioPath: URL, audioDuration: Double) async {
 
     // Save report
     let reportDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".audio-transcribe/benchmark")
+        .appendingPathComponent("Library/Application Support/Parley/benchmark")
     try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -953,7 +953,7 @@ func runDiarizationSweep(audioPath: URL, audioDuration: Double, thresholds: [Dou
 
     // Save report
     let reportDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".audio-transcribe/benchmark")
+        .appendingPathComponent("Library/Application Support/Parley/benchmark")
     try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -1398,7 +1398,7 @@ struct EngineBenchmarkCLI {
 
             // Save matrix report
             let reportDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".audio-transcribe/benchmark")
+                .appendingPathComponent("Library/Application Support/Parley/benchmark")
             try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
             let matrixFormatter = DateFormatter()
             matrixFormatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -1434,7 +1434,7 @@ struct EngineBenchmarkCLI {
 
         // Set up log file (tee output to file + stdout)
         let logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".audio-transcribe/benchmark")
+            .appendingPathComponent("Library/Application Support/Parley/benchmark")
         try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         let logFormatter = DateFormatter()
         logFormatter.dateFormat = "yyyyMMdd-HHmmss"
@@ -1566,7 +1566,7 @@ struct EngineBenchmarkCLI {
 
         // Save report
         let reportDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".audio-transcribe/benchmark")
+            .appendingPathComponent("Library/Application Support/Parley/benchmark")
         try? FileManager.default.createDirectory(at: reportDir, withIntermediateDirectories: true)
         let reportFormatter = DateFormatter()
         reportFormatter.dateFormat = "yyyyMMdd-HHmmss"

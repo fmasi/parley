@@ -1,8 +1,18 @@
 # Test Checklist — v0.7.x branch
 
+## Rename → Parley migration (#75)
+**Resets macOS TCC permissions** (bundle ID changed `com.audio-transcribe.app` → `eu.fmasi.parley`). Do a clean-up + re-auth pass:
+- [ ] Remove the old install + LaunchAgent: `rm -rf /Applications/AudioTranscribe.app` and `launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.app.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.audio-transcribe.app.plist`
+- [ ] If `~/.audio-transcribe` exists, it auto-migrates to `~/Library/Application Support/Parley` on first launch — verify `config.json` + `token-ratios.json` carried over and `~/.audio-transcribe` is gone
+- [ ] App launches as **Parley**; re-grant Screen Recording + Microphone when prompted
+- [ ] Menu/About/Setup windows read "Parley", not "Audio Transcribe"
+- [ ] Full pipeline: record → transcribe → (optional) summarize works end to end
+- [ ] `/usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows logs during a recording
+- [ ] Re-shoot `docs/assets/` screenshots (window titles still say "Audio Transcribe")
+
 ## Version Infrastructure (#42 + #33)
 - [ ] About menu item visible between Settings and Quit
-- [ ] Click "About Audio Transcribe" — native About panel appears
+- [ ] Click "About Parley" — native About panel appears
 - [ ] About panel shows version like `0.6.1 (xxxxxxx)` (not "dev" or "2.0.0")
 - [ ] Record a short session, check output JSON `"software_version"` in metadata
 - [ ] `software_version` value matches `git describe` format (e.g. `v0.6.1-25-gxxxxxxx`)
@@ -24,7 +34,7 @@
 - [ ] Set `merge_chunked_audio: false` in config — verify per-chunk files preserved
 
 ## CLI Stereo Channel Handling
-- [ ] `AudioTranscribe transcribe -i file.m4a` — prompts for stereo channel handling
+- [ ] `Parley transcribe -i file.m4a` — prompts for stereo channel handling
 - [ ] `--split` flag splits stereo without prompting
 - [ ] `--no-split` flag processes as mono without prompting
 
@@ -49,7 +59,7 @@
 - [ ] Rename and save — names updated in JSON and SRT/TXT
 
 ## CLI AAC Re-processing
-- [ ] `AudioTranscribe transcribe -i file.m4a` — splits and processes stereo AAC
+- [ ] `Parley transcribe -i file.m4a` — splits and processes stereo AAC
 - [ ] `--debug` flag streams logs to stderr
 - [ ] Echo dedup runs (check `echo_segments_removed` in output)
 
@@ -85,5 +95,5 @@
 - [ ] Toggle persists across app restart
 - [ ] With toggle ON, "Check now" button appears
 - [ ] "Check now" reports a status within 10s and stays under the toggle
-- [ ] Launch log contains a "Manifest verify:" line within a few seconds of startup (subsystem com.audio-transcribe.app, category transcription)
+- [ ] Launch log contains a "Manifest verify:" line within a few seconds of startup (subsystem eu.fmasi.parley, category transcription)
 - [ ] After deleting a file from the FluidAudio cache root (returned by `AsrModels.defaultCacheDirectory()`), next launch logs `Manifest verify: ... file(s) corrupt -- ...` or `... missing ...`

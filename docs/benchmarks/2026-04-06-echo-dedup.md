@@ -9,7 +9,7 @@
 
 ## Methodology
 
-CLI re-processing of AAC archives via `AudioTranscribe transcribe -i file.m4a`. Stereo AAC auto-split into dual mono WAVs via `AudioSourceResolver.splitChannels()`. Legacy mode (individual Jaccard only) via `--legacy-dedup` flag for A/B comparison. Human verification of ambiguous segments via `afplay` of extracted mic channel clips.
+CLI re-processing of AAC archives via `Parley transcribe -i file.m4a`. Stereo AAC auto-split into dual mono WAVs via `AudioSourceResolver.splitChannels()`. Legacy mode (individual Jaccard only) via `--legacy-dedup` flag for A/B comparison. Human verification of ambiguous segments via `afplay` of extracted mic channel clips.
 
 ## Test Matrix
 

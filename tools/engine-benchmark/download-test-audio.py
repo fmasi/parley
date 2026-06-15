@@ -7,7 +7,7 @@ Downloads from HuggingFace datasets-server API:
   - Korean: Zeroth Korean (kresnik/zeroth_korean)
   - Multi-speaker: AMI Meeting Corpus (edinburghcstr/ami)
 
-Files saved to: ~/.audio-transcribe/benchmark/test-audio/
+Files saved to: ~/Library/Application Support/Parley/benchmark/test-audio/
 """
 
 import json
@@ -15,7 +15,7 @@ import os
 import urllib.request
 from pathlib import Path
 
-TEST_DIR = Path.home() / ".audio-transcribe" / "benchmark" / "test-audio"
+TEST_DIR = Path.home() / "Library/Application Support/Parley" / "benchmark" / "test-audio"
 TEST_DIR.mkdir(parents=True, exist_ok=True)
 
 GROUND_TRUTH = {}

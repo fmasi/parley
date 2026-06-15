@@ -51,7 +51,7 @@ public enum CLIParser {
 
         public var errorDescription: String? {
             switch self {
-            case .missingSubcommand: return "Usage: AudioTranscribe <transcribe|rename|benchmark|summarize>"
+            case .missingSubcommand: return "Usage: Parley <transcribe|rename|benchmark|summarize>"
             case .unknownSubcommand(let cmd): return "Unknown subcommand: \(cmd)"
             case .missingRequiredArg(let arg): return "Missing required argument: \(arg)"
             case .conflictingFlags(let msg): return "Conflicting flags: \(msg)"

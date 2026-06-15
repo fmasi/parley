@@ -3,7 +3,7 @@ import Foundation
 /// A snapshot of a downloaded model: which Hugging Face commit it came from,
 /// when it was downloaded, and the SHA-256 of every file under the cache root.
 ///
-/// Persisted to `~/.audio-transcribe/model-manifests/<repo-slug>.json` after a
+/// Persisted to `~/Library/Application Support/Parley/model-manifests/<repo-slug>.json` after a
 /// successful download. Used to (a) detect local corruption, (b) compare against
 /// the current Hugging Face commit when the user opts in to update checks.
 public struct ModelManifest: Codable, Equatable, Sendable {

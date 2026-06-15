@@ -5,7 +5,7 @@ Benchmark script: WhisperKit vs Python transcription pipeline.
 Run with: python scripts/benchmark.py
 Will prompt for sudo password (needed for powermetrics only).
 
-Outputs to ~/.audio-transcribe/benchmark/:
+Outputs to ~/Library/Application Support/Parley/benchmark/:
   report-YYYYMMDD-HHMMSS.txt     — human-readable summary
   telemetry-YYYYMMDD-HHMMSS/     — CSV time-series for graphing
     <label>-system.csv           — cpu_power_mw, gpu_power_mw, ane_power_mw
@@ -29,12 +29,12 @@ from pathlib import Path
 # ── Configuration ──
 
 HOME = Path.home()
-REPORT_DIR = HOME / ".audio-transcribe" / "benchmark"
+REPORT_DIR = HOME / "Library/Application Support/Parley" / "benchmark"
 TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 REPORT_FILE = REPORT_DIR / f"report-{TIMESTAMP}.txt"
 TELEMETRY_DIR = REPORT_DIR / f"telemetry-{TIMESTAMP}"
 
-WHISPERKIT_BIN = Path(".build/debug/AudioTranscribe")
+WHISPERKIT_BIN = Path(".build/debug/Parley")
 PYTHON_BIN = sys.executable
 
 BENCHMARKS = [
@@ -436,7 +436,7 @@ def main():
                 "--no-diarize",
             ],
             output_file=out,
-            process_pattern="AudioTranscribe transcribe",
+            process_pattern="Parley transcribe",
             report_lines=report,
         )
 

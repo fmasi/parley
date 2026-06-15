@@ -73,7 +73,7 @@ Transform the existing `transcribe.py` + `rename_speakers.py` CLI tools into a b
 
 ### 7. Logging & Notifications
 **Logging:**
-- Service logs to `~/.audio-transcribe/logs/` or similar
+- Service logs to `~/Library/Application Support/Parley/logs/` or similar
 - Include timestamps, errors, transcription status
 
 **Notifications:**
@@ -116,7 +116,7 @@ Recording → Audio File → transcribe.py (mlx-whisper + pyannote)
 - Auto-start on launch? (yes/no)
 - Logging level (debug/info/error)
 
-**Storage location:** `~/.audio-transcribe/config.json` (or similar)
+**Storage location:** `~/Library/Application Support/Parley/config.json` (or similar)
 
 ---
 

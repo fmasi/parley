@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# package_app.sh — Build and package AudioTranscribe.app (SwiftUI + XPC)
+# package_app.sh — Build and package Parley.app (SwiftUI + XPC)
 #
 # Usage:
 #   bash package_app.sh [--release] [--install]
@@ -7,7 +7,7 @@
 #   --release        Build in release mode (default: debug)
 #   --install        Copy finished .app to /Applications
 #
-# Output: dist/AudioTranscribe.app
+# Output: dist/Parley.app
 
 set -euo pipefail
 
@@ -55,11 +55,11 @@ fi
 echo "   Version: $VERSION (distance: $DISTANCE, git: $GIT_DESCRIPTION)"
 
 # ── Assemble app bundle ───────────────────────────────────────────────────────
-APP="dist/AudioTranscribe.app"
+APP="dist/Parley.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
-XPC_BUNDLE="$CONTENTS/XPCServices/com.audio-transcribe.capture-helper.xpc"
+XPC_BUNDLE="$CONTENTS/XPCServices/eu.fmasi.parley.capture-helper.xpc"
 XPC_MACOS="$XPC_BUNDLE/Contents/MacOS"
 
 echo "==> Assembling $APP ..."
@@ -78,7 +78,7 @@ cp packaging/AudioCaptureHelper-Info.plist "$XPC_BUNDLE/Contents/Info.plist"
 cp packaging/AppIcon.icns "$RESOURCES/AppIcon.icns"
 
 # Binaries
-cp "$BUILD_DIR/AudioTranscribe"           "$MACOS/AudioTranscribe"
+cp "$BUILD_DIR/Parley"           "$MACOS/Parley"
 cp "$BUILD_DIR/audio-capture-helper-xpc"  "$XPC_MACOS/audio-capture-helper-xpc"
 
 # ── Code sign (ad-hoc) ────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ echo "==> Done: $APP"
 # ── Install ───────────────────────────────────────────────────────────────────
 if [[ "$INSTALL" == "1" ]]; then
     echo "==> Installing to /Applications ..."
-    rm -rf "/Applications/AudioTranscribe.app"
+    rm -rf "/Applications/Parley.app"
     cp -R "$APP" /Applications/
-    echo "==> Installed: /Applications/AudioTranscribe.app"
+    echo "==> Installed: /Applications/Parley.app"
 fi

@@ -5,7 +5,7 @@ let package = Package(
     name: "Transcriber",
     platforms: [.macOS("15.0")],
     products: [
-        .executable(name: "AudioTranscribe", targets: ["TranscriberApp"]),
+        .executable(name: "Parley", targets: ["TranscriberApp"]),
         .executable(name: "audio-capture-helper-xpc", targets: ["AudioCaptureHelperXPC"]),
     ],
     dependencies: [

@@ -248,12 +248,12 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ## 20. HF token committed to git in plist
 
-**Symptom:** The filled-in `com.audio-transcribe.plist` (containing the real HuggingFace token) was tracked by git.
+**Symptom:** The filled-in `eu.fmasi.parley.plist` (containing the real HuggingFace token) was tracked by git.
 
 **Fix:**
-1. Added `com.audio-transcribe.plist` to `.gitignore`
-2. Created `com.audio-transcribe.plist.template` with placeholder values for new users to copy and fill in
-3. Removed the plist from git tracking: `git rm --cached com.audio-transcribe.plist`
+1. Added `eu.fmasi.parley.plist` to `.gitignore`
+2. Created `eu.fmasi.parley.plist.template` with placeholder values for new users to copy and fill in
+3. Removed the plist from git tracking: `git rm --cached eu.fmasi.parley.plist`
 
 ---
 
@@ -303,9 +303,9 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ## 25. App launches but menu bar icon is invisible
 
-**Symptom:** Double-clicking `AudioTranscribe.app` shows the "verifying" spinner, then nothing appears. The app is actually running — `pgrep -la python | grep menu_bar` confirms the process is alive.
+**Symptom:** Double-clicking `Parley.app` shows the "verifying" spinner, then nothing appears. The app is actually running — `pgrep -la python | grep menu_bar` confirms the process is alive.
 
-**Root cause:** On MacBooks with a notch, macOS hides menu bar icons that overflow. The AudioTranscribe icon appears to the left of the notch (outside the visible area) when the menu bar is full.
+**Root cause:** On MacBooks with a notch, macOS hides menu bar icons that overflow. The Parley icon appears to the left of the notch (outside the visible area) when the menu bar is full.
 
 **Fix:** Hold `Cmd` and drag other menu bar icons to the right to make space. Alternatively install [Ice](https://github.com/jordanbaird/Ice) (free) or Bartender to manage menu bar overflow.
 

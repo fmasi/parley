@@ -46,4 +46,4 @@ import Foundation
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.
-public let audioCaptureServiceName = "com.audio-transcribe.capture-helper"
+public let audioCaptureServiceName = "eu.fmasi.parley.capture-helper"

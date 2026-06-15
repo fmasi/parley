@@ -131,7 +131,7 @@ struct SpeechTest {
         let args = CommandLine.arguments
         guard args.count >= 3 else {
             print("Usage: SpeechTest <audio.wav> <locale>")
-            print("Example: SpeechTest ~/.audio-transcribe/benchmark/test-audio/fr-00.wav fr-FR")
+            print("Example: SpeechTest ~/Library/Application Support/Parley/benchmark/test-audio/fr-00.wav fr-FR")
             Foundation.exit(1)
         }
 

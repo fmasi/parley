@@ -2,7 +2,7 @@ import Foundation
 import os
 
 /// Persisted crash-recovery signal written at recording start, deleted on clean stop.
-/// If `~/.audio-transcribe/recording.json` exists at launch, a crash occurred during recording.
+/// If `~/Library/Application Support/Parley/recording.json` exists at launch, a crash occurred during recording.
 public struct RecordingSentinel: Codable, Equatable {
     public var startedAt: Date
     public var sessionName: String
@@ -48,8 +48,7 @@ public struct RecordingSentinel: Codable, Equatable {
     private static let fileName = "recording.json"
 
     private static func fileURL(directory: URL?) -> URL {
-        let dir = directory ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".audio-transcribe")
+        let dir = directory ?? AppPaths.dataDirectory
         return dir.appendingPathComponent(fileName)
     }
 

@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TEST_DIR="$HOME/.audio-transcribe/benchmark/test-audio"
+TEST_DIR="$HOME/Library/Application Support/Parley/benchmark/test-audio"
 
 # Check test audio exists
 if [ ! -d "$TEST_DIR" ] || [ -z "$(ls -A "$TEST_DIR"/*.wav 2>/dev/null)" ]; then
