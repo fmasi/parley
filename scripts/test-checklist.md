@@ -85,6 +85,11 @@
 - [ ] The orphaned chunk WAV opens with correct duration (not 0s) via `afinfo` — header was flushed during recording
 - [ ] On next transcription, an orphaned chunk's audio appears in the transcript (repairHeader recovered it); log shows `WAV header repaired: ... data size N -> M bytes`
 
+## Crash-recovery segment completeness (#84, #85)
+- [ ] After a recording that survived ≥1 crash (segments `-0` and `-2` on disk, `-1` missing), the final transcript spans the WHOLE meeting — the pre-crash segment is NOT dropped at the numbering gap
+- [ ] Transcript `metadata.audio_files` lists every recovered segment, not just the last one
+- [ ] Recovery/CLI path repairs an orphaned segment header before transcribing (log shows `WAV header repaired`); orphan’s audio appears in the transcript
+
 ## Regression
 - [ ] Start recording, stop, transcription completes
 - [ ] Settings save and reload correctly
