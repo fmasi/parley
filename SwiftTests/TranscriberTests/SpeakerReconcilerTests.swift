@@ -165,4 +165,29 @@ struct SpeakerReconcilerTests {
             #expect(mapping[i]?["spk_0"] == "spk_0")
         }
     }
+
+    // Regression (bug_004): chunks may be stored in processing-completion order,
+    // not index order. Reconciliation seeds the global namespace from the first
+    // chunk, so the result must not depend on the input array order.
+    @Test func reconcileIsIndependentOfInputOrder() {
+        // Two different speakers sharing the same local label "spk_0" across chunks.
+        var axisA = [Float](repeating: 0, count: 256); axisA[0] = 1.0
+        var axisB = [Float](repeating: 0, count: 256); axisB[1] = 1.0
+
+        let chunk0 = ProcessedChunk(
+            index: 0, startTime: Date(), audioPath: "m-0.m4a",
+            segments: [], speakerDatabase: ["spk_0": axisA]
+        )
+        let chunk1 = ProcessedChunk(
+            index: 1, startTime: Date(), audioPath: "m-1.m4a",
+            segments: [], speakerDatabase: ["spk_0": axisB]
+        )
+
+        let inOrder = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1])
+        let reversed = SpeakerReconciler.reconcile(chunks: [chunk1, chunk0])
+
+        #expect(inOrder == reversed)
+        // Chunk 0 (chronologically first) seeds the namespace → identity mapping.
+        #expect(inOrder[0]?["spk_0"] == "spk_0")
+    }
 }

@@ -70,8 +70,7 @@ final class TranscriptionRunner {
         repairSegmentHeaders(segments)
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
-        var localSpeakerDb: [String: [Float]] = [:]
-        var remoteSpeakerDb: [String: [Float]] = [:]
+        var echoRemoved = 0
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -86,9 +85,15 @@ final class TranscriptionRunner {
                 audioSource: .system,
                 config: config
             )
-            allSegments.append(contentsOf: systemResult.segments)
-            remoteSpeakerDb.merge(systemResult.speakerDatabase) { _, new in new }
             audioPaths.append(segmentPair.system)
+
+            // Per-segment speaker databases. Each recovery segment is diarized
+            // independently, so "Speaker 1" in one segment is unrelated to the next.
+            // Dedup must use this segment's own databases — a cross-segment merge
+            // (last-write-wins) would compare against the wrong speaker's embedding.
+            let remoteDb = systemResult.speakerDatabase
+            var localDb: [String: [Float]] = [:]
+            var segmentSegments = systemResult.segments
 
             if isDualStream {
                 let micPath = segmentPair.mic
@@ -101,34 +106,36 @@ final class TranscriptionRunner {
                         audioSource: .microphone,
                         config: config
                     )
-                    allSegments.append(contentsOf: micResult.segments)
-                    localSpeakerDb.merge(micResult.speakerDatabase) { _, new in new }
+                    segmentSegments.append(contentsOf: micResult.segments)
+                    localDb = micResult.speakerDatabase
                     audioPaths.append(micPath)
                 }
             }
-        }
 
-        if isDualStream && !allSegments.isEmpty {
-            SpeakerAssignment.tagWithSourcePrefix(&allSegments)
+            if isDualStream && !segmentSegments.isEmpty {
+                SpeakerAssignment.tagWithSourcePrefix(&segmentSegments)
+            }
+            segmentSegments.sort { $0.start < $1.start }
+
+            // Echo dedup within the segment (remove mic bleed of remote speaker)
+            if isDualStream {
+                let dedupResult = EchoDeduplicator.deduplicate(
+                    segments: segmentSegments,
+                    localSpeakerDatabase: localDb,
+                    remoteSpeakerDatabase: remoteDb,
+                    temporalThreshold: config.echoTemporalThreshold,
+                    textThreshold: config.echoTextThreshold,
+                    embeddingThreshold: config.echoEmbeddingThreshold
+                )
+                segmentSegments = dedupResult.segments
+                echoRemoved += dedupResult.removedCount
+            }
+
+            allSegments.append(contentsOf: segmentSegments)
         }
 
         allSegments.sort { $0.start < $1.start }
         Logger.transcription.info("Total segments after merge: \(allSegments.count, privacy: .public)")
-
-        // Echo dedup (remove mic bleed of remote speaker)
-        var echoRemoved = 0
-        if isDualStream {
-            let dedupResult = EchoDeduplicator.deduplicate(
-                segments: allSegments,
-                localSpeakerDatabase: localSpeakerDb,
-                remoteSpeakerDatabase: remoteSpeakerDb,
-                temporalThreshold: config.echoTemporalThreshold,
-                textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold
-            )
-            allSegments = dedupResult.segments
-            echoRemoved = dedupResult.removedCount
-        }
 
         let uniqueLanguages = Set(detectedLanguages)
         let detectedLanguage: String
@@ -239,14 +246,21 @@ final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
-        // 5. Audio paths from chunks
-        let chunkAudioPaths = sessionState.chunks.map {
-            outputDirectory.appendingPathComponent($0.audioPath)
-        }
+        // 5. Audio paths from chunks, in recording order. Chunks are stored in
+        // processing-completion order (parallel ChunkProcessor tasks), so sort by
+        // index before concatenation or the merged archive plays out of sequence.
+        let chunkAudioPaths = sessionState.chunks
+            .sorted { $0.index < $1.index }
+            .map { outputDirectory.appendingPathComponent($0.audioPath) }
 
-        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk)
+        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
+        // Only merge when every chunk is an archived .m4a: AudioConcatenator deletes its sources
+        // after a successful export, which would destroy kept-WAV evidence — either a chunk whose
+        // AAC archival failed (gotcha #38 keeps the WAV intact) or a single-stream recording that
+        // never archived. The raw archive must never be modified after writing.
         let audioPaths: [URL]
-        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
+        let allArchived = chunkAudioPaths.allSatisfy { $0.pathExtension.lowercased() == "m4a" }
+        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 && allArchived {
             do {
                 let concatResult = try await AudioConcatenator.concatenate(
                     sources: chunkAudioPaths,
@@ -264,6 +278,10 @@ final class TranscriptionRunner {
                 audioPaths = chunkAudioPaths
             }
         } else {
+            if config.mergeChunkedAudio && chunkAudioPaths.count > 1 && !allArchived {
+                let rawCount = chunkAudioPaths.filter { $0.pathExtension.lowercased() != "m4a" }.count
+                Logger.files.info("Skipping audio merge: \(rawCount, privacy: .public) chunk(s) are raw WAV (kept as evidence); leaving chunk files separate")
+            }
             audioPaths = chunkAudioPaths
         }
 

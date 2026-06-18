@@ -123,6 +123,28 @@ struct SpeakerAssignmentTests {
         #expect(segments[0].speaker == "Local")
     }
 
+    // Regression: chunked finalize tags at chunk time (ChunkProcessor) and again
+    // in TranscriptionRunner.finalize(); a second call must not double-prefix.
+    @Test func tagSegmentsIsIdempotent() {
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "hi", source: "local"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Speaker 1", text: "yo", source: "remote"),
+        ]
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        #expect(segments[0].speaker == "Local Speaker 1")
+        #expect(segments[1].speaker == "Remote Speaker 1")
+    }
+
+    @Test func tagSegmentsIsIdempotentForBareLabel() {
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "", text: "hi", source: "local"),
+        ]
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        #expect(segments[0].speaker == "Local")
+    }
+
     // MARK: - buildSpeakerMap
 
     @Test func buildSpeakerMapMapsRawIDsToFriendlyNames() {

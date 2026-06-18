@@ -39,9 +39,14 @@ public enum SpeakerReconciler {
     ///   - threshold: Minimum cosine similarity to consider two embeddings a match (default 0.65).
     /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
     public static func reconcile(
-        chunks: [ProcessedChunk],
+        chunks unsortedChunks: [ProcessedChunk],
         threshold: Float = 0.65
     ) -> [Int: [String: String]] {
+
+        // Seed the global namespace from the chronologically-first chunk. Callers
+        // (TranscriptionRunner.finalize) may pass chunks in processing-completion
+        // order, so sort by index to keep reconciliation deterministic.
+        let chunks = unsortedChunks.sorted { $0.index < $1.index }
 
         var result: [Int: [String: String]] = [:]
         // Global reference embeddings: globalID → embedding

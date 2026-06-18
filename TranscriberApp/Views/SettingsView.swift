@@ -231,13 +231,19 @@ struct SettingsView: View {
             ToolbarItem {
                 Button("Save") {
                     if summaryEnabled && !summaryEndpoint.isEmpty {
+                        // Preserve advanced fields that have no UI control; they can
+                        // only be set by editing config.json and would otherwise be
+                        // silently reset to defaults on every Save.
+                        let existing = configManager.config.summary
                         config.summary = SummaryConfig(
                             enabled: true,
                             provider: summaryProvider,
                             endpoint: summaryEndpoint,
                             apiKey: summaryApiKey,
                             model: summaryModel,
-                            contextLength: Int(summaryContextLength)
+                            contextLength: Int(summaryContextLength),
+                            contextOverheadPercent: existing?.contextOverheadPercent,
+                            maxOutputTokens: existing?.maxOutputTokens
                         )
                     } else {
                         config.summary = nil

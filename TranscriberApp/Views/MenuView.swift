@@ -12,6 +12,7 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
     @State private var xpcRetryCount = 0
+    @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
 
     init(
@@ -103,6 +104,11 @@ struct MenuView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+        .onChange(of: configManager.config.lastMicrophoneDeviceId) { _, newValue in
+            // Keep the menu's mic selection in sync when the default is changed in
+            // Settings; the seeded @State alone would stay stale until app restart.
+            selectedMicId = newValue
+        }
     }
 
     /// Author + attribution shown in the standard macOS About panel.
@@ -308,6 +314,15 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
+        // Decay the retry counter: if the previous crash was long enough ago, the
+        // session clearly recovered, so don't count it toward the cap. This keeps a
+        // long recording with sparse transient crashes alive, while a genuine crash
+        // loop (crashes within milliseconds) still trips the cap below.
+        let now = Date()
+        if let last = lastCrashAt, now.timeIntervalSince(last) > 600 {
+            xpcRetryCount = 0
+        }
+        lastCrashAt = now
         xpcRetryCount += 1
         Logger.state.warning("XPC crash during recording — attempt \(xpcRetryCount) of 2")
 

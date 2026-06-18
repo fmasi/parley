@@ -72,8 +72,15 @@ enum CLIHandler {
                 "--predicate", "subsystem == \"eu.fmasi.parley\""
             ]
             proc.standardOutput = FileHandle.standardError
-            try? proc.run()
-            logProcess = proc
+            // Only retain the process if it actually launched. terminate() on a
+            // never-launched Process raises an uncatchable NSException, which would
+            // crash the CLI in the defer below if /usr/bin/log failed to spawn.
+            do {
+                try proc.run()
+                logProcess = proc
+            } catch {
+                FileHandle.standardError.write(Data("warning: --debug log stream failed to launch: \(error.localizedDescription)\n".utf8))
+            }
         }
         defer { logProcess?.terminate() }
 
