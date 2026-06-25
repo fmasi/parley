@@ -62,4 +62,24 @@ public enum TranscriptAssembler {
         try data.write(to: path, options: .atomic)
         Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .public)")
     }
+
+    /// Rewrite a transcript JSON's `audio_paths` / `audio_files` to reference every audio source
+    /// that contributed to it, replacing the placeholder source-WAV paths written at assembly
+    /// time (#93). No-op if the file is missing or unreadable.
+    public static func reconcileAudioPaths(in jsonPath: URL, to paths: [URL]) {
+        guard let data = try? Data(contentsOf: jsonPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var metadata = json["metadata"] as? [String: Any]
+        else { return }
+
+        metadata["audio_paths"] = paths.map { $0.path }
+        metadata["audio_files"] = paths.map { $0.lastPathComponent }
+        json["metadata"] = metadata
+
+        guard let updated = try? JSONSerialization.data(
+            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+        try? updated.write(to: jsonPath, options: .atomic)
+        Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .public) → \(paths.count) source(s)")
+    }
 }

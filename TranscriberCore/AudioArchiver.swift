@@ -86,6 +86,48 @@ public enum AudioArchiver {
         return AudioArchiveResult(archivePath: outputURL)
     }
 
+    /// A system + optional-mic segment to archive.
+    public struct SegmentPair: Sendable {
+        public let system: URL
+        public let mic: URL?
+        public init(system: URL, mic: URL?) {
+            self.system = system
+            self.mic = mic
+        }
+    }
+
+    /// Archive every contributing segment, returning one audio URL per segment in input order.
+    ///
+    /// Each pair is isolated: a per-segment failure keeps that segment's source WAV and still
+    /// returns it, so a single bad segment never drops the others or throws (#93). A system-only
+    /// pair (no mic) is returned as-is — there is nothing to combine into stereo.
+    public static func archiveAll(
+        pairs: [SegmentPair],
+        outputDirectory: URL,
+        bitrateKbps: Int
+    ) async -> [URL] {
+        var results: [URL] = []
+        for pair in pairs {
+            guard let mic = pair.mic else {
+                results.append(pair.system)
+                continue
+            }
+            do {
+                let archived = try await archive(
+                    systemAudio: pair.system,
+                    micAudio: mic,
+                    outputDirectory: outputDirectory,
+                    bitrateKbps: bitrateKbps
+                )
+                results.append(archived.archivePath)
+            } catch {
+                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .public)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")
+                results.append(pair.system)
+            }
+        }
+        return results
+    }
+
     // MARK: - Private helpers
 
     /// Stream both mono WAVs into a stereo AAC .m4a via AVAssetWriter.

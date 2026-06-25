@@ -102,4 +102,77 @@ struct AudioArchiverTests {
             #expect(FileManager.default.fileExists(atPath: micWav.path))
         }
     }
+
+    // MARK: - archiveAll (recovery: archive every contributing segment)
+
+    @Test func archiveAllArchivesEverySegment() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let s0 = dir.appendingPathComponent("meeting-0.wav")
+        let m0 = dir.appendingPathComponent("meeting-0_mic.wav")
+        let s1 = dir.appendingPathComponent("meeting-1.wav")
+        let m1 = dir.appendingPathComponent("meeting-1_mic.wav")
+        for url in [s0, m0, s1, m1] { try Self.createTestWav(at: url) }
+
+        let out = await AudioArchiver.archiveAll(
+            pairs: [.init(system: s0, mic: m0), .init(system: s1, mic: m1)],
+            outputDirectory: dir,
+            bitrateKbps: 64
+        )
+
+        #expect(out.count == 2)
+        #expect(out.allSatisfy { $0.pathExtension == "m4a" })
+        #expect(out.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        // Every source WAV consumed.
+        for w in [s0, m0, s1, m1] { #expect(!FileManager.default.fileExists(atPath: w.path)) }
+    }
+
+    @Test func archiveAllKeepsSystemWavWhenMicMissing() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let s0 = dir.appendingPathComponent("seg-0.wav")
+        try Self.createTestWav(at: s0)
+
+        let out = await AudioArchiver.archiveAll(
+            pairs: [.init(system: s0, mic: nil)],
+            outputDirectory: dir,
+            bitrateKbps: 64
+        )
+
+        #expect(out == [s0])
+        #expect(FileManager.default.fileExists(atPath: s0.path))  // kept, not deleted
+    }
+
+    @Test func archiveAllIsolatesPerSegmentFailure() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let goodSys = dir.appendingPathComponent("good-0.wav")
+        let goodMic = dir.appendingPathComponent("good-0_mic.wav")
+        try Self.createTestWav(at: goodSys)
+        try Self.createTestWav(at: goodMic)
+        let badSys = dir.appendingPathComponent("bad-1.wav")
+        let badMic = dir.appendingPathComponent("bad-1_mic.wav")
+        try Data([0, 1, 2]).write(to: badSys)
+        try Data([0, 1, 2]).write(to: badMic)
+
+        let out = await AudioArchiver.archiveAll(
+            pairs: [.init(system: goodSys, mic: goodMic), .init(system: badSys, mic: badMic)],
+            outputDirectory: dir,
+            bitrateKbps: 64
+        )
+
+        #expect(out.count == 2)
+        #expect(out[0].pathExtension == "m4a")           // good segment archived
+        #expect(out[1] == badSys)                          // bad segment kept as WAV
+        #expect(FileManager.default.fileExists(atPath: badSys.path))
+    }
 }
