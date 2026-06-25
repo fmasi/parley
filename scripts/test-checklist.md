@@ -1,5 +1,37 @@
 # Test Checklist — v0.7.x branch
 
+## ⚠️ Capture resilience — DEVICE TEST REQUIRED before push (#86, #92, #93, #94, #95, #7, #61, #54)
+This branch changes the live audio-capture path. It is **gated on a real Bluetooth-call route-change
+test** — it cannot be validated by unit tests. Reproduce your actual scenario: put on AirPods, then
+answer a FaceTime / WhatsApp call and record.
+
+### Benign route change is NOT a crash (#86) — the headline test
+- [ ] Start recording. Mid-recording, force an audio-route change: answer a FaceTime/WhatsApp call so it grabs the mic (AirPods HFP↔A2DP), or connect/disconnect AirPods.
+- [ ] Recording **keeps going** — you see a calm "Audio device changed — recording resumed automatically" (or "briefly interrupted — continuing") bubble, **NOT** a red crash error.
+- [ ] Mic stays on your chosen device — you do **NOT** have to manually re-switch to the right mic afterward (re-pin works).
+- [ ] After stop, the transcript spans the **whole** session — no missing minutes at the route change.
+- [ ] Log shows `Stream restarted in place — mic re-pinned:` (subsystem `eu.fmasi.parley`, category audio).
+
+### Live helper-crash data-loss fix (#92) — the "Andrew lost 16 min" regression
+- [ ] Record ≥2 min. Force-kill the helper mid-recording: `pkill -f audio-capture-helper-xpc`.
+- [ ] App recovers (resume bubble). Keep talking ~1 min, then stop.
+- [ ] Final transcript contains **both** the pre-crash audio (the orphan chunk) **and** the post-crash audio — nothing dropped.
+
+### Recovered-segment archival + metadata (#93, #7)
+- [ ] After a crash-recovered session (segments `-0`, `-1`, … on disk), transcript `metadata.audio_files` lists **every** recovered segment and each was archived to `.m4a` (not just the base).
+
+### Anomaly-gated diagnostics + provenance (#95)
+- [ ] After an **anomalous** session (one with a route change or forced crash), a `<sessionId>.diag.jsonl` exists in the day's recording folder and contains `streamStopError` / `restartInPlace` (or `xpcInterruption`) events.
+- [ ] After a **clean** session (no interruption), **no** `.diag.jsonl` is written.
+- [ ] **Every** transcript JSON has `metadata.capture_provenance` (engine, system_format, mic_format, route_changes, retries, recovered, anomaly_count) — clean and anomalous alike.
+
+### Retry decay, not lifetime cap (#61)
+- [ ] Over a long meeting with a few **well-spaced** route changes (>10 min apart), the app does **not** hit the "microphone capture crashed repeatedly" critical error — the decay window resets the counter.
+- [ ] A **tight** loop (≥3 interruptions within ~10 min) still trips the critical-error panel.
+
+### Format change / buffer safety (#94)
+- [ ] Audio after a route change is **not** corrupted or wrong-speed (system stays 48kHz mono). No crash on the route change (bounded mic memcpy).
+
 ## Rename → Parley migration (#75)
 **Resets macOS TCC permissions** (bundle ID changed `com.audio-transcribe.app` → `eu.fmasi.parley`). Do a clean-up + re-auth pass:
 - [ ] Remove the old install + LaunchAgent: `rm -rf /Applications/AudioTranscribe.app` and `launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.app.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.audio-transcribe.app.plist`
