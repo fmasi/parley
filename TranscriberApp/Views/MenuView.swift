@@ -183,6 +183,27 @@ struct MenuView: View {
                 await self.handleXPCCrash(appState: appState, captureClient: captureClient)
             }
         }
+        // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
+        // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
+        // — both keep recording and just surface a transient notice. Only a fatal give-up escalates.
+        captureClient.onRestartInPlace = { [appState] in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = "Audio device changed — recording resumed automatically."
+            }
+        }
+        captureClient.onBriefInterruption = { [appState] in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = "Recording briefly interrupted — continuing."
+            }
+        }
+        captureClient.onFatalFailure = { [appState, captureClient] _ in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                await self.handleXPCCrash(appState: appState, captureClient: captureClient)
+            }
+        }
 
         do {
             let sentinel = RecordingSentinel(
@@ -245,8 +266,15 @@ struct MenuView: View {
                 await processor.awaitAllProcessed()
 
                 // Final merge
-                let sessionState = await processor.getSessionState()
+                var sessionState = await processor.getSessionState()
                 let outputDir = paths.systemAudio.deletingLastPathComponent()
+                // Drain capture diagnostics, flush <session>.diag.jsonl only if anomalous, and stamp
+                // the always-present provenance into the transcript metadata (#95).
+                sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionState.sessionId,
+                    engine: configManager.config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
                 let result = try await transcriptionRunner.finalize(
                     sessionState: sessionState,
                     outputDirectory: outputDir,
@@ -321,6 +349,7 @@ struct MenuView: View {
         )
         xpcRetryCount = decision.retryCount
         lastCrashAt = Date()
+        captureClient.recordRetry(["attempt": "\(xpcRetryCount)", "giveUp": "\(decision.shouldGiveUp)"])
         Logger.state.warning("XPC interruption during recording — attempt \(xpcRetryCount) within the decay window")
 
         guard let sentinel = RecordingSentinel.read() else {

@@ -11,7 +11,8 @@ public enum TranscriptAssembler {
         numSpeakers: Int?,
         diarization: Bool,
         dualStream: Bool,
-        echoSegmentsRemoved: Int = 0
+        echoSegmentsRemoved: Int = 0,
+        provenance: CaptureProvenance? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -25,6 +26,11 @@ public enum TranscriptAssembler {
         ]
         if echoSegmentsRemoved > 0 {
             metadata["echo_segments_removed"] = echoSegmentsRemoved
+        }
+        // Capture provenance (#95): a compact, always-present stamp of how this recording was
+        // captured — engine, formats, and how many route changes / retries / recoveries occurred.
+        if let provenance {
+            metadata["capture_provenance"] = provenance.asMetadataDictionary()
         }
 
         let segmentDicts: [[String: Any]] = segments.map { seg in

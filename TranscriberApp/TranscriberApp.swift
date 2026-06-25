@@ -126,6 +126,7 @@ struct TranscriberApp: App {
         if isAlive {
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             appState.phase = .recording(since: sentinel.startedAt)
+            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
             setupCrashHandler(captureClient: captureClient, appState: appState)
             return
         }
@@ -156,6 +157,7 @@ struct TranscriberApp: App {
                 try RecordingSentinel.write(newSentinel)
                 appState.phase = .recording(since: sentinel.startedAt)
                 appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
+                captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
                 setupCrashHandler(captureClient: captureClient, appState: appState)
 
                 // Send notification
@@ -234,6 +236,26 @@ struct TranscriberApp: App {
                         message: "Capture crashed during recovery and could not restart."
                     )
                 }
+            }
+        }
+        // #86: benign route changes during a recovered recording resume in place; only a fatal
+        // give-up escalates to the relaunch handler above.
+        captureClient.onRestartInPlace = {
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = "Audio device changed — recording resumed automatically."
+            }
+        }
+        captureClient.onBriefInterruption = {
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = "Recording briefly interrupted — continuing."
+            }
+        }
+        captureClient.onFatalFailure = { _ in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                captureClient.onServiceCrash?()
             }
         }
     }

@@ -298,7 +298,8 @@ final class TranscriptionRunner {
             numSpeakers: nil,
             diarization: true,
             dualStream: isDualStream,
-            echoSegmentsRemoved: totalEchoRemoved
+            echoSegmentsRemoved: totalEchoRemoved,
+            provenance: sessionState.provenance
         )
 
         let baseName = sessionState.sessionId
