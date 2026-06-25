@@ -72,6 +72,9 @@ final class TranscriptionRunner {
         var audioPaths: [URL] = []
         var localSpeakerDb: [String: [Float]] = [:]
         var remoteSpeakerDb: [String: [Float]] = [:]
+        // #93: every segment that actually contributed audio, so each (not just the base pair)
+        // is archived to its own AAC and reflected in the transcript's audio_paths.
+        var contributingPairs: [AudioArchiver.SegmentPair] = []
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -90,6 +93,7 @@ final class TranscriptionRunner {
             remoteSpeakerDb.merge(systemResult.speakerDatabase) { _, new in new }
             audioPaths.append(segmentPair.system)
 
+            var segmentMic: URL?
             if isDualStream {
                 let micPath = segmentPair.mic
                 if FileManager.default.fileExists(atPath: micPath.path) {
@@ -104,7 +108,15 @@ final class TranscriptionRunner {
                     allSegments.append(contentsOf: micResult.segments)
                     localSpeakerDb.merge(micResult.speakerDatabase) { _, new in new }
                     audioPaths.append(micPath)
+                    segmentMic = micPath
                 }
+            }
+
+            // #93: record this segment for archival if it carried real audio (system payload
+            // past the WAV header, or a mic file existed). Skips header-only orphans.
+            let sysSize = (try? FileManager.default.attributesOfItem(atPath: segmentPair.system.path)[.size] as? Int) ?? 0
+            if sysSize > wavHeaderSize || segmentMic != nil {
+                contributingPairs.append(AudioArchiver.SegmentPair(system: segmentPair.system, mic: segmentMic))
             }
         }
 
@@ -159,28 +171,28 @@ final class TranscriptionRunner {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
 
-        // Archive WAVs to stereo AAC (L=mic, R=system)
-        if isDualStream, let micAudio {
-            do {
-                let archiveResult = try await AudioArchiver.archive(
-                    systemAudio: systemAudio,
-                    micAudio: micAudio,
-                    outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps
-                )
-                // Update transcript JSON with new audio path
-                Self.updateAudioPaths(in: jsonPath, to: [archiveResult.archivePath])
-                Logger.files.info("Archived to: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
+        // #93: archive EVERY contributing segment to its own stereo AAC (L=mic, R=system),
+        // not just the base pair — a crash-recovered recording has multiple segments and the
+        // pre-#93 code silently dropped all but the first. archiveAll is per-segment isolated:
+        // a failed segment keeps its WAV rather than aborting the whole archive.
+        if isDualStream && !contributingPairs.isEmpty {
+            let archived = await AudioArchiver.archiveAll(
+                pairs: contributingPairs,
+                outputDirectory: outputDirectory,
+                bitrateKbps: config.archiveBitrateKbps
+            )
+            TranscriptAssembler.reconcileAudioPaths(in: jsonPath, to: archived)
+            Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
 
-                // Enforce storage quota
+            do {
                 try StorageManager.enforceQuota(
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
-                    protectedFile: archiveResult.archivePath
+                    protectedFile: archived.last
                 )
             } catch {
-                Logger.files.error("Archival failed, keeping WAV files: \(error, privacy: .public)")
+                Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
             }
         }
 
@@ -392,25 +404,6 @@ final class TranscriptionRunner {
     }
 
     // MARK: - Private
-
-    /// Update the audio_paths in a transcript JSON file after archival.
-    private static func updateAudioPaths(in jsonPath: URL, to newPaths: [URL]) {
-        guard let data = try? Data(contentsOf: jsonPath),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var metadata = json["metadata"] as? [String: Any]
-        else { return }
-
-        metadata["audio_paths"] = newPaths.map { $0.path }
-        metadata["audio_files"] = newPaths.map { $0.lastPathComponent }
-        json["metadata"] = metadata
-
-        if let updatedData = try? JSONSerialization.data(
-            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? updatedData.write(to: jsonPath, options: .atomic)
-            Logger.files.info("Updated audio_paths in \(jsonPath.lastPathComponent, privacy: .public)")
-        }
-    }
 
     static func discoverSegments(
         systemAudio: URL,
