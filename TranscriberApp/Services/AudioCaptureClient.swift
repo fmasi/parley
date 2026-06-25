@@ -47,7 +47,9 @@ final class AudioCaptureClient {
     }
 
     func start(outputDirectory: URL, baseName: String, microphoneDeviceId: String? = nil) async throws {
-        crashHandlerFired = false
+        // crashHandlerFired is reset only in connect() — its sole reset point (#54). Resetting it
+        // here would re-arm the dedup latch on a restart that reuses an about-to-be-invalidated
+        // connection, letting the trailing invalidation re-fire onServiceCrash (a spurious retry).
         let conn = try getConnection()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in

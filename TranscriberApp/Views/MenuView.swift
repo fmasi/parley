@@ -12,6 +12,7 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
     @State private var xpcRetryCount = 0
+    @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
 
     init(
@@ -211,6 +212,7 @@ struct MenuView: View {
 
             appState.phase = .recording(since: Date())
             xpcRetryCount = 0
+            lastCrashAt = nil
         } catch {
             RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
@@ -268,10 +270,13 @@ struct MenuView: View {
                 let systemAudio: URL
                 let micAudio: URL?
                 if let sentinel, sentinel.segment > 1 {
+                    // #7: point discovery at the 0-indexed base so SegmentDiscovery's gap-tolerant
+                    // 0-indexed mode reclaims every segment (-0, -1, …). The stripped base would use
+                    // legacy mode and drop the -0 orphan, referencing a non-existent <root>.wav.
                     let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
                     let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                    systemAudio = dir.appendingPathComponent(origBase + ".wav")
-                    micAudio = dir.appendingPathComponent(origBase + "_mic.wav")
+                    systemAudio = dir.appendingPathComponent(origBase + "-0.wav")
+                    micAudio = dir.appendingPathComponent(origBase + "-0_mic.wav")
                 } else {
                     systemAudio = paths.systemAudio
                     micAudio = paths.micAudio
@@ -308,8 +313,15 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
-        xpcRetryCount += 1
-        Logger.state.warning("XPC crash during recording — attempt \(xpcRetryCount) of 2")
+        // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
+        // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
+        // crash loop (interruptions within the decay window) still trips the cap.
+        let decision = XPCRetryPolicy.register(
+            priorCount: xpcRetryCount, lastCrashAt: lastCrashAt, now: Date()
+        )
+        xpcRetryCount = decision.retryCount
+        lastCrashAt = Date()
+        Logger.state.warning("XPC interruption during recording — attempt \(xpcRetryCount) within the decay window")
 
         guard let sentinel = RecordingSentinel.read() else {
             Logger.state.error("No sentinel found during crash recovery")
@@ -322,9 +334,8 @@ struct MenuView: View {
             return
         }
 
-        // Retry limit: give up after 2 crashes
-        if xpcRetryCount > 2 {
-            Logger.state.error("All retries exhausted after \(xpcRetryCount) crashes")
+        if decision.shouldGiveUp {
+            Logger.state.error("All retries exhausted after \(xpcRetryCount) interruptions within the decay window")
             appState.criticalError = "Recording failed — microphone capture crashed repeatedly."
             appState.phase = .idle
             RecordingSentinel.delete()
@@ -336,13 +347,40 @@ struct MenuView: View {
         }
 
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let seg = sentinel.segment + 1
-        let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+        let baseName: String
+        var newSentinel: RecordingSentinel
 
-        let newSentinel = sentinel.incrementedSegment(
-            systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-            micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-        )
+        // #92: when the chunked pipeline is still live (the common live-crash case), re-ingest the
+        // orphaned in-progress chunk and advance the rotator BEFORE restarting capture. Otherwise
+        // the orphan's audio is processed by no one and silently dropped from the final transcript.
+        if let rotator = transcriptionRunner.chunkRotator,
+           let processor = transcriptionRunner.chunkProcessor {
+            let orphan = rotator.currentChunkInfo
+            let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index,
+                systemPath: outputDir.appendingPathComponent(orphanBase + ".wav").path,
+                micPath: outputDir.appendingPathComponent(orphanBase + "_mic.wav").path,
+                startTime: orphan.startTime
+            ))
+            let plan = rotator.recoverFromCrash()
+            baseName = plan.recoveryBaseName
+            newSentinel = sentinel.incrementedSegment(
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+            )
+            newSentinel.chunkIndex = plan.recoveryIndex
+            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .public)); recovery continues at \(baseName, privacy: .public)")
+        } else {
+            // No live pipeline (app-relaunch re-attach): keep segment-based naming; the stop-path
+            // fallback uses 0-indexed gap-tolerant discovery to reclaim every segment.
+            let seg = sentinel.segment + 1
+            baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            newSentinel = sentinel.incrementedSegment(
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+            )
+        }
 
         do {
             try await captureClient.start(
