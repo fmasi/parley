@@ -88,19 +88,24 @@ public struct SessionState: Codable {
     public let engine: String
     public let chunkDurationMinutes: Int
     public var chunks: [ProcessedChunk]
+    /// Capture provenance stamp (#95). Optional → omitted/`nil` for legacy session.json and
+    /// for sessions that never recorded one; synthesized Codable decodes a missing key as nil.
+    public var provenance: CaptureProvenance?
 
     public init(
         sessionId: String,
         meetingStart: Date,
         engine: String,
         chunkDurationMinutes: Int,
-        chunks: [ProcessedChunk] = []
+        chunks: [ProcessedChunk] = [],
+        provenance: CaptureProvenance? = nil
     ) {
         self.sessionId = sessionId
         self.meetingStart = meetingStart
         self.engine = engine
         self.chunkDurationMinutes = chunkDurationMinutes
         self.chunks = chunks
+        self.provenance = provenance
     }
 
     // MARK: - File location
