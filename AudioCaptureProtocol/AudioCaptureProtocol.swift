@@ -43,6 +43,23 @@ import Foundation
         newBaseName: String,
         reply: @escaping (String?, String?, String?) -> Void
     )
+
+    /// Drain and clear the helper's anomaly-gated diagnostic ring (#95).
+    /// Reply: JSON-encoded `[CaptureEvent]` (helper origin), or nil if empty/unavailable.
+    func drainDiagnostics(
+        reply: @escaping (Data?) -> Void
+    )
+}
+
+/// Reverse XPC channel: the helper calls back into the app to report that it self-healed a benign
+/// stream stop in place, or that capture has terminally failed (#86). The app sets an exported
+/// object conforming to this so a route-change restart surfaces as a transient "Recording Resumed"
+/// notice instead of a crash, and a fatal stop stops the session cleanly.
+@objc public protocol AudioCaptureClientProtocol {
+    /// The SCStream stopped (benign route change) and was restarted in place — no audio lost.
+    func captureDidRestartInPlace()
+    /// Capture failed and could not be restarted within budget; the session must stop.
+    func captureDidFailFatally(reason: String)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

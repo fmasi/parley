@@ -8,9 +8,18 @@ import TranscriberCore
 final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var systemWriter: WavFileWriter
     private var micWriter: WavFileWriter
-    private var detectedSystemRate = false
+    private let systemFormatTracker = SystemFormatTracker()
     private var systemFormatInfo: FormatInfo?
+    private var micFormatDetected = false
     private let micConverter = AudioConverter()
+
+    /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
+    /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
+    var diagnostics: LockedDiagnostics?
+
+    /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
+    /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
+    var onStreamStopped: ((Error) -> Void)?
 
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
         self.systemWriter = systemWriter
@@ -19,6 +28,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Mic writer always gets normalized 48kHz mono Int16
         micWriter.setSampleRate(UInt32(AudioConverter.outputSampleRate))
         micWriter.setChannelCount(UInt16(AudioConverter.outputChannelCount))
+    }
+
+    private func record(
+        _ kind: CaptureEventKind,
+        _ severity: CaptureEvent.Severity,
+        _ detail: [String: String] = [:]
+    ) {
+        diagnostics?.record(CaptureEvent(
+            timestamp: Date(), origin: .helper, kind: kind, severity: severity, detail: detail
+        ))
     }
 
     func finalizeAll() {
@@ -68,18 +87,44 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         Logger.audio.error("Stream stopped with error: \(error, privacy: .public)")
+        // A benign audio-route change (e.g. AirPods HFP↔A2DP) stops the SCStream without a
+        // process crash. Record it and hand off to the service's restart decision (#86) instead
+        // of treating it as a terminal failure.
+        record(.streamStopError, .anomaly, ["error": "\(error.localizedDescription)"])
+        onStreamStopped?(error)
     }
 
-    // MARK: - System audio (unchanged — ScreenCaptureKit normalizes via config)
+    // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
-        if !detectedSystemRate {
-            detectedSystemRate = true
-            if let info = formatInfo(from: sampleBuffer) {
+        // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
+        // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
+        // `.changed` means a transient route anomaly — record it loudly rather than silently
+        // writing mismatched samples under a stale header; the paired didStopWithError drives the
+        // #86 in-place restart, which opens fresh writers that re-detect cleanly.
+        if let info = formatInfo(from: sampleBuffer) {
+            let fmt = AudioStreamFormat(
+                sampleRate: info.rate, channelCount: Int(info.channels),
+                isFloat: info.isFloat, bitsPerChannel: Int(info.bitsPerChannel)
+            )
+            switch systemFormatTracker.observe(fmt) {
+            case .first(let f):
                 systemFormatInfo = info
-                systemWriter.setSampleRate(UInt32(info.rate))
-                systemWriter.setChannelCount(UInt16(info.channels))
-                Logger.audio.info("System audio: \(Int(info.rate))Hz, \(info.channels)ch, \(info.isFloat ? "Float32" : "Int16", privacy: .public)")
+                systemWriter.setSampleRate(UInt32(f.sampleRate))
+                systemWriter.setChannelCount(UInt16(f.channelCount))
+                Logger.audio.info("System audio: \(Int(f.sampleRate))Hz, \(f.channelCount)ch, \(f.isFloat ? "Float32" : "Int16", privacy: .public)")
+                record(.systemFormatDetected, .info, [
+                    "rate": "\(Int(f.sampleRate))", "channels": "\(f.channelCount)",
+                    "sample": f.isFloat ? "float32" : "int16",
+                ])
+            case .unchanged:
+                break
+            case .changed(let from, let to):
+                Logger.audio.error("System format changed mid-stream: \(Int(from.sampleRate))Hz/\(from.channelCount)ch → \(Int(to.sampleRate))Hz/\(to.channelCount)ch")
+                record(.formatChanged, .anomaly, [
+                    "from": "\(Int(from.sampleRate))Hz/\(from.channelCount)ch",
+                    "to": "\(Int(to.sampleRate))Hz/\(to.channelCount)ch",
+                ])
             }
         }
 
@@ -118,6 +163,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             Logger.audio.error("Mic audio: unsupported format — rate=\(asbd.pointee.mSampleRate) ch=\(asbd.pointee.mChannelsPerFrame) flags=\(asbd.pointee.mFormatFlags)")
             return
         }
+        if !micFormatDetected {
+            micFormatDetected = true
+            record(.micFormatDetected, .info, [
+                "rate": "\(Int(asbd.pointee.mSampleRate))",
+                "channels": "\(asbd.pointee.mChannelsPerFrame)",
+            ])
+        }
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
         guard frameCount > 0 else { return }
 
@@ -139,12 +191,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
-        // Copy raw bytes into the PCM buffer's channel data (non-interleaved)
-        // or AudioBufferList (interleaved)
+        // Copy raw bytes into the PCM buffer's channel data (non-interleaved) or AudioBufferList
+        // (interleaved). Clamp every copy to the destination channel's capacity — a route change
+        // can briefly deliver a buffer whose byte count exceeds frameLength*sampleSize, and an
+        // unbounded memcpy would overrun the heap allocation (#94).
         if let channelData = pcmBuffer.floatChannelData {
-            memcpy(channelData[0], ptr, totalLength)
+            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Float>.size
+            memcpy(channelData[0], ptr, min(totalLength, capacity))
         } else if let channelData = pcmBuffer.int16ChannelData {
-            memcpy(channelData[0], ptr, totalLength)
+            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Int16>.size
+            memcpy(channelData[0], ptr, min(totalLength, capacity))
         } else {
             // Interleaved format — copy via AudioBufferList
             let abl = pcmBuffer.mutableAudioBufferList

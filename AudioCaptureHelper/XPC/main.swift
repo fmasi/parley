@@ -15,6 +15,17 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         )
         newConnection.exportedObject = service
 
+        // Reverse channel (#86): let the service call back into the app to report an in-place
+        // restart or a fatal failure. The app sets a matching exported object on its side.
+        newConnection.remoteObjectInterface = NSXPCInterface(
+            with: AudioCaptureClientProtocol.self
+        )
+        let client = newConnection.remoteObjectProxyWithErrorHandler { error in
+            Logger.audio.debug("Reverse-channel proxy error: \(error.localizedDescription, privacy: .public)")
+        } as? AudioCaptureClientProtocol
+        service.onRestartInPlace = { client?.captureDidRestartInPlace() }
+        service.onFailFatally = { reason in client?.captureDidFailFatally(reason: reason) }
+
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }
             Logger.audio.warning("XPC client disconnected — stopping capture and finalizing")
