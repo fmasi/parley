@@ -49,4 +49,28 @@ public enum MultichannelDownmix {
         }
         return written
     }
+
+    /// Average `channels` interleaved **Int16** samples per frame into mono **Float32** in [-1, 1).
+    ///
+    /// Same gap-safe contract as `averageInterleavedToMono`. The built-in mic array is float, but pro
+    /// USB interfaces (Focusrite, Behringer, …) present >2 channels of packed Int16 — without this they
+    /// would be dropped. Output is float so it feeds the same `AudioConverter` path as the float case.
+    @discardableResult
+    public static func averageInterleavedInt16ToMono(
+        _ src: UnsafePointer<Int16>, srcCount: Int, channels: Int,
+        into dst: UnsafeMutablePointer<Float>, frameCount: Int
+    ) -> Int {
+        guard channels > 0 else { return 0 }
+        let scale = 1.0 / (Float(channels) * 32768.0)
+        var written = 0
+        var i = 0
+        while written < frameCount && i + channels <= srcCount {
+            var sum: Float = 0
+            for c in 0..<channels { sum += Float(src[i + c]) }
+            dst[written] = sum * scale
+            written += 1
+            i += channels
+        }
+        return written
+    }
 }

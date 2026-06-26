@@ -1,16 +1,18 @@
 # Test Checklist — v0.7.x branch
 
-## ⚠️ Capture resilience — DEVICE TEST REQUIRED before push (#86, #92, #93, #94, #95, #7, #61, #54)
-This branch changes the live audio-capture path. It is **gated on a real Bluetooth-call route-change
-test** — it cannot be validated by unit tests. Reproduce your actual scenario: put on AirPods, then
-answer a FaceTime / WhatsApp call and record.
+## ⚠️ Capture resilience — DEVICE TEST REQUIRED before push (#96, #86, #92, #93, #94, #95, #7, #61, #54)
+This branch changes the live audio-capture path AND moves mic capture to its own AVCaptureSession
+(#96). It is **gated on a real Bluetooth-call route-change test** — it cannot be validated by unit
+tests. Reproduce your actual scenario: put on AirPods, then answer a FaceTime / WhatsApp call and record.
 
-### Benign route change is NOT a crash (#86) — the headline test
-- [ ] Start recording. Mid-recording, force an audio-route change: answer a FaceTime/WhatsApp call so it grabs the mic (AirPods HFP↔A2DP), or connect/disconnect AirPods.
-- [ ] Recording **keeps going** — you see a calm "Audio device changed — recording resumed automatically" (or "briefly interrupted — continuing") bubble, **NOT** a red crash error.
-- [ ] Mic stays on your chosen device — you do **NOT** have to manually re-switch to the right mic afterward (re-pin works).
-- [ ] After stop, the transcript spans the **whole** session — no missing minutes at the route change.
-- [ ] Log shows `Stream restarted in place — mic re-pinned:` (subsystem `eu.fmasi.parley`, category audio).
+### Mic route change no longer crashes capture (#96 + #86) — the headline test
+The whole point: the mic now runs on its **own AVCaptureSession**, so an AirPods/Bluetooth mic route
+change can no longer stop the system-audio SCStream.
+- [ ] Start recording. Mid-recording, force a MIC route change: answer a FaceTime/WhatsApp call (AirPods HFP↔A2DP), or connect/disconnect AirPods.
+- [ ] Recording **keeps going** — a calm "recording resumed" bubble, **NOT** a red crash error.
+- [ ] **System audio has NO gap** at the route change — it was never interrupted; only the mic re-establishes. The transcript spans the **whole** session.
+- [ ] Your voice (local track) resumes after the brief switch. If a pinned mic (AirPods) dropped, it falls back to built-in and **re-pins to AirPods when they reconnect**.
+- [ ] Log shows `Mic capture recovered in place — device:` for a mic route change (and/or `System-audio stream restarted in place` for a system-audio route change), subsystem `eu.fmasi.parley`, category audio.
 
 ### Live helper-crash data-loss fix (#92) — the "Andrew lost 16 min" regression
 - [ ] Record ≥2 min. Force-kill the helper mid-recording: `pkill -f audio-capture-helper-xpc`.
@@ -32,11 +34,12 @@ answer a FaceTime / WhatsApp call and record.
 ### Format change / buffer safety (#94)
 - [ ] Audio after a route change is **not** corrupted or wrong-speed (system stays 48kHz mono). No crash on the route change (bounded mic memcpy).
 
-### Built-in mic / multichannel — the "wrong microphone" root cause (device-test 2026-06-26)
-- [ ] Mid-recording, switch the mic to the **MacBook built-in mic** (or let a route change fall back to it). Speak.
-- [ ] Your voice is **present and clear** in the local track afterward — NOT silent. (The built-in mic is a 3-capsule array; all capsules are now **averaged** into mono. Before this fix the 3-channel format was rejected and every mic buffer was dropped; the interim fix kept only channel 0.)
-- [ ] Log does **NOT** show a flood of `Mic audio: unsupported format … ch=3`. Optionally confirm `AudioConverter: new converter …ch → 48000Hz 1ch` appears for the built-in mic.
-- [ ] If a mic format ever IS unsupported, the session writes a `.diag.jsonl` (the failure is now recorded as an anomaly), and `metadata.capture_provenance.mic_format` reflects the mic actually in use at the end.
+### Mic on its own AVCaptureSession (#96) — voice present, aligned, no SCK mic tap
+- [ ] **Helper Microphone TCC (HOL-2):** record with the built-in mic; your voice is **present and clear** in the local track — NOT silent. The mic now opens an `AVCaptureSession` **in the helper**, whose bundle carries its own `NSMicrophoneUsageDescription`. On a machine where mic was never granted, confirm the permission prompt appears and capture is not silent (no SIGKILL / recovery storm).
+- [ ] Log shows `Mic capture started — device: …` at start (subsystem `eu.fmasi.parley`); the SCStream no longer captures the mic (no `.microphone` output).
+- [ ] **Mic/system alignment (HOL-1):** in the stereo `.m4a` (L=mic, R=system) your voice and the system audio are **time-aligned** (not offset by a fraction of a second), and echo dedup still removes remote bleed (`echo_segments_removed > 0`). After an AirPods route change mid-sentence the two tracks stay aligned — log shows `Mic timeline: padding …ms silence`.
+- [ ] **Built-in multichannel:** the OS hands AVCaptureSession mono, so **no** `unsupported format … ch=3` flood. (A >2ch USB interface is averaged to mono; a truly unhandled bit-depth writes a `.diag.jsonl` anomaly.)
+- [ ] `metadata.capture_provenance.mic_device` reflects the mic **actually** in use at the end — after a fallback it shows the fallback/re-pinned device, not the originally-pinned one.
 
 ## Rename → Parley migration (#75)
 **Resets macOS TCC permissions** (bundle ID changed `com.audio-transcribe.app` → `eu.fmasi.parley`). Do a clean-up + re-auth pass:

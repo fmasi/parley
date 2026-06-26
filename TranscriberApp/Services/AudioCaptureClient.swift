@@ -146,9 +146,14 @@ final class AudioCaptureClient {
             guard let e = diagnostics.events.last(where: { $0.kind == kind }) else { return nil }
             return "\(e.detail["rate"] ?? "?")Hz/\(e.detail["channels"] ?? "?")ch"
         }
-        // The mic device is whatever the most recent start / switch event pinned.
-        let micDevice = diagnostics.events.last { $0.kind == .micSwitch || $0.kind == .captureStart }?
-            .detail["mic"]
+        // The mic device is whatever the most recent start / switch / mic-recovery event captured on.
+        // Including the mic in-place restart (a route-change fallback or re-pin) keeps mic_device
+        // honest about the device that ACTUALLY captured the audio after a fallback (council HOL-3) —
+        // not the originally-pinned device that may have since disconnected.
+        let micDevice = diagnostics.events.last {
+            $0.kind == .micSwitch || $0.kind == .captureStart
+                || ($0.kind == .restartInPlace && $0.detail["source"] == "mic")
+        }?.detail["mic"]
 
         if diagnostics.isAnomalous {
             let url = recordingDirectory.appendingPathComponent("\(sessionId).diag.jsonl")

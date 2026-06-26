@@ -13,9 +13,9 @@ import TranscriberCore
 /// recovers the mic on its own (fall back + re-pin) while system audio keeps recording uninterrupted.
 ///
 /// macOS hands `AVCaptureSession` the OS-fused mono for the built-in mic (not the raw 3-channel
-/// beamforming array `SCStream` exposed), so the multichannel-array problem disappears at the source.
-/// A genuinely multichannel USB mic is still normalized downstream by `AudioConverter` (which averages
-/// >2 channels — see `MultichannelDownmix`).
+/// beamforming array `SCStream` exposed), so the multichannel-array problem disappears at the source
+/// for the built-in mic. A genuinely multichannel USB interface is still normalized downstream by
+/// `AudioOutputHandler` (which averages >2 channels — see `MultichannelDownmix`).
 ///
 /// Sample buffers are delivered on the caller-supplied `deliveryQueue` — the capture service's single
 /// persistent audio queue — so mic appends serialize with system-audio appends, chunk-rotation writer
@@ -35,7 +35,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// Records a diagnostic event (route change, recovery, error) into the helper's anomaly ring.
     var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
 
-    /// Guards `session`, `pinnedDeviceId`, and the recovery flags. A leaf lock — its critical sections
+    /// Guards `session`, the device ids, and the recovery flags. A leaf lock — its critical sections
     /// never call out (no `configQueue`, no `startRunning`), so it can't deadlock with `configQueue`.
     private let stateLock = DispatchQueue(label: "mic-capture.state")
     /// Serializes every (re)build so a user mic-switch and an in-flight route-change recovery can't
@@ -44,9 +44,13 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     private let configQueue = DispatchQueue(label: "mic-capture.config")
 
     private var session: AVCaptureSession?
-    /// The device the active session is pinned to (`nil` = system default), re-applied on recovery so
-    /// a transient error can't silently demote capture to a different input.
+    /// The device the USER chose (`nil` = system default). Set only on a *successful* start/switch, so
+    /// a failed switch can't corrupt it. NEVER overwritten by a fallback, so we can re-pin to it when
+    /// it reconnects.
     private var pinnedDeviceId: String?
+    /// The device the active session is ACTUALLY capturing on (may be a fallback after a disconnect).
+    /// Distinct from `pinnedDeviceId` so we know whether we're on a fallback and can re-pin.
+    private var currentDeviceId: String?
     private var isStopping = false
     private var isRecovering = false
     private var restartAttempts = 0
@@ -63,12 +67,13 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// unavailable or unauthorized, so `startCapture` can surface a clear, actionable error.
     func start(deviceId: String?) throws {
         stateLock.sync {
-            pinnedDeviceId = deviceId
             isStopping = false
             isRecovering = false
             restartAttempts = 0
         }
         try configQueue.sync { try buildAndStart(deviceId: deviceId) }
+        // Pin the user's choice only AFTER a successful start so a throw can't leave a stale pin.
+        stateLock.sync { pinnedDeviceId = deviceId }
         observeRouteChanges()
     }
 
@@ -85,19 +90,21 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     }
 
     /// Live mic switch (the mid-recording mic-switch dialog): retarget the session to a new device,
-    /// reusing the same mic WAV so the file stays continuous.
+    /// reusing the same mic WAV so the file stays continuous. The pin moves only on success.
     func updateDevice(_ deviceId: String?) throws {
+        try configQueue.sync { try buildAndStart(deviceId: deviceId) }
         stateLock.sync {
             pinnedDeviceId = deviceId
             restartAttempts = 0
         }
-        try configQueue.sync { try buildAndStart(deviceId: deviceId) }
     }
 
     // MARK: - Build
 
     /// MUST run on `configQueue` (callers wrap in `configQueue.sync`). Tears down any previous session
-    /// and starts a fresh one pinned to `deviceId`.
+    /// and starts a fresh one capturing `deviceId`. Records the ACTUAL device in `currentDeviceId`;
+    /// does NOT touch `pinnedDeviceId` (callers own the user's pin). Throws `.stopped` if a stop raced
+    /// in during the build, after tearing the new session down — so capture never leaks past stop.
     private func buildAndStart(deviceId: String?) throws {
         // Authorization is the #96 device-test risk: the helper captured the mic via ScreenCaptureKit
         // before, so its Microphone TCC grant may be implicit. Surface the status unambiguously, and
@@ -134,10 +141,23 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let old: AVCaptureSession? = stateLock.sync {
             let o = session
             session = newSession
+            currentDeviceId = deviceId
             return o
         }
         old?.stopRunning()
         newSession.startRunning()
+
+        // F1-style commit-or-abort: if a stop began while we were (re)building (stopRunning/startRunning
+        // run outside stateLock), retire the just-started session instead of leaking a running capture
+        // past stop.
+        let raced: AVCaptureSession? = stateLock.sync {
+            if isStopping { session = nil; return newSession }
+            return nil
+        }
+        if let raced {
+            raced.stopRunning()
+            throw MicCaptureError.stopped
+        }
 
         Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(deviceId ?? "default", privacy: .public))")
     }
@@ -154,6 +174,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             self, selector: #selector(handleDeviceDisconnected(_:)),
             name: AVCaptureDevice.wasDisconnectedNotification, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleDeviceConnected(_:)),
+            name: AVCaptureDevice.wasConnectedNotification, object: nil
+        )
     }
 
     @objc private func handleRuntimeError(_ note: Notification) {
@@ -165,16 +189,27 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     @objc private func handleDeviceDisconnected(_ note: Notification) {
         guard let device = note.object as? AVCaptureDevice, device.hasMediaType(.audio) else { return }
-        let (pinned, stopping) = stateLock.sync { (pinnedDeviceId, isStopping) }
+        let (current, stopping) = stateLock.sync { (currentDeviceId, isStopping) }
         guard !stopping else { return }
-        // Only react if the device we are actually capturing went away. If a specific device was
-        // pinned and it vanished, fall back to the system default; if we were on default, rebuild
-        // (the default has already moved to a surviving device).
-        let weWereUsingIt = (pinned == device.uniqueID) || (pinned == nil)
+        // Only react if the device we are ACTUALLY capturing on went away. If a specific device was in
+        // use and it vanished, fall back to the system default; if we were on default, rebuild (the
+        // default has already moved to a surviving device).
+        let weWereUsingIt = (current == device.uniqueID) || (current == nil)
         guard weWereUsingIt else { return }
         Logger.audio.warning("Mic device disconnected: \(device.localizedName, privacy: .public) — recovering")
         onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "device disconnected", "device": device.localizedName])
-        attemptRecover(forceDefault: pinned == device.uniqueID)
+        attemptRecover(forceDefault: current == device.uniqueID)
+    }
+
+    @objc private func handleDeviceConnected(_ note: Notification) {
+        guard let device = note.object as? AVCaptureDevice, device.hasMediaType(.audio) else { return }
+        let (pinned, current, stopping) = stateLock.sync { (pinnedDeviceId, currentDeviceId, isStopping) }
+        // Re-pin only when the user's originally-chosen device reappears AND we are currently on a
+        // fallback (current != pinned). Otherwise a reconnect of some unrelated device is irrelevant.
+        guard !stopping, let pinned, device.uniqueID == pinned, current != pinned else { return }
+        Logger.audio.info("Pinned mic reconnected: \(device.localizedName, privacy: .public) — re-pinning")
+        onEvent?(.micSwitch, .info, ["mic": pinned, "reason": "reconnect"])
+        attemptRecover(forceDefault: false)
     }
 
     /// Kick off a recovery loop on a background queue, at most one at a time.
@@ -195,25 +230,21 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             if stopping { return }
             if attempts >= maxRestartAttempts {
                 Logger.audio.error("Mic recovery budget exhausted — mic unavailable, system audio continues")
-                onEvent?(.restartFailed, .anomaly, ["source": "mic"])
+                // The service's onUnavailable handler records the .restartFailed anomaly; don't also
+                // record it here (that would double-count the event).
                 onUnavailable?("mic restart budget exhausted")
                 return
             }
             let deviceId = forceDefault ? nil : pinned
             do {
                 try configQueue.sync { try buildAndStart(deviceId: deviceId) }
-                // A stop may have raced in while we were (re)building; if so, tear the just-built
-                // session down instead of resurrecting capture into a stopping session (mirrors the
-                // service's atomic-commit guard).
-                let raced: AVCaptureSession? = stateLock.sync {
-                    if isStopping { let s = session; session = nil; return s }
-                    restartAttempts = 0
-                    return nil
-                }
-                if let raced { raced.stopRunning(); return }
+                stateLock.sync { restartAttempts = 0 }
                 Logger.audio.info("Mic capture recovered in place — device: \(deviceId ?? "default", privacy: .public)")
                 onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": deviceId ?? "default"])
                 onRecovered?()
+                return
+            } catch MicCaptureError.stopped {
+                // A stop raced in; buildAndStart already retired the new session. Nothing to recover.
                 return
             } catch {
                 stateLock.sync { restartAttempts += 1 }
@@ -222,6 +253,18 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             }
         }
     }
+
+    // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
+
+    /// Delivered on `deliveryQueue` (the capture service's audio queue). Forward the mic buffer to the
+    /// handler, which converts + appends it under the single-writer-queue invariant.
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        onSampleBuffer(sampleBuffer)
+    }
 }
 
 enum MicCaptureError: LocalizedError {
@@ -229,6 +272,7 @@ enum MicCaptureError: LocalizedError {
     case noDevice
     case cannotAddInput
     case cannotAddOutput
+    case stopped
 
     var errorDescription: String? {
         switch self {
@@ -240,6 +284,8 @@ enum MicCaptureError: LocalizedError {
             return "Could not attach the microphone input"
         case .cannotAddOutput:
             return "Could not attach the microphone output"
+        case .stopped:
+            return "Microphone capture stopped during setup"
         }
     }
 }

@@ -426,19 +426,25 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // so a concurrent rotateChunk/stop sees isCapturing=false and bails rather than operating on
         // the handler we're about to finalize (council FV1). The finalize itself is idempotent, which
         // is the real guard against a double-finalize crash; this claim just narrows the window.
-        let (won, h): (Bool, AudioOutputHandler?) = stateLock.sync {
-            if hasFailedFatally { return (false, nil) }
+        let (won, h, micSess): (Bool, AudioOutputHandler?, MicCaptureSession?) = stateLock.sync {
+            if hasFailedFatally { return (false, nil, nil) }
             hasFailedFatally = true
             let handlerToFinalize = handler
+            let micToStop = micSession
             isCapturing = false
             stream = nil
             handler = nil
+            micSession = nil
             systemPath = nil
             micPath = nil
-            return (true, handlerToFinalize)
+            return (true, handlerToFinalize, micToStop)
         }
         guard won else { return }
         record(.restartFailed, .anomaly, ["reason": reason])
+        // Stop the decoupled mic session too, otherwise its AVCaptureSession keeps running after the
+        // system stream is declared dead (council CONC-2). Stop it before finalize so no mic buffer
+        // lands on the audio queue after the WAV headers are sealed.
+        micSess?.stop()
         // Flush the partial WAV (pre-fault audio) on the persistent queue; finalize is idempotent so
         // a rotation's swapWriters finalizing the same writers first is harmless.
         audioQueue.sync { h?.finalizeAll() }

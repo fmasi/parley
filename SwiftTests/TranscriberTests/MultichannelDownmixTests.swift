@@ -56,4 +56,36 @@ struct MultichannelDownmixTests {
     func zeroChannelsNoOp() {
         #expect(downmix([1, 2, 3], channels: 0, frameCount: 3) == [])
     }
+
+    /// Run the Int16 → mono-float downmix over Swift arrays and return only the frames written.
+    private func downmixInt16(_ src: [Int16], channels: Int, frameCount: Int) -> [Float] {
+        var dst = [Float](repeating: -999, count: max(frameCount, 0))
+        let written = src.withUnsafeBufferPointer { s in
+            dst.withUnsafeMutableBufferPointer { d in
+                MultichannelDownmix.averageInterleavedInt16ToMono(
+                    s.baseAddress!, srcCount: s.count, channels: channels,
+                    into: d.baseAddress!, frameCount: frameCount
+                )
+            }
+        }
+        return Array(dst.prefix(written))
+    }
+
+    @Test("averages a 4-channel Int16 frame and scales to [-1, 1)")
+    func int16FourChannelAverage() {
+        // frame: (16384 + 16384 + 0 + 0)/4 = 8192; 8192/32768 = 0.25
+        #expect(downmixInt16([16384, 16384, 0, 0], channels: 4, frameCount: 1) == [0.25])
+    }
+
+    @Test("Int16 full-scale negative maps near -1")
+    func int16NegativeFullScale() {
+        // (-32768 + -32768)/2 = -32768; /32768 = -1.0
+        #expect(downmixInt16([-32768, -32768], channels: 2, frameCount: 1) == [-1.0])
+    }
+
+    @Test("Int16 downmix stops at the last whole frame")
+    func int16Truncated() {
+        // 3ch, 1⅔ frames of data — only the first whole frame (0,0,0 → 0.0) is emitted
+        #expect(downmixInt16([0, 0, 0, 9, 9], channels: 3, frameCount: 2) == [0.0])
+    }
 }

@@ -15,6 +15,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastMicFormatKey: String?
     private let micConverter = AudioConverter()
 
+    /// Shared-timeline anchor for mic/system alignment (#96 / council HOL-1): the PTS of the first
+    /// system-audio buffer (the continuous "spine"). The mic runs on an independent AVCaptureSession
+    /// whose start latency and route-change recovery gaps would otherwise shift the mic track relative
+    /// to system audio — breaking echo-dedup temporal overlap and skewing the stereo archive. The mic
+    /// path inserts compensating silence so mic frame N lines up with system frame N. Reset per chunk.
+    private var timelineAnchorPTS: CMTime?
+    /// Mic frames (48 kHz mono) written to the current chunk, including inserted silence — the mic's
+    /// position on the shared timeline. Reset to 0 on each chunk rotation.
+    private var micFramesWritten: Int64 = 0
+
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
     var diagnostics: LockedDiagnostics?
@@ -72,6 +82,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         systemWriter = newSystemWriter
         micWriter = newMicWriter
 
+        // Re-anchor the shared timeline for the new chunk: the new writers start at frame 0, so the
+        // next system buffer becomes the new spine t=0 and the mic re-aligns from there (#96 / HOL-1).
+        timelineAnchorPTS = nil
+        micFramesWritten = 0
+
         return (oldSystemPath, oldMicPath)
     }
 
@@ -99,6 +114,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        // Anchor the shared mic/system timeline to the first system buffer — the spine that defines
+        // t=0 for this chunk. The mic aligns to it (#96 / council HOL-1).
+        if timelineAnchorPTS == nil {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            if pts.isValid { timelineAnchorPTS = pts }
+        }
+
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
         // `.changed` means a transient route anomaly — record it and DROP the buffer rather than
@@ -183,15 +205,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let channels = Int(asbd.pointee.mChannelsPerFrame)
         let rate = asbd.pointee.mSampleRate
 
-        // The macOS built-in mic is a 3-capsule beamforming array. macOS normally fuses it into clean
-        // mono for us, but ScreenCaptureKit's raw mic tap bypasses that and delivers the raw 3+
-        // interleaved channels — which AVAudioFormat(streamDescription:) rejects (returns nil). That
-        // is the root cause of the "it used the wrong microphone, my voice was missing" reports when a
-        // route change falls back to the built-in mic. The capsules are undifferentiated (a
-        // positionless "Discrete" layout — no "primary" channel), so we average them all into mono
-        // (see MultichannelDownmix) rather than dropping buffers or wastefully keeping just one. The
-        // durable fix is to capture the mic off SCK via AVAudioEngine's input node (#96), which hands
-        // us OS-fused mono directly.
+        // The mic comes from a dedicated AVCaptureSession now (#96), which hands us the OS-fused MONO
+        // for the built-in mic — so its raw 3-capsule beamforming array is no longer exposed here. A
+        // multichannel format still arrives from pro USB interfaces (>2ch). Those channels are
+        // undifferentiated, so we average them all into mono (see MultichannelDownmix) rather than
+        // dropping the buffer or wastefully keeping one; <=2ch takes the normal converter path below.
         if channels > 2 {
             recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
             handleMultichannelMic(sampleBuffer, channels: channels, rate: rate, asbd: asbd)
@@ -245,10 +263,38 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
         do {
             let result = try micConverter.convert(pcmBuffer)
-            result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+            appendAlignedMic(result.samples, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         } catch {
             Logger.audio.error("Mic audio conversion failed: \(error, privacy: .public)")
         }
+    }
+
+    /// Append converted 48 kHz mono mic samples, first inserting compensating silence so the mic WAV
+    /// stays aligned to the system-audio spine on a shared timeline (#96 / council HOL-1). One
+    /// mechanism covers both the AVCaptureSession start latency (leading silence on the first buffer)
+    /// and any route-change recovery gap (silence for the dead interval) — without it the mic track
+    /// would drift earlier than system audio, breaking echo-dedup overlap and skewing the stereo
+    /// archive. Never trims (we can't un-write); only catches the mic up when it is behind.
+    private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
+        if timelineAnchorPTS == nil, pts.isValid { timelineAnchorPTS = pts }
+        if let anchor = timelineAnchorPTS, anchor.isValid, pts.isValid {
+            let rate = AudioConverter.outputSampleRate  // 48000
+            let targetFrame = Int64((CMTimeSubtract(pts, anchor).seconds * rate).rounded())
+            var pad = targetFrame - micFramesWritten
+            if pad > 0 {
+                let maxPad = Int64(rate * 60)  // clamp a pathological gap at 60s of silence
+                if pad > maxPad {
+                    Logger.audio.error("Mic timeline gap \(Int(Double(pad) / rate))s exceeds 60s cap — clamping")
+                    pad = maxPad
+                }
+                Logger.audio.info("Mic timeline: padding \(Int(Double(pad) / rate * 1000))ms silence to align mic to system spine")
+                let silence = [Int16](repeating: 0, count: Int(pad))
+                silence.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+                micFramesWritten += pad
+            }
+        }
+        samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+        micFramesWritten += Int64(samples.count)
     }
 
     /// Record the mic input format, but only when it CHANGES — so a mid-stream mic switch (and an
@@ -263,17 +309,22 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ])
     }
 
-    /// Capture a multichannel (3+) mic by averaging its interleaved capsules into a single mono buffer
-    /// the AudioConverter can normalize. The built-in mic array's capsules are undifferentiated
-    /// (positionless "Discrete" layout), so an equal-weight average is the correct mixdown and beats
-    /// picking one channel on SNR. The built-in array delivers interleaved float here; a non-float
-    /// multichannel layout (not observed in practice) is dropped with a clear log.
+    /// Capture a multichannel (3+) mic by averaging its interleaved channels into a single mono buffer
+    /// the AudioConverter can normalize. The channels are undifferentiated (positionless "Discrete"
+    /// layout), so an equal-weight average is the correct mixdown and beats picking one channel on SNR.
+    /// Handles both float and packed 16-bit-int interleaved input (pro USB interfaces are int); any
+    /// other layout is recorded as an anomaly and dropped (council CONC-2).
     private func handleMultichannelMic(
         _ sampleBuffer: CMSampleBuffer, channels: Int, rate: Double,
         asbd: UnsafePointer<AudioStreamBasicDescription>
     ) {
-        guard asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
-            Logger.audio.error("Mic audio: unhandled non-float \(channels)ch format — dropping")
+        let isFloat = asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        let bits = Int(asbd.pointee.mBitsPerChannel)
+        // Average float or packed 16-bit integer interleaved channels. Anything else (e.g. 24/32-bit
+        // int) is genuinely unhandled — record it as an anomaly (not a silent loss) and drop.
+        guard isFloat || bits == 16 else {
+            recordMicFormatIfChanged(rate: rate, channels: channels, supported: false)
+            Logger.audio.error("Mic audio: unhandled \(bits)-bit non-float \(channels)ch format — dropping")
             return
         }
         let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
@@ -292,18 +343,28 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &rawPtr
         ) == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
-        let srcCount = totalLength / MemoryLayout<Float32>.size
-        let written = ptr.withMemoryRebound(to: Float32.self, capacity: srcCount) { src in
-            MultichannelDownmix.averageInterleavedToMono(
-                src, srcCount: srcCount, channels: channels, into: dst, frameCount: frameCount
-            )
+        let written: Int
+        if isFloat {
+            let srcCount = totalLength / MemoryLayout<Float32>.size
+            written = ptr.withMemoryRebound(to: Float32.self, capacity: srcCount) { src in
+                MultichannelDownmix.averageInterleavedToMono(
+                    src, srcCount: srcCount, channels: channels, into: dst, frameCount: frameCount
+                )
+            }
+        } else {
+            let srcCount = totalLength / MemoryLayout<Int16>.size
+            written = ptr.withMemoryRebound(to: Int16.self, capacity: srcCount) { src in
+                MultichannelDownmix.averageInterleavedInt16ToMono(
+                    src, srcCount: srcCount, channels: channels, into: dst, frameCount: frameCount
+                )
+            }
         }
         guard written > 0 else { return }
         monoBuffer.frameLength = AVAudioFrameCount(written)
 
         do {
             let result = try micConverter.convert(monoBuffer)
-            result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+            appendAlignedMic(result.samples, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         } catch {
             Logger.audio.error("Mic audio conversion failed (multichannel): \(error, privacy: .public)")
         }
