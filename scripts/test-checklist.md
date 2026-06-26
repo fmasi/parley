@@ -34,7 +34,7 @@ answer a FaceTime / WhatsApp call and record.
 
 ### Built-in mic / multichannel — the "wrong microphone" root cause (device-test 2026-06-26)
 - [ ] Mid-recording, switch the mic to the **MacBook built-in mic** (or let a route change fall back to it). Speak.
-- [ ] Your voice is **present** in the local track afterward — NOT silent. (Before this fix the built-in mic's 3-channel format was rejected and every mic buffer was dropped.)
+- [ ] Your voice is **present and clear** in the local track afterward — NOT silent. (The built-in mic is a 3-capsule array; all capsules are now **averaged** into mono. Before this fix the 3-channel format was rejected and every mic buffer was dropped; the interim fix kept only channel 0.)
 - [ ] Log does **NOT** show a flood of `Mic audio: unsupported format … ch=3`. Optionally confirm `AudioConverter: new converter …ch → 48000Hz 1ch` appears for the built-in mic.
 - [ ] If a mic format ever IS unsupported, the session writes a `.diag.jsonl` (the failure is now recorded as an anomaly), and `metadata.capture_provenance.mic_format` reflects the mic actually in use at the end.
 
