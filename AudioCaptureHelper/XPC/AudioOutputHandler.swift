@@ -80,10 +80,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
+        // The mic is captured separately via AVCaptureSession (#96); the SCStream delivers system
+        // audio only. `.microphone` is no longer registered as an output, so only `.audio` arrives.
         if type == .audio {
             handleSystemAudio(sampleBuffer)
-        } else if type == .microphone {
-            handleMicAudio(sampleBuffer)
         }
     }
 
@@ -172,7 +172,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Mic audio (normalized via AudioConverter)
 
-    private func handleMicAudio(_ sampleBuffer: CMSampleBuffer) {
+    /// Append a microphone sample buffer captured by the decoupled `AVCaptureSession` (#96). MUST be
+    /// called on the capture service's audio queue — the same serial queue as system-audio callbacks,
+    /// writer swaps, and finalize — so all writer access stays single-threaded.
+    func appendMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }
