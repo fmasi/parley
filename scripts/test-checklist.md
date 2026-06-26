@@ -32,6 +32,12 @@ answer a FaceTime / WhatsApp call and record.
 ### Format change / buffer safety (#94)
 - [ ] Audio after a route change is **not** corrupted or wrong-speed (system stays 48kHz mono). No crash on the route change (bounded mic memcpy).
 
+### Built-in mic / multichannel — the "wrong microphone" root cause (device-test 2026-06-26)
+- [ ] Mid-recording, switch the mic to the **MacBook built-in mic** (or let a route change fall back to it). Speak.
+- [ ] Your voice is **present** in the local track afterward — NOT silent. (Before this fix the built-in mic's 3-channel format was rejected and every mic buffer was dropped.)
+- [ ] Log does **NOT** show a flood of `Mic audio: unsupported format … ch=3`. Optionally confirm `AudioConverter: new converter …ch → 48000Hz 1ch` appears for the built-in mic.
+- [ ] If a mic format ever IS unsupported, the session writes a `.diag.jsonl` (the failure is now recorded as an anomaly), and `metadata.capture_provenance.mic_format` reflects the mic actually in use at the end.
+
 ## Rename → Parley migration (#75)
 **Resets macOS TCC permissions** (bundle ID changed `com.audio-transcribe.app` → `eu.fmasi.parley`). Do a clean-up + re-auth pass:
 - [ ] Remove the old install + LaunchAgent: `rm -rf /Applications/AudioTranscribe.app` and `launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.app.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.audio-transcribe.app.plist`
