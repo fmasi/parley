@@ -99,9 +99,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
-        // `.changed` means a transient route anomaly — record it loudly rather than silently
-        // writing mismatched samples under a stale header; the paired didStopWithError drives the
-        // #86 in-place restart, which opens fresh writers that re-detect cleanly.
+        // `.changed` means a transient route anomaly — record it and DROP the buffer rather than
+        // appending mismatched samples under the stale WAV header (council F9). The in-place
+        // restart reuses the SAME handler/writers/tracker (it does NOT reset them), so if true
+        // mid-stream rotation is ever needed the tracker + writer config must be reset explicitly.
         if let info = formatInfo(from: sampleBuffer) {
             let fmt = AudioStreamFormat(
                 sampleRate: info.rate, channelCount: Int(info.channels),
@@ -125,6 +126,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                     "from": "\(Int(from.sampleRate))Hz/\(from.channelCount)ch",
                     "to": "\(Int(to.sampleRate))Hz/\(to.channelCount)ch",
                 ])
+                return  // drop the off-format buffer instead of corrupting the WAV (council F9)
             }
         }
 

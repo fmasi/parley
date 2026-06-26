@@ -10,7 +10,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
-    private var audioQueue: DispatchQueue?
+    /// One persistent serial queue for ALL stream callbacks across the session — initial stream
+    /// and every in-place restart register on it, so writer swaps / finalization / sample appends
+    /// can never run on two different queues concurrently (council F4). Never reassigned or nil'd.
+    private let audioQueue = DispatchQueue(label: "audio-capture.shared")
     private let stateLock = DispatchQueue(label: "audio-capture.state")
 
     // MARK: - #86 in-place restart + #95 diagnostics
@@ -27,6 +30,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var restartAttempts = 0
     /// Guards against overlapping restart loops from rapid repeated stop errors.
     private var isRestarting = false
+    /// One-shot latch so the reverse-channel fatal notification fires at most once per session
+    /// even if both fatal emitters race (council F8). Reset on a fresh startCapture.
+    private var hasFailedFatally = false
     private let maxRestartAttempts = 3
 
     /// Reverse-channel callbacks to the app (wired in main.swift from the connection proxy).
@@ -81,6 +87,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.isUserStopping = false
                 self.restartAttempts = 0
                 self.isRestarting = false
+                self.hasFailedFatally = false
             }
             record(.captureStart, .info, ["mic": microphoneDeviceId ?? "default"])
 
@@ -111,31 +118,35 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     func stopCapture(
         reply: @escaping (String?, String?, String?) -> Void
     ) {
-        let (capturing, captureStream) = stateLock.sync { (isCapturing, stream) }
-        guard capturing, let captureStream else {
+        // Set isUserStopping FIRST, then snapshot the stream, atomically. Ordering matters:
+        // an in-flight in-place restart commits its new stream into `self.stream` and bails only
+        // if it sees isUserStopping at commit time — so we must mark stopping before we read the
+        // stream, guaranteeing we stop whatever stream is (or is about to be) live (council F1).
+        let (capturing, captureStream) = stateLock.sync { () -> (Bool, SCStream?) in
+            if isCapturing { isUserStopping = true }
+            return (isCapturing, stream)
+        }
+        guard capturing else {
             reply(nil, nil, "No capture in progress")
             return
         }
 
         Logger.audio.info("Stopping capture")
-        // Mark the stop as user-initiated so the SCStream's didStopWithError (which fires as a
-        // consequence of our own stopCapture) is classified as `.ignore`, not a route change (#86).
-        stateLock.sync { isUserStopping = true }
         record(.captureStop, .info)
 
         Task {
-            do {
-                try await captureStream.stopCapture()
-                Logger.audio.debug("SCStream stopped")
-            } catch {
-                // Stream may already be stopped — proceed with finalization
+            if let captureStream {
+                do {
+                    try await captureStream.stopCapture()
+                    Logger.audio.debug("SCStream stopped")
+                } catch {
+                    // Stream may already be stopped — proceed with finalization
+                }
             }
-            // Snapshot under state lock, then drain audio queue outside it
-            // to avoid lock-order inversion with rotateChunk.
-            let (queue, handler) = self.stateLock.sync {
-                (self.audioQueue, self.handler)
-            }
-            queue?.sync { handler?.finalizeAll() }
+            // Drain the audio queue (persistent constant) outside stateLock to avoid lock-order
+            // inversion with rotateChunk; serializes with any callbacks on the same queue.
+            let handler = self.stateLock.sync { self.handler }
+            self.audioQueue.sync { handler?.finalizeAll() }
             let (sys, mic) = self.stateLock.sync {
                 let result = (self.systemPath, self.micPath)
                 self.isCapturing = false
@@ -143,7 +154,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.handler = nil
                 self.systemPath = nil
                 self.micPath = nil
-                self.audioQueue = nil
                 return result
             }
             reply(sys, mic, nil)
@@ -199,8 +209,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         newBaseName: String,
         reply: @escaping (String?, String?, String?) -> Void
     ) {
-        let (capturing, currentHandler, queue) = stateLock.sync { (isCapturing, handler, audioQueue) }
-        guard capturing, let currentHandler, let queue else {
+        let (capturing, currentHandler) = stateLock.sync { (isCapturing, handler) }
+        guard capturing, let currentHandler else {
             reply(nil, nil, "No capture in progress")
             return
         }
@@ -214,10 +224,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             let newSystemWriter = try WavFileWriter(path: newSysPath)
             let newMicWriter = try WavFileWriter(path: newMicPath)
 
-            // Swap on the audio queue for zero-gap guarantee, then update
+            // Swap on the persistent audio queue for zero-gap guarantee, then update
             // state outside to avoid lock-order inversion with stopCapture.
             var oldPaths: (systemPath: String, micPath: String)!
-            queue.sync {
+            audioQueue.sync {
                 oldPaths = currentHandler.swapWriters(
                     newSystemWriter: newSystemWriter,
                     newMicWriter: newMicWriter
@@ -242,14 +252,18 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     func stopAndFinalize() {
-        let (capturing, captureStream, queue) = stateLock.sync { (isCapturing, stream, audioQueue) }
+        // Mark stopping before snapshotting the stream so an in-flight restart bails / is torn
+        // down (council F1), mirroring stopCapture.
+        let (capturing, captureStream) = stateLock.sync { () -> (Bool, SCStream?) in
+            if isCapturing { isUserStopping = true }
+            return (isCapturing, stream)
+        }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
-        stateLock.sync { isUserStopping = true }
 
-        // Finalize synchronously on the audio queue so WAV headers are written
+        // Finalize synchronously on the persistent audio queue so WAV headers are written
         // before the XPC service exits (I5 fix).
-        queue?.sync { self.handler?.finalizeAll() }
+        audioQueue.sync { self.handler?.finalizeAll() }
 
         if let captureStream {
             Task {
@@ -271,14 +285,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     private func cleanupAfterFailure() {
         stateLock.sync {
-            audioQueue?.sync { handler?.finalizeAll() }
+            audioQueue.sync { handler?.finalizeAll() }
             if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
             if let mic = micPath { try? FileManager.default.removeItem(atPath: mic) }
             stream = nil
             handler = nil
             systemPath = nil
             micPath = nil
-            audioQueue = nil
         }
     }
 
@@ -318,15 +331,23 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let captureStream = SCStream(
             filter: filter, configuration: config, delegate: handler
         )
-        let sharedQueue = DispatchQueue(label: "audio-capture.shared")
 
-        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: sharedQueue)
-        try captureStream.addStreamOutput(handler, type: .microphone, sampleHandlerQueue: sharedQueue)
-        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: audioQueue)
+        try captureStream.addStreamOutput(handler, type: .microphone, sampleHandlerQueue: audioQueue)
+        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: audioQueue)
 
-        self.stateLock.sync {
+        // Commit the new stream and re-validate the session atomically: if a stop/disconnect began
+        // while we were awaiting (SCShareableContent + addStreamOutput), bail instead of resurrecting
+        // a stream into finalized writers (council F1). isUserStopping (not !isCapturing) is the
+        // correct gate — initial startCapture sets isCapturing only AFTER this returns.
+        let committed = stateLock.sync { () -> Bool in
+            if isUserStopping { return false }
             self.stream = captureStream
-            self.audioQueue = sharedQueue
+            return true
+        }
+        guard committed else {
+            try? await captureStream.stopCapture()
+            throw CancellationError()
         }
         try await captureStream.startCapture()
     }
@@ -336,8 +357,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// SCStream `didStopWithError` handoff. Decides whether the stop is a user stop (ignore), a
     /// recoverable route change (restart in place), or a terminal fault (surface fatal).
     private func handleStreamStopped(_ error: Error) {
-        let (capturing, userStopping, restarting, attempts) = stateLock.sync {
-            (isCapturing, isUserStopping, isRestarting, restartAttempts)
+        let (capturing, userStopping, attempts) = stateLock.sync {
+            (isCapturing, isUserStopping, restartAttempts)
         }
         let decision = RestartDecision.evaluate(
             isUserStopped: userStopping, isCapturing: capturing,
@@ -348,13 +369,44 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             Logger.audio.info("Stream stop ignored — user stop or capture already inactive")
         case .failFatal:
             Logger.audio.error("Stream stop: restart budget exhausted — fatal")
-            record(.restartFailed, .anomaly, ["reason": "budget exhausted"])
-            onFailFatally?("Capture stream failed and could not be restarted")
+            failFatally("restart budget exhausted")
         case .restart:
-            guard !restarting else { return }
-            stateLock.sync { isRestarting = true }
+            // Atomic check-and-set so two concurrent didStopWithError callbacks can't both launch
+            // a restart loop (council F10).
+            let shouldStart = stateLock.sync { () -> Bool in
+                if isRestarting { return false }
+                isRestarting = true
+                return true
+            }
+            guard shouldStart else { return }
             Task { await self.attemptRestart() }
         }
+    }
+
+    /// Finalize writers and clear all capture state after an unrecoverable stream failure, then
+    /// notify the app exactly once. Clearing isCapturing lets the app's recovery start() succeed on
+    /// the same XPC connection (council F2); the one-shot latch makes the fatal notification
+    /// at-most-once even if both emitters race (council F8).
+    private func failFatally(_ reason: String) {
+        let firstFatal = stateLock.sync { () -> Bool in
+            if hasFailedFatally { return false }
+            hasFailedFatally = true
+            return true
+        }
+        guard firstFatal else { return }
+        record(.restartFailed, .anomaly, ["reason": reason])
+        // Flush the partial WAV (pre-fault audio) on the persistent queue, OUTSIDE stateLock to
+        // preserve lock order, then clear state.
+        let h = stateLock.sync { handler }
+        audioQueue.sync { h?.finalizeAll() }
+        stateLock.sync {
+            isCapturing = false
+            stream = nil
+            handler = nil
+            systemPath = nil
+            micPath = nil
+        }
+        onFailFatally?("Capture stream failed and could not be restarted")
     }
 
     /// Rebuild and restart the dead stream into the SAME handler/writers, re-pinning the mic.
@@ -370,19 +422,23 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 attempts: attempts, maxAttempts: maxRestartAttempts
             )
             guard decision == .restart, let currentHandler else {
-                if decision == .failFatal {
-                    record(.restartFailed, .anomaly, ["reason": "budget exhausted"])
-                    onFailFatally?("Capture stream failed and could not be restarted")
-                }
+                if decision == .failFatal { failFatally("restart budget exhausted") }
                 return
             }
             do {
                 if let oldStream { try? await oldStream.stopCapture() }  // tear down the dead stream
                 try await buildAndStartStream(handler: currentHandler, microphoneDeviceId: micId)
+                // A stop may have begun during the restart's awaits; if so, don't claim success or
+                // notify — the stop path owns teardown now (council F1).
+                if stateLock.sync(execute: { isUserStopping }) { return }
                 stateLock.sync { restartAttempts = 0 }
                 Logger.audio.info("Stream restarted in place — mic re-pinned: \(micId ?? "default", privacy: .public)")
                 record(.restartInPlace, .warning, ["mic": micId ?? "default"])
                 onRestartInPlace?()
+                return
+            } catch is CancellationError {
+                // buildAndStartStream bailed because a stop began — abandon the restart silently.
+                Logger.audio.info("In-place restart aborted — session stopping")
                 return
             } catch {
                 stateLock.sync { restartAttempts += 1 }
