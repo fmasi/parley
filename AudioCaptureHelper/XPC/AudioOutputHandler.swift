@@ -303,8 +303,15 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard let anchor = timelineAnchorPTS, anchor.isValid, pts.isValid else { return 0 }
         let deltaSeconds = CMTimeSubtract(pts, anchor).seconds
-        guard deltaSeconds.isFinite, deltaSeconds >= 0, deltaSeconds < 3600 else {
-            if !deltaSeconds.isFinite || deltaSeconds >= 3600 {
+        // Reject only a genuinely impossible delta (non-finite, negative, or > 24h), which would TRAP
+        // the Int64 conversion below on the audio thread on a cross-source PTS clock-epoch mismatch.
+        // The ceiling must stay well above any real per-chunk delta: the anchor resets every chunk
+        // rotation (swapWriters) so this delta is bounded by ONE chunk's length — and chunkDurationMinutes
+        // has NO upper bound (min 10), so a 60-min+ chunk is legitimate and must still align. An earlier
+        // 1h cap wrongly rejected it (council CONV-2). Actual silence is separately clamped to 60s below.
+        let maxPlausibleDelta = 86_400.0  // 24h — clearly garbage for any single meeting chunk
+        guard deltaSeconds.isFinite, deltaSeconds >= 0, deltaSeconds < maxPlausibleDelta else {
+            if !deltaSeconds.isFinite || deltaSeconds >= maxPlausibleDelta {
                 Logger.audio.error("Timeline \(label) delta \(deltaSeconds)s implausible (PTS clock mismatch?) — skipping alignment")
             }
             return 0

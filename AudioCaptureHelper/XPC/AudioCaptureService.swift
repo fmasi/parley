@@ -88,7 +88,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.isRestarting = false
                 self.hasFailedFatally = false
             }
-            record(.captureStart, .info, ["mic": microphoneDeviceId ?? "default"])
 
             Task {
                 do {
@@ -98,7 +97,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     // already-recording system WAV (council F2). A mic-start failure fails the start
                     // loudly so the user fixes permissions before the meeting — mid-session mic loss
                     // degrades to system-only instead, which is handled separately.
-                    try self.startMicSession(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
+                    let resolvedMic = try self.startMicSession(
+                        handler: outputHandler, microphoneDeviceId: microphoneDeviceId
+                    )
+                    // Record capture-start provenance with the mic that ACTUALLY resolved — not the
+                    // requested id, which may have silently fallen back to the system default if the
+                    // pinned device couldn't be opened (council CONV-1). Recorded after a successful mic
+                    // start (not on a failed one, which tears down with no provenance consumer).
+                    self.record(.captureStart, .info, ["mic": resolvedMic ?? "default"])
                     try await self.buildAndStartStream(handler: outputHandler)
                     Logger.audio.info("Capture started — mic AVCaptureSession + system SCStream; awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
@@ -185,13 +191,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
 
         Logger.audio.info("Switching mic to: \(deviceId ?? "system default", privacy: .public)")
-        record(.micSwitch, .info, ["mic": deviceId ?? "default"])
 
         // Retarget the decoupled mic AVCaptureSession (#96). startRunning can block briefly, so do it
         // off the XPC reply thread.
         Task {
             do {
                 try micSess.updateDevice(deviceId)
+                // Record provenance with the RESOLVED device, on success only — symmetric with
+                // .captureStart (council CONV-1): a switch that fell back to default or failed must not
+                // claim the requested device in mic_device.
+                self.record(.micSwitch, .info, ["mic": micSess.resolvedDeviceId ?? "default"])
                 Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .public)")
                 reply(true, nil)
             } catch {
@@ -307,7 +316,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// callbacks into the service. Throws — failing the whole start — if the mic can't be brought up,
     /// since the user expects their own voice recorded. Mid-session mic loss is handled separately by
     /// MicCaptureSession and is NOT fatal (system audio keeps recording).
-    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?) throws {
+    /// Returns the device the mic ACTUALLY resolved to (`nil` = system default), so the caller can
+    /// record honest `.captureStart` provenance even when the requested device fell back (council CONV-1).
+    @discardableResult
+    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?) throws -> String? {
         let mic = MicCaptureSession(deliveryQueue: audioQueue) { [weak handler] buffer in
             handler?.appendMicSampleBuffer(buffer)
         }
@@ -335,6 +347,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return false
         }
         if stopping { mic.stop() }
+        return mic.resolvedDeviceId
     }
 
     /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the

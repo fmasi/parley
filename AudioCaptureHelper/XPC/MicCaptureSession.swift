@@ -63,6 +63,12 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    /// The device the active session is ACTUALLY capturing on (`nil` = system default), exposed so the
+    /// service can record honest mic_device provenance at its own event-emission sites (`.captureStart`,
+    /// `.micSwitch`) — a `buildAndStart` fallback updates this even when the requested id differs
+    /// (council CONV-1, sibling of MIC-CURRENT-MISLABEL). Reads under the leaf `stateLock`.
+    var resolvedDeviceId: String? { stateLock.sync { currentDeviceId } }
+
     /// Build and start the session for `deviceId` (`nil` = system default). Throws if the mic is
     /// unavailable or unauthorized, so `startCapture` can surface a clear, actionable error.
     func start(deviceId: String?) throws {
@@ -252,9 +258,18 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             let deviceId = forceDefault ? nil : pinned
             do {
                 try configQueue.sync { try buildAndStart(deviceId: deviceId) }
-                stateLock.sync { restartAttempts = 0 }
-                Logger.audio.info("Mic capture recovered in place — device: \(deviceId ?? "default", privacy: .public)")
-                onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": deviceId ?? "default"])
+                // Report the RESOLVED device, not the requested one: buildAndStart may have fallen back
+                // to the system default if the pinned device couldn't be opened, and this event feeds
+                // mic_device provenance. Reporting `deviceId` here would falsify provenance on a silent
+                // fallback (council PROV-RECOVER-REQID — sibling of MIC-CURRENT-MISLABEL). buildAndStart
+                // set currentDeviceId under this same lock; if a concurrent user switch updated it first,
+                // reporting the actually-current device is still exactly what mic_device wants.
+                let resolved = stateLock.sync { () -> String? in
+                    restartAttempts = 0
+                    return currentDeviceId
+                }
+                Logger.audio.info("Mic capture recovered in place — device: \(resolved ?? "default", privacy: .public)")
+                onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": resolved ?? "default"])
                 onRecovered?()
                 return
             } catch MicCaptureError.stopped {
