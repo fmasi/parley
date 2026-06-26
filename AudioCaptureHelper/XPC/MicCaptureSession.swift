@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 import os
 import TranscriberCore
@@ -9,8 +10,11 @@ import TranscriberCore
 /// Why this exists: previously ONE `SCStream` captured both system audio and the mic, so any mic
 /// route change (AirPods connect/disconnect, HFP↔A2DP) stopped the whole stream — the root cause of
 /// the "recording crashed mid-call, lost minutes" incidents. With the mic on its own
-/// `AVCaptureSession`, a mic route change can no longer tear down system-audio capture; this session
-/// recovers the mic on its own (fall back + re-pin) while system audio keeps recording uninterrupted.
+/// `AVCaptureSession`, a mic route change can no longer tear down system-audio capture. The session
+/// follows audio-device changes via a **Core Audio HAL listener** (gotcha #55 — AVFoundation's audio
+/// disconnect notifications don't fire on macOS): on "System Default" it **auto-follows** the system
+/// default input (AirPods in/out — the user never has to pick a mic); an explicit pin falls back to the
+/// default when its device vanishes and re-pins when it returns. System audio records on, uninterrupted.
 ///
 /// macOS hands `AVCaptureSession` the OS-fused mono for the built-in mic (not the raw 3-channel
 /// beamforming array `SCStream` exposed), so the multichannel-array problem disappears at the source
@@ -49,19 +53,31 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// it reconnects.
     private var pinnedDeviceId: String?
     /// The device the active session is ACTUALLY capturing on (may be a fallback after a disconnect).
-    /// Distinct from `pinnedDeviceId` so we know whether we're on a fallback and can re-pin.
+    /// Distinct from `pinnedDeviceId` so we know whether we're on a fallback and can re-pin. Keeps the
+    /// `nil == system default` convention that mic_device provenance relies on.
     private var currentDeviceId: String?
+    /// The CONCRETE device the running session is bound to (its `uniqueID`, non-nil while capturing) —
+    /// distinct from `currentDeviceId`, which stays `nil` in default mode for provenance. The HAL
+    /// device-change reevaluation compares against this to decide whether we are already on the device we
+    /// SHOULD be on, so an unrelated device appearing (or a duplicate notification) is a no-op.
+    private var currentConcreteDeviceId: String?
     private var isStopping = false
     private var isRecovering = false
     private var restartAttempts = 0
     private let maxRestartAttempts = 3
+
+    /// Serial queue the Core Audio HAL property-listener block runs on (never the audio/main queue).
+    private let monitorQueue = DispatchQueue(label: "mic-capture.device-monitor")
+    /// The HAL listener block, retained so the SAME reference can be passed to remove it — Swift boxes a
+    /// fresh block per call, so removal silently no-ops without the original reference.
+    private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
 
     init(deliveryQueue: DispatchQueue, onSampleBuffer: @escaping (CMSampleBuffer) -> Void) {
         self.deliveryQueue = deliveryQueue
         self.onSampleBuffer = onSampleBuffer
     }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit { stopDeviceMonitoring() }
 
     /// The device the active session is ACTUALLY capturing on (`nil` = system default), exposed so the
     /// service can record honest mic_device provenance at its own event-emission sites (`.captureStart`,
@@ -80,7 +96,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         try configQueue.sync { try buildAndStart(deviceId: deviceId) }
         // Pin the user's choice only AFTER a successful start so a throw can't leave a stale pin.
         stateLock.sync { pinnedDeviceId = deviceId }
-        observeRouteChanges()
+        startDeviceMonitoring()
     }
 
     /// Stop capture and detach all observers. Idempotent.
@@ -91,7 +107,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             session = nil
             return s
         }
-        NotificationCenter.default.removeObserver(self)
+        stopDeviceMonitoring()
         live?.stopRunning()
     }
 
@@ -158,6 +174,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             let o = session
             session = newSession
             currentDeviceId = resolvedId
+            currentConcreteDeviceId = device.uniqueID
             return o
         }
         old?.stopRunning()
@@ -178,57 +195,113 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(resolvedId ?? "default", privacy: .public))")
     }
 
-    // MARK: - Route-change recovery
+    // MARK: - Device-change monitoring (Core Audio HAL)
 
-    private func observeRouteChanges() {
+    private static let deviceListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private static let defaultInputAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Start monitoring for audio-device changes. AVFoundation's `wasDisconnected`/`wasConnected`
+    /// notifications and KVO on `isConnected` do NOT fire for audio-input removal on macOS — the session
+    /// just goes silent (gotcha #55 / `docs/mic-capture-design.md`). So the route-change signal comes from
+    /// the Core Audio HAL: a property listener on the system object for `kAudioHardwarePropertyDefaultInputDevice`
+    /// (the default input flipped — AirPods in/out, drives auto-follow) and `kAudioHardwarePropertyDevices`
+    /// (a device appeared/vanished — drives pinned fallback/re-pin). Both feed one debounced reevaluation.
+    /// `runtimeErrorNotification` is kept as a belt-and-suspenders fallback for a session that errors outright.
+    private func startDeviceMonitoring() {
         NotificationCenter.default.removeObserver(self)
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleRuntimeError(_:)),
             name: AVCaptureSession.runtimeErrorNotification, object: nil
         )
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(handleDeviceDisconnected(_:)),
-            name: AVCaptureDevice.wasDisconnectedNotification, object: nil
+
+        guard deviceListenerBlock == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleDeviceReevaluation()
+        }
+        deviceListenerBlock = block
+        let system = AudioObjectID(kAudioObjectSystemObject)  // imported as Int32 — must cast
+        var devices = Self.deviceListAddress
+        var defaultInput = Self.defaultInputAddress
+        let s1 = AudioObjectAddPropertyListenerBlock(system, &devices, monitorQueue, block)
+        let s2 = AudioObjectAddPropertyListenerBlock(system, &defaultInput, monitorQueue, block)
+        if s1 != noErr || s2 != noErr {
+            Logger.audio.error("Mic device monitor: HAL listener registration failed (\(s1), \(s2))")
+        }
+    }
+
+    /// Detach the HAL listener + the runtime-error observer. Idempotent.
+    private func stopDeviceMonitoring() {
+        NotificationCenter.default.removeObserver(self)
+        guard let block = deviceListenerBlock else { return }
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        var devices = Self.deviceListAddress
+        var defaultInput = Self.defaultInputAddress
+        _ = AudioObjectRemovePropertyListenerBlock(system, &devices, monitorQueue, block)
+        _ = AudioObjectRemovePropertyListenerBlock(system, &defaultInput, monitorQueue, block)
+        deviceListenerBlock = nil
+    }
+
+    /// Debounce a burst of HAL notifications (a single route change fires several) and let the new route
+    /// settle before re-targeting. Runs on `monitorQueue`.
+    private func scheduleDeviceReevaluation() {
+        monitorQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.reevaluateDevices() }
+    }
+
+    /// Re-target the mic to the device we SHOULD be on after a device change: the user's pinned device if
+    /// it is still present, otherwise the current system default (auto-follow — the user never has to pick
+    /// a mic; we track whatever macOS considers correct for the active route). Rebuilds ONLY when that
+    /// differs from the concrete device we are actually on, so connecting an unrelated device or a duplicate
+    /// notification is a no-op. This single rule covers disconnect-fallback, reconnect-re-pin, and
+    /// default-following uniformly. Runs on `monitorQueue`.
+    private func reevaluateDevices() {
+        let (pinned, concrete, stopping, recovering) = stateLock.sync {
+            (pinnedDeviceId, currentConcreteDeviceId, isStopping, isRecovering)
+        }
+        if stopping { return }
+        if recovering {
+            // A rebuild is already in flight; re-check shortly so a change landing during it isn't missed.
+            scheduleDeviceReevaluation()
+            return
+        }
+
+        // "Be on the pinned device if available, else follow the system default" — the pure rule, so it's
+        // unit-tested without hardware (see MicTargeting + MicTargetingTests).
+        let available = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
+        let systemDefault = AVCaptureDevice.default(for: .audio)?.uniqueID
+        let decision = MicTargeting.decide(
+            pinned: pinned, current: concrete, available: available, systemDefault: systemDefault
         )
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(handleDeviceConnected(_:)),
-            name: AVCaptureDevice.wasConnectedNotification, object: nil
-        )
+        guard decision.needsSwitch else { return }  // already on the right device
+
+        // If the device we are LEAVING has vanished, that is a genuine input loss — flag it as an anomaly
+        // so the session's forensic .diag.jsonl is written (#95). A change while our device is still present
+        // (e.g. AirPods connected and became the new default) is an intentional follow, captured by the
+        // .restartInPlace the recovery records on success — not an anomaly.
+        if decision.leavingDeviceGone {
+            Logger.audio.warning("Mic input removed — was \(concrete ?? "none", privacy: .public), following to \(decision.target ?? "default", privacy: .public)")
+            onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "input device removed",
+                                                  "from": concrete ?? "none", "to": decision.target ?? "default"])
+        } else {
+            Logger.audio.info("Mic following device change — \(concrete ?? "none", privacy: .public) → \(decision.target ?? "default", privacy: .public)")
+        }
+        // A device change is fresh information: refresh the recovery budget so a prior exhaustion can't
+        // block following the new device (council F3).
+        stateLock.sync { restartAttempts = 0 }
+        attemptRecover(forceDefault: decision.forceDefault)
     }
 
     @objc private func handleRuntimeError(_ note: Notification) {
         let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error
         Logger.audio.error("Mic capture runtime error: \(err?.localizedDescription ?? "unknown", privacy: .public)")
         onEvent?(.streamStopError, .anomaly, ["source": "mic", "error": err?.localizedDescription ?? "unknown"])
-        attemptRecover(forceDefault: false)
-    }
-
-    @objc private func handleDeviceDisconnected(_ note: Notification) {
-        guard let device = note.object as? AVCaptureDevice, device.hasMediaType(.audio) else { return }
-        let (current, stopping) = stateLock.sync { (currentDeviceId, isStopping) }
-        guard !stopping else { return }
-        // Only react if the device we are ACTUALLY capturing on went away. If a specific device was in
-        // use and it vanished, fall back to the system default; if we were on default, rebuild (the
-        // default has already moved to a surviving device).
-        let weWereUsingIt = (current == device.uniqueID) || (current == nil)
-        guard weWereUsingIt else { return }
-        Logger.audio.warning("Mic device disconnected: \(device.localizedName, privacy: .public) — recovering")
-        onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "device disconnected", "device": device.localizedName])
-        attemptRecover(forceDefault: current == device.uniqueID)
-    }
-
-    @objc private func handleDeviceConnected(_ note: Notification) {
-        guard let device = note.object as? AVCaptureDevice, device.hasMediaType(.audio) else { return }
-        let (pinned, current, stopping) = stateLock.sync { (pinnedDeviceId, currentDeviceId, isStopping) }
-        // Re-pin only when the user's originally-chosen device reappears AND we are currently on a
-        // fallback (current != pinned). Otherwise a reconnect of some unrelated device is irrelevant.
-        guard !stopping, let pinned, device.uniqueID == pinned, current != pinned else { return }
-        Logger.audio.info("Pinned mic reconnected: \(device.localizedName, privacy: .public) — re-pinning")
-        // A reconnect is fresh information: give recovery a new budget so a prior exhaustion can't
-        // block re-pinning the user's device (council F3). Don't record a .micSwitch here — that would
-        // claim the device in provenance before the re-pin is confirmed (council REG-3); recoverLoop
-        // emits .restartInPlace(source:mic) only on success, which mic_device derivation honours.
-        stateLock.sync { restartAttempts = 0 }
         attemptRecover(forceDefault: false)
     }
 
