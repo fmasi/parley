@@ -93,10 +93,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             Task {
                 do {
                     // System audio (SCStream) and the mic (AVCaptureSession) are independent sources
-                    // now (#96). Bring both up; either failing fails the start with a clear error.
-                    try await self.buildAndStartStream(handler: outputHandler)
+                    // now (#96). Start the MIC FIRST: it is the likelier failure (Microphone TCC), and
+                    // starting it before the system stream means a mic-start failure can't delete an
+                    // already-recording system WAV (council F2). A mic-start failure fails the start
+                    // loudly so the user fixes permissions before the meeting — mid-session mic loss
+                    // degrades to system-only instead, which is handled separately.
                     try self.startMicSession(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
-                    Logger.audio.info("Capture started — system SCStream + mic AVCaptureSession; awaiting frames")
+                    try await self.buildAndStartStream(handler: outputHandler)
+                    Logger.audio.info("Capture started — mic AVCaptureSession + system SCStream; awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
                     reply(true, nil)
                 } catch {

@@ -120,10 +120,20 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             break
         }
 
-        let device: AVCaptureDevice? = {
-            if let deviceId, let pinned = AVCaptureDevice(uniqueID: deviceId) { return pinned }
-            return AVCaptureDevice.default(for: .audio)
-        }()
+        // Resolve the device, tracking whether we actually got the REQUESTED one or fell back to the
+        // system default. `resolvedId == nil` means "on the system default" — the convention the
+        // disconnect/reconnect handlers rely on. Recording the requested id here even on a fallback
+        // (the old bug) made re-pin and disconnect-recovery target a device that wasn't capturing, and
+        // falsified mic_device provenance (council MIC-CURRENT-MISLABEL / REG-2).
+        let device: AVCaptureDevice?
+        let resolvedId: String?
+        if let deviceId, let requested = AVCaptureDevice(uniqueID: deviceId) {
+            device = requested
+            resolvedId = deviceId
+        } else {
+            device = AVCaptureDevice.default(for: .audio)
+            resolvedId = nil
+        }
         guard let device else { throw MicCaptureError.noDevice }
 
         let newSession = AVCaptureSession()
@@ -141,7 +151,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let old: AVCaptureSession? = stateLock.sync {
             let o = session
             session = newSession
-            currentDeviceId = deviceId
+            currentDeviceId = resolvedId
             return o
         }
         old?.stopRunning()
@@ -159,7 +169,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             throw MicCaptureError.stopped
         }
 
-        Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(deviceId ?? "default", privacy: .public))")
+        Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(resolvedId ?? "default", privacy: .public))")
     }
 
     // MARK: - Route-change recovery
@@ -208,7 +218,11 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         // fallback (current != pinned). Otherwise a reconnect of some unrelated device is irrelevant.
         guard !stopping, let pinned, device.uniqueID == pinned, current != pinned else { return }
         Logger.audio.info("Pinned mic reconnected: \(device.localizedName, privacy: .public) — re-pinning")
-        onEvent?(.micSwitch, .info, ["mic": pinned, "reason": "reconnect"])
+        // A reconnect is fresh information: give recovery a new budget so a prior exhaustion can't
+        // block re-pinning the user's device (council F3). Don't record a .micSwitch here — that would
+        // claim the device in provenance before the re-pin is confirmed (council REG-3); recoverLoop
+        // emits .restartInPlace(source:mic) only on success, which mic_device derivation honours.
+        stateLock.sync { restartAttempts = 0 }
         attemptRecover(forceDefault: false)
     }
 

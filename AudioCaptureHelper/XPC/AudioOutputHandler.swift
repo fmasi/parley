@@ -15,15 +15,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastMicFormatKey: String?
     private let micConverter = AudioConverter()
 
-    /// Shared-timeline anchor for mic/system alignment (#96 / council HOL-1): the PTS of the first
-    /// system-audio buffer (the continuous "spine"). The mic runs on an independent AVCaptureSession
-    /// whose start latency and route-change recovery gaps would otherwise shift the mic track relative
-    /// to system audio — breaking echo-dedup temporal overlap and skewing the stereo archive. The mic
-    /// path inserts compensating silence so mic frame N lines up with system frame N. Reset per chunk.
+    /// Shared-timeline anchor for mic/system alignment (#96 / council HOL-1). Set to the PTS of the
+    /// FIRST buffer of EITHER source; BOTH the mic and system tracks are pinned to it, so whichever
+    /// source starts later gets leading silence and any mid-stream gap (AVCaptureSession recovery, a
+    /// dropped run, an #86 system in-place restart) is silence-filled — keeping the stereo archive and
+    /// echo-dedup aligned. The mic runs on an independent AVCaptureSession, so without this its start
+    /// latency and recovery gaps would shift it relative to system audio. Reset per chunk.
     private var timelineAnchorPTS: CMTime?
-    /// Mic frames (48 kHz mono) written to the current chunk, including inserted silence — the mic's
-    /// position on the shared timeline. Reset to 0 on each chunk rotation.
+    /// Mic / system frames (mono) written to the current chunk, INCLUDING inserted silence — each
+    /// track's position on the shared timeline. Reset to 0 on each chunk rotation.
     private var micFramesWritten: Int64 = 0
+    private var systemFramesWritten: Int64 = 0
 
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
@@ -83,9 +85,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         micWriter = newMicWriter
 
         // Re-anchor the shared timeline for the new chunk: the new writers start at frame 0, so the
-        // next system buffer becomes the new spine t=0 and the mic re-aligns from there (#96 / HOL-1).
+        // next buffer of either source becomes the new anchor and both tracks re-align (#96 / HOL-1).
         timelineAnchorPTS = nil
         micFramesWritten = 0
+        systemFramesWritten = 0
 
         return (oldSystemPath, oldMicPath)
     }
@@ -114,13 +117,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
-        // Anchor the shared mic/system timeline to the first system buffer — the spine that defines
-        // t=0 for this chunk. The mic aligns to it (#96 / council HOL-1).
-        if timelineAnchorPTS == nil {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            if pts.isValid { timelineAnchorPTS = pts }
-        }
-
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
         // `.changed` means a transient route anomaly — record it and DROP the buffer rather than
@@ -178,17 +174,27 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
+        // Pad the system track to its shared-timeline position before appending — fills a dropped or
+        // #86-restarted run, and the startup offset when the mic anchored the timeline first (HOL-1).
+        let sysRate = systemFormatInfo.map { $0.rate } ?? AudioConverter.outputSampleRate
+        systemFramesWritten += timelineSilencePad(
+            into: systemWriter, framesWritten: systemFramesWritten, rate: sysRate,
+            pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), label: "system"
+        )
+
         let isFloat = isFloatFormat(from: sampleBuffer)
         if isFloat {
             let count = totalLength / MemoryLayout<Float32>.size
             ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
                 systemWriter.append(UnsafeBufferPointer(start: floatPtr, count: count))
             }
+            systemFramesWritten += Int64(count)
         } else {
             let count = totalLength / MemoryLayout<Int16>.size
             ptr.withMemoryRebound(to: Int16.self, capacity: count) { int16Ptr in
                 systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
+            systemFramesWritten += Int64(count)
         }
     }
 
@@ -211,7 +217,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // undifferentiated, so we average them all into mono (see MultichannelDownmix) rather than
         // dropping the buffer or wastefully keeping one; <=2ch takes the normal converter path below.
         if channels > 2 {
-            recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
+            // handleMultichannelMic records the format (supported or not) exactly once — recording it
+            // here too would toggle the dedup key every buffer and flood the ring (council REG-1).
             handleMultichannelMic(sampleBuffer, channels: channels, rate: rate, asbd: asbd)
             return
         }
@@ -269,32 +276,51 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Append converted 48 kHz mono mic samples, first inserting compensating silence so the mic WAV
-    /// stays aligned to the system-audio spine on a shared timeline (#96 / council HOL-1). One
-    /// mechanism covers both the AVCaptureSession start latency (leading silence on the first buffer)
-    /// and any route-change recovery gap (silence for the dead interval) — without it the mic track
-    /// would drift earlier than system audio, breaking echo-dedup overlap and skewing the stereo
-    /// archive. Never trims (we can't un-write); only catches the mic up when it is behind.
+    /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
+    /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
-        if timelineAnchorPTS == nil, pts.isValid { timelineAnchorPTS = pts }
-        if let anchor = timelineAnchorPTS, anchor.isValid, pts.isValid {
-            let rate = AudioConverter.outputSampleRate  // 48000
-            let targetFrame = Int64((CMTimeSubtract(pts, anchor).seconds * rate).rounded())
-            var pad = targetFrame - micFramesWritten
-            if pad > 0 {
-                let maxPad = Int64(rate * 60)  // clamp a pathological gap at 60s of silence
-                if pad > maxPad {
-                    Logger.audio.error("Mic timeline gap \(Int(Double(pad) / rate))s exceeds 60s cap — clamping")
-                    pad = maxPad
-                }
-                Logger.audio.info("Mic timeline: padding \(Int(Double(pad) / rate * 1000))ms silence to align mic to system spine")
-                let silence = [Int16](repeating: 0, count: Int(pad))
-                silence.withUnsafeBufferPointer { micWriter.appendInt16($0) }
-                micFramesWritten += pad
-            }
-        }
+        micFramesWritten += timelineSilencePad(
+            into: micWriter, framesWritten: micFramesWritten,
+            rate: AudioConverter.outputSampleRate, pts: pts, label: "mic"
+        )
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
+    }
+
+    /// Insert leading/gap silence into `writer` so its next sample lands at this buffer's position on
+    /// the shared mic/system timeline, and return the number of silence frames written (the caller
+    /// adds it to that track's counter). Pins BOTH tracks to ONE anchor — the first buffer of either
+    /// source — so whichever source starts later gets leading silence and any mid-stream gap
+    /// (AVCaptureSession recovery, a dropped or #86-restarted system run) is filled. Never trims; only
+    /// catches a track up when it is behind. Guards the Int64 conversion against a cross-source PTS
+    /// clock mismatch, which could otherwise be non-finite/huge and TRAP on the audio thread.
+    private func timelineSilencePad(
+        into writer: WavFileWriter, framesWritten: Int64, rate: Double, pts: CMTime, label: StaticString
+    ) -> Int64 {
+        if timelineAnchorPTS == nil, pts.isValid {
+            timelineAnchorPTS = pts
+            Logger.audio.info("Mic/system timeline anchored by \(label) at \(CMTimeGetSeconds(pts))s")
+        }
+        guard let anchor = timelineAnchorPTS, anchor.isValid, pts.isValid else { return 0 }
+        let deltaSeconds = CMTimeSubtract(pts, anchor).seconds
+        guard deltaSeconds.isFinite, deltaSeconds >= 0, deltaSeconds < 3600 else {
+            if !deltaSeconds.isFinite || deltaSeconds >= 3600 {
+                Logger.audio.error("Timeline \(label) delta \(deltaSeconds)s implausible (PTS clock mismatch?) — skipping alignment")
+            }
+            return 0
+        }
+        let target = Int64((deltaSeconds * rate).rounded())
+        var pad = target - framesWritten
+        guard pad > 0 else { return 0 }
+        let maxPad = Int64(rate * 60)  // clamp a pathological gap at 60s of silence
+        if pad > maxPad {
+            Logger.audio.error("Timeline \(label) gap \(Int(Double(pad) / rate))s exceeds 60s cap — clamping")
+            pad = maxPad
+        }
+        Logger.audio.info("Timeline: padding \(Int(Double(pad) / rate * 1000))ms silence into \(label)")
+        let silence = [Int16](repeating: 0, count: Int(pad))
+        silence.withUnsafeBufferPointer { writer.appendInt16($0) }
+        return pad
     }
 
     /// Record the mic input format, but only when it CHANGES — so a mid-stream mic switch (and an
@@ -327,6 +353,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             Logger.audio.error("Mic audio: unhandled \(bits)-bit non-float \(channels)ch format — dropping")
             return
         }
+        recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
         let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
         guard frameCount > 0,
               let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
