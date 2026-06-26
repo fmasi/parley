@@ -49,15 +49,20 @@ struct CaptureDiagnosticsTests {
     }
 
     @Test func countersReflectKinds() {
+        // Mirrors real severities: restartInPlace/retry/launchRecovery are warnings; the route
+        // disruption itself (streamStopError) is the anomaly. routeChangeCount counts the handled
+        // restarts (council F5), not the never-emitted .formatChanged.
         var d = CaptureDiagnostics()
-        d.record(event(.formatChanged, .anomaly, at: 0))
-        d.record(event(.formatChanged, .anomaly, at: 1))
-        d.record(event(.retry, .anomaly, at: 2))
-        d.record(event(.launchRecovery, .anomaly, at: 3))
-        #expect(d.routeChangeCount == 2)
+        d.record(event(.restartInPlace, .warning, at: 0))
+        d.record(event(.restartInPlace, .warning, at: 1))
+        d.record(event(.retry, .warning, at: 2))
+        d.record(event(.launchRecovery, .warning, at: 3))
+        d.record(event(.streamStopError, .anomaly, at: 4))
+        d.record(event(.streamStopError, .anomaly, at: 5))
+        #expect(d.routeChangeCount == 2)   // counts .restartInPlace
         #expect(d.retryCount == 1)
         #expect(d.didRecover == true)
-        #expect(d.anomalyCount == 4)
+        #expect(d.anomalyCount == 2)       // the two .anomaly-severity events
     }
 
     @Test func mergeInterleavesByTime() {

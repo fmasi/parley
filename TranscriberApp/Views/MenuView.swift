@@ -310,11 +310,23 @@ struct MenuView: View {
                     micAudio = paths.micAudio
                 }
 
+                // #95/council F6: the recovery path also drains diagnostics, flushes the
+                // anomaly-gated <sessionId>.diag.jsonl, and stamps capture_provenance (incl.
+                // recovered=true) — previously only the chunked branch did this.
+                let outputDir = systemAudio.deletingLastPathComponent()
+                let sessionId = systemAudio.deletingPathExtension().lastPathComponent
+                let provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionId,
+                    engine: configManager.config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
+
                 let result = try await transcriptionRunner.run(
                     systemAudio: systemAudio,
                     micAudio: micAudio,
-                    outputDirectory: systemAudio.deletingLastPathComponent(),
-                    config: configManager.config
+                    outputDirectory: outputDir,
+                    config: configManager.config,
+                    provenance: provenance
                 )
 
                 appState.lastJsonPath = result.jsonPath.path
@@ -365,12 +377,18 @@ struct MenuView: View {
 
         if decision.shouldGiveUp {
             Logger.state.error("All retries exhausted after \(xpcRetryCount) interruptions within the decay window")
-            appState.criticalError = "Recording failed — microphone capture crashed repeatedly."
+            // council F3: salvage the live chunked session (re-ingesting the in-progress orphan,
+            // since this branch returns before the normal re-ingestion below) so chunks already
+            // transcribed aren't discarded with the session.
+            await finalizeAbandonedSession(
+                sentinel: sentinel, reingestOrphan: true, appState: appState, captureClient: captureClient
+            )
+            appState.criticalError = "Recording failed — microphone capture crashed repeatedly. Audio recorded before the failure has been saved."
             appState.phase = .idle
             RecordingSentinel.delete()
             sendCriticalNotification(
                 title: "Recording Failed",
-                body: "Microphone capture crashed after retry. Your recording may be incomplete."
+                body: "Microphone capture crashed after retry. The portion recorded before the failure has been transcribed."
             )
             return
         }
@@ -425,14 +443,65 @@ struct MenuView: View {
             )
         } catch {
             Logger.state.error("Restart failed: \(error, privacy: .public)")
-            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription)"
+            // council F3: the orphan was already re-ingested above, so just finalize what's been
+            // processed rather than abandoning the whole session.
+            await finalizeAbandonedSession(
+                sentinel: sentinel, reingestOrphan: false, appState: appState, captureClient: captureClient
+            )
+            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Audio recorded before the failure has been saved."
             appState.phase = .idle
             RecordingSentinel.delete()
             sendCriticalNotification(
                 title: "Recording Failed",
-                body: "Microphone capture crashed and could not restart."
+                body: "Microphone capture crashed and could not restart. The portion recorded before the failure has been transcribed."
             )
         }
+    }
+
+    /// Best-effort finalize a live chunked session being abandoned after an unrecoverable crash, so
+    /// chunks already transcribed to session.json become a real transcript instead of being silently
+    /// discarded (council F3). The give-up branch returns before the normal orphan re-ingestion, so
+    /// it passes reingestOrphan: true to reclaim the in-progress chunk first.
+    private func finalizeAbandonedSession(
+        sentinel: RecordingSentinel,
+        reingestOrphan: Bool,
+        appState: AppState,
+        captureClient: AudioCaptureClient
+    ) async {
+        guard let processor = transcriptionRunner.chunkProcessor else { return }
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        transcriptionRunner.stopChunkRotation()
+
+        if reingestOrphan, let rotator = transcriptionRunner.chunkRotator {
+            let orphan = rotator.currentChunkInfo
+            let orphanBase = rotator.currentBaseName
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index,
+                systemPath: outputDir.appendingPathComponent(orphanBase + ".wav").path,
+                micPath: outputDir.appendingPathComponent(orphanBase + "_mic.wav").path,
+                startTime: orphan.startTime
+            ))
+        }
+
+        await processor.awaitAllProcessed()
+        var sessionState = await processor.getSessionState()
+        guard !sessionState.chunks.isEmpty else {
+            transcriptionRunner.teardownChunkedPipeline()
+            return
+        }
+        sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
+            sessionId: sessionState.sessionId,
+            engine: configManager.config.engine.rawValue,
+            recordingDirectory: outputDir
+        )
+        if let result = try? await transcriptionRunner.finalize(
+            sessionState: sessionState, outputDirectory: outputDir, config: configManager.config
+        ) {
+            appState.lastJsonPath = result.jsonPath.path
+            appState.lastTranscriptPath = result.jsonPath.path
+            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .public)")
+        }
+        transcriptionRunner.teardownChunkedPipeline()
     }
 
     private var activeMicName: String {

@@ -175,7 +175,10 @@ public struct CaptureDiagnostics: Sendable {
     }
 
     public var isAnomalous: Bool { events.contains { $0.severity == .anomaly } }
-    public var routeChangeCount: Int { events.lazy.filter { $0.kind == .formatChanged }.count }
+    /// Count handled benign route changes via the in-place restart they each trigger. (The pinned
+    /// 48kHz/mono system tap never emits `.formatChanged`, so counting that would always read 0 for
+    /// the AirPods HFP↔A2DP scenario this exists to surface — council F5.)
+    public var routeChangeCount: Int { events.lazy.filter { $0.kind == .restartInPlace }.count }
     public var retryCount: Int { events.lazy.filter { $0.kind == .retry }.count }
     public var didRecover: Bool { events.contains { $0.kind == .launchRecovery } }
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }

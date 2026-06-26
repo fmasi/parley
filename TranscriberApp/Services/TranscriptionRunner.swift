@@ -40,7 +40,8 @@ final class TranscriptionRunner {
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
-        config: Config
+        config: Config,
+        provenance: CaptureProvenance? = nil
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -158,7 +159,8 @@ final class TranscriptionRunner {
             numSpeakers: nil,
             diarization: diarizer != nil,
             dualStream: isDualStream,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsRemoved: echoRemoved,
+            provenance: provenance
         )
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent

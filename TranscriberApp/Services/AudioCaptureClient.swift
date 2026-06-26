@@ -50,6 +50,9 @@ final class AudioCaptureClient {
         conn.interruptionHandler = { [weak self] in
             Task { @MainActor in
                 guard let self, !self.crashHandlerFired else { return }
+                // Bind the connection identity so we can detect a concurrent invalidation/recovery
+                // cycle that swaps the connection out from under us while we await below (council F7).
+                let boundConnection = self.connection
                 // An XPC interruption is only a "crash" if a fresh crash report names the helper.
                 // A benign route-change blip writes no .ips — classify before tearing down (#86).
                 let classification = CrashReportScanner.classifyLive()
@@ -65,6 +68,9 @@ final class AudioCaptureClient {
                 // No crash report: verify the helper is still capturing before trusting the blip.
                 Logger.audio.warning("XPC interrupted — no crash report; verifying capture is alive")
                 let stillCapturing = await self.isCapturing()
+                // If a concurrent invalidation/recovery already replaced the connection while we
+                // awaited, that path owns this teardown — don't double-fire onServiceCrash (F7).
+                guard self.connection === boundConnection else { return }
                 if stillCapturing {
                     self.onBriefInterruption?()
                 } else if !self.crashHandlerFired {
