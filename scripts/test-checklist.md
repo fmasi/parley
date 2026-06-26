@@ -1,5 +1,46 @@
 # Test Checklist — v0.7.x branch
 
+## ⚠️ Capture resilience — DEVICE TEST REQUIRED before push (#96, #86, #92, #93, #94, #95, #7, #61, #54)
+This branch changes the live audio-capture path AND moves mic capture to its own AVCaptureSession
+(#96). It is **gated on a real Bluetooth-call route-change test** — it cannot be validated by unit
+tests. Reproduce your actual scenario: put on AirPods, then answer a FaceTime / WhatsApp call and record.
+
+### Mic route change no longer crashes capture (#96 + #86) — the headline test
+The whole point: the mic now runs on its **own AVCaptureSession**, so an AirPods/Bluetooth mic route
+change can no longer stop the system-audio SCStream.
+- [ ] Start recording. Mid-recording, force a MIC route change: answer a FaceTime/WhatsApp call (AirPods HFP↔A2DP), or connect/disconnect AirPods.
+- [ ] Recording **keeps going** — a calm "recording resumed" bubble, **NOT** a red crash error.
+- [ ] **System audio has NO gap** at the route change — it was never interrupted; only the mic re-establishes. The transcript spans the **whole** session.
+- [ ] Your voice (local track) resumes after the brief switch. If a pinned mic (AirPods) dropped, it falls back to built-in and **re-pins to AirPods when they reconnect**.
+- [ ] Log shows `Mic capture recovered in place — device:` for a mic route change (and/or `System-audio stream restarted in place` for a system-audio route change), subsystem `eu.fmasi.parley`, category audio.
+
+### Live helper-crash data-loss fix (#92) — the "Andrew lost 16 min" regression
+- [ ] Record ≥2 min. Force-kill the helper mid-recording: `pkill -f audio-capture-helper-xpc`.
+- [ ] App recovers (resume bubble). Keep talking ~1 min, then stop.
+- [ ] Final transcript contains **both** the pre-crash audio (the orphan chunk) **and** the post-crash audio — nothing dropped.
+
+### Recovered-segment archival + metadata (#93, #7)
+- [ ] After a crash-recovered session (segments `-0`, `-1`, … on disk), transcript `metadata.audio_files` lists **every** recovered segment and each was archived to `.m4a` (not just the base).
+
+### Anomaly-gated diagnostics + provenance (#95)
+- [ ] After an **anomalous** session (one with a route change or forced crash), a `<sessionId>.diag.jsonl` exists in the day's recording folder and contains `streamStopError` / `restartInPlace` (or `xpcInterruption`) events.
+- [ ] After a **clean** session (no interruption), **no** `.diag.jsonl` is written.
+- [ ] **Every** transcript JSON has `metadata.capture_provenance` (engine, system_format, mic_format, route_changes, retries, recovered, anomaly_count) — clean and anomalous alike.
+
+### Retry decay, not lifetime cap (#61)
+- [ ] Over a long meeting with a few **well-spaced** route changes (>10 min apart), the app does **not** hit the "microphone capture crashed repeatedly" critical error — the decay window resets the counter.
+- [ ] A **tight** loop (≥3 interruptions within ~10 min) still trips the critical-error panel.
+
+### Format change / buffer safety (#94)
+- [ ] Audio after a route change is **not** corrupted or wrong-speed (system stays 48kHz mono). No crash on the route change (bounded mic memcpy).
+
+### Mic on its own AVCaptureSession (#96) — voice present, aligned, no SCK mic tap
+- [ ] **Helper Microphone TCC (HOL-2):** record with the built-in mic; your voice is **present and clear** in the local track — NOT silent. The mic now opens an `AVCaptureSession` **in the helper**, whose bundle carries its own `NSMicrophoneUsageDescription`. On a machine where mic was never granted, confirm the permission prompt appears and capture is not silent (no SIGKILL / recovery storm).
+- [ ] Log shows `Mic capture started — device: …` at start (subsystem `eu.fmasi.parley`); the SCStream no longer captures the mic (no `.microphone` output).
+- [ ] **Mic/system alignment (HOL-1):** in the stereo `.m4a` (L=mic, R=system) your voice and the system audio are **time-aligned** (not offset by a fraction of a second), and echo dedup still removes remote bleed (`echo_segments_removed > 0`). After an AirPods route change mid-sentence the two tracks stay aligned — log shows `Mic timeline: padding …ms silence`.
+- [ ] **Built-in multichannel:** the OS hands AVCaptureSession mono, so **no** `unsupported format … ch=3` flood. (A >2ch USB interface is averaged to mono; a truly unhandled bit-depth writes a `.diag.jsonl` anomaly.)
+- [ ] `metadata.capture_provenance.mic_device` reflects the mic **actually** in use at the end — after a fallback it shows the fallback/re-pinned device, not the originally-pinned one.
+
 ## Rename → Parley migration (#75)
 **Resets macOS TCC permissions** (bundle ID changed `com.audio-transcribe.app` → `eu.fmasi.parley`). Do a clean-up + re-auth pass:
 - [ ] Remove the old install + LaunchAgent: `rm -rf /Applications/AudioTranscribe.app` and `launchctl unload ~/Library/LaunchAgents/com.audio-transcribe.app.plist 2>/dev/null; rm -f ~/Library/LaunchAgents/com.audio-transcribe.app.plist`

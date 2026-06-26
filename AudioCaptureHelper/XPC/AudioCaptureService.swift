@@ -10,8 +10,47 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
-    private var audioQueue: DispatchQueue?
+    /// One persistent serial queue for ALL stream callbacks across the session — initial stream
+    /// and every in-place restart register on it, so writer swaps / finalization / sample appends
+    /// can never run on two different queues concurrently (council F4). Never reassigned or nil'd.
+    private let audioQueue = DispatchQueue(label: "audio-capture.shared")
     private let stateLock = DispatchQueue(label: "audio-capture.state")
+
+    // MARK: - #86 in-place restart + #95 diagnostics
+
+    /// Anomaly-gated diagnostic ring, drained by the app over XPC (#95).
+    private let diagnostics = LockedDiagnostics()
+    /// The decoupled microphone capture session (#96): the mic runs on its own AVCaptureSession, so a
+    /// mic route change can no longer tear down the system-audio SCStream. nil when not capturing.
+    private var micSession: MicCaptureSession?
+    /// Set true while the app is deliberately stopping, so a stop-induced `didStopWithError`
+    /// is classified as `.ignore` rather than a route-change restart.
+    private var isUserStopping = false
+    /// Consecutive failed in-place restarts; reset to 0 on a restart that starts cleanly.
+    private var restartAttempts = 0
+    /// Guards against overlapping restart loops from rapid repeated stop errors.
+    private var isRestarting = false
+    /// One-shot latch so the reverse-channel fatal notification fires at most once per session
+    /// even if both fatal emitters race (council F8). Reset on a fresh startCapture.
+    private var hasFailedFatally = false
+    private let maxRestartAttempts = 3
+
+    /// Reverse-channel callbacks to the app (wired in main.swift from the connection proxy).
+    var onRestartInPlace: (() -> Void)?
+    var onFailFatally: ((String) -> Void)?
+    /// Invoked when the mic auto-switches during a session (route change, fallback, re-pin).
+    /// Passes the resolved device UID (`nil` = system default) for menu-label refresh.
+    var onMicDeviceChanged: ((String?) -> Void)?
+
+    private func record(
+        _ kind: CaptureEventKind,
+        _ severity: CaptureEvent.Severity,
+        _ detail: [String: String] = [:]
+    ) {
+        diagnostics.record(CaptureEvent(
+            timestamp: Date(), origin: .helper, kind: kind, severity: severity, detail: detail
+        ))
+    }
 
     func startCapture(
         outputDirectory: String,
@@ -38,17 +77,39 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             let outputHandler = AudioOutputHandler(
                 systemWriter: systemWriter, micWriter: micWriter
             )
+            outputHandler.diagnostics = diagnostics
+            outputHandler.onStreamStopped = { [weak self] error in
+                self?.handleStreamStopped(error)
+            }
 
             self.stateLock.sync {
                 self.systemPath = sysPath
                 self.micPath = micFilePath
                 self.handler = outputHandler
+                self.isUserStopping = false
+                self.restartAttempts = 0
+                self.isRestarting = false
+                self.hasFailedFatally = false
             }
 
             Task {
                 do {
-                    try await self.configureAndStart(handler: outputHandler, microphoneDeviceId: microphoneDeviceId)
-                    Logger.audio.info("SCStream started, awaiting frames")
+                    // System audio (SCStream) and the mic (AVCaptureSession) are independent sources
+                    // now (#96). Start the MIC FIRST: it is the likelier failure (Microphone TCC), and
+                    // starting it before the system stream means a mic-start failure can't delete an
+                    // already-recording system WAV (council F2). A mic-start failure fails the start
+                    // loudly so the user fixes permissions before the meeting — mid-session mic loss
+                    // degrades to system-only instead, which is handled separately.
+                    let resolvedMic = try self.startMicSession(
+                        handler: outputHandler, microphoneDeviceId: microphoneDeviceId
+                    )
+                    // Record capture-start provenance with the mic that ACTUALLY resolved — not the
+                    // requested id, which may have silently fallen back to the system default if the
+                    // pinned device couldn't be opened (council CONV-1). Recorded after a successful mic
+                    // start (not on a failed one, which tears down with no provenance consumer).
+                    self.record(.captureStart, .info, ["mic": resolvedMic ?? "default"])
+                    try await self.buildAndStartStream(handler: outputHandler)
+                    Logger.audio.info("Capture started — mic AVCaptureSession + system SCStream; awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
                     reply(true, nil)
                 } catch {
@@ -56,8 +117,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     Logger.audio.error("Capture failed: \(error, privacy: .public)")
                     let desc = "\(error)"
                     if desc.contains("permission") || desc.contains("denied")
-                        || desc.contains("notAuthorized") {
-                        reply(false, "Permission denied — grant Screen Recording access in System Settings")
+                        || desc.contains("notAuthorized") || desc.contains("Microphone access") {
+                        reply(false, "Permission denied — grant Screen Recording and Microphone access in System Settings")
                     } else {
                         reply(false, "Capture failed: \(error.localizedDescription)")
                     }
@@ -72,35 +133,46 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     func stopCapture(
         reply: @escaping (String?, String?, String?) -> Void
     ) {
-        let (capturing, captureStream) = stateLock.sync { (isCapturing, stream) }
-        guard capturing, let captureStream else {
+        // Set isUserStopping FIRST, then snapshot the stream, atomically. Ordering matters:
+        // an in-flight in-place restart commits its new stream into `self.stream` and bails only
+        // if it sees isUserStopping at commit time — so we must mark stopping before we read the
+        // stream, guaranteeing we stop whatever stream is (or is about to be) live (council F1).
+        let (capturing, captureStream, micSess) = stateLock.sync { () -> (Bool, SCStream?, MicCaptureSession?) in
+            if isCapturing { isUserStopping = true }
+            return (isCapturing, stream, micSession)
+        }
+        guard capturing else {
             reply(nil, nil, "No capture in progress")
             return
         }
 
         Logger.audio.info("Stopping capture")
+        record(.captureStop, .info)
+        // Stop mic delivery before finalize so no mic buffer lands on the audio queue after the WAV
+        // headers are sealed (a late buffer would be a no-op anyway — finalize is idempotent).
+        micSess?.stop()
 
         Task {
-            do {
-                try await captureStream.stopCapture()
-                Logger.audio.debug("SCStream stopped")
-            } catch {
-                // Stream may already be stopped — proceed with finalization
+            if let captureStream {
+                do {
+                    try await captureStream.stopCapture()
+                    Logger.audio.debug("SCStream stopped")
+                } catch {
+                    // Stream may already be stopped — proceed with finalization
+                }
             }
-            // Snapshot under state lock, then drain audio queue outside it
-            // to avoid lock-order inversion with rotateChunk.
-            let (queue, handler) = self.stateLock.sync {
-                (self.audioQueue, self.handler)
-            }
-            queue?.sync { handler?.finalizeAll() }
+            // Drain the audio queue (persistent constant) outside stateLock to avoid lock-order
+            // inversion with rotateChunk; serializes with any callbacks on the same queue.
+            let handler = self.stateLock.sync { self.handler }
+            self.audioQueue.sync { handler?.finalizeAll() }
             let (sys, mic) = self.stateLock.sync {
                 let result = (self.systemPath, self.micPath)
                 self.isCapturing = false
                 self.stream = nil
                 self.handler = nil
+                self.micSession = nil
                 self.systemPath = nil
                 self.micPath = nil
-                self.audioQueue = nil
                 return result
             }
             reply(sys, mic, nil)
@@ -115,30 +187,23 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         deviceId: String?,
         reply: @escaping (Bool, String?) -> Void
     ) {
-        let (capturing, captureStream) = stateLock.sync { (isCapturing, stream) }
-        guard capturing, let captureStream else {
+        let (capturing, micSess) = stateLock.sync { (isCapturing, micSession) }
+        guard capturing, let micSess else {
             reply(false, "No capture in progress")
             return
         }
 
         Logger.audio.info("Switching mic to: \(deviceId ?? "system default", privacy: .public)")
 
-        let config = SCStreamConfiguration()
-        config.capturesAudio = true
-        config.captureMicrophone = true
-        if let deviceId {
-            config.microphoneCaptureDeviceID = deviceId
-        }
-        config.excludesCurrentProcessAudio = true
-        config.channelCount = 1
-        config.sampleRate = 48000
-        config.width = 2
-        config.height = 2
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-
+        // Retarget the decoupled mic AVCaptureSession (#96). startRunning can block briefly, so do it
+        // off the XPC reply thread.
         Task {
             do {
-                try await captureStream.updateConfiguration(config)
+                try micSess.updateDevice(deviceId)
+                // Record provenance with the RESOLVED device, on success only — symmetric with
+                // .captureStart (council CONV-1): a switch that fell back to default or failed must not
+                // claim the requested device in mic_device.
+                self.record(.micSwitch, .info, ["mic": micSess.resolvedDeviceId ?? "default"])
                 Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .public)")
                 reply(true, nil)
             } catch {
@@ -153,8 +218,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         newBaseName: String,
         reply: @escaping (String?, String?, String?) -> Void
     ) {
-        let (capturing, currentHandler, queue) = stateLock.sync { (isCapturing, handler, audioQueue) }
-        guard capturing, let currentHandler, let queue else {
+        let (capturing, currentHandler) = stateLock.sync { (isCapturing, handler) }
+        guard capturing, let currentHandler else {
             reply(nil, nil, "No capture in progress")
             return
         }
@@ -168,10 +233,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             let newSystemWriter = try WavFileWriter(path: newSysPath)
             let newMicWriter = try WavFileWriter(path: newMicPath)
 
-            // Swap on the audio queue for zero-gap guarantee, then update
+            // Swap on the persistent audio queue for zero-gap guarantee, then update
             // state outside to avoid lock-order inversion with stopCapture.
             var oldPaths: (systemPath: String, micPath: String)!
-            queue.sync {
+            audioQueue.sync {
                 oldPaths = currentHandler.swapWriters(
                     newSystemWriter: newSystemWriter,
                     newMicWriter: newMicWriter
@@ -189,14 +254,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
+    /// Drain and clear the helper's diagnostic ring for transport to the app (#95). The app merges
+    /// these helper-origin events with its own and flushes `<session>.diag.jsonl` if anomalous.
+    func drainDiagnostics(reply: @escaping (Data?) -> Void) {
+        reply(diagnostics.drainData())
+    }
+
     func stopAndFinalize() {
-        let (capturing, captureStream, queue) = stateLock.sync { (isCapturing, stream, audioQueue) }
+        // Mark stopping before snapshotting the stream so an in-flight restart bails / is torn
+        // down (council F1), mirroring stopCapture.
+        let (capturing, captureStream, micSess) = stateLock.sync { () -> (Bool, SCStream?, MicCaptureSession?) in
+            if isCapturing { isUserStopping = true }
+            return (isCapturing, stream, micSession)
+        }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
 
-        // Finalize synchronously on the audio queue so WAV headers are written
-        // before the XPC service exits (I5 fix).
-        queue?.sync { self.handler?.finalizeAll() }
+        // Stop mic delivery, then finalize synchronously on the persistent audio queue so WAV headers
+        // are written before the XPC service exits (I5 fix).
+        micSess?.stop()
+        audioQueue.sync { self.handler?.finalizeAll() }
 
         if let captureStream {
             Task {
@@ -205,6 +282,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.isCapturing = false
                     self.stream = nil
                     self.handler = nil
+                    self.micSession = nil
                 }
                 Logger.audio.info("Capture finalized after client disconnect")
             }
@@ -212,24 +290,75 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             stateLock.sync {
                 self.isCapturing = false
                 self.handler = nil
+                self.micSession = nil
             }
         }
     }
 
     private func cleanupAfterFailure() {
-        stateLock.sync {
-            audioQueue?.sync { handler?.finalizeAll() }
-            if let sys = systemPath { try? FileManager.default.removeItem(atPath: sys) }
-            if let mic = micPath { try? FileManager.default.removeItem(atPath: mic) }
+        // Snapshot and clear state under the lock, then run the blocking teardown (mic stopRunning,
+        // writer finalize, file deletes) OUTSIDE the lock so we never hold stateLock across a blocking
+        // call. Not called under stateLock, so the snapshot-then-act split is safe.
+        let (h, micSess, sys, mic) = stateLock.sync {
+            () -> (AudioOutputHandler?, MicCaptureSession?, String?, String?) in
+            let snapshot = (handler, micSession, systemPath, micPath)
             stream = nil
             handler = nil
+            micSession = nil
             systemPath = nil
             micPath = nil
-            audioQueue = nil
+            return snapshot
         }
+        micSess?.stop()
+        audioQueue.sync { h?.finalizeAll() }
+        if let sys { try? FileManager.default.removeItem(atPath: sys) }
+        if let mic { try? FileManager.default.removeItem(atPath: mic) }
     }
 
-    private func configureAndStart(handler: AudioOutputHandler, microphoneDeviceId: String?) async throws {
+    /// Build and start the decoupled mic capture session (#96), wiring its diagnostics + recovery
+    /// callbacks into the service. Throws — failing the whole start — if the mic can't be brought up,
+    /// since the user expects their own voice recorded. Mid-session mic loss is handled separately by
+    /// MicCaptureSession and is NOT fatal (system audio keeps recording).
+    /// Returns the device the mic ACTUALLY resolved to (`nil` = system default), so the caller can
+    /// record honest `.captureStart` provenance even when the requested device fell back (council CONV-1).
+    @discardableResult
+    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?) throws -> String? {
+        let mic = MicCaptureSession(deliveryQueue: audioQueue) { [weak handler] buffer in
+            handler?.appendMicSampleBuffer(buffer)
+        }
+        mic.onEvent = { [weak self] kind, severity, detail in
+            self?.record(kind, severity, detail)
+        }
+        mic.onRecovered = { [weak self] deviceId in
+            // Mic self-healed a route change — system audio never stopped.
+            // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
+            self?.onMicDeviceChanged?(deviceId)
+        }
+        mic.onUnavailable = { [weak self] reason in
+            // Mic loss is NOT fatal: system audio keeps recording and the partial mic WAV stays valid.
+            // Record the anomaly so the session is flagged and diagnostics flush.
+            Logger.audio.error("Microphone unavailable mid-session: \(reason, privacy: .public)")
+            self?.record(.restartFailed, .anomaly, ["source": "mic", "reason": reason])
+        }
+        try mic.start(deviceId: microphoneDeviceId)
+        // Commit-or-abort against a stop that raced in during start (mirrors buildAndStartStream's
+        // council-F1 guard): if the app began stopping while the mic was coming up, tear it down
+        // rather than leak a running session past stop.
+        let stopping = stateLock.sync { () -> Bool in
+            if isUserStopping { return true }
+            self.micSession = mic
+            return false
+        }
+        if stopping { mic.stop() }
+        return mic.resolvedDeviceId
+    }
+
+    /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the
+    /// initial start and for #86 in-place restarts: because the SAME handler (and therefore the same
+    /// WavFileWriters / output files) is reused, a restart resumes the existing recording with no file
+    /// rotation and no lost audio. The mic is captured separately (AVCaptureSession, #96) and is no
+    /// longer part of this stream — so a mic route change never stops it.
+    private func buildAndStartStream(handler: AudioOutputHandler) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false
         )
@@ -245,11 +374,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         )
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.captureMicrophone = true
-        if let microphoneDeviceId {
-            config.microphoneCaptureDeviceID = microphoneDeviceId
-            Logger.audio.debug("Mic capture device override: \(microphoneDeviceId, privacy: .public)")
-        }
+        config.captureMicrophone = false  // mic is captured via AVCaptureSession (#96)
         config.excludesCurrentProcessAudio = true
         config.channelCount = 1
         config.sampleRate = 48000
@@ -261,14 +386,127 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let captureStream = SCStream(
             filter: filter, configuration: config, delegate: handler
         )
-        let sharedQueue = DispatchQueue(label: "audio-capture.shared")
-        self.audioQueue = sharedQueue
 
-        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: sharedQueue)
-        try captureStream.addStreamOutput(handler, type: .microphone, sampleHandlerQueue: sharedQueue)
-        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: sharedQueue)
+        try captureStream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: audioQueue)
+        try captureStream.addStreamOutput(handler, type: .screen, sampleHandlerQueue: audioQueue)
 
-        self.stream = captureStream
+        // Commit the new stream and re-validate the session atomically: if a stop/disconnect began
+        // while we were awaiting (SCShareableContent + addStreamOutput), bail instead of resurrecting
+        // a stream into finalized writers (council F1). isUserStopping (not !isCapturing) is the
+        // correct gate — initial startCapture sets isCapturing only AFTER this returns.
+        let committed = stateLock.sync { () -> Bool in
+            if isUserStopping { return false }
+            self.stream = captureStream
+            return true
+        }
+        guard committed else {
+            try? await captureStream.stopCapture()
+            throw CancellationError()
+        }
         try await captureStream.startCapture()
+    }
+
+    // MARK: - #86 in-place restart on benign stream stop
+
+    /// SCStream `didStopWithError` handoff. Decides whether the stop is a user stop (ignore), a
+    /// recoverable route change (restart in place), or a terminal fault (surface fatal).
+    private func handleStreamStopped(_ error: Error) {
+        let (capturing, userStopping, attempts) = stateLock.sync {
+            (isCapturing, isUserStopping, restartAttempts)
+        }
+        let decision = RestartDecision.evaluate(
+            isUserStopped: userStopping, isCapturing: capturing,
+            attempts: attempts, maxAttempts: maxRestartAttempts
+        )
+        switch decision {
+        case .ignore:
+            Logger.audio.info("Stream stop ignored — user stop or capture already inactive")
+        case .failFatal:
+            Logger.audio.error("Stream stop: restart budget exhausted — fatal")
+            failFatally("restart budget exhausted")
+        case .restart:
+            // Atomic check-and-set so two concurrent didStopWithError callbacks can't both launch
+            // a restart loop (council F10).
+            let shouldStart = stateLock.sync { () -> Bool in
+                if isRestarting { return false }
+                isRestarting = true
+                return true
+            }
+            guard shouldStart else { return }
+            Task { await self.attemptRestart() }
+        }
+    }
+
+    /// Finalize writers and clear all capture state after an unrecoverable stream failure, then
+    /// notify the app exactly once. Clearing isCapturing lets the app's recovery start() succeed on
+    /// the same XPC connection (council F2); the one-shot latch makes the fatal notification
+    /// at-most-once even if both emitters race (council F8).
+    private func failFatally(_ reason: String) {
+        // Latch (at-most-once), CLAIM the handler, and clear capture state in ONE critical section,
+        // so a concurrent rotateChunk/stop sees isCapturing=false and bails rather than operating on
+        // the handler we're about to finalize (council FV1). The finalize itself is idempotent, which
+        // is the real guard against a double-finalize crash; this claim just narrows the window.
+        let (won, h, micSess): (Bool, AudioOutputHandler?, MicCaptureSession?) = stateLock.sync {
+            if hasFailedFatally { return (false, nil, nil) }
+            hasFailedFatally = true
+            let handlerToFinalize = handler
+            let micToStop = micSession
+            isCapturing = false
+            stream = nil
+            handler = nil
+            micSession = nil
+            systemPath = nil
+            micPath = nil
+            return (true, handlerToFinalize, micToStop)
+        }
+        guard won else { return }
+        record(.restartFailed, .anomaly, ["reason": reason])
+        // Stop the decoupled mic session too, otherwise its AVCaptureSession keeps running after the
+        // system stream is declared dead (council CONC-2). Stop it before finalize so no mic buffer
+        // lands on the audio queue after the WAV headers are sealed.
+        micSess?.stop()
+        // Flush the partial WAV (pre-fault audio) on the persistent queue; finalize is idempotent so
+        // a rotation's swapWriters finalizing the same writers first is harmless.
+        audioQueue.sync { h?.finalizeAll() }
+        onFailFatally?("Capture stream failed and could not be restarted")
+    }
+
+    /// Rebuild and restart the dead stream into the SAME handler/writers, re-pinning the mic.
+    /// Loops on transient failures up to the restart budget, then surfaces a fatal failure.
+    private func attemptRestart() async {
+        defer { stateLock.sync { isRestarting = false } }
+        while true {
+            let (userStopping, capturing, attempts, currentHandler, oldStream) = stateLock.sync {
+                (isUserStopping, isCapturing, restartAttempts, handler, stream)
+            }
+            let decision = RestartDecision.evaluate(
+                isUserStopped: userStopping, isCapturing: capturing,
+                attempts: attempts, maxAttempts: maxRestartAttempts
+            )
+            guard decision == .restart, let currentHandler else {
+                if decision == .failFatal { failFatally("restart budget exhausted") }
+                return
+            }
+            do {
+                if let oldStream { try? await oldStream.stopCapture() }  // tear down the dead stream
+                try await buildAndStartStream(handler: currentHandler)
+                // A stop may have begun during the restart's awaits; if so, don't claim success or
+                // notify — the stop path owns teardown now (council F1).
+                if stateLock.sync(execute: { isUserStopping }) { return }
+                stateLock.sync { restartAttempts = 0 }
+                Logger.audio.info("System-audio stream restarted in place")
+                record(.restartInPlace, .warning, ["source": "system"])
+                onRestartInPlace?()
+                return
+            } catch is CancellationError {
+                // buildAndStartStream bailed because a stop began — abandon the restart silently.
+                Logger.audio.info("In-place restart aborted — session stopping")
+                return
+            } catch {
+                stateLock.sync { restartAttempts += 1 }
+                Logger.audio.error("In-place restart attempt failed: \(error, privacy: .public)")
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
     }
 }

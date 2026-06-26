@@ -18,6 +18,15 @@
     <key>CFBundleExecutable</key>
     <string>audio-capture-helper-xpc</string>
 
+    <!-- The helper opens an AVCaptureSession for the mic (#96), so its bundle needs its own
+         microphone usage string. Without it a bundled XPC service that touches the mic can be
+         terminated by TCC (council HOL-2). It also drives Screen Recording (system audio). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Parley needs microphone access to record your voice.</string>
+
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Parley needs Screen Recording permission to capture system audio from meetings.</string>
+
     <key>XPCService</key>
     <dict>
         <key>ServiceType</key>

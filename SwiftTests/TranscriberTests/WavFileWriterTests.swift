@@ -172,6 +172,36 @@ struct WavFileWriterTests {
         #expect(dataSize == 10)  // 5 samples × 2 bytes
     }
 
+    // MARK: - Idempotent finalize (council FV1)
+
+    @Test func finalizeIsIdempotentAndSafeAfterClose() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        let samples: [Int16] = [100, 200, 300, 400]
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+
+        writer.finalize()
+        // A second/third finalize (e.g. a chunk rotation's swapWriters racing a fatal teardown) must
+        // be a no-op, NOT a write to the now-closed descriptor — which would raise an uncatchable
+        // NSFileHandleOperationException and SIGABRT the helper. If this test reaches its assertions
+        // without crashing, finalize() is idempotent.
+        writer.finalize()
+        writer.finalize()
+        // A late append / flush on the closed writer must also be silently ignored.
+        let stray: [Int16] = [999, 999]
+        stray.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.flushHeader()
+
+        let data = readData(at: path)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == 8)   // only the 4 pre-finalize Int16 samples × 2 bytes; stray dropped
+        let riffSize: UInt32 = data[4...7].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(riffSize == 44)  // 36 + 8
+    }
+
     // MARK: - Byte rate
 
     @Test func byteRateMatchesSampleRateTimesTwo() throws {

@@ -44,6 +44,20 @@ final class ChunkRotator {
         (index: currentChunkIndex, startTime: currentChunkStartTime)
     }
 
+    /// Recover from a live XPC crash: advance to the next chunk index so the post-crash recording
+    /// continues at a fresh chunk, and return the plan whose names the caller uses for the orphan
+    /// (the current index) and the recovery segment. The caller MUST enqueue the orphan chunk
+    /// (using `currentBaseName` / `currentChunkInfo`) BEFORE calling this — once it returns, the
+    /// index has advanced (#92).
+    @discardableResult
+    func recoverFromCrash(now: Date = Date()) -> ChunkRecoveryPlan {
+        let plan = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
+        currentChunkIndex = plan.recoveryIndex
+        currentChunkStartTime = now
+        Logger.audio.info("ChunkRotator recovered: orphan chunk \(plan.orphanIndex, privacy: .public), resuming at \(plan.recoveryIndex, privacy: .public)")
+        return plan
+    }
+
     /// Start the rotation timer.
     func start() {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .public)")

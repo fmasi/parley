@@ -12,7 +12,20 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
     @State private var xpcRetryCount = 0
+    @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
+    /// True once the helper has reported which device it is actually capturing on (post auto-switch).
+    /// When false, `helperMicId` is meaningless and the UI falls back to `selectedMicId`.
+    @State private var helperMicKnown: Bool = false
+    /// The mic device the helper is ACTUALLY capturing on, reported via the reverse channel after an
+    /// auto-switch. Valid only when `helperMicKnown` is true. `nil` = helper on system default;
+    /// non-nil = helper on this specific device. Both cleared when recording stops.
+    @State private var helperMicId: String? = nil
+    /// True while handleXPCCrash is mid-recovery (across its `await start()`). A user Stop in that
+    /// window must not race the helper restart (council FV2) — it sets stopRequestedDuringRecovery
+    /// and the recovery handler honors it once capture is back up.
+    @State private var recoveryInFlight = false
+    @State private var stopRequestedDuringRecovery = false
 
     init(
         appState: AppState,
@@ -182,6 +195,23 @@ struct MenuView: View {
                 await self.handleXPCCrash(appState: appState, captureClient: captureClient)
             }
         }
+        // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
+        // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
+        // — both keep recording silently. Only a fatal give-up escalates.
+        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
+        captureClient.onMicDeviceChanged = { [appState] deviceId in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                self.helperMicKnown = true
+                self.helperMicId = deviceId
+            }
+        }
+        captureClient.onFatalFailure = { [appState, captureClient] _ in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                await self.handleXPCCrash(appState: appState, captureClient: captureClient)
+            }
+        }
 
         do {
             let sentinel = RecordingSentinel(
@@ -200,6 +230,8 @@ struct MenuView: View {
                 baseName: baseName,
                 microphoneDeviceId: microphoneDeviceId
             )
+            helperMicKnown = true
+            helperMicId = microphoneDeviceId
 
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient,
@@ -211,6 +243,9 @@ struct MenuView: View {
 
             appState.phase = .recording(since: Date())
             xpcRetryCount = 0
+            lastCrashAt = nil
+            recoveryInFlight = false
+            stopRequestedDuringRecovery = false
         } catch {
             RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
@@ -219,7 +254,17 @@ struct MenuView: View {
     }
 
     private func stopRecording() async {
+        // council FV2: if a crash recovery is mid-flight, don't race the helper restart — record
+        // the intent and let handleXPCCrash perform the stop once capture is back up.
+        if recoveryInFlight {
+            Logger.state.info("Stop pressed during crash recovery — deferring to the recovery handler")
+            stopRequestedDuringRecovery = true
+            appState.phase = .transcribing(progress: "Finishing…")
+            return
+        }
         Logger.state.info("Recording stopped")
+        helperMicKnown = false
+        helperMicId = nil
         do {
             let sentinel = RecordingSentinel.read()
             let paths = try await captureClient.stop()
@@ -243,8 +288,15 @@ struct MenuView: View {
                 await processor.awaitAllProcessed()
 
                 // Final merge
-                let sessionState = await processor.getSessionState()
+                var sessionState = await processor.getSessionState()
                 let outputDir = paths.systemAudio.deletingLastPathComponent()
+                // Drain capture diagnostics, flush <session>.diag.jsonl only if anomalous, and stamp
+                // the always-present provenance into the transcript metadata (#95).
+                sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionState.sessionId,
+                    engine: configManager.config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
                 let result = try await transcriptionRunner.finalize(
                     sessionState: sessionState,
                     outputDirectory: outputDir,
@@ -268,20 +320,35 @@ struct MenuView: View {
                 let systemAudio: URL
                 let micAudio: URL?
                 if let sentinel, sentinel.segment > 1 {
+                    // #7: point discovery at the 0-indexed base so SegmentDiscovery's gap-tolerant
+                    // 0-indexed mode reclaims every segment (-0, -1, …). The stripped base would use
+                    // legacy mode and drop the -0 orphan, referencing a non-existent <root>.wav.
                     let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
                     let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                    systemAudio = dir.appendingPathComponent(origBase + ".wav")
-                    micAudio = dir.appendingPathComponent(origBase + "_mic.wav")
+                    systemAudio = dir.appendingPathComponent(origBase + "-0.wav")
+                    micAudio = dir.appendingPathComponent(origBase + "-0_mic.wav")
                 } else {
                     systemAudio = paths.systemAudio
                     micAudio = paths.micAudio
                 }
 
+                // #95/council F6: the recovery path also drains diagnostics, flushes the
+                // anomaly-gated <sessionId>.diag.jsonl, and stamps capture_provenance (incl.
+                // recovered=true) — previously only the chunked branch did this.
+                let outputDir = systemAudio.deletingLastPathComponent()
+                let sessionId = systemAudio.deletingPathExtension().lastPathComponent
+                let provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionId,
+                    engine: configManager.config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
+
                 let result = try await transcriptionRunner.run(
                     systemAudio: systemAudio,
                     micAudio: micAudio,
-                    outputDirectory: systemAudio.deletingLastPathComponent(),
-                    config: configManager.config
+                    outputDirectory: outputDir,
+                    config: configManager.config,
+                    provenance: provenance
                 )
 
                 appState.lastJsonPath = result.jsonPath.path
@@ -299,8 +366,18 @@ struct MenuView: View {
 
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
+            // council FV2 defense-in-depth: stop() can throw (e.g. the helper already cleared
+            // isCapturing on a fatal failure that raced this stop). If a live chunked pipeline still
+            // holds transcribed chunks, salvage them into a transcript instead of discarding the
+            // session with a blind teardown.
+            if transcriptionRunner.chunkProcessor != nil, let sentinel = RecordingSentinel.read() {
+                await finalizeAbandonedSession(
+                    sentinel: sentinel, reingestOrphan: false, appState: appState, captureClient: captureClient
+                )
+            } else {
+                transcriptionRunner.teardownChunkedPipeline()
+            }
             RecordingSentinel.delete()
-            transcriptionRunner.teardownChunkedPipeline()
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle
@@ -308,8 +385,20 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
-        xpcRetryCount += 1
-        Logger.state.warning("XPC crash during recording — attempt \(xpcRetryCount) of 2")
+        // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
+        // flags on every exit so a deferred stop never leaks into the next recovery.
+        recoveryInFlight = true
+        defer { recoveryInFlight = false; stopRequestedDuringRecovery = false }
+        // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
+        // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
+        // crash loop (interruptions within the decay window) still trips the cap.
+        let decision = XPCRetryPolicy.register(
+            priorCount: xpcRetryCount, lastCrashAt: lastCrashAt, now: Date()
+        )
+        xpcRetryCount = decision.retryCount
+        lastCrashAt = Date()
+        captureClient.recordRetry(["attempt": "\(xpcRetryCount)", "giveUp": "\(decision.shouldGiveUp)"])
+        Logger.state.warning("XPC interruption during recording — attempt \(xpcRetryCount) within the decay window")
 
         guard let sentinel = RecordingSentinel.read() else {
             Logger.state.error("No sentinel found during crash recovery")
@@ -322,27 +411,59 @@ struct MenuView: View {
             return
         }
 
-        // Retry limit: give up after 2 crashes
-        if xpcRetryCount > 2 {
-            Logger.state.error("All retries exhausted after \(xpcRetryCount) crashes")
-            appState.criticalError = "Recording failed — microphone capture crashed repeatedly."
+        if decision.shouldGiveUp {
+            Logger.state.error("All retries exhausted after \(xpcRetryCount) interruptions within the decay window")
+            // council F3: salvage the live chunked session (re-ingesting the in-progress orphan,
+            // since this branch returns before the normal re-ingestion below) so chunks already
+            // transcribed aren't discarded with the session.
+            await finalizeAbandonedSession(
+                sentinel: sentinel, reingestOrphan: true, appState: appState, captureClient: captureClient
+            )
+            appState.criticalError = "Recording failed — microphone capture crashed repeatedly. Audio recorded before the failure has been saved."
             appState.phase = .idle
             RecordingSentinel.delete()
             sendCriticalNotification(
                 title: "Recording Failed",
-                body: "Microphone capture crashed after retry. Your recording may be incomplete."
+                body: "Microphone capture crashed after retry. The portion recorded before the failure has been transcribed."
             )
             return
         }
 
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let seg = sentinel.segment + 1
-        let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+        let baseName: String
+        var newSentinel: RecordingSentinel
 
-        let newSentinel = sentinel.incrementedSegment(
-            systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-            micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-        )
+        // #92: when the chunked pipeline is still live (the common live-crash case), re-ingest the
+        // orphaned in-progress chunk and advance the rotator BEFORE restarting capture. Otherwise
+        // the orphan's audio is processed by no one and silently dropped from the final transcript.
+        if let rotator = transcriptionRunner.chunkRotator,
+           let processor = transcriptionRunner.chunkProcessor {
+            let orphan = rotator.currentChunkInfo
+            let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index,
+                systemPath: outputDir.appendingPathComponent(orphanBase + ".wav").path,
+                micPath: outputDir.appendingPathComponent(orphanBase + "_mic.wav").path,
+                startTime: orphan.startTime
+            ))
+            let plan = rotator.recoverFromCrash()
+            baseName = plan.recoveryBaseName
+            newSentinel = sentinel.incrementedSegment(
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+            )
+            newSentinel.chunkIndex = plan.recoveryIndex
+            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .public)); recovery continues at \(baseName, privacy: .public)")
+        } else {
+            // No live pipeline (app-relaunch re-attach): keep segment-based naming; the stop-path
+            // fallback uses 0-indexed gap-tolerant discovery to reclaim every segment.
+            let seg = sentinel.segment + 1
+            baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            newSentinel = sentinel.incrementedSegment(
+                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+            )
+        }
 
         do {
             try await captureClient.start(
@@ -351,6 +472,15 @@ struct MenuView: View {
                 microphoneDeviceId: sentinel.micDeviceUID
             )
             try RecordingSentinel.write(newSentinel)
+            // council FV2: a Stop pressed while we were restarting now runs cleanly — capture is back
+            // up, so a normal stop finalizes the session instead of racing the helper / orphaning it.
+            if stopRequestedDuringRecovery {
+                stopRequestedDuringRecovery = false
+                recoveryInFlight = false
+                Logger.state.info("Honoring stop requested during recovery")
+                await stopRecording()
+                return
+            }
             appState.interruptionWarning = "Recording briefly interrupted. Resuming."
             sendNotification(
                 title: "Recording Resumed",
@@ -358,19 +488,74 @@ struct MenuView: View {
             )
         } catch {
             Logger.state.error("Restart failed: \(error, privacy: .public)")
-            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription)"
+            // council F3: the orphan was already re-ingested above, so just finalize what's been
+            // processed rather than abandoning the whole session.
+            await finalizeAbandonedSession(
+                sentinel: sentinel, reingestOrphan: false, appState: appState, captureClient: captureClient
+            )
+            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Audio recorded before the failure has been saved."
             appState.phase = .idle
             RecordingSentinel.delete()
             sendCriticalNotification(
                 title: "Recording Failed",
-                body: "Microphone capture crashed and could not restart."
+                body: "Microphone capture crashed and could not restart. The portion recorded before the failure has been transcribed."
             )
         }
     }
 
+    /// Best-effort finalize a live chunked session being abandoned after an unrecoverable crash, so
+    /// chunks already transcribed to session.json become a real transcript instead of being silently
+    /// discarded (council F3). The give-up branch returns before the normal orphan re-ingestion, so
+    /// it passes reingestOrphan: true to reclaim the in-progress chunk first.
+    private func finalizeAbandonedSession(
+        sentinel: RecordingSentinel,
+        reingestOrphan: Bool,
+        appState: AppState,
+        captureClient: AudioCaptureClient
+    ) async {
+        guard let processor = transcriptionRunner.chunkProcessor else { return }
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        transcriptionRunner.stopChunkRotation()
+
+        if reingestOrphan, let rotator = transcriptionRunner.chunkRotator {
+            let orphan = rotator.currentChunkInfo
+            let orphanBase = rotator.currentBaseName
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index,
+                systemPath: outputDir.appendingPathComponent(orphanBase + ".wav").path,
+                micPath: outputDir.appendingPathComponent(orphanBase + "_mic.wav").path,
+                startTime: orphan.startTime
+            ))
+        }
+
+        await processor.awaitAllProcessed()
+        var sessionState = await processor.getSessionState()
+        guard !sessionState.chunks.isEmpty else {
+            transcriptionRunner.teardownChunkedPipeline()
+            return
+        }
+        sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
+            sessionId: sessionState.sessionId,
+            engine: configManager.config.engine.rawValue,
+            recordingDirectory: outputDir
+        )
+        if let result = try? await transcriptionRunner.finalize(
+            sessionState: sessionState, outputDirectory: outputDir, config: configManager.config
+        ) {
+            appState.lastJsonPath = result.jsonPath.path
+            appState.lastTranscriptPath = result.jsonPath.path
+            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .public)")
+        }
+        transcriptionRunner.teardownChunkedPipeline()
+    }
+
     private var activeMicName: String {
-        AudioDeviceEnumerator.availableDevices()
-            .first(where: { $0.id == selectedMicId })?.name
+        // Prefer the helper-reported device (post auto-switch) over the user's configured preference.
+        // `helperMicKnown` is false until the helper reports back; when true, `helperMicId` wins
+        // (nil = system default, non-nil = specific device).
+        let id: String? = helperMicKnown ? helperMicId : selectedMicId
+        return AudioDeviceEnumerator.availableDevices()
+            .first(where: { $0.id == id })?.name
             ?? "System Default"
     }
 
