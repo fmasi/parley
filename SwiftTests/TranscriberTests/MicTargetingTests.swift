@@ -112,4 +112,33 @@ struct MicTargetingTests {
         #expect(d.needsSwitch == true)
         #expect(d.leavingDeviceGone == true)
     }
+
+    // MARK: - recoveryTarget (recomputed each recovery iteration)
+
+    @Test("recoveryTarget: pinned device available → target the pin")
+    func recoveryPinnedAvailable() {
+        #expect(MicTargeting.recoveryTarget(pinned: "airpods", available: ["builtin", "airpods"]) == "airpods")
+    }
+
+    @Test("recoveryTarget: pinned device gone → nil (system default)")
+    func recoveryPinnedGone() {
+        #expect(MicTargeting.recoveryTarget(pinned: "airpods", available: ["builtin"]) == nil)
+    }
+
+    @Test("recoveryTarget: no pin (auto-follow) → nil (system default)")
+    func recoveryNoPin() {
+        #expect(MicTargeting.recoveryTarget(pinned: nil, available: ["builtin", "airpods"]) == nil)
+    }
+
+    @Test("recoveryTarget: pin set mid-recovery and now present → honored on the next pass (clobber fix)")
+    func recoveryPinAppliedMidRecovery() {
+        // Auto-follow recovery was in flight (pinned was nil); the user pins a present device mid-loop.
+        // The next iteration reads the fresh pin and targets it — never frozen to the system default.
+        #expect(MicTargeting.recoveryTarget(pinned: "usb-mic", available: ["builtin", "usb-mic"]) == "usb-mic")
+    }
+
+    @Test("recoveryTarget: no devices at all → nil")
+    func recoveryNoDevices() {
+        #expect(MicTargeting.recoveryTarget(pinned: "airpods", available: []) == nil)
+    }
 }

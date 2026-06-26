@@ -93,9 +93,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             isRecovering = false
             restartAttempts = 0
         }
-        try configQueue.sync { try buildAndStart(deviceId: deviceId) }
-        // Pin the user's choice only AFTER a successful start so a throw can't leave a stale pin.
-        stateLock.sync { pinnedDeviceId = deviceId }
+        // `userInitiated` sets the pin atomically with the session swap (inside buildAndStart's stateLock
+        // block), so a concurrent HAL reevaluation can never observe a fresh concrete device against a
+        // stale pin (council MIC-HAL-RACE-2 / F2). A throw before the swap leaves the pin untouched.
+        try configQueue.sync { try buildAndStart(deviceId: deviceId, userInitiated: true) }
         startDeviceMonitoring()
     }
 
@@ -114,20 +115,23 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// Live mic switch (the mid-recording mic-switch dialog): retarget the session to a new device,
     /// reusing the same mic WAV so the file stays continuous. The pin moves only on success.
     func updateDevice(_ deviceId: String?) throws {
-        try configQueue.sync { try buildAndStart(deviceId: deviceId) }
-        stateLock.sync {
-            pinnedDeviceId = deviceId
-            restartAttempts = 0
-        }
+        // `userInitiated` moves the pin atomically with the concrete swap (see buildAndStart) so an
+        // in-flight HAL reevaluation can't see a half-applied {pin, concrete} and switch back off the
+        // device the user just picked (council MIC-HAL-RACE-2 / F2).
+        try configQueue.sync { try buildAndStart(deviceId: deviceId, userInitiated: true) }
+        stateLock.sync { restartAttempts = 0 }
     }
 
     // MARK: - Build
 
     /// MUST run on `configQueue` (callers wrap in `configQueue.sync`). Tears down any previous session
-    /// and starts a fresh one capturing `deviceId`. Records the ACTUAL device in `currentDeviceId`;
-    /// does NOT touch `pinnedDeviceId` (callers own the user's pin). Throws `.stopped` if a stop raced
-    /// in during the build, after tearing the new session down — so capture never leaks past stop.
-    private func buildAndStart(deviceId: String?) throws {
+    /// and starts a fresh one capturing `deviceId`. Records the ACTUAL device in `currentDeviceId`.
+    /// When `userInitiated` (a user start/switch, not a recovery), moves `pinnedDeviceId` to `deviceId`
+    /// ATOMICALLY with the concrete swap so a concurrent HAL reevaluation never sees a half-applied
+    /// {pin, concrete} (council MIC-HAL-RACE-2 / F2); recovery passes `false` so it never moves the pin.
+    /// Throws `.stopped` if a stop raced in during the build, after tearing the new session down — so
+    /// capture never leaks past stop.
+    private func buildAndStart(deviceId: String?, userInitiated: Bool = false) throws {
         // Authorization is the #96 device-test risk: the helper captured the mic via ScreenCaptureKit
         // before, so its Microphone TCC grant may be implicit. Surface the status unambiguously, and
         // fail fast with an actionable error if it is hard-denied.
@@ -175,6 +179,9 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             session = newSession
             currentDeviceId = resolvedId
             currentConcreteDeviceId = device.uniqueID
+            // Pin (the user's REQUESTED id, even on a fallback, so we re-pin when it returns) moves in the
+            // SAME critical section as the concrete device — never observable half-applied.
+            if userInitiated { pinnedDeviceId = deviceId }
             return o
         }
         old?.stopRunning()
@@ -222,31 +229,50 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             name: AVCaptureSession.runtimeErrorNotification, object: nil
         )
 
-        guard deviceListenerBlock == nil else { return }
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.scheduleDeviceReevaluation()
         }
-        deviceListenerBlock = block
+        // Claim the block under stateLock (a leaf, no call-out) so a concurrent stopDeviceMonitoring can't
+        // race the add/remove on `deviceListenerBlock` (council MIC-HAL-RACE-1). The HAL Add calls happen
+        // OUTSIDE the lock so the leaf-lock no-call-out invariant holds.
+        let shouldRegister: Bool = stateLock.sync {
+            guard deviceListenerBlock == nil else { return false }
+            deviceListenerBlock = block
+            return true
+        }
+        guard shouldRegister else { return }
         let system = AudioObjectID(kAudioObjectSystemObject)  // imported as Int32 — must cast
         var devices = Self.deviceListAddress
         var defaultInput = Self.defaultInputAddress
         let s1 = AudioObjectAddPropertyListenerBlock(system, &devices, monitorQueue, block)
         let s2 = AudioObjectAddPropertyListenerBlock(system, &defaultInput, monitorQueue, block)
         if s1 != noErr || s2 != noErr {
+            // Registration failure means we silently lose ALL device-following (auto-follow, fallback,
+            // re-pin) — exactly the silent-mic-death class this exists to prevent — so surface it into the
+            // anomaly ring, not just the log (council hal-listener-registration-failure-not-surfaced).
             Logger.audio.error("Mic device monitor: HAL listener registration failed (\(s1), \(s2))")
+            onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "device monitor unavailable",
+                                                  "status": "\(s1)/\(s2)"])
         }
     }
 
     /// Detach the HAL listener + the runtime-error observer. Idempotent.
     private func stopDeviceMonitoring() {
         NotificationCenter.default.removeObserver(self)
-        guard let block = deviceListenerBlock else { return }
+        // Read-and-nil the block in ONE leaf-lock critical section so two concurrent stop()s (e.g. an XPC
+        // invalidation racing a user stopCapture) can't tear the ARC optional closure (council
+        // MIC-HAL-RACE-1). The HAL Remove calls run OUTSIDE the lock using the claimed reference.
+        let block: AudioObjectPropertyListenerBlock? = stateLock.sync {
+            let b = deviceListenerBlock
+            deviceListenerBlock = nil
+            return b
+        }
+        guard let block else { return }
         let system = AudioObjectID(kAudioObjectSystemObject)
         var devices = Self.deviceListAddress
         var defaultInput = Self.defaultInputAddress
         _ = AudioObjectRemovePropertyListenerBlock(system, &devices, monitorQueue, block)
         _ = AudioObjectRemovePropertyListenerBlock(system, &defaultInput, monitorQueue, block)
-        deviceListenerBlock = nil
     }
 
     /// Debounce a burst of HAL notifications (a single route change fires several) and let the new route
@@ -295,40 +321,53 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         // A device change is fresh information: refresh the recovery budget so a prior exhaustion can't
         // block following the new device (council F3).
         stateLock.sync { restartAttempts = 0 }
-        attemptRecover(forceDefault: decision.forceDefault)
+        // recoverLoop recomputes its target from fresh state each iteration (so a mid-recovery user pin is
+        // honored) — no frozen decision is passed across the async hop (council MIC-FOLLOW-PIN-OVERRIDE).
+        attemptRecover()
     }
 
     @objc private func handleRuntimeError(_ note: Notification) {
         let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error
         Logger.audio.error("Mic capture runtime error: \(err?.localizedDescription ?? "unknown", privacy: .public)")
         onEvent?(.streamStopError, .anomaly, ["source": "mic", "error": err?.localizedDescription ?? "unknown"])
-        attemptRecover(forceDefault: false)
+        attemptRecover()
     }
 
     /// Kick off a recovery loop on a background queue, at most one at a time.
-    private func attemptRecover(forceDefault: Bool) {
+    private func attemptRecover() {
         let shouldStart: Bool = stateLock.sync {
             if isStopping || isRecovering { return false }
             isRecovering = true
             return true
         }
         guard shouldStart else { return }
-        DispatchQueue.global(qos: .userInitiated).async { self.recoverLoop(forceDefault: forceDefault) }
+        DispatchQueue.global(qos: .userInitiated).async { self.recoverLoop() }
     }
 
-    private func recoverLoop(forceDefault: Bool) {
+    private func recoverLoop() {
         defer { stateLock.sync { isRecovering = false } }
         while true {
             let (stopping, attempts, pinned) = stateLock.sync { (isStopping, restartAttempts, pinnedDeviceId) }
             if stopping { return }
             if attempts >= maxRestartAttempts {
                 Logger.audio.error("Mic recovery budget exhausted — mic unavailable, system audio continues")
+                // Clear the concrete device we are no longer capturing on, so a LATER HAL event — the very
+                // device reconnecting, or a new default appearing — is seen by reevaluateDevices as
+                // needsSwitch (current==nil ⇒ leavingDeviceGone, target!=nil ⇒ needsSwitch) and rebuilds.
+                // Without this the stale concrete makes us think we're already on the right device and the
+                // mic stays silently dead — fatal on Macs with no built-in fallback (council F1).
+                stateLock.sync { currentConcreteDeviceId = nil }
                 // The service's onUnavailable handler records the .restartFailed anomaly; don't also
                 // record it here (that would double-count the event).
                 onUnavailable?("mic restart budget exhausted")
                 return
             }
-            let deviceId = forceDefault ? nil : pinned
+            // Recompute the target from FRESH state every iteration: the pinned device if it is currently
+            // available, else the system default (nil). Never a frozen forceDefault — so a pin the user
+            // applies mid-recovery, or a device that comes/goes during the loop, is honored on the next
+            // pass (council MIC-FOLLOW-PIN-OVERRIDE / mic-switch-clobbered-by-autofollow-recovery).
+            let available = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
+            let deviceId = MicTargeting.recoveryTarget(pinned: pinned, available: available)
             do {
                 try configQueue.sync { try buildAndStart(deviceId: deviceId) }
                 // Report the RESOLVED device, not the requested one: buildAndStart may have fallen back
@@ -337,12 +376,16 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 // fallback (council PROV-RECOVER-REQID — sibling of MIC-CURRENT-MISLABEL). buildAndStart
                 // set currentDeviceId under this same lock; if a concurrent user switch updated it first,
                 // reporting the actually-current device is still exactly what mic_device wants.
-                let resolved = stateLock.sync { () -> String? in
+                let (resolved, concrete) = stateLock.sync { () -> (String?, String?) in
                     restartAttempts = 0
-                    return currentDeviceId
+                    return (currentDeviceId, currentConcreteDeviceId)
                 }
                 Logger.audio.info("Mic capture recovered in place — device: \(resolved ?? "default", privacy: .public)")
-                onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": resolved ?? "default"])
+                // `mic` keeps the nil==default provenance convention; `device` records the CONCRETE physical
+                // mic we actually followed to, so a clean auto-follow (built-in → AirPods, both present) still
+                // leaves the followed-to identity in the forensic trail (council AUTOFOLLOW-CONCRETE-UNRECORDED).
+                onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": resolved ?? "default",
+                                                     "device": concrete ?? "unknown"])
                 onRecovered?()
                 return
             } catch MicCaptureError.stopped {

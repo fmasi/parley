@@ -47,4 +47,14 @@ public enum MicTargeting {
             leavingDeviceGone: leavingGone
         )
     }
+
+    /// The device id to (re)build on during recovery: the pinned device when it is available, else `nil`
+    /// — where `nil` means "the system default", preserving the `nil == default` provenance convention
+    /// that `mic_device` relies on. Recomputed from FRESH state on every recovery iteration so a pin the
+    /// user applies mid-recovery (or a device that comes/goes during the loop) is honored, never frozen
+    /// into a stale decision (council MIC-FOLLOW-PIN-OVERRIDE / mic-switch-clobbered-by-autofollow).
+    public static func recoveryTarget(pinned: String?, available: Set<String>) -> String? {
+        let onPin = pinned.map { available.contains($0) } ?? false
+        return onPin ? pinned : nil
+    }
 }
