@@ -14,6 +14,11 @@ struct MenuView: View {
     @State private var xpcRetryCount = 0
     @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
+    /// True while handleXPCCrash is mid-recovery (across its `await start()`). A user Stop in that
+    /// window must not race the helper restart (council FV2) — it sets stopRequestedDuringRecovery
+    /// and the recovery handler honors it once capture is back up.
+    @State private var recoveryInFlight = false
+    @State private var stopRequestedDuringRecovery = false
 
     init(
         appState: AppState,
@@ -234,6 +239,8 @@ struct MenuView: View {
             appState.phase = .recording(since: Date())
             xpcRetryCount = 0
             lastCrashAt = nil
+            recoveryInFlight = false
+            stopRequestedDuringRecovery = false
         } catch {
             RecordingSentinel.delete()
             appState.errorMessage = error.localizedDescription
@@ -242,6 +249,14 @@ struct MenuView: View {
     }
 
     private func stopRecording() async {
+        // council FV2: if a crash recovery is mid-flight, don't race the helper restart — record
+        // the intent and let handleXPCCrash perform the stop once capture is back up.
+        if recoveryInFlight {
+            Logger.state.info("Stop pressed during crash recovery — deferring to the recovery handler")
+            stopRequestedDuringRecovery = true
+            appState.phase = .transcribing(progress: "Finishing…")
+            return
+        }
         Logger.state.info("Recording stopped")
         do {
             let sentinel = RecordingSentinel.read()
@@ -344,8 +359,18 @@ struct MenuView: View {
 
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
+            // council FV2 defense-in-depth: stop() can throw (e.g. the helper already cleared
+            // isCapturing on a fatal failure that raced this stop). If a live chunked pipeline still
+            // holds transcribed chunks, salvage them into a transcript instead of discarding the
+            // session with a blind teardown.
+            if transcriptionRunner.chunkProcessor != nil, let sentinel = RecordingSentinel.read() {
+                await finalizeAbandonedSession(
+                    sentinel: sentinel, reingestOrphan: false, appState: appState, captureClient: captureClient
+                )
+            } else {
+                transcriptionRunner.teardownChunkedPipeline()
+            }
             RecordingSentinel.delete()
-            transcriptionRunner.teardownChunkedPipeline()
             appState.errorMessage = error.localizedDescription
             sendNotification(title: "Transcription Failed", body: error.localizedDescription)
             appState.phase = .idle
@@ -353,6 +378,10 @@ struct MenuView: View {
     }
 
     private func handleXPCCrash(appState: AppState, captureClient: AudioCaptureClient) async {
+        // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
+        // flags on every exit so a deferred stop never leaks into the next recovery.
+        recoveryInFlight = true
+        defer { recoveryInFlight = false; stopRequestedDuringRecovery = false }
         // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
         // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
         // crash loop (interruptions within the decay window) still trips the cap.
@@ -436,6 +465,15 @@ struct MenuView: View {
                 microphoneDeviceId: sentinel.micDeviceUID
             )
             try RecordingSentinel.write(newSentinel)
+            // council FV2: a Stop pressed while we were restarting now runs cleanly — capture is back
+            // up, so a normal stop finalizes the session instead of racing the helper / orphaning it.
+            if stopRequestedDuringRecovery {
+                stopRequestedDuringRecovery = false
+                recoveryInFlight = false
+                Logger.state.info("Honoring stop requested during recovery")
+                await stopRecording()
+                return
+            }
             appState.interruptionWarning = "Recording briefly interrupted. Resuming."
             sendNotification(
                 title: "Recording Resumed",

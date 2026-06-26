@@ -388,24 +388,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// the same XPC connection (council F2); the one-shot latch makes the fatal notification
     /// at-most-once even if both emitters race (council F8).
     private func failFatally(_ reason: String) {
-        let firstFatal = stateLock.sync { () -> Bool in
-            if hasFailedFatally { return false }
+        // Latch (at-most-once), CLAIM the handler, and clear capture state in ONE critical section,
+        // so a concurrent rotateChunk/stop sees isCapturing=false and bails rather than operating on
+        // the handler we're about to finalize (council FV1). The finalize itself is idempotent, which
+        // is the real guard against a double-finalize crash; this claim just narrows the window.
+        let (won, h): (Bool, AudioOutputHandler?) = stateLock.sync {
+            if hasFailedFatally { return (false, nil) }
             hasFailedFatally = true
-            return true
-        }
-        guard firstFatal else { return }
-        record(.restartFailed, .anomaly, ["reason": reason])
-        // Flush the partial WAV (pre-fault audio) on the persistent queue, OUTSIDE stateLock to
-        // preserve lock order, then clear state.
-        let h = stateLock.sync { handler }
-        audioQueue.sync { h?.finalizeAll() }
-        stateLock.sync {
+            let handlerToFinalize = handler
             isCapturing = false
             stream = nil
             handler = nil
             systemPath = nil
             micPath = nil
+            return (true, handlerToFinalize)
         }
+        guard won else { return }
+        record(.restartFailed, .anomaly, ["reason": reason])
+        // Flush the partial WAV (pre-fault audio) on the persistent queue; finalize is idempotent so
+        // a rotation's swapWriters finalizing the same writers first is harmless.
+        audioQueue.sync { h?.finalizeAll() }
         onFailFatally?("Capture stream failed and could not be restarted")
     }
 

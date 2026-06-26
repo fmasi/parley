@@ -121,12 +121,26 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             case .unchanged:
                 break
             case .changed(let from, let to):
+                // Log the transition once (observe() reports `.unchanged` for the buffers that
+                // follow, since it advances `current`). The sticky gate below is what actually
+                // drops them — not this one-shot branch (council FV3).
                 Logger.audio.error("System format changed mid-stream: \(Int(from.sampleRate))Hz/\(from.channelCount)ch → \(Int(to.sampleRate))Hz/\(to.channelCount)ch")
                 record(.formatChanged, .anomaly, [
                     "from": "\(Int(from.sampleRate))Hz/\(from.channelCount)ch",
                     "to": "\(Int(to.sampleRate))Hz/\(to.channelCount)ch",
                 ])
-                return  // drop the off-format buffer instead of corrupting the WAV (council F9)
+            }
+
+            // Sticky drop: skip ANY buffer whose format is writer-incompatible with the format the
+            // writer is actually configured for (set once in `.first`), independent of observe()'s
+            // transient/sustained distinction. A single dropped run is harmless — the paired
+            // didStopWithError drives the #86 restart that resumes cleanly (council FV3, F9).
+            if let cfg = systemFormatInfo {
+                let configured = AudioStreamFormat(
+                    sampleRate: cfg.rate, channelCount: Int(cfg.channels),
+                    isFloat: cfg.isFloat, bitsPerChannel: Int(cfg.bitsPerChannel)
+                )
+                if !configured.isWriterCompatible(with: fmt) { return }
             }
         }
 

@@ -9,6 +9,11 @@ public final class WavFileWriter {
     private var channelCount: UInt16 = 1
     private var firstWriteLogged = false
     private var overflowWarned = false
+    /// Once finalized the FileHandle is closed; every further write/flush/finalize is a no-op.
+    /// All mutators run on the single capture audio queue, so a plain flag is sufficient (no lock).
+    /// This makes finalize() idempotent so a double-finalize (e.g. a fatal teardown racing a chunk
+    /// rotation's swapWriters) can't write to a closed descriptor and SIGABRT the helper.
+    private var finalized = false
     // WAV format uses 32-bit size fields; max data payload is ~4.29 GB.
     private static let maxDataBytes: UInt32 = UInt32.max - 36
     private var lastSyncTime: ContinuousClock.Instant = .now
@@ -31,6 +36,7 @@ public final class WavFileWriter {
     }
 
     public func append(_ samples: UnsafeBufferPointer<Float32>) {
+        guard !finalized else { return }
         var pcm = [Int16](repeating: 0, count: samples.count)
         for i in 0..<samples.count {
             let clamped = max(-1.0, min(1.0, samples[i]))
@@ -46,6 +52,7 @@ public final class WavFileWriter {
 
     /// Write Int16 PCM samples directly (no conversion needed).
     public func appendInt16(_ samples: UnsafeBufferPointer<Int16>) {
+        guard !finalized else { return }
         let bytes = samples.withMemoryRebound(to: UInt8.self) { Data($0) }
         guard let toWrite = clampedData(bytes) else { return }
         fileHandle.write(toWrite)
@@ -86,6 +93,7 @@ public final class WavFileWriter {
     /// resume appending. Called periodically so that a crash before `finalize()`
     /// still leaves a readable WAV (loss bounded to the last sync interval).
     public func flushHeader() {
+        guard !finalized else { return }
         let rate = sampleRate > 0 ? sampleRate : 16000
         fileHandle.seek(toFileOffset: 0)
         writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
@@ -100,8 +108,10 @@ public final class WavFileWriter {
     }
 
     public func finalize() {
-        flushHeader()
+        guard !finalized else { return }   // idempotent — a second finalize must not touch the closed fd
+        flushHeader()                       // runs while `finalized` is still false
         fileHandle.closeFile()
+        finalized = true
         Logger.files.info("WAV finalized: \(self.path, privacy: .private), size: \(self.dataByteCount) bytes")
     }
 
