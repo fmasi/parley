@@ -180,11 +180,15 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let channels = Int(asbd.pointee.mChannelsPerFrame)
         let rate = asbd.pointee.mSampleRate
 
-        // macOS built-in mic arrays present 3+ interleaved channels, which
-        // AVAudioFormat(streamDescription:) rejects (returns nil) — the likely root cause of the
-        // "it used the wrong microphone, my voice was missing" reports when a route change falls
-        // back to the built-in mic. Down-pick channel 0 (the primary capsule) into a mono buffer the
-        // converter can normalize, instead of dropping every buffer.
+        // The macOS built-in mic is a 3-capsule beamforming array. macOS normally fuses it into clean
+        // mono for us, but ScreenCaptureKit's raw mic tap bypasses that and delivers the raw 3+
+        // interleaved channels — which AVAudioFormat(streamDescription:) rejects (returns nil). That
+        // is the root cause of the "it used the wrong microphone, my voice was missing" reports when a
+        // route change falls back to the built-in mic. The capsules are undifferentiated (a
+        // positionless "Discrete" layout — no "primary" channel), so we average them all into mono
+        // (see MultichannelDownmix) rather than dropping buffers or wastefully keeping just one. The
+        // durable fix is to capture the mic off SCK via AVAudioEngine's input node (#96), which hands
+        // us OS-fused mono directly.
         if channels > 2 {
             recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
             handleMultichannelMic(sampleBuffer, channels: channels, rate: rate, asbd: asbd)
@@ -256,9 +260,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ])
     }
 
-    /// Capture a multichannel (3+) mic by extracting channel 0 (the primary capsule) into a mono
-    /// buffer the AudioConverter can normalize. The built-in mic array delivers interleaved float
-    /// here; a non-float multichannel layout (not observed in practice) is dropped with a clear log.
+    /// Capture a multichannel (3+) mic by averaging its interleaved capsules into a single mono buffer
+    /// the AudioConverter can normalize. The built-in mic array's capsules are undifferentiated
+    /// (positionless "Discrete" layout), so an equal-weight average is the correct mixdown and beats
+    /// picking one channel on SNR. The built-in array delivers interleaved float here; a non-float
+    /// multichannel layout (not observed in practice) is dropped with a clear log.
     private func handleMultichannelMic(
         _ sampleBuffer: CMSampleBuffer, channels: Int, rate: Double,
         asbd: UnsafePointer<AudioStreamBasicDescription>
@@ -284,15 +290,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ) == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
         let srcCount = totalLength / MemoryLayout<Float32>.size
-        ptr.withMemoryRebound(to: Float32.self, capacity: srcCount) { src in
-            // De-interleave channel 0: samples at indices 0, channels, 2*channels, …
-            var f = 0, i = 0
-            while f < frameCount && i < srcCount {
-                dst[f] = src[i]
-                f += 1
-                i += channels
-            }
+        let written = ptr.withMemoryRebound(to: Float32.self, capacity: srcCount) { src in
+            MultichannelDownmix.averageInterleavedToMono(
+                src, srcCount: srcCount, channels: channels, into: dst, frameCount: frameCount
+            )
         }
+        guard written > 0 else { return }
+        monoBuffer.frameLength = AVAudioFrameCount(written)
 
         do {
             let result = try micConverter.convert(monoBuffer)
