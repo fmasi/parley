@@ -29,9 +29,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     private let onSampleBuffer: (CMSampleBuffer) -> Void
 
     /// Invoked after the session self-heals a device disconnect / runtime error by rebuilding around
-    /// the pinned (or fallback) device — surfaced as the calm "Recording Resumed" notice. No audio is
-    /// lost beyond the brief switch gap; the same mic WAV continues.
-    var onRecovered: (() -> Void)?
+    /// the pinned (or fallback) device. Passes the resolved device UID (`nil` = system default) so the
+    /// app can update the menu label without surfacing a banner. No audio is lost beyond the brief
+    /// switch gap; the same mic WAV continues.
+    var onRecovered: ((String?) -> Void)?
     /// Invoked when the mic cannot be (re)started within budget. Mic loss is NOT fatal to the session
     /// — system audio keeps recording — so the service records an anomaly and continues; the partial
     /// mic WAV captured up to the loss remains valid.
@@ -386,7 +387,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 // leaves the followed-to identity in the forensic trail (council AUTOFOLLOW-CONCRETE-UNRECORDED).
                 onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": resolved ?? "default",
                                                      "device": concrete ?? "unknown"])
-                onRecovered?()
+                onRecovered?(resolved)
                 return
             } catch MicCaptureError.stopped {
                 // A stop raced in; buildAndStart already retired the new session. Nothing to recover.

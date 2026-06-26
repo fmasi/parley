@@ -38,6 +38,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Reverse-channel callbacks to the app (wired in main.swift from the connection proxy).
     var onRestartInPlace: (() -> Void)?
     var onFailFatally: ((String) -> Void)?
+    /// Invoked when the mic auto-switches during a session (route change, fallback, re-pin).
+    /// Passes the resolved device UID (`nil` = system default) for menu-label refresh.
+    var onMicDeviceChanged: ((String?) -> Void)?
 
     private func record(
         _ kind: CaptureEventKind,
@@ -326,10 +329,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         mic.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
-        mic.onRecovered = { [weak self] in
-            // The mic self-healed a route change — surface the same calm "Recording Resumed" notice as
-            // a system-stream in-place restart. System audio never stopped.
-            self?.onRestartInPlace?()
+        mic.onRecovered = { [weak self] deviceId in
+            // Mic self-healed a route change — system audio never stopped.
+            // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
+            self?.onMicDeviceChanged?(deviceId)
         }
         mic.onUnavailable = { [weak self] reason in
             // Mic loss is NOT fatal: system audio keeps recording and the partial mic WAV stays valid.

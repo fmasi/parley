@@ -25,6 +25,7 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         } as? AudioCaptureClientProtocol
         service.onRestartInPlace = { client?.captureDidRestartInPlace() }
         service.onFailFatally = { reason in client?.captureDidFailFatally(reason: reason) }
+        service.onMicDeviceChanged = { deviceId in client?.micDeviceChanged?(to: deviceId) }
 
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }

@@ -60,6 +60,8 @@ import Foundation
     func captureDidRestartInPlace()
     /// Capture failed and could not be restarted within budget; the session must stop.
     func captureDidFailFatally(reason: String)
+    /// The mic auto-switched to a new device — `deviceId` is the new device UID (nil = system default).
+    @objc optional func micDeviceChanged(to deviceId: String?)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

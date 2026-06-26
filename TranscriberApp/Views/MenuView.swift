@@ -14,6 +14,13 @@ struct MenuView: View {
     @State private var xpcRetryCount = 0
     @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
+    /// True once the helper has reported which device it is actually capturing on (post auto-switch).
+    /// When false, `helperMicId` is meaningless and the UI falls back to `selectedMicId`.
+    @State private var helperMicKnown: Bool = false
+    /// The mic device the helper is ACTUALLY capturing on, reported via the reverse channel after an
+    /// auto-switch. Valid only when `helperMicKnown` is true. `nil` = helper on system default;
+    /// non-nil = helper on this specific device. Both cleared when recording stops.
+    @State private var helperMicId: String? = nil
     /// True while handleXPCCrash is mid-recovery (across its `await start()`). A user Stop in that
     /// window must not race the helper restart (council FV2) — it sets stopRequestedDuringRecovery
     /// and the recovery handler honors it once capture is back up.
@@ -190,17 +197,13 @@ struct MenuView: View {
         }
         // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
         // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
-        // — both keep recording and just surface a transient notice. Only a fatal give-up escalates.
-        captureClient.onRestartInPlace = { [appState] in
+        // — both keep recording silently. Only a fatal give-up escalates.
+        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
+        captureClient.onMicDeviceChanged = { [appState] deviceId in
             Task { @MainActor in
                 guard appState.isRecording else { return }
-                appState.interruptionWarning = "Audio device changed — recording resumed automatically."
-            }
-        }
-        captureClient.onBriefInterruption = { [appState] in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Recording briefly interrupted — continuing."
+                self.helperMicKnown = true
+                self.helperMicId = deviceId
             }
         }
         captureClient.onFatalFailure = { [appState, captureClient] _ in
@@ -227,6 +230,8 @@ struct MenuView: View {
                 baseName: baseName,
                 microphoneDeviceId: microphoneDeviceId
             )
+            helperMicKnown = true
+            helperMicId = microphoneDeviceId
 
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient,
@@ -258,6 +263,8 @@ struct MenuView: View {
             return
         }
         Logger.state.info("Recording stopped")
+        helperMicKnown = false
+        helperMicId = nil
         do {
             let sentinel = RecordingSentinel.read()
             let paths = try await captureClient.stop()
@@ -543,8 +550,12 @@ struct MenuView: View {
     }
 
     private var activeMicName: String {
-        AudioDeviceEnumerator.availableDevices()
-            .first(where: { $0.id == selectedMicId })?.name
+        // Prefer the helper-reported device (post auto-switch) over the user's configured preference.
+        // `helperMicKnown` is false until the helper reports back; when true, `helperMicId` wins
+        // (nil = system default, non-nil = specific device).
+        let id: String? = helperMicKnown ? helperMicId : selectedMicId
+        return AudioDeviceEnumerator.availableDevices()
+            .first(where: { $0.id == id })?.name
             ?? "System Default"
     }
 

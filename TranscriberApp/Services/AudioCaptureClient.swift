@@ -35,6 +35,10 @@ final class AudioCaptureClient {
     /// Invoked (reverse channel) when the helper could not restart within budget — fatal (#86).
     var onFatalFailure: (@Sendable (String) -> Void)?
 
+    /// Invoked (reverse channel) when the mic auto-switched to a new device — `deviceId` is the
+    /// resolved UID (`nil` = system default). Used to refresh the menu label without a banner.
+    var onMicDeviceChanged: (@Sendable (String?) -> Void)?
+
     func connect() {
         crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
@@ -323,6 +327,13 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
         Task { @MainActor [weak client] in
             Logger.audio.error("Helper reported fatal capture failure: \(reason, privacy: .public)")
             client?.onFatalFailure?(reason)
+        }
+    }
+
+    func micDeviceChanged(to deviceId: String?) {
+        Task { @MainActor [weak client] in
+            Logger.audio.info("Mic device auto-switched to: \(deviceId ?? "default", privacy: .public)")
+            client?.onMicDeviceChanged?(deviceId)
         }
     }
 }
