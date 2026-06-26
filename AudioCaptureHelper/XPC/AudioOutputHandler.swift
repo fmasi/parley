@@ -10,7 +10,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var micWriter: WavFileWriter
     private let systemFormatTracker = SystemFormatTracker()
     private var systemFormatInfo: FormatInfo?
-    private var micFormatDetected = false
+    /// Last mic format seen ("<rate>Hz/<ch>ch[/unsupported]"); re-recorded on change so a mid-stream
+    /// mic switch (and its format) is captured in diagnostics + provenance, not just the first one.
+    private var lastMicFormatKey: String?
     private let micConverter = AudioConverter()
 
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
@@ -175,17 +177,26 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }
 
-        guard let inputFormat = AVAudioFormat(streamDescription: asbd) else {
-            Logger.audio.error("Mic audio: unsupported format — rate=\(asbd.pointee.mSampleRate) ch=\(asbd.pointee.mChannelsPerFrame) flags=\(asbd.pointee.mFormatFlags)")
+        let channels = Int(asbd.pointee.mChannelsPerFrame)
+        let rate = asbd.pointee.mSampleRate
+
+        // macOS built-in mic arrays present 3+ interleaved channels, which
+        // AVAudioFormat(streamDescription:) rejects (returns nil) — the likely root cause of the
+        // "it used the wrong microphone, my voice was missing" reports when a route change falls
+        // back to the built-in mic. Down-pick channel 0 (the primary capsule) into a mono buffer the
+        // converter can normalize, instead of dropping every buffer.
+        if channels > 2 {
+            recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
+            handleMultichannelMic(sampleBuffer, channels: channels, rate: rate, asbd: asbd)
             return
         }
-        if !micFormatDetected {
-            micFormatDetected = true
-            record(.micFormatDetected, .info, [
-                "rate": "\(Int(asbd.pointee.mSampleRate))",
-                "channels": "\(asbd.pointee.mChannelsPerFrame)",
-            ])
+
+        guard let inputFormat = AVAudioFormat(streamDescription: asbd) else {
+            recordMicFormatIfChanged(rate: rate, channels: channels, supported: false)
+            Logger.audio.error("Mic audio: unsupported format — rate=\(rate) ch=\(channels) flags=\(asbd.pointee.mFormatFlags)")
+            return
         }
+        recordMicFormatIfChanged(rate: rate, channels: channels, supported: true)
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
         guard frameCount > 0 else { return }
 
@@ -230,6 +241,64 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         } catch {
             Logger.audio.error("Mic audio conversion failed: \(error, privacy: .public)")
+        }
+    }
+
+    /// Record the mic input format, but only when it CHANGES — so a mid-stream mic switch (and an
+    /// unsupported format) lands in diagnostics/provenance, not just the first format seen (#95).
+    private func recordMicFormatIfChanged(rate: Double, channels: Int, supported: Bool) {
+        let key = "\(Int(rate))Hz/\(channels)ch\(supported ? "" : "/unsupported")"
+        guard key != lastMicFormatKey else { return }
+        lastMicFormatKey = key
+        let severity: CaptureEvent.Severity = supported ? (channels > 2 ? .warning : .info) : .anomaly
+        record(.micFormatDetected, severity, [
+            "rate": "\(Int(rate))", "channels": "\(channels)", "supported": "\(supported)",
+        ])
+    }
+
+    /// Capture a multichannel (3+) mic by extracting channel 0 (the primary capsule) into a mono
+    /// buffer the AudioConverter can normalize. The built-in mic array delivers interleaved float
+    /// here; a non-float multichannel layout (not observed in practice) is dropped with a clear log.
+    private func handleMultichannelMic(
+        _ sampleBuffer: CMSampleBuffer, channels: Int, rate: Double,
+        asbd: UnsafePointer<AudioStreamBasicDescription>
+    ) {
+        guard asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
+            Logger.audio.error("Mic audio: unhandled non-float \(channels)ch format — dropping")
+            return
+        }
+        let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0,
+              let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
+              let monoBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: AVAudioFrameCount(frameCount)),
+              let dst = monoBuffer.floatChannelData?[0],
+              let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
+        else { return }
+        monoBuffer.frameLength = AVAudioFrameCount(frameCount)
+
+        var lengthAtOffset = 0, totalLength = 0
+        var rawPtr: UnsafeMutablePointer<Int8>?
+        guard CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0,
+            lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &rawPtr
+        ) == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
+
+        let srcCount = totalLength / MemoryLayout<Float32>.size
+        ptr.withMemoryRebound(to: Float32.self, capacity: srcCount) { src in
+            // De-interleave channel 0: samples at indices 0, channels, 2*channels, …
+            var f = 0, i = 0
+            while f < frameCount && i < srcCount {
+                dst[f] = src[i]
+                f += 1
+                i += channels
+            }
+        }
+
+        do {
+            let result = try micConverter.convert(monoBuffer)
+            result.samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+        } catch {
+            Logger.audio.error("Mic audio conversion failed (multichannel): \(error, privacy: .public)")
         }
     }
 
