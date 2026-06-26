@@ -120,6 +120,7 @@ cd audio_capture_helper && bash build.sh
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
 - [docs/gotchas.md](docs/gotchas.md) -- 48 platform-specific gotchas
+- [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 
 ## Key Gotchas
