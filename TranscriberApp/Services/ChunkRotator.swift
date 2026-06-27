@@ -18,7 +18,7 @@ final class ChunkRotator {
     private var timer: Timer?
     private var currentChunkIndex: Int = 0
     private var currentChunkStartTime: Date
-    private let onChunkFinalized: (FinalizedChunk) -> Void
+    private let onChunkFinalized: @MainActor (FinalizedChunk) -> Void
 
     init(
         captureClient: AudioCaptureClient,
@@ -26,7 +26,7 @@ final class ChunkRotator {
         sessionBaseName: String,
         chunkDurationMinutes: Int,
         startTime: Date,
-        onChunkFinalized: @escaping (FinalizedChunk) -> Void
+        onChunkFinalized: @MainActor @escaping (FinalizedChunk) -> Void
     ) {
         self.captureClient = captureClient
         self.outputDirectory = outputDirectory

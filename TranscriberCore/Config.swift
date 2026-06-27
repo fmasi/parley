@@ -62,7 +62,7 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
     }
 }
 
-public struct Config: Codable, Equatable {
+public struct Config: Codable, Equatable, Sendable {
     public var recordingDirectory: String
     public var silenceTimeoutMinutes: Int
     public var silenceDetectionEnabled: Bool

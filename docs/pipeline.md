@@ -193,16 +193,17 @@ Defaults: `vadSpeechThreshold = 0.5`, `qualityScoreThreshold = 0.3`.
 
 ### Stage 8 — Audio Archival
 
-**What it does:** Combines the two mono WAV files into a stereo AAC `.m4a` archive (L=mic, R=system) via `AVAssetWriter`. Source WAVs are deleted on success. Reads/writes in fixed 65536-frame blocks (~1 MB memory usage, O(block) not O(file)).
+**What it does:** Combines the two mono WAV files into a stereo AAC `.m4a` archive (L=mic, R=system) via `AVAssetWriter`. Source WAVs are deleted on success. Reads/writes in fixed 65536-frame blocks (~1 MB memory usage, O(block) not O(file)). WAV is a transient crash-resiliency format only — **every** chunk flushes to `.m4a` in the success path, including single-stream (no-mic) and single-chunk recordings (#59).
 
 **Input:** `systemAudio: URL`, `micAudio: URL`, `bitrateKbps: Int`. Output: `AudioArchiveResult(archivePath: URL)` (.m4a).
 
 **Key code path:**
 - `TranscriberCore/AudioArchiver.swift` — `archive(systemAudio:micAudio:outputDirectory:bitrateKbps:)` → `streamEncodeAAC()` → `verify()`
+- `TranscriberCore/AudioArchiver.swift` — `archiveSystemOnly(systemAudio:outputDirectory:bitrateKbps:)` for single-stream chunks (no mic file): same stereo layout with a silent left/mic channel, so re-ingestion is identical.
 
 Notes:
 - Channel convention: L = mic (local), R = system (remote). `AudioSourceResolver` reads this back for re-transcription.
-- Source WAVs are only deleted after verification (non-empty file with at least one audio track).
+- Source WAVs are only deleted after verification (non-empty file with at least one audio track). On a genuine archive failure the WAV is kept as a last-resort fallback (never delete a WAV that has no `.m4a` replacement).
 
 ### Stage 9 — Transcript Assembly
 
