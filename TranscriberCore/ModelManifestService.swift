@@ -93,9 +93,7 @@ public actor ModelManifestService {
                 corrupt.append(entry.relativePath)
             }
         }
-        if !missing.isEmpty { return .missing(paths: missing) }
-        if !corrupt.isEmpty { return .corrupt(paths: corrupt) }
-        return .ok
+        return ManifestVerification(manifestPresent: true, missing: missing, corrupt: corrupt)
     }
 
     // MARK: - Online update check (opt-in)
@@ -128,7 +126,8 @@ public actor ModelManifestService {
     }
 
     /// HF response shape we care about. Other fields are ignored.
-    private struct HFRepoResponse: Decodable {
+    /// Internal (not private) so the JSON-parsing path can be unit-tested directly.
+    struct HFRepoResponse: Decodable {
         let sha: String
         let lastModified: String?
     }

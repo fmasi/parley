@@ -59,15 +59,34 @@ public struct ModelManifest: Codable, Equatable, Sendable {
 }
 
 /// Result of comparing a manifest against the local cache contents.
-public enum ManifestVerification: Equatable, Sendable {
-    /// All files match the manifest.
-    case ok
+///
+/// Reports missing and corrupt files *together* in a single pass — `verify()` scans
+/// every file before returning, so a cache that is both missing some files and has
+/// corrupted others surfaces both sets at once instead of short-circuiting on the first.
+public struct ManifestVerification: Equatable, Sendable {
+    /// Whether a manifest existed to verify against at all. `false` means first run,
+    /// or the model was never downloaded through a build that wrote manifests.
+    public let manifestPresent: Bool
+    /// Listed files absent from the cache.
+    public let missing: [String]
+    /// Files present but with the wrong size or SHA-256.
+    public let corrupt: [String]
+
+    public init(manifestPresent: Bool, missing: [String], corrupt: [String]) {
+        self.manifestPresent = manifestPresent
+        self.missing = missing
+        self.corrupt = corrupt
+    }
+
     /// No manifest exists yet (first run, or never downloaded with manifest support).
-    case noManifest
-    /// One or more listed files are missing from the cache.
-    case missing(paths: [String])
-    /// One or more files exist but have wrong size or SHA-256.
-    case corrupt(paths: [String])
+    public static let noManifest = ManifestVerification(manifestPresent: false, missing: [], corrupt: [])
+    /// All files match the manifest.
+    public static let ok = ManifestVerification(manifestPresent: true, missing: [], corrupt: [])
+
+    /// A manifest exists and every listed file matches.
+    public var isOK: Bool { manifestPresent && missing.isEmpty && corrupt.isEmpty }
+    /// A manifest exists but one or more files are missing or corrupt.
+    public var hasProblems: Bool { manifestPresent && (!missing.isEmpty || !corrupt.isEmpty) }
 }
 
 /// Result of checking Hugging Face for a newer commit than the one in the manifest.
