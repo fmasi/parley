@@ -194,14 +194,14 @@ import Testing
 /// Minimal URLProtocol stub: each test installs a `responder` that maps a request to a
 /// canned (HTTPURLResponse, Data) pair. Lets us drive ModelManifestService's network path
 /// without hitting Hugging Face.
-final class MockURLProtocol: URLProtocol {
+final class ManifestMockURLProtocol: URLProtocol {
     nonisolated(unsafe) static var responder: ((URLRequest) -> (HTTPURLResponse, Data))?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let responder = MockURLProtocol.responder else {
+        guard let responder = ManifestMockURLProtocol.responder else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
@@ -216,7 +216,7 @@ final class MockURLProtocol: URLProtocol {
 
 private func makeMockSession() -> URLSession {
     let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [MockURLProtocol.self]
+    config.protocolClasses = [ManifestMockURLProtocol.self]
     return URLSession(configuration: config)
 }
 
@@ -273,7 +273,7 @@ private func iso8601(_ s: String) -> Date? {
 
 @Suite(.serialized) struct ModelManifestServiceNetworkTests {
     @Test func checkForUpdateParsesRemoteLastModifiedViaMockSession() async throws {
-        defer { MockURLProtocol.responder = nil }
+        defer { ManifestMockURLProtocol.responder = nil }
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("manifest-net-\(UUID().uuidString)")
         let svc = ModelManifestService(manifestDir: dir, session: makeMockSession())
@@ -286,14 +286,14 @@ private func iso8601(_ s: String) -> Date? {
         try Data([0x01]).write(to: cacheRoot.appendingPathComponent("a.bin"))
 
         // Baseline: record establishes a manifest with commit "AAA000".
-        MockURLProtocol.responder = { req in
+        ManifestMockURLProtocol.responder = { req in
             ok200(req, #"{"sha":"AAA000","lastModified":"2026-01-01T00:00:00.000Z"}"#)
         }
         let recorded = try await svc.record(repo: "Test/repo", cacheRoot: cacheRoot, sdkLabel: "test")
         #expect(recorded.commitSha == "AAA000")
 
         // Remote has since moved to "BBB111" with a new lastModified.
-        MockURLProtocol.responder = { req in
+        ManifestMockURLProtocol.responder = { req in
             ok200(req, #"{"sha":"BBB111","lastModified":"2026-05-01T12:00:00.000Z"}"#)
         }
         let status = await svc.checkForUpdate(repo: "Test/repo")
