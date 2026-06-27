@@ -58,6 +58,32 @@ public enum EchoDeduplicator {
         return dot / denom
     }
 
+    /// Compute the centroid (mean) of multiple embedding vectors stored as a single
+    /// flat concatenated `[Float]` array. Each individual embedding has `dim` floats.
+    ///
+    /// When `TranscriptionRunner` accumulates speaker databases across crash-recovery
+    /// segments with `existing + new`, each entry grows to `N × dim` floats where N
+    /// is the number of segments the speaker appeared in. This function collapses that
+    /// back to a single `dim`-float centroid so `cosineSimilarity` always receives
+    /// equal-length vectors regardless of per-speaker segment counts.
+    ///
+    /// If `accumulated.count == dim` (single embedding), returns it unchanged.
+    /// Falls back to returning `accumulated` as-is if lengths do not divide evenly.
+    public static func centroid(from accumulated: [Float], dim: Int) -> [Float] {
+        guard dim > 0, !accumulated.isEmpty, accumulated.count % dim == 0 else {
+            return accumulated
+        }
+        let count = accumulated.count / dim
+        guard count > 1 else { return accumulated }
+        var result = [Float](repeating: 0, count: dim)
+        for segment in 0..<count {
+            for d in 0..<dim {
+                result[d] += accumulated[segment * dim + d]
+            }
+        }
+        return result.map { $0 / Float(count) }
+    }
+
     // MARK: - Result
 
     public struct DeduplicationResult {
@@ -83,6 +109,22 @@ public enum EchoDeduplicator {
             "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .public), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .public), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
         )
 
+        // Infer the base embedding dimension from the shortest non-empty entry across both
+        // databases. When TranscriptionRunner accumulates embeddings across crash-recovery
+        // segments (existing + new), entries grow to N × dim floats; the speaker that
+        // appeared in the fewest segments still holds exactly `dim` floats, giving us the
+        // base dimension needed to compute centroids below.
+        var allLengths: [Int] = []
+        for v in localSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
+        for v in remoteSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
+        let baseDim = allLengths.min() ?? 0
+
+        // Pool each speaker's accumulated embedding vectors into a single centroid so that
+        // cosineSimilarity always receives equal-length vectors regardless of per-speaker
+        // segment counts. For single-segment databases (the common case) this is a no-op.
+        let localCentroidDb  = localSpeakerDatabase.mapValues  { centroid(from: $0, dim: baseDim) }
+        let remoteCentroidDb = remoteSpeakerDatabase.mapValues { centroid(from: $0, dim: baseDim) }
+
         let remoteSegments = segments.filter { $0.source == "remote" }
         guard !remoteSegments.isEmpty else {
             return DeduplicationResult(segments: segments, removedCount: 0)
@@ -98,7 +140,7 @@ public enum EchoDeduplicator {
             }
 
             if isEcho(local: seg, remoteSegments: remoteSegments,
-                      localDb: localSpeakerDatabase, remoteDb: remoteSpeakerDatabase,
+                      localDb: localCentroidDb, remoteDb: remoteCentroidDb,
                       temporalThreshold: tThresh, textThreshold: xThresh, embeddingThreshold: eThresh) {
                 removedCount += 1
             } else {
