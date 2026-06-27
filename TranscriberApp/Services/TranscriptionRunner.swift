@@ -91,7 +91,7 @@ final class TranscriptionRunner {
                 config: config
             )
             allSegments.append(contentsOf: systemResult.segments)
-            remoteSpeakerDb.merge(systemResult.speakerDatabase) { _, new in new }
+            remoteSpeakerDb.merge(systemResult.speakerDatabase) { existing, new in existing + new }
             audioPaths.append(segmentPair.system)
 
             var segmentMic: URL?
@@ -107,7 +107,7 @@ final class TranscriptionRunner {
                         config: config
                     )
                     allSegments.append(contentsOf: micResult.segments)
-                    localSpeakerDb.merge(micResult.speakerDatabase) { _, new in new }
+                    localSpeakerDb.merge(micResult.speakerDatabase) { existing, new in existing + new }
                     audioPaths.append(micPath)
                     segmentMic = micPath
                 }
