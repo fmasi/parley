@@ -114,7 +114,7 @@ public enum EchoDeduplicator {
         let eThresh = Float(embeddingThreshold ?? Double(defaultEmbeddingThreshold))
 
         Logger.transcription.debug(
-            "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .public), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .public), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
+            "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .private), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .private), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
         )
 
         // Infer the base embedding dimension from the GCD of all non-empty entry lengths
@@ -184,7 +184,7 @@ public enum EchoDeduplicator {
         guard let localEmbedding = localDb[localSpeakerName],
               !localEmbedding.isEmpty else {
             Logger.transcription.debug(
-                "Echo dedup: no embedding for '\(localSpeakerName, privacy: .public)' (localDb keys: \(Array(localDb.keys), privacy: .public))"
+                "Echo dedup: no embedding for '\(localSpeakerName, privacy: .private)' (localDb keys: \(Array(localDb.keys), privacy: .private))"
             )
             return false
         }
@@ -201,12 +201,12 @@ public enum EchoDeduplicator {
 
         guard bestSimilarity > embeddingThreshold else {
             Logger.transcription.debug(
-                "Echo dedup: embedding gate FAILED for '\(localSpeakerName, privacy: .public)' — best match '\(bestRemoteKey, privacy: .public)' at \(String(format: "%.3f", bestSimilarity), privacy: .public) (threshold \(embeddingThreshold, privacy: .public))"
+                "Echo dedup: embedding gate FAILED for '\(localSpeakerName, privacy: .private)' — best match '\(bestRemoteKey, privacy: .private)' at \(String(format: "%.3f", bestSimilarity), privacy: .public) (threshold \(embeddingThreshold, privacy: .public))"
             )
             return false
         }
         Logger.transcription.debug(
-            "Echo dedup: embedding gate PASSED for '\(localSpeakerName, privacy: .public)' — matches '\(bestRemoteKey, privacy: .public)' at \(String(format: "%.3f", bestSimilarity), privacy: .public)"
+            "Echo dedup: embedding gate PASSED for '\(localSpeakerName, privacy: .private)' — matches '\(bestRemoteKey, privacy: .private)' at \(String(format: "%.3f", bestSimilarity), privacy: .public)"
         )
 
         // The local voice resembles `bestRemoteKey`. Only that remote speaker's
@@ -238,11 +238,11 @@ public enum EchoDeduplicator {
         for (remote, overlap) in overlappingRemotes {
             let textSim = textSimilarity(local.text, remote.text)
             Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs '\(remote.speaker, privacy: .public)' — temporal=\(String(format: "%.3f", overlap), privacy: .public) text=\(String(format: "%.3f", textSim), privacy: .public) (thresholds: \(String(format: "%.2f", temporalThreshold), privacy: .public)/\(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" remote=\"\(remote.text.prefix(60), privacy: .private)\""
+                "Echo dedup: '\(localSpeakerName, privacy: .private)' vs '\(remote.speaker, privacy: .private)' — temporal=\(String(format: "%.3f", overlap), privacy: .public) text=\(String(format: "%.3f", textSim), privacy: .public) (thresholds: \(String(format: "%.2f", temporalThreshold), privacy: .public)/\(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" remote=\"\(remote.text.prefix(60), privacy: .private)\""
             )
             if textSim > textThreshold {
                 Logger.transcription.debug(
-                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .public)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of '\(remote.speaker, privacy: .public)'"
+                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of '\(remote.speaker, privacy: .private)'"
                 )
                 return true
             }
@@ -254,10 +254,10 @@ public enum EchoDeduplicator {
                 let containment = textContainment(local.text, remote.text)
                 if containment > textThreshold {
                     Logger.transcription.debug(
-                        "Echo dedup: '\(localSpeakerName, privacy: .public)' vs '\(remote.speaker, privacy: .public)' — containment=\(String(format: "%.3f", containment), privacy: .public) (Jaccard was \(String(format: "%.3f", textSim), privacy: .public))"
+                        "Echo dedup: '\(localSpeakerName, privacy: .private)' vs '\(remote.speaker, privacy: .private)' — containment=\(String(format: "%.3f", containment), privacy: .public) (Jaccard was \(String(format: "%.3f", textSim), privacy: .public))"
                     )
                     Logger.transcription.debug(
-                        "Echo dedup: REMOVING '\(localSpeakerName, privacy: .public)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — contained in '\(remote.speaker, privacy: .public)'"
+                        "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — contained in '\(remote.speaker, privacy: .private)'"
                     )
                     return true
                 }
@@ -271,11 +271,11 @@ public enum EchoDeduplicator {
             let windowSim = textSimilarity(local.text, windowText)
             let speakers = Array(Set(sorted.map(\.0.speaker))).joined(separator: "+")
             Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs WINDOW(\(sorted.count, privacy: .public) segs) — text=\(String(format: "%.3f", windowSim), privacy: .public) (threshold: \(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" window=\"\(windowText.prefix(80), privacy: .private)\""
+                "Echo dedup: '\(localSpeakerName, privacy: .private)' vs WINDOW(\(sorted.count, privacy: .public) segs) — text=\(String(format: "%.3f", windowSim), privacy: .public) (threshold: \(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" window=\"\(windowText.prefix(80), privacy: .private)\""
             )
             if windowSim > textThreshold {
                 Logger.transcription.debug(
-                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .public)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of window [\(speakers, privacy: .public)]"
+                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of window [\(speakers, privacy: .private)]"
                 )
                 return true
             }

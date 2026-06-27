@@ -149,6 +149,59 @@ struct SpeakerReconcilerTests {
         #expect(mapping[1]?.count == 1)
     }
 
+    // MARK: - localSpeakerDatabase merge (#64)
+
+    @Test func reconcileIncludesLocalOnlySpeaker() {
+        // localSpeakerDatabase carries a speaker key absent from speakerDatabase.
+        // After the merge, that local speaker must participate in reconciliation.
+        var remoteEmb = [Float](repeating: 0, count: 256); remoteEmb[0] = 1.0
+        var localEmb  = [Float](repeating: 0, count: 256); localEmb[1] = 1.0
+
+        let chunk = ProcessedChunk(
+            index: 0,
+            startTime: Date(),
+            audioPath: "/tmp/chunk0.wav",
+            segments: [],
+            speakerDatabase: ["spk_0": remoteEmb],
+            localSpeakerDatabase: ["local_spk": localEmb]
+        )
+
+        let mapping = SpeakerReconciler.reconcile(chunks: [chunk])
+        // Both the remote and the local-only speaker get seeded on the first chunk.
+        #expect(mapping[0]?["spk_0"] == "spk_0")
+        #expect(mapping[0]?["local_spk"] == "local_spk")
+    }
+
+    @Test func reconcileRemoteWinsOnKeyCollision() {
+        // Both databases share key "spk_0" with DIFFERENT embeddings.
+        // The merge must keep the REMOTE embedding (axis 1), not the local one (axis 0).
+        var localEmb  = [Float](repeating: 0, count: 256); localEmb[0] = 1.0
+        var remoteEmb = [Float](repeating: 0, count: 256); remoteEmb[1] = 1.0
+
+        let chunk0 = ProcessedChunk(
+            index: 0,
+            startTime: Date(),
+            audioPath: "/tmp/chunk0.wav",
+            segments: [],
+            speakerDatabase: ["spk_0": remoteEmb],
+            localSpeakerDatabase: ["spk_0": localEmb]
+        )
+
+        // Probe matches the REMOTE embedding (axis 1). If remote won the merge,
+        // it matches spk_0; if local had won (axis 0), it would be orthogonal → new ID.
+        var probeEmb = [Float](repeating: 0, count: 256); probeEmb[1] = 1.0
+        let chunk1 = ProcessedChunk(
+            index: 1,
+            startTime: Date(),
+            audioPath: "/tmp/chunk1.wav",
+            segments: [],
+            speakerDatabase: ["probe": probeEmb]
+        )
+
+        let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], threshold: 0.65)
+        #expect(mapping[1]?["probe"] == "spk_0")
+    }
+
     @Test func reconcileSingleSpeakerThroughout() {
         var emb = [Float](repeating: 0, count: 256)
         emb[0] = 1.0
