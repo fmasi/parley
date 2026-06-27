@@ -212,23 +212,25 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
 
-        // 1. Speaker reconciliation
-        Logger.transcription.info("Reconciling speakers across \(sessionState.chunks.count) chunks (cosine threshold: 0.65)")
+        // 1. Speaker reconciliation — chunks must be in recording order so the reconciler's
+        // greedy cosine matching builds reference embeddings chronologically. (#56)
+        let sortedChunks = sessionState.chunks.sorted { $0.index < $1.index }
+        Logger.transcription.info("Reconciling speakers across \(sortedChunks.count) chunks (cosine threshold: 0.65)")
         let speakerMapping = SpeakerReconciler.reconcile(
-            chunks: sessionState.chunks,
+            chunks: sortedChunks,
             threshold: 0.65
         )
 
         // 2. Merge chunks
         let mergeResult = TranscriptMerger.merge(
-            chunks: sessionState.chunks,
+            chunks: sortedChunks,
             speakerMapping: speakerMapping,
             meetingStart: sessionState.meetingStart
         )
 
         // 3. Convert MergedSegments to LabeledSegments for existing assembler
         var allSegments: [LabeledSegment] = []
-        for chunk in sessionState.chunks {
+        for chunk in sortedChunks {
             let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
             let chunkMapping = speakerMapping[chunk.index] ?? [:]
             for seg in chunk.segments {
@@ -253,8 +255,9 @@ final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
-        // 5. Audio paths from chunks
-        let chunkAudioPaths = sessionState.chunks.map {
+        // 5. Audio paths from chunks — must be in index order so AudioConcatenator
+        // stitches them chronologically. (#56)
+        let chunkAudioPaths = sortedChunks.map {
             outputDirectory.appendingPathComponent($0.audioPath)
         }
 

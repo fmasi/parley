@@ -50,7 +50,10 @@ public enum SpeakerReconciler {
         var nextGlobalIndex: Int = 0
 
         for chunk in chunks {
-            let db = chunk.speakerDatabase
+            // Merge remote (system) and local (mic) speaker databases so the reconciler
+            // can match speakers regardless of which audio stream they came from. (#64)
+            // Remote embeddings take precedence on key collision.
+            let db = chunk.localSpeakerDatabase.merging(chunk.speakerDatabase) { _, remote in remote }
             var mapping: [String: String] = [:]
 
             if referenceEmbeddings.isEmpty {

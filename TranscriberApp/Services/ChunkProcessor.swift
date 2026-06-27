@@ -140,8 +140,10 @@ final class ChunkProcessor {
             )
         }
 
-        // 5. Speaker database from system audio diarization (used for cross-chunk reconciliation)
+        // 5. Speaker databases from both streams (used for cross-chunk reconciliation, #64)
         let speakerDatabase = systemResult.speakerDatabase
+        // Local stream: only present when diarization ran on the mic stream.
+        let localSpeakerDatabase = hasDualStream ? micResult.speakerDatabase : [:]
 
         // 6. Archive WAV → AAC (store filename only for session.json portability)
         var audioPath = systemURL.lastPathComponent
@@ -175,6 +177,7 @@ final class ChunkProcessor {
             audioPath: audioPath,
             segments: chunkSegments,
             speakerDatabase: speakerDatabase,
+            localSpeakerDatabase: localSpeakerDatabase,
             echoSegmentsRemoved: echoRemoved
         )
 
