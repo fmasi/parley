@@ -48,20 +48,52 @@ public func discoverSegments(
          dir.appendingPathComponent("\(root)-\(idx)_mic.wav"))
     }
 
+    // Observability (#89): record the recovery path and the raw discovery before any filtering.
+    let mode = zeroIndexed ? "0-indexed" : "legacy"
+    Logger.transcription.debug(
+        "SegmentDiscovery: base=\(baseName, privacy: .public) root=\(root, privacy: .public) mode=\(mode, privacy: .public) suffixed-indices=[\(indices.map(String.init).joined(separator: ","), privacy: .public)]"
+    )
+
     var segments: [(system: URL, mic: URL)]
     if zeroIndexed {
         segments = indices.map(pair)
         if segments.isEmpty {
             // Fallback: nothing on disk, return the original pair.
+            Logger.transcription.warning(
+                "SegmentDiscovery: 0-indexed mode found no \(root, privacy: .public)-N.wav on disk; falling back to the original pair"
+            )
             return [(systemAudio, micAudio)]
         }
     } else {
         // Legacy naming: base is segment "1" (always included); suffixed segments start at -2 (never -1).
+        // A `<root>-1.wav` should never exist (numbering jumps base → -2). If one ever appears it would
+        // be filtered out silently — counter to the never-silently-lose-audio principle — so warn (#89).
+        if indices.contains(1) {
+            Logger.transcription.warning(
+                "SegmentDiscovery: legacy mode found unexpected \(root, privacy: .public)-1.wav; legacy numbering jumps base → -2, so this file is being dropped (possible numbering bug)"
+            )
+        }
         segments = [(systemAudio, micAudio)] + indices.filter { $0 >= 2 }.map(pair)
     }
 
+    // Surface gaps in the discovered index sequence. Discovery is gap-tolerant (a missing middle
+    // segment is harmless given absolute timestamps), but a hole is worth recording during a
+    // crash-recovery investigation (#89).
+    if let lo = indices.first, let hi = indices.last {
+        let present = Set(indices)
+        let missing = (lo...hi).filter { !present.contains($0) }
+        if !missing.isEmpty {
+            Logger.transcription.info(
+                "SegmentDiscovery: gap(s) in segment indices, missing [\(missing.map(String.init).joined(separator: ","), privacy: .public)] (gap-tolerant, remaining segments still stitched)"
+            )
+        }
+    }
+
     if segments.count > 1 {
-        Logger.transcription.info("Discovered \(segments.count) audio segments for stitching")
+        let ordered = segments.map { $0.system.lastPathComponent }.joined(separator: ", ")
+        Logger.transcription.info(
+            "Discovered \(segments.count) audio segments for stitching (\(mode, privacy: .public) mode): \(ordered, privacy: .public)"
+        )
     }
 
     return segments

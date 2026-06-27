@@ -62,7 +62,9 @@ enum CLIHandler {
     }
 
     private static func handleTranscribe(_ opts: TranscribeOptions) async throws {
-        // Spawn log stream for --debug (streams unified logs to stderr alongside normal output)
+        // Spawn log stream for --debug (streams unified logs to stderr alongside normal output).
+        // If the subprocess fails to launch (binary missing, sandbox denial, …) we degrade
+        // gracefully: warn and continue without the debug stream rather than crashing (#62).
         var logProcess: Process?
         if opts.debug {
             let proc = Process()
@@ -72,10 +74,21 @@ enum CLIHandler {
                 "--predicate", "subsystem == \"eu.fmasi.parley\""
             ]
             proc.standardOutput = FileHandle.standardError
-            try? proc.run()
-            logProcess = proc
+            do {
+                try proc.run()
+                logProcess = proc
+            } catch {
+                // Leave logProcess nil so teardown never terminates an unlaunched Process.
+                fputs("Warning: --debug log stream unavailable: \(error.localizedDescription)\n", stderr)
+                Logger.transcription.warning("--debug: failed to launch /usr/bin/log: \(error.localizedDescription, privacy: .public)")
+            }
         }
-        defer { logProcess?.terminate() }
+        // Only terminate a process that actually launched and is still running (#62).
+        defer {
+            if let logProcess, logProcess.isRunning {
+                logProcess.terminate()
+            }
+        }
 
         let config = ConfigManager.shared.config
 
