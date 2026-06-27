@@ -4,15 +4,22 @@ import TranscriberCore
 
 /// Processes finalized chunks in the background: transcribe both streams,
 /// diarize, VAD, speaker assignment, archive to AAC, and persist to session.json.
+///
+/// The class is `@MainActor` so the `inFlightTasks` bookkeeping is serialized without a lock (#52).
+/// The heavy per-chunk work (`processChunkAsync` / `transcribeStream`) is `nonisolated` so the ML
+/// transcription, diarization, VAD and AAC encoding run off the main actor — only enqueueing and
+/// awaiting tasks touches the main actor. Immutable dependencies are `nonisolated let` so the
+/// off-actor work can read them without hopping back to the main actor.
+@MainActor
 final class ChunkProcessor {
-    private let config: Config
-    private let outputDirectory: URL
-    private let transcriber: any TranscriptionEngine
-    private let diarizer: (any DiarizationProvider)?
-    private let vadSpeechMap = VadSpeechMap()
-    private let stateStore: StateStore
-    private let wavHeaderSize = 44
-    private let taskPriority: TaskPriority
+    private nonisolated let config: Config
+    private nonisolated let outputDirectory: URL
+    private nonisolated let transcriber: any TranscriptionEngine
+    private nonisolated let diarizer: (any DiarizationProvider)?
+    private nonisolated let vadSpeechMap = VadSpeechMap()
+    private nonisolated let stateStore: StateStore
+    private nonisolated let wavHeaderSize = 44
+    private nonisolated let taskPriority: TaskPriority
     private var inFlightTasks: [Task<Void, Never>] = []
 
     /// Actor-isolated mutable session state — replaces NSLock.
@@ -63,7 +70,8 @@ final class ChunkProcessor {
     }
 
     /// Process the final chunk synchronously (called at end-of-recording).
-    func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
+    /// `nonisolated` so the heavy work runs off the main actor even when awaited from `@MainActor`.
+    nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
         await processChunkAsync(chunk)
     }
 
@@ -82,7 +90,7 @@ final class ChunkProcessor {
 
     // MARK: - Private
 
-    private func processChunkAsync(_ chunk: ChunkRotator.FinalizedChunk) async {
+    private nonisolated func processChunkAsync(_ chunk: ChunkRotator.FinalizedChunk) async {
         let startTime = ContinuousClock.now
         Logger.transcription.info(
             "Chunk \(chunk.index, privacy: .public) processing started (qos: \(self.config.chunkProcessingQos, privacy: .public))"
@@ -145,29 +153,45 @@ final class ChunkProcessor {
         // Local stream: only present when diarization ran on the mic stream.
         let localSpeakerDatabase = hasDualStream ? micResult.speakerDatabase : [:]
 
-        // 6. Archive WAV → AAC (store filename only for session.json portability)
+        // 6. Archive WAV(s) → AAC (store filename only for session.json portability).
+        //
+        // WAV is only a transient crash-resiliency format: every chunk must flush to .m4a in the
+        // success path so no lossless WAV is left behind wasting space — regardless of stream count
+        // or chunk count (#59). The mic WAV is archived whenever it exists on disk (not gated on
+        // hasDualStream, which is segment-based) so a mic file that produced no segments is still
+        // consumed instead of orphaned. The ONLY time a WAV survives is a genuine archive failure:
+        // deleting a WAV that has no .m4a replacement would be real data loss.
         var audioPath = systemURL.lastPathComponent
-        if hasDualStream {
-            do {
-                let archiveResult = try await AudioArchiver.archive(
+        let micFileExists = FileManager.default.fileExists(atPath: chunk.micPath)
+        do {
+            let archiveResult: AudioArchiveResult
+            if micFileExists {
+                archiveResult = try await AudioArchiver.archive(
                     systemAudio: systemURL,
                     micAudio: micURL,
                     outputDirectory: outputDirectory,
                     bitrateKbps: config.archiveBitrateKbps
                 )
-                audioPath = archiveResult.archivePath.lastPathComponent
-                Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
-
-                // Enforce storage quota
-                try StorageManager.enforceQuota(
-                    in: outputDirectory,
-                    limitHours: config.audioArchiveLimitHours,
-                    bitrateKbps: config.archiveBitrateKbps,
-                    protectedFile: archiveResult.archivePath
+            } else {
+                archiveResult = try await AudioArchiver.archiveSystemOnly(
+                    systemAudio: systemURL,
+                    outputDirectory: outputDirectory,
+                    bitrateKbps: config.archiveBitrateKbps
                 )
-            } catch {
-                Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAVs: \(error, privacy: .public)")
             }
+            audioPath = archiveResult.archivePath.lastPathComponent
+            Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
+
+            // Enforce storage quota
+            try StorageManager.enforceQuota(
+                in: outputDirectory,
+                limitHours: config.audioArchiveLimitHours,
+                bitrateKbps: config.archiveBitrateKbps,
+                protectedFile: archiveResult.archivePath
+            )
+        } catch {
+            // Archive failed — keep the WAV(s) as a last-resort fallback (audioPath stays .wav).
+            Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s): \(error, privacy: .public)")
         }
 
         // 7. Create ProcessedChunk
@@ -203,7 +227,7 @@ final class ChunkProcessor {
     }
 
     /// Transcribe a single audio stream, with optional diarization + VAD.
-    private func transcribeStream(
+    private nonisolated func transcribeStream(
         audioPath: URL,
         source: String,
         audioSource: AudioSourceType,

@@ -86,6 +86,57 @@ public enum AudioArchiver {
         return AudioArchiveResult(archivePath: outputURL)
     }
 
+    /// Encode a single mono WAV (system audio only — no mic stream) into a stereo AAC .m4a
+    /// and delete the source WAV on success.
+    ///
+    /// WAV is only a transient crash-resiliency format; single-stream chunks must still flush to
+    /// .m4a so no lossless WAV is left behind wasting space (#59). The output keeps the standard
+    /// L=mic, R=system channel layout — the mic (left) channel is silent — so `AudioSourceResolver`
+    /// reads it back identically to a dual-stream archive.
+    public static func archiveSystemOnly(
+        systemAudio: URL,
+        outputDirectory: URL,
+        bitrateKbps: Int
+    ) async throws -> AudioArchiveResult {
+        let baseName = systemAudio.deletingPathExtension().lastPathComponent
+        let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
+
+        Logger.files.info("AudioArchiver: starting system-only archive '\(baseName)'")
+
+        let sysFile: AVAudioFile
+        do {
+            sysFile = try AVAudioFile(forReading: systemAudio)
+        } catch {
+            throw AudioArchiverError.cannotReadAudio("system: \(error.localizedDescription)")
+        }
+
+        let sampleRate = sysFile.processingFormat.sampleRate
+
+        try? FileManager.default.removeItem(at: outputURL)
+
+        do {
+            try await streamEncodeAAC(
+                micFile: nil,
+                sysFile: sysFile,
+                sampleRate: sampleRate,
+                outputURL: outputURL,
+                bitrateKbps: bitrateKbps
+            )
+        } catch {
+            // Keep WAV on failure.
+            Logger.files.error("AudioArchiver: system-only encoding failed — \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: outputURL)
+            throw AudioArchiverError.encodingFailed(error.localizedDescription)
+        }
+
+        try await verify(outputURL: outputURL)
+
+        try? FileManager.default.removeItem(at: systemAudio)
+
+        Logger.files.info("AudioArchiver: done (system-only) — \(outputURL.lastPathComponent)")
+        return AudioArchiveResult(archivePath: outputURL)
+    }
+
     /// A system + optional-mic segment to archive.
     public struct SegmentPair: Sendable {
         public let system: URL
@@ -133,8 +184,10 @@ public enum AudioArchiver {
     /// Stream both mono WAVs into a stereo AAC .m4a via AVAssetWriter.
     /// Reads fixed-size blocks, interleaves on the fly, and releases each block
     /// before reading the next. Memory usage is O(blockFrames) — ~1 MB.
+    ///
+    /// `micFile` is optional: when nil (system-only archive, #59) the left/mic channel is silent.
     private static func streamEncodeAAC(
-        micFile: AVAudioFile,
+        micFile: AVAudioFile?,
         sysFile: AVAudioFile,
         sampleRate: Double,
         outputURL: URL,
@@ -180,7 +233,7 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed("Cannot allocate read buffers")
         }
 
-        let totalFrames = max(micFile.length, sysFile.length)
+        let totalFrames = max(micFile?.length ?? 0, sysFile.length)
         var frameOffset: Int64 = 0
 
         // Build ASBD for interleaved stereo Float32.
@@ -222,9 +275,9 @@ public enum AudioArchiver {
 
             let framesToProcess = Int(min(Int64(blockFrames), totalFrames - frameOffset))
 
-            // Read mic block (zeros past EOF).
+            // Read mic block (zeros past EOF, or always silent when there is no mic file).
             let micFrames: Int
-            if micFile.framePosition < micFile.length {
+            if let micFile, micFile.framePosition < micFile.length {
                 let toRead = AVAudioFrameCount(min(
                     Int64(framesToProcess),
                     micFile.length - micFile.framePosition

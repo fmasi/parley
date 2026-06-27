@@ -103,6 +103,12 @@ public enum AudioConcatenator {
 
     // MARK: - Private
 
+    /// Hard cap on a single export pass. `AVAssetExportSession` can hang indefinitely on a
+    /// corrupt composition; this bounds it so `finalize()` fails loudly instead of blocking
+    /// forever. 5 minutes is generous — passthrough is near-instant and AAC re-encode runs many
+    /// times faster than real time on Apple Silicon, so any longer means the export is stuck. (#51)
+    private static let exportTimeout: Duration = .seconds(300)
+
     private static func export(
         composition: AVMutableComposition,
         to outputURL: URL,
@@ -113,7 +119,9 @@ public enum AudioConcatenator {
             throw AudioConcatenatorError.exportFailed("Cannot create export session for preset \(preset)")
         }
         do {
-            try await session.export(to: outputURL, as: fileType)
+            try await exportWithTimeout(session: session, to: outputURL, as: fileType, preset: preset)
+        } catch let error as AudioConcatenatorError {
+            throw error
         } catch {
             throw AudioConcatenatorError.exportFailed("\(preset): \(error.localizedDescription)")
         }
@@ -131,6 +139,35 @@ public enum AudioConcatenator {
             throw AudioConcatenatorError.exportFailed("\(preset): output has no audio tracks")
         }
         return outputURL
+    }
+
+    /// Run the export, racing it against `exportTimeout`. If the timeout wins, cancel the
+    /// export session and throw, so a corrupt composition can't wedge the pipeline forever. (#51)
+    private static func exportWithTimeout(
+        session: AVAssetExportSession,
+        to outputURL: URL,
+        as fileType: AVFileType,
+        preset: String
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await session.export(to: outputURL, as: fileType)
+            }
+            group.addTask {
+                try await Task.sleep(for: exportTimeout)
+                throw AudioConcatenatorError.exportFailed(
+                    "\(preset): export timed out after \(exportTimeout)"
+                )
+            }
+            defer { group.cancelAll() }
+            do {
+                // Wait for whichever finishes first (export success, export error, or timeout).
+                try await group.next()
+            } catch {
+                session.cancelExport()
+                throw error
+            }
+        }
     }
 
     private static func deleteSources(_ sources: [URL]) {

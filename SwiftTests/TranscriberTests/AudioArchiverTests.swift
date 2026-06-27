@@ -103,6 +103,54 @@ struct AudioArchiverTests {
         }
     }
 
+    // MARK: - archiveSystemOnly (single-stream chunks flush to m4a too, #59)
+
+    @Test func archiveSystemOnlyCreatesM4aAndDeletesWav() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("solo-0.wav")
+        try Self.createTestWav(at: systemWav, frequency: 660)
+
+        let result = try await AudioArchiver.archiveSystemOnly(
+            systemAudio: systemWav,
+            outputDirectory: dir,
+            bitrateKbps: 64
+        )
+
+        #expect(result.archivePath.lastPathComponent == "solo-0.m4a")
+        #expect(FileManager.default.fileExists(atPath: result.archivePath.path))
+        // Source WAV is deleted — no lossless WAV left behind.
+        #expect(!FileManager.default.fileExists(atPath: systemWav.path))
+
+        // Keeps the standard stereo (L=mic silent, R=system) layout for re-ingestion.
+        let file = try AVAudioFile(forReading: result.archivePath)
+        #expect(file.processingFormat.channelCount == 2)
+    }
+
+    @Test func archiveSystemOnlyKeepsWavOnFailure() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("solo.wav")
+        try Data([0, 1, 2]).write(to: systemWav)  // invalid WAV
+
+        do {
+            _ = try await AudioArchiver.archiveSystemOnly(
+                systemAudio: systemWav,
+                outputDirectory: dir,
+                bitrateKbps: 64
+            )
+            Issue.record("Expected archiveSystemOnly to throw on invalid input")
+        } catch {
+            #expect(FileManager.default.fileExists(atPath: systemWav.path))
+        }
+    }
+
     // MARK: - archiveAll (recovery: archive every contributing segment)
 
     @Test func archiveAllArchivesEverySegment() async throws {
