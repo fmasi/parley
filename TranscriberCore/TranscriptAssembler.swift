@@ -12,7 +12,8 @@ public enum TranscriptAssembler {
         diarization: Bool,
         dualStream: Bool,
         echoSegmentsRemoved: Int = 0,
-        provenance: CaptureProvenance? = nil
+        provenance: CaptureProvenance? = nil,
+        recordedAt: Date? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -24,6 +25,12 @@ public enum TranscriptAssembler {
             "dual_stream": dualStream,
             "software_version": AppVersion.gitDescription,
         ]
+        // Recording-start wall-clock time (#49): the canonical date of the meeting. Stamped
+        // here so summaries (and any downstream consumer) date the record by when it was
+        // recorded, not when it was later transcribed/summarized. ISO8601 for stable parsing.
+        if let recordedAt {
+            metadata["recorded_at"] = ISO8601DateFormatter().string(from: recordedAt)
+        }
         if echoSegmentsRemoved > 0 {
             metadata["echo_segments_removed"] = echoSegmentsRemoved
         }

@@ -145,4 +145,152 @@ struct OpenAISummaryProviderTests {
         // Curb the model's tendency to log discussion/intent as a "decision".
         #expect(OpenAISummaryProvider.systemPrompt.contains("explicit"))
     }
+
+    // MARK: - Retry policy (#50)
+
+    @Test func isRetryableCoversRateLimitAndOverload() {
+        #expect(OpenAISummaryProvider.isRetryable(429))
+        #expect(OpenAISummaryProvider.isRetryable(503))
+        #expect(!OpenAISummaryProvider.isRetryable(200))
+        #expect(!OpenAISummaryProvider.isRetryable(400))
+        #expect(!OpenAISummaryProvider.isRetryable(500))
+    }
+
+    @Test func parseRetryAfterSeconds() {
+        #expect(OpenAISummaryProvider.parseRetryAfter("5") == 5)
+        #expect(OpenAISummaryProvider.parseRetryAfter("  12 ") == 12)
+        #expect(OpenAISummaryProvider.parseRetryAfter("-1") == nil)
+        #expect(OpenAISummaryProvider.parseRetryAfter("not-a-number") == nil)
+    }
+
+    @Test func parseRetryAfterHTTPDate() throws {
+        // A date ~10s in the future should yield a positive, near-10 wait.
+        let future = Date().addingTimeInterval(10)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "GMT")
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        let header = f.string(from: future)
+        let parsed = try #require(OpenAISummaryProvider.parseRetryAfter(header))
+        #expect(parsed > 5 && parsed <= 11)
+    }
+
+    @Test func retryDelayUsesExponentialBackoffWhenNoHeader() {
+        let provider = OpenAISummaryProvider(
+            endpoint: "https://api.openai.com/v1", apiKey: "k", model: "m",
+            session: .shared, retryBaseDelay: 1.0
+        )
+        let response = HTTPURLResponse(
+            url: URL(string: "https://x")!, statusCode: 429, httpVersion: nil, headerFields: nil
+        )!
+        #expect(provider.retryDelay(attempt: 0, response: response) == 1)
+        #expect(provider.retryDelay(attempt: 1, response: response) == 2)
+        #expect(provider.retryDelay(attempt: 2, response: response) == 4)
+    }
+
+    @Test func retryDelayHonorsRetryAfterHeader() {
+        let provider = OpenAISummaryProvider(
+            endpoint: "https://api.openai.com/v1", apiKey: "k", model: "m",
+            session: .shared, retryBaseDelay: 1.0
+        )
+        let response = HTTPURLResponse(
+            url: URL(string: "https://x")!, statusCode: 429, httpVersion: nil,
+            headerFields: ["Retry-After": "7"]
+        )!
+        #expect(provider.retryDelay(attempt: 0, response: response) == 7)
+    }
+}
+
+@Suite(.serialized)
+struct OpenAISummaryProviderRetryTests {
+
+    private func makeProvider() -> OpenAISummaryProvider {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        return OpenAISummaryProvider(
+            endpoint: "https://api.openai.com/v1",
+            apiKey: "sk-test",
+            model: "gpt-4o-mini",
+            session: session,
+            retryBaseDelay: 0  // no real sleeping under test
+        )
+    }
+
+    private let metadata = SummaryMetadata(
+        sessionName: "test", date: Date(timeIntervalSince1970: 0),
+        durationSeconds: 60, speakers: ["Alice"]
+    )
+    private let segments = [SummarySegment(start: 0, end: 5, speaker: "Alice", text: "hi")]
+
+    private static func okBody() -> Data {
+        """
+        {"choices": [{"message": {"content": "## Summary\\nDone."}}]}
+        """.data(using: .utf8)!
+    }
+
+    @Test func retriesOn429ThenSucceeds() async throws {
+        MockURLProtocol.reset()
+        MockURLProtocol.responses = [
+            (429, ["Retry-After": "0"], Data("rate limited".utf8)),
+            (200, [:], Self.okBody()),
+        ]
+
+        let provider = makeProvider()
+        let content = try await provider.summarize(segments: segments, metadata: metadata)
+
+        #expect(content.contains("Done."))
+        #expect(MockURLProtocol.requestCount == 2)  // one 429, one success
+    }
+
+    @Test func retriesExhaustedThrows() async throws {
+        MockURLProtocol.reset()
+        // Always 429 — should give up after 1 initial + maxRetries attempts and throw.
+        MockURLProtocol.responses = [(429, [:], Data("rate limited".utf8))]
+
+        let provider = makeProvider()
+        await #expect(throws: SummaryError.self) {
+            _ = try await provider.summarize(segments: segments, metadata: metadata)
+        }
+        #expect(MockURLProtocol.requestCount == OpenAISummaryProvider.maxRetries + 1)
+    }
+
+    @Test func succeedsFirstTryWithoutRetry() async throws {
+        MockURLProtocol.reset()
+        MockURLProtocol.responses = [(200, [:], Self.okBody())]
+
+        let provider = makeProvider()
+        let content = try await provider.summarize(segments: segments, metadata: metadata)
+        #expect(content.contains("Done."))
+        #expect(MockURLProtocol.requestCount == 1)
+    }
+}
+
+/// Minimal stub URLProtocol that replays a scripted sequence of responses. The last entry
+/// is repeated for any further requests (so a single "always 429" entry covers all attempts).
+final class MockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var responses: [(status: Int, headers: [String: String], body: Data)] = []
+    nonisolated(unsafe) static var requestCount = 0
+
+    static func reset() {
+        responses = []
+        requestCount = 0
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let index = min(MockURLProtocol.requestCount, MockURLProtocol.responses.count - 1)
+        MockURLProtocol.requestCount += 1
+        let entry = MockURLProtocol.responses[index]
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: entry.status, httpVersion: "HTTP/1.1", headerFields: entry.headers
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: entry.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

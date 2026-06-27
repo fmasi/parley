@@ -104,7 +104,7 @@ public enum MeetingSummarizer {
 
         let metadata = SummaryMetadata(
             sessionName: sessionName,
-            date: Date(),
+            date: resolveRecordingDate(metadata: metadata_raw, transcriptPath: path),
             durationSeconds: duration,
             speakers: speakers,
             dualStream: dualStream,
@@ -112,5 +112,36 @@ public enum MeetingSummarizer {
         )
 
         return (segments, metadata)
+    }
+
+    /// Determine the canonical recording-start date for the summary (#49).
+    ///
+    /// Priority: the transcript's `recorded_at` metadata (the real meeting start) →
+    /// the transcript file's creation/modification date (older transcripts without the
+    /// key) → the current time as a last resort. Never `Date()` when better info exists,
+    /// so a recording summarized the next day is still dated to when it happened.
+    static func resolveRecordingDate(metadata: [String: Any]?, transcriptPath path: URL) -> Date {
+        if let raw = metadata?["recorded_at"] as? String,
+           let parsed = parseISODate(raw) {
+            Logger.transcription.debug("Summary date sourced from transcript metadata 'recorded_at'")
+            return parsed
+        }
+
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
+           let fileDate = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date) {
+            Logger.transcription.debug("Summary date sourced from transcript file date (no 'recorded_at' in metadata)")
+            return fileDate
+        }
+
+        Logger.transcription.debug("Summary date fell back to current time (no 'recorded_at' and no file date)")
+        return Date()
+    }
+
+    /// Parse an ISO8601 timestamp, tolerating both fractional-second and plain forms.
+    private static func parseISODate(_ raw: String) -> Date? {
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFractional.date(from: raw) { return d }
+        return ISO8601DateFormatter().date(from: raw)
     }
 }

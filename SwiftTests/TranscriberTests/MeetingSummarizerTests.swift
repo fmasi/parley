@@ -203,6 +203,78 @@ struct MeetingSummarizerTests {
         #expect(capturedSegs[0].source == "local")
         #expect(capturedSegs[1].source == "remote")
     }
+
+    // MARK: - Recording-start date sourcing (#49)
+
+    @Test func summaryDatedToRecordedAtMetadata() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // A recording from well in the past, summarized "now".
+        let recordedAt = Date(timeIntervalSince1970: 1_600_000_000)  // 2020-09-13
+        let iso = ISO8601DateFormatter().string(from: recordedAt)
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false, "recorded_at": iso] as [String: Any],
+            "segments": [
+                ["start": 0.0, "end": 5.0, "speaker": "Alice", "text": "Hi"] as [String: Any]
+            ]
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: transcript)
+        let jsonPath = dir.appendingPathComponent("meeting.json")
+        try jsonData.write(to: jsonPath)
+
+        var captured: SummaryMetadata?
+        let provider = CapturingProvider { _, metadata in
+            captured = metadata
+            return "## Summary"
+        }
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+
+        // The summary is dated by when the meeting was recorded, not when it was summarized.
+        #expect(abs((captured?.date ?? Date()).timeIntervalSince(recordedAt)) < 1)
+    }
+
+    @Test func summaryFallsBackToFileDateWhenNoRecordedAt() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [
+                ["start": 0.0, "end": 5.0, "speaker": "Alice", "text": "Hi"] as [String: Any]
+            ]
+        ]
+        let jsonData = try JSONSerialization.data(withJSONObject: transcript)
+        let jsonPath = dir.appendingPathComponent("meeting.json")
+        try jsonData.write(to: jsonPath)
+
+        // No recorded_at → resolve from the file's own creation/modification date, which is ~now.
+        let resolved = MeetingSummarizer.resolveRecordingDate(
+            metadata: ["dual_stream": false], transcriptPath: jsonPath
+        )
+        #expect(abs(resolved.timeIntervalSinceNow) < 60)
+    }
+
+    @Test func resolveRecordingDatePrefersMetadataOverFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let jsonPath = dir.appendingPathComponent("x.json")
+        try Data("{}".utf8).write(to: jsonPath)
+
+        let recordedAt = Date(timeIntervalSince1970: 1_500_000_000)
+        let iso = ISO8601DateFormatter().string(from: recordedAt)
+        let resolved = MeetingSummarizer.resolveRecordingDate(
+            metadata: ["recorded_at": iso], transcriptPath: jsonPath
+        )
+        #expect(abs(resolved.timeIntervalSince(recordedAt)) < 1)
+    }
 }
 
 private final class CapturingProvider: SummaryProvider, @unchecked Sendable {
