@@ -36,7 +36,10 @@ public struct ProcessedChunk: Codable {
     public let startTime: Date
     public let audioPath: String
     public let segments: [Segment]
+    /// Speaker embeddings from the remote/system audio stream (keyed by friendly name).
     public let speakerDatabase: [String: [Float]]
+    /// Speaker embeddings from the local/mic audio stream (keyed by friendly name). (#64)
+    public let localSpeakerDatabase: [String: [Float]]
     public let echoSegmentsRemoved: Int
 
     public init(
@@ -45,6 +48,7 @@ public struct ProcessedChunk: Codable {
         audioPath: String,
         segments: [Segment],
         speakerDatabase: [String: [Float]],
+        localSpeakerDatabase: [String: [Float]] = [:],
         echoSegmentsRemoved: Int = 0
     ) {
         self.index = index
@@ -52,6 +56,7 @@ public struct ProcessedChunk: Codable {
         self.audioPath = audioPath
         self.segments = segments
         self.speakerDatabase = speakerDatabase
+        self.localSpeakerDatabase = localSpeakerDatabase
         self.echoSegmentsRemoved = echoSegmentsRemoved
     }
 
@@ -63,6 +68,7 @@ public struct ProcessedChunk: Codable {
         case audioPath
         case segments
         case speakerDatabase
+        case localSpeakerDatabase
         case echoSegmentsRemoved = "echo_segments_removed"
     }
 
@@ -73,6 +79,7 @@ public struct ProcessedChunk: Codable {
         audioPath = try c.decode(String.self, forKey: .audioPath)
         segments = try c.decode([Segment].self, forKey: .segments)
         speakerDatabase = try c.decode([String: [Float]].self, forKey: .speakerDatabase)
+        localSpeakerDatabase = try c.decodeIfPresent([String: [Float]].self, forKey: .localSpeakerDatabase) ?? [:]
         echoSegmentsRemoved = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
     }
 }

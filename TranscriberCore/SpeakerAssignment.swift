@@ -254,9 +254,14 @@ public enum SpeakerAssignment {
 
     public static func tagWithSourcePrefix(_ segments: inout [LabeledSegment]) {
         for i in segments.indices {
+            let speaker = segments[i].speaker
+            // Idempotency guard: skip if the prefix was already applied (prevents
+            // "Local Local Speaker N" when finalize() and ChunkProcessor both call this). (#55)
+            if speaker.hasPrefix("Local ") || speaker.hasPrefix("Remote ") {
+                continue
+            }
             let source = segments[i].source
             let label = source == "local" ? "Local" : "Remote"
-            let speaker = segments[i].speaker
             if !speaker.isEmpty && speaker != "Unknown" {
                 segments[i].speaker = "\(label) \(speaker)"
             } else if speaker != "Unknown" {

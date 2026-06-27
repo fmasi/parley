@@ -32,6 +32,10 @@ public enum AudioConcatenator {
 
     /// Concatenate `sources` into a single .m4a at `outputDirectory/<outputName>.m4a`.
     /// Deletes source files on success (when sources.count > 1).
+    ///
+    /// - Important: `sources` must be provided in chronological order. This function inserts
+    ///   them sequentially into the composition without sorting — callers are responsible for
+    ///   ordering by chunk index (or recording time) before calling. (#56)
     public static func concatenate(
         sources: [URL],
         outputDirectory: URL,
