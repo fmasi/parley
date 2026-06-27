@@ -206,7 +206,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
             let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
             if FileManager.default.fileExists(atPath: outputPath.path) {
-                Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .public)")
+                Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .private)")
             }
         } catch {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")

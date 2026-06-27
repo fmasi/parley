@@ -120,7 +120,7 @@ enum CLIRename {
             guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   var segments = json["segments"] as? [[String: Any]]
             else {
-                Logger.files.error("Failed to parse JSON for rename: \(jsonPath.lastPathComponent, privacy: .public)")
+                Logger.files.error("Failed to parse JSON for rename: \(jsonPath.lastPathComponent, privacy: .private)")
                 return
             }
 

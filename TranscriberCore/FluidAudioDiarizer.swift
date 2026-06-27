@@ -12,7 +12,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
     public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
-        Logger.transcription.info("FluidAudio diarization starting: \(audioPath.lastPathComponent, privacy: .public)")
+        Logger.transcription.info("FluidAudio diarization starting: \(audioPath.lastPathComponent, privacy: .private)")
 
         let mgr = try await ensureLoaded()
         let result = try await mgr.process(audioPath)

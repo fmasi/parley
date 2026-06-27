@@ -158,7 +158,7 @@ struct TranscriberApp: App {
     ) async {
         guard let sentinel = RecordingSentinel.read() else { return }
 
-        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .public), segment: \(sentinel.segment))")
+        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .private), segment: \(sentinel.segment))")
 
         // Check if sentinel is stale (from before last boot)
         let bootTime = ProcessInfo.processInfo.systemUptime

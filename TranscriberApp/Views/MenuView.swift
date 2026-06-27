@@ -170,7 +170,7 @@ struct MenuView: View {
     }
 
     private func startRecording(sessionName: String, microphoneDeviceId: String?) async {
-        Logger.state.info("Recording started — session: \(sessionName, privacy: .public)")
+        Logger.state.info("Recording started — session: \(sessionName, privacy: .private)")
         appState.errorMessage = nil
 
         let config = configManager.config
@@ -453,7 +453,7 @@ struct MenuView: View {
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
             )
             newSentinel.chunkIndex = plan.recoveryIndex
-            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .public)); recovery continues at \(baseName, privacy: .public)")
+            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .private)); recovery continues at \(baseName, privacy: .private)")
         } else {
             // No live pipeline (app-relaunch re-attach): keep segment-based naming; the stop-path
             // fallback uses 0-indexed gap-tolerant discovery to reclaim every segment.
@@ -545,7 +545,7 @@ struct MenuView: View {
         ) {
             appState.lastJsonPath = result.jsonPath.path
             appState.lastTranscriptPath = result.jsonPath.path
-            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .public)")
+            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
         }
         transcriptionRunner.teardownChunkedPipeline()
     }

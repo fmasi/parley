@@ -83,7 +83,7 @@ public struct RecordingSentinel: Codable, Equatable {
         // Rename (atomic on same volume)
         _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
 
-        Logger.state.debug("RecordingSentinel written — session: \(sentinel.sessionName, privacy: .public), segment: \(sentinel.segment)")
+        Logger.state.debug("RecordingSentinel written — session: \(sentinel.sessionName, privacy: .private), segment: \(sentinel.segment)")
     }
 
     /// Read sentinel from disk. Returns nil if file is missing or corrupt.
@@ -93,10 +93,10 @@ public struct RecordingSentinel: Codable, Equatable {
             return nil
         }
         guard let sentinel = try? makeDecoder().decode(RecordingSentinel.self, from: data) else {
-            Logger.state.warning("RecordingSentinel at \(url.path, privacy: .public) is corrupt — ignoring")
+            Logger.state.warning("RecordingSentinel at \(url.path, privacy: .private) is corrupt — ignoring")
             return nil
         }
-        Logger.state.info("RecordingSentinel found — session: \(sentinel.sessionName, privacy: .public), segment: \(sentinel.segment)")
+        Logger.state.info("RecordingSentinel found — session: \(sentinel.sessionName, privacy: .private), segment: \(sentinel.segment)")
         return sentinel
     }
 

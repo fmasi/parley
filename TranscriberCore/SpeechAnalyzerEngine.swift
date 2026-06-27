@@ -29,7 +29,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
     public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
         let startTime = ContinuousClock.now
 
-        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with SpeechAnalyzer")
+        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .private) with SpeechAnalyzer")
 
         let locale: Locale
         if let lang = language {

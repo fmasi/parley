@@ -180,7 +180,7 @@ final class ChunkProcessor {
                 )
             }
             audioPath = archiveResult.archivePath.lastPathComponent
-            Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .public)")
+            Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .private)")
 
             // Enforce storage quota
             try StorageManager.enforceQuota(
@@ -245,7 +245,7 @@ final class ChunkProcessor {
             return StreamResult(segments: [], speakerDatabase: [:])
         }
 
-        Logger.transcription.info("Transcribing \(label, privacy: .public): \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
+        Logger.transcription.info("Transcribing \(label, privacy: .public): \(audioPath.lastPathComponent, privacy: .private) (\(fileSize) bytes)")
 
         let segments: [TranscriptSegment]
         do {

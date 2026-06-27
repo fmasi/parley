@@ -163,7 +163,7 @@ final class AudioCaptureClient {
             let url = recordingDirectory.appendingPathComponent("\(sessionId).diag.jsonl")
             do {
                 try diagnostics.jsonlData().write(to: url, options: .atomic)
-                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .public) (\(self.diagnostics.events.count) events)")
+                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .private) (\(self.diagnostics.events.count) events)")
             } catch {
                 Logger.files.error("Failed to flush diagnostics: \(error, privacy: .public)")
             }
