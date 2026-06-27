@@ -76,7 +76,12 @@ public enum AudioArchiver {
         }
 
         // 4. Verify output.
-        try await verify(outputURL: outputURL)
+        do {
+            try await verify(outputURL: outputURL)
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
 
         // 5. Delete source WAVs.
         try? FileManager.default.removeItem(at: systemAudio)
@@ -129,7 +134,12 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed(error.localizedDescription)
         }
 
-        try await verify(outputURL: outputURL)
+        do {
+            try await verify(outputURL: outputURL)
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
 
         try? FileManager.default.removeItem(at: systemAudio)
 

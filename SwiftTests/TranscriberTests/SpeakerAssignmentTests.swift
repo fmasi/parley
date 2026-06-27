@@ -123,6 +123,18 @@ struct SpeakerAssignmentTests {
         #expect(segments[0].speaker == "Local")
     }
 
+    @Test func tagWithSourcePrefixIsIdempotent() {
+        // Calling twice must not double-prefix (e.g. "Local Local Speaker 1"). (#55)
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "hi", source: "local"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Speaker 1", text: "yo", source: "remote"),
+        ]
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        SpeakerAssignment.tagWithSourcePrefix(&segments)  // must be a no-op
+        #expect(segments[0].speaker == "Local Speaker 1")
+        #expect(segments[1].speaker == "Remote Speaker 1")
+    }
+
     // MARK: - buildSpeakerMap
 
     @Test func buildSpeakerMapMapsRawIDsToFriendlyNames() {
