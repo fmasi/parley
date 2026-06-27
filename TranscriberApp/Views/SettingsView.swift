@@ -25,6 +25,8 @@ struct SettingsView: View {
     @State private var summaryApiKey: String = ""
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
+    @State private var summaryContextOverheadPercent: String = ""
+    @State private var summaryMaxOutputTokens: String = ""
     @State private var settingsMicId: String?
     @State private var settingsMicDevices: [AudioInputDevice] = []
 
@@ -39,6 +41,8 @@ struct SettingsView: View {
         self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
+        self._summaryContextOverheadPercent = State(initialValue: s?.contextOverheadPercent.map(String.init) ?? "")
+        self._summaryMaxOutputTokens = State(initialValue: s?.maxOutputTokens.map(String.init) ?? "")
         self._settingsMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
     }
 
@@ -215,8 +219,19 @@ struct SettingsView: View {
                         TextField("Context Length", text: $summaryContextLength)
                             .textFieldStyle(.roundedBorder)
                             .help("Max tokens for context window (leave empty for model default)")
+                        TextField("Context Overhead %", text: $summaryContextOverheadPercent)
+                            .textFieldStyle(.roundedBorder)
+                            .help("Percentage of context reserved for overhead (leave empty for default)")
+                        TextField("Max Output Tokens", text: $summaryMaxOutputTokens)
+                            .textFieldStyle(.roundedBorder)
+                            .help("Maximum tokens for the summary response (leave empty for model default)")
                     }
                 }
+            }
+
+            Section("About") {
+                LabeledContent("Version", value: AppVersion.displayString)
+                LabeledContent("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–")
             }
         }
         .formStyle(.grouped)
@@ -237,7 +252,9 @@ struct SettingsView: View {
                             endpoint: summaryEndpoint,
                             apiKey: summaryApiKey,
                             model: summaryModel,
-                            contextLength: Int(summaryContextLength)
+                            contextLength: Int(summaryContextLength),
+                            contextOverheadPercent: Int(summaryContextOverheadPercent),
+                            maxOutputTokens: Int(summaryMaxOutputTokens)
                         )
                     } else {
                         config.summary = nil

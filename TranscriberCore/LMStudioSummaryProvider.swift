@@ -35,7 +35,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         // Calibrate on first encounter with this model
         await calibrateIfNeeded()
 
-        let (request, inputChars, resolvedContextLength) = try buildRequest(segments: segments, metadata: metadata)
+        let (request, inputChars, resolvedContextLength) = try await buildRequest(segments: segments, metadata: metadata)
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
@@ -46,7 +46,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 Logger.transcription.warning(
                     "Context too small: model needed \(actualTokens) tokens. Setting exact ratio and retrying."
                 )
-                TokenRatioCache.shared.setRatio(
+                await TokenRatioCache.shared.setRatio(
                     for: model,
                     inputChars: inputChars,
                     actualInputTokens: actualTokens
@@ -64,7 +64,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 "LM Studio summary stats — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
             )
             // Refine token ratio from real usage data
-            TokenRatioCache.shared.refine(
+            await TokenRatioCache.shared.refine(
                 model: model,
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
@@ -81,7 +81,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
     /// Single retry with recalibrated context — no further retries to avoid loops.
     private func retryRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
-        let (request, inputChars, resolvedContextLength) = try buildRequest(segments: segments, metadata: metadata)
+        let (request, inputChars, resolvedContextLength) = try await buildRequest(segments: segments, metadata: metadata)
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
@@ -95,7 +95,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
             Logger.transcription.info(
                 "LM Studio summary stats (retry) — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
             )
-            TokenRatioCache.shared.refine(
+            await TokenRatioCache.shared.refine(
                 model: model,
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
@@ -113,7 +113,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
     private func calibrateIfNeeded() async {
         let cache = TokenRatioCache.shared
-        guard cache.ratio(for: model) == nil else { return }
+        guard await cache.ratio(for: model) == nil else { return }
         do {
             _ = try await cache.calibrate(model: model, endpoint: endpoint, apiKey: apiKey)
         } catch {
@@ -136,7 +136,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     static let defaultOverheadPercent = 10
 
     /// Returns (request, totalInputChars, resolvedContextLength).
-    func buildRequest(segments: [SummarySegment], metadata: SummaryMetadata) throws -> (URLRequest, Int, Int) {
+    func buildRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> (URLRequest, Int, Int) {
         let baseURL = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
         guard let url = URL(string: baseURL + "/api/v1/chat") else {
             throw SummaryError.invalidEndpoint(endpoint)
@@ -167,8 +167,8 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
         // Estimate tokens needed and auto-size context window (uses calibrated ratio if available)
         let cache = TokenRatioCache.shared
-        let rawEstimate = cache.estimateTokens(userMessage, model: model)
-            + cache.estimateTokens(prompt, model: model)
+        let rawEstimate = await cache.estimateTokens(userMessage, model: model)
+            + (await cache.estimateTokens(prompt, model: model))
         let estimatedInputTokens = rawEstimate + (rawEstimate * overheadPercent / 100)
         let neededContext = estimatedInputTokens + outputBuffer
         let maxContext = contextLength ?? 32768

@@ -481,6 +481,7 @@ struct MenuView: View {
                 await stopRecording()
                 return
             }
+            xpcRetryCount = 0
             appState.interruptionWarning = "Recording briefly interrupted. Resuming."
             sendNotification(
                 title: "Recording Resumed",
