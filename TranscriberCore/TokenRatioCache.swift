@@ -6,7 +6,7 @@ import os
 /// Ratios are either "seed" (from a small calibration probe, rough) or "measured" (from real
 /// transcripts, accurate). Real measurements always replace seeds. Subsequent real measurements
 /// refine via EMA blending. Only transcripts above `minCharsForMeasurement` count as real data.
-public final class TokenRatioCache: Sendable {
+public actor TokenRatioCache {
 
     public static let shared = TokenRatioCache()
 

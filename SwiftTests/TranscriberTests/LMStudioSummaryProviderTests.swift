@@ -4,7 +4,7 @@ import Foundation
 
 struct LMStudioSummaryProviderTests {
 
-    @Test func buildsNativeAPIRequest() throws {
+    @Test func buildsNativeAPIRequest() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "",
@@ -20,7 +20,7 @@ struct LMStudioSummaryProviderTests {
             durationSeconds: 600,
             speakers: ["Alice"]
         )
-        let (request, inputChars, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, inputChars, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
 
         #expect(request.url?.absoluteString == "http://127.0.0.1:1234/api/v1/chat")
         #expect(request.httpMethod == "POST")
@@ -40,7 +40,7 @@ struct LMStudioSummaryProviderTests {
         #expect(input.contains("Meeting: standup"))
     }
 
-    @Test func autoSizesContextFromContent() throws {
+    @Test func autoSizesContextFromContent() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "",
@@ -49,7 +49,7 @@ struct LMStudioSummaryProviderTests {
         // ~300 chars of transcript → ~100 tokens estimated + system prompt ~300 tokens + 1024 buffer
         let segments = [SummarySegment(start: 0, end: 5, speaker: "A", text: "test")]
         let metadata = SummaryMetadata(sessionName: "t", date: Date(), durationSeconds: 5, speakers: ["A"])
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
 
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         let ctx = body["context_length"] as! Int
@@ -58,7 +58,7 @@ struct LMStudioSummaryProviderTests {
         #expect(ctx < 5000)  // small input shouldn't request a huge context
     }
 
-    @Test func capsContextAtUserLimit() throws {
+    @Test func capsContextAtUserLimit() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "",
@@ -68,14 +68,14 @@ struct LMStudioSummaryProviderTests {
         // Even with small input, context should not exceed the user cap
         let segments = [SummarySegment(start: 0, end: 5, speaker: "A", text: String(repeating: "word ", count: 500))]
         let metadata = SummaryMetadata(sessionName: "t", date: Date(), durationSeconds: 5, speakers: ["A"])
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
 
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         let ctx = body["context_length"] as! Int
         #expect(ctx <= 2000)
     }
 
-    @Test func buildsRequestWithAuth() throws {
+    @Test func buildsRequestWithAuth() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "lms-abc123",
@@ -83,7 +83,7 @@ struct LMStudioSummaryProviderTests {
         )
         let segments = [SummarySegment(start: 0, end: 5, speaker: "A", text: "test")]
         let metadata = SummaryMetadata(sessionName: "t", date: Date(), durationSeconds: 5, speakers: ["A"])
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer lms-abc123")
     }
 
@@ -133,7 +133,7 @@ struct LMStudioSummaryProviderTests {
         }
     }
 
-    @Test func endpointStripsTrailingSlash() throws {
+    @Test func endpointStripsTrailingSlash() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234/",
             apiKey: "",
@@ -141,7 +141,7 @@ struct LMStudioSummaryProviderTests {
         )
         let segments = [SummarySegment(start: 0, end: 1, speaker: "A", text: "hi")]
         let metadata = SummaryMetadata(sessionName: "t", date: Date(), durationSeconds: 1, speakers: ["A"])
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
         #expect(request.url?.absoluteString == "http://127.0.0.1:1234/api/v1/chat")
     }
 
@@ -166,7 +166,7 @@ struct LMStudioSummaryProviderTests {
 
     // MARK: - Dual-stream prompt injection
 
-    @Test func dualStreamMetadataInjectsHintIntoSystemPrompt() throws {
+    @Test func dualStreamMetadataInjectsHintIntoSystemPrompt() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "",
@@ -183,14 +183,14 @@ struct LMStudioSummaryProviderTests {
             speakers: ["Alice", "Bob"],
             dualStream: true
         )
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
 
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         let systemPrompt = body["system_prompt"] as! String
         #expect(systemPrompt.contains("Dual-Stream Audio Context"))
     }
 
-    @Test func nonDualStreamMetadataOmitsHintFromSystemPrompt() throws {
+    @Test func nonDualStreamMetadataOmitsHintFromSystemPrompt() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234",
             apiKey: "",
@@ -204,7 +204,7 @@ struct LMStudioSummaryProviderTests {
             speakers: ["Alice"],
             dualStream: false
         )
-        let (request, _, _) = try provider.buildRequest(segments: segments, metadata: metadata)
+        let (request, _, _) = try await provider.buildRequest(segments: segments, metadata: metadata)
 
         let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
         let systemPrompt = body["system_prompt"] as! String

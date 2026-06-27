@@ -9,19 +9,19 @@ struct TokenRatioCacheTests {
             .appendingPathComponent("token-ratio-test-\(UUID().uuidString).json")
     }
 
-    @Test func returnsNilForUnknownModel() {
+    @Test func returnsNilForUnknownModel() async {
         let cache = TokenRatioCache(cacheURL: tempCacheURL())
-        #expect(cache.ratio(for: "some-model") == nil)
+        #expect(await cache.ratio(for: "some-model") == nil)
     }
 
-    @Test func estimateTokensUsesDefaultWhenNotCalibrated() {
+    @Test func estimateTokensUsesDefaultWhenNotCalibrated() async {
         let cache = TokenRatioCache(cacheURL: tempCacheURL())
         // 300 chars / 3.0 default = 100 tokens
         let text = String(repeating: "a", count: 300)
-        #expect(cache.estimateTokens(text, model: "unknown") == 100)
+        #expect(await cache.estimateTokens(text, model: "unknown") == 100)
     }
 
-    @Test func estimateTokensUsesCalibratedRatio() {
+    @Test func estimateTokensUsesCalibratedRatio() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -34,27 +34,27 @@ struct TokenRatioCacheTests {
         let cache = TokenRatioCache(cacheURL: url)
         // 612 chars / 3.06 = 200 tokens
         let text = String(repeating: "x", count: 612)
-        #expect(cache.estimateTokens(text, model: "gemma-4") == 200)
+        #expect(await cache.estimateTokens(text, model: "gemma-4") == 200)
     }
 
     @Test func probeTextHasCorrectLength() {
         #expect(TokenRatioCache.probeText.count == TokenRatioCache.probeChars)
     }
 
-    @Test func handlesEmptyText() {
+    @Test func handlesEmptyText() async {
         let cache = TokenRatioCache(cacheURL: tempCacheURL())
-        #expect(cache.estimateTokens("", model: "any") == 1)
+        #expect(await cache.estimateTokens("", model: "any") == 1)
     }
 
-    @Test func handlesMissingCacheFile() {
+    @Test func handlesMissingCacheFile() async {
         let cache = TokenRatioCache(cacheURL: URL(fileURLWithPath: "/tmp/nonexistent-\(UUID()).json"))
-        #expect(cache.ratio(for: "model") == nil)
-        #expect(cache.estimateTokens("hello world", model: "model") > 0)
+        #expect(await cache.ratio(for: "model") == nil)
+        #expect(await cache.estimateTokens("hello world", model: "model") > 0)
     }
 
     // MARK: - Seed vs measured
 
-    @Test func firstRealMeasurementReplacesSeed() {
+    @Test func firstRealMeasurementReplacesSeed() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -65,17 +65,17 @@ struct TokenRatioCacheTests {
         try! JSONEncoder().encode(entries).write(to: url, options: .atomic)
 
         let cache = TokenRatioCache(cacheURL: url)
-        #expect(cache.isSeed(for: "model-a") == true)
+        #expect(await cache.isSeed(for: "model-a") == true)
 
         // Refine with a real transcript (3000 chars, 1000 tokens = 3.0 ratio)
-        cache.refine(model: "model-a", inputChars: 3000, actualInputTokens: 1000)
+        await cache.refine(model: "model-a", inputChars: 3000, actualInputTokens: 1000)
 
         // Should replace seed entirely, not blend
-        #expect(cache.ratio(for: "model-a") == 3.0)
-        #expect(cache.isSeed(for: "model-a") == false)
+        #expect(await cache.ratio(for: "model-a") == 3.0)
+        #expect(await cache.isSeed(for: "model-a") == false)
     }
 
-    @Test func subsequentMeasurementsBlendViaEMA() {
+    @Test func subsequentMeasurementsBlendViaEMA() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -88,14 +88,14 @@ struct TokenRatioCacheTests {
         let cache = TokenRatioCache(cacheURL: url)
 
         // Refine with another real measurement: 4000 chars / 1000 tokens = 4.0
-        cache.refine(model: "model-a", inputChars: 4000, actualInputTokens: 1000)
+        await cache.refine(model: "model-a", inputChars: 4000, actualInputTokens: 1000)
 
         // EMA: 0.3 * 4.0 + 0.7 * 3.0 = 3.3
-        let ratio = cache.ratio(for: "model-a")!
+        let ratio = await cache.ratio(for: "model-a")!
         #expect(abs(ratio - 3.3) < 0.01)
     }
 
-    @Test func refineIgnoresSmallRequests() {
+    @Test func refineIgnoresSmallRequests() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -107,11 +107,11 @@ struct TokenRatioCacheTests {
         let cache = TokenRatioCache(cacheURL: url)
 
         // Too small (500 chars < 2000 minimum) — should be ignored
-        cache.refine(model: "model", inputChars: 500, actualInputTokens: 100)
-        #expect(cache.ratio(for: "model") == 3.0)
+        await cache.refine(model: "model", inputChars: 500, actualInputTokens: 100)
+        #expect(await cache.ratio(for: "model") == 3.0)
     }
 
-    @Test func setRatioForcesExactValue() {
+    @Test func setRatioForcesExactValue() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -122,13 +122,13 @@ struct TokenRatioCacheTests {
 
         let cache = TokenRatioCache(cacheURL: url)
         // Force from error: 60000 chars / 20000 tokens = 3.0
-        cache.setRatio(for: "model", inputChars: 60000, actualInputTokens: 20000)
+        await cache.setRatio(for: "model", inputChars: 60000, actualInputTokens: 20000)
 
-        #expect(cache.ratio(for: "model") == 3.0)
-        #expect(cache.isSeed(for: "model") == false)
+        #expect(await cache.ratio(for: "model") == 3.0)
+        #expect(await cache.isSeed(for: "model") == false)
     }
 
-    @Test func migratesLegacyFormat() {
+    @Test func migratesLegacyFormat() async {
         let url = tempCacheURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -137,7 +137,7 @@ struct TokenRatioCacheTests {
         try! JSONEncoder().encode(legacy).write(to: url, options: .atomic)
 
         let cache = TokenRatioCache(cacheURL: url)
-        #expect(cache.ratio(for: "old-model") == 2.5)
-        #expect(cache.isSeed(for: "old-model") == true) // legacy treated as seed
+        #expect(await cache.ratio(for: "old-model") == 2.5)
+        #expect(await cache.isSeed(for: "old-model") == true) // legacy treated as seed
     }
 }
