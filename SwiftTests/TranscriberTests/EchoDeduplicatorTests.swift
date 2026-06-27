@@ -111,6 +111,29 @@ struct EchoDeduplicatorTests {
         #expect(EchoDeduplicator.cosineSimilarity([], []) == 0.0)
     }
 
+    // MARK: - Centroid pooling (accumulated embeddings)
+
+    @Test func gcdRecoversDimensionWhenNoSpeakerIsSingleSegment() {
+        // Two speakers each accumulated across the same number of segments:
+        // entries are 2×dim and 3×dim. min() would wrongly infer 2×dim (=8);
+        // gcd(8, 12) correctly recovers dim = 4.
+        #expect(EchoDeduplicator.gcd(8, 12) == 4)
+        #expect(EchoDeduplicator.gcd(0, 4) == 4)   // seed-from-zero reduce
+        #expect(EchoDeduplicator.gcd(4, 4) == 4)   // single-segment common case
+    }
+
+    @Test func centroidAveragesAccumulatedVectors() {
+        // Two 4-dim vectors concatenated → centroid is their element-wise mean.
+        let accumulated: [Float] = [2, 4, 6, 8, 4, 8, 10, 12]
+        let c = EchoDeduplicator.centroid(from: accumulated, dim: 4)
+        #expect(c == [3, 6, 8, 10])
+    }
+
+    @Test func centroidSingleSegmentIsNoOp() {
+        let v: [Float] = [1, 2, 3, 4]
+        #expect(EchoDeduplicator.centroid(from: v, dim: 4) == v)
+    }
+
     // MARK: - Deduplication
 
     @Test func removesEchoWhenAllThreeSignalsMatch() {

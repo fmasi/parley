@@ -84,6 +84,14 @@ public enum EchoDeduplicator {
         return result.map { $0 / Float(count) }
     }
 
+    /// Greatest common divisor (Euclid). `gcd(0, n) == n`, so reducing a list of
+    /// embedding lengths from a seed of 0 yields the GCD of the whole list.
+    static func gcd(_ a: Int, _ b: Int) -> Int {
+        var (x, y) = (abs(a), abs(b))
+        while y != 0 { (x, y) = (y, x % y) }
+        return x
+    }
+
     // MARK: - Result
 
     public struct DeduplicationResult {
@@ -109,15 +117,18 @@ public enum EchoDeduplicator {
             "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .public), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .public), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
         )
 
-        // Infer the base embedding dimension from the shortest non-empty entry across both
-        // databases. When TranscriptionRunner accumulates embeddings across crash-recovery
-        // segments (existing + new), entries grow to N × dim floats; the speaker that
-        // appeared in the fewest segments still holds exactly `dim` floats, giving us the
-        // base dimension needed to compute centroids below.
+        // Infer the base embedding dimension from the GCD of all non-empty entry lengths
+        // across both databases. When TranscriptionRunner accumulates embeddings across
+        // crash-recovery segments (existing + new), each entry grows to N × dim floats for
+        // its own N. Using the minimum length only recovers `dim` when some speaker appears
+        // in exactly one segment; the GCD recovers it even when every speaker appears in
+        // ≥2 segments (e.g. a 2-person meeting recovered as 2 chunks → all entries 2×dim,
+        // min would wrongly infer 2×dim). For single-segment databases (the common case)
+        // the GCD is exactly `dim`, so centroid() is a no-op.
         var allLengths: [Int] = []
         for v in localSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
         for v in remoteSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
-        let baseDim = allLengths.min() ?? 0
+        let baseDim = allLengths.reduce(0) { gcd($0, $1) }
 
         // Pool each speaker's accumulated embedding vectors into a single centroid so that
         // cosineSimilarity always receives equal-length vectors regardless of per-speaker
