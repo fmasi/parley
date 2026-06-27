@@ -152,14 +152,15 @@ import Testing
         try FileManager.default.removeItem(at: willDelete)
 
         let result = await svc.verify(repo: "Test/example", cacheRoot: cacheRoot)
-        switch result {
-        case .missing(let paths):
-            #expect(paths.contains("gone.bin"))
-        case .corrupt(let paths):
-            #expect(paths.contains("flip.bin"))
-        default:
-            Issue.record("Expected missing or corrupt, got \(result)")
-        }
+        // #44: verify() must report missing AND corrupt together, not short-circuit.
+        #expect(result.manifestPresent)
+        #expect(result.hasProblems)
+        #expect(!result.isOK)
+        #expect(result.missing.contains("gone.bin"))
+        #expect(result.corrupt.contains("flip.bin"))
+        // The intact file must appear in neither set.
+        #expect(!result.missing.contains("good.bin"))
+        #expect(!result.corrupt.contains("good.bin"))
     }
 
     @Test func verifyReturnsNoManifestWhenAbsent() async {
@@ -167,5 +168,142 @@ import Testing
         let dummy = FileManager.default.temporaryDirectory
         let result = await svc.verify(repo: "Nope/none", cacheRoot: dummy)
         #expect(result == .noManifest)
+        #expect(!result.manifestPresent)
+        #expect(!result.hasProblems)
+        #expect(!result.isOK)
+    }
+
+    @Test func verifyReturnsOKWhenAllFilesIntact() async throws {
+        let (svc, _) = makeService()
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cache-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        try Data([0xAA, 0xBB]).write(to: cacheRoot.appendingPathComponent("a.bin"))
+
+        _ = try await svc.record(repo: "Test/ok", cacheRoot: cacheRoot, sdkLabel: "test")
+        let result = await svc.verify(repo: "Test/ok", cacheRoot: cacheRoot)
+        #expect(result.isOK)
+        #expect(result.missing.isEmpty)
+        #expect(result.corrupt.isEmpty)
+    }
+}
+
+// MARK: - #43: HFRepoResponse.lastModified parsing (mock URLSession)
+
+/// Minimal URLProtocol stub: each test installs a `responder` that maps a request to a
+/// canned (HTTPURLResponse, Data) pair. Lets us drive ModelManifestService's network path
+/// without hitting Hugging Face.
+final class MockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var responder: ((URLRequest) -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let responder = MockURLProtocol.responder else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        let (response, data) = responder(request)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private func makeMockSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [MockURLProtocol.self]
+    return URLSession(configuration: config)
+}
+
+private func ok200(_ request: URLRequest, _ json: String) -> (HTTPURLResponse, Data) {
+    let response = HTTPURLResponse(
+        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+    )!
+    return (response, Data(json.utf8))
+}
+
+private func iso8601(_ s: String) -> Date? {
+    let fmt = ISO8601DateFormatter()
+    fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fmt.date(from: s)
+}
+
+@Suite struct HFRepoResponseParsingTests {
+    @Test func decodesLastModifiedToExpectedDate() throws {
+        let json = #"{"sha":"abc123","lastModified":"2026-05-01T12:00:00.000Z"}"#
+        let decoded = try JSONDecoder().decode(
+            ModelManifestService.HFRepoResponse.self, from: Data(json.utf8)
+        )
+        #expect(decoded.sha == "abc123")
+        #expect(decoded.lastModified == "2026-05-01T12:00:00.000Z")
+
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 5; comps.day = 1
+        comps.hour = 12; comps.minute = 0; comps.second = 0
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let expected = cal.date(from: comps)!
+        #expect(iso8601(decoded.lastModified!) == expected)
+    }
+
+    @Test func missingLastModifiedDecodesToNil() throws {
+        let json = #"{"sha":"deadbeef"}"#
+        let decoded = try JSONDecoder().decode(
+            ModelManifestService.HFRepoResponse.self, from: Data(json.utf8)
+        )
+        #expect(decoded.sha == "deadbeef")
+        #expect(decoded.lastModified == nil)
+    }
+
+    @Test func malformedLastModifiedStringYieldsNilDate() throws {
+        let json = #"{"sha":"abc","lastModified":"not-a-real-date"}"#
+        let decoded = try JSONDecoder().decode(
+            ModelManifestService.HFRepoResponse.self, from: Data(json.utf8)
+        )
+        // The string still decodes (it is a String?), but parsing it to a Date fails.
+        #expect(decoded.lastModified == "not-a-real-date")
+        #expect(iso8601(decoded.lastModified!) == nil)
+    }
+}
+
+@Suite(.serialized) struct ModelManifestServiceNetworkTests {
+    @Test func checkForUpdateParsesRemoteLastModifiedViaMockSession() async throws {
+        defer { MockURLProtocol.responder = nil }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-net-\(UUID().uuidString)")
+        let svc = ModelManifestService(manifestDir: dir, session: makeMockSession())
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cache-net-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        try Data([0x01]).write(to: cacheRoot.appendingPathComponent("a.bin"))
+
+        // Baseline: record establishes a manifest with commit "AAA000".
+        MockURLProtocol.responder = { req in
+            ok200(req, #"{"sha":"AAA000","lastModified":"2026-01-01T00:00:00.000Z"}"#)
+        }
+        let recorded = try await svc.record(repo: "Test/repo", cacheRoot: cacheRoot, sdkLabel: "test")
+        #expect(recorded.commitSha == "AAA000")
+
+        // Remote has since moved to "BBB111" with a new lastModified.
+        MockURLProtocol.responder = { req in
+            ok200(req, #"{"sha":"BBB111","lastModified":"2026-05-01T12:00:00.000Z"}"#)
+        }
+        let status = await svc.checkForUpdate(repo: "Test/repo")
+        guard case let .updateAvailable(local, remote, when) = status else {
+            Issue.record("Expected .updateAvailable, got \(status)")
+            return
+        }
+        #expect(local == "AAA000")
+        #expect(remote == "BBB111")
+        #expect(when == "2026-05-01T12:00:00.000Z")
+        #expect(iso8601(when!) != nil)
     }
 }

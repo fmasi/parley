@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var archiveUsageBytes: Int = 0
     @State private var updateCheckInFlight = false
     @State private var lastUpdateStatus: String?
+    private let manifestHealth = ManifestHealthStore.shared
     @State private var summaryEnabled: Bool = false
     @State private var summaryProvider: SummaryProviderType = .openai
     @State private var summaryEndpoint: String = ""
@@ -112,6 +113,11 @@ struct SettingsView: View {
             }
 
             Section("Model Updates") {
+                if let problem = manifestHealth.problemMessage {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
                 Toggle("Check for model updates online", isOn: $config.modelUpdateCheckEnabled)
                 Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
                     .font(.caption)

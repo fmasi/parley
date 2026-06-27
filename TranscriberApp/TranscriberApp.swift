@@ -48,6 +48,39 @@ final class LaunchGate {
     }
 }
 
+/// Holds the most recent model-manifest verification result so the UI can surface
+/// missing/corrupt model files to the user (Settings shows it; a notification alerts
+/// at launch). Populated by the launch-time `verify()` in `TranscriberApp.init`.
+@MainActor
+@Observable
+final class ManifestHealthStore {
+    static let shared = ManifestHealthStore()
+    private init() {}
+
+    /// Latest launch-time verification result; nil until the first check completes.
+    private(set) var verification: ManifestVerification?
+
+    /// User-facing description of any integrity problem, or nil when healthy/unknown.
+    var problemMessage: String? {
+        guard let v = verification, v.hasProblems else { return nil }
+        return Self.problemMessage(for: v)
+    }
+
+    func update(_ result: ManifestVerification) {
+        verification = result
+    }
+
+    /// Builds the Settings detail message. `nonisolated` so it can be reused off the
+    /// main actor (e.g. when composing the launch notification).
+    nonisolated static func problemMessage(for v: ManifestVerification) -> String {
+        var parts: [String] = []
+        if !v.missing.isEmpty { parts.append("\(v.missing.count) missing") }
+        if !v.corrupt.isEmpty { parts.append("\(v.corrupt.count) corrupt") }
+        let summary = parts.isEmpty ? "integrity issue" : parts.joined(separator: ", ")
+        return "Model files failed verification (\(summary)). Re-download the model from Setup to restore it."
+    }
+}
+
 @main
 struct TranscriberApp: App {
     @State private var appState = AppState()
@@ -80,15 +113,30 @@ struct TranscriberApp: App {
                 repo: FluidAudioEngine.parakeetRepoSlug,
                 cacheRoot: cacheRoot
             )
-            switch result {
-            case .ok:
-                Logger.transcription.info("Manifest verify: OK")
-            case .noManifest:
+            if !result.manifestPresent {
                 Logger.transcription.info("Manifest verify: no manifest yet (will be written on next download)")
-            case .missing(let paths):
-                Logger.transcription.warning("Manifest verify: missing \(paths.count) file(s) — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
-            case .corrupt(let paths):
-                Logger.transcription.error("Manifest verify: \(paths.count) file(s) corrupt — \(paths.prefix(3).joined(separator: ", "), privacy: .public)…")
+            } else if result.isOK {
+                Logger.transcription.info("Manifest verify: OK")
+            } else {
+                if !result.missing.isEmpty {
+                    Logger.transcription.warning("Manifest verify: missing \(result.missing.count) file(s) — \(result.missing.prefix(3).joined(separator: ", "), privacy: .public)…")
+                }
+                if !result.corrupt.isEmpty {
+                    Logger.transcription.error("Manifest verify: \(result.corrupt.count) file(s) corrupt — \(result.corrupt.prefix(3).joined(separator: ", "), privacy: .public)…")
+                }
+            }
+            // Surface the result to the UI layer (Settings shows it; a notification alerts now).
+            await MainActor.run { ManifestHealthStore.shared.update(result) }
+            if result.hasProblems, Bundle.main.bundleIdentifier != nil {
+                let content = UNMutableNotificationContent()
+                content.title = "Model Integrity Problem"
+                content.body = ManifestHealthStore.problemMessage(for: result)
+                content.sound = .default
+                content.interruptionLevel = .timeSensitive
+                let request = UNNotificationRequest(
+                    identifier: "manifest-verify", content: content, trigger: nil
+                )
+                try? await UNUserNotificationCenter.current().add(request)
             }
         }
 
