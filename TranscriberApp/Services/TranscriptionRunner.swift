@@ -160,7 +160,10 @@ final class TranscriptionRunner {
             diarization: diarizer != nil,
             dualStream: isDualStream,
             echoSegmentsRemoved: echoRemoved,
-            provenance: provenance
+            provenance: provenance,
+            // No in-memory session start here (CLI / crash-recovery / single-file path), so
+            // use the source audio's creation time as the recording-start stamp (#49).
+            recordedAt: (try? systemAudio.resourceValues(forKeys: [.creationDateKey]).creationDate)
         )
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
@@ -304,7 +307,9 @@ final class TranscriptionRunner {
             diarization: true,
             dualStream: isDualStream,
             echoSegmentsRemoved: totalEchoRemoved,
-            provenance: sessionState.provenance
+            provenance: sessionState.provenance,
+            // The wall-clock time the meeting actually began (#49).
+            recordedAt: sessionState.meetingStart
         )
 
         let baseName = sessionState.sessionId

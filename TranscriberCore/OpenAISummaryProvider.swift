@@ -19,23 +19,92 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
     private let endpoint: String
     private let apiKey: String
     private let model: String
+    private let session: URLSession
+    private let retryBaseDelay: Double
+
+    /// Maximum number of retries on a rate-limit / transient response (HTTP 429 / 503).
+    static let maxRetries = 3
+    /// Upper bound on any single backoff sleep, in seconds — caps both exponential
+    /// backoff and an over-large `Retry-After`.
+    static let maxBackoffSeconds: Double = 30
 
     public init(endpoint: String, apiKey: String, model: String) {
+        self.init(endpoint: endpoint, apiKey: apiKey, model: model, session: .shared)
+    }
+
+    /// Testable initializer: inject a `URLSession` (e.g. with a mock `URLProtocol`) and a
+    /// shorter retry base delay so the 429 backoff path runs fast under test.
+    init(endpoint: String, apiKey: String, model: String, session: URLSession, retryBaseDelay: Double = 1.0) {
         self.endpoint = endpoint
         self.apiKey = apiKey
         self.model = model
+        self.session = session
+        self.retryBaseDelay = retryBaseDelay
     }
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
         let request = try buildRequest(segments: segments, metadata: metadata)
-        let (data, response) = try await URLSession.shared.data(for: request)
 
-        if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+        var attempt = 0
+        while true {
+            let (data, response) = try await session.data(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return try Self.parseResponse(data)
+            }
+
+            if (200...299).contains(httpResponse.statusCode) {
+                return try Self.parseResponse(data)
+            }
+
+            // Bounded retry with backoff on rate-limit (429) and transient overload (503).
+            if Self.isRetryable(httpResponse.statusCode), attempt < Self.maxRetries {
+                let delay = retryDelay(attempt: attempt, response: httpResponse)
+                Logger.transcription.warning(
+                    "OpenAI summary HTTP \(httpResponse.statusCode), retrying in \(delay)s (attempt \(attempt + 1)/\(Self.maxRetries))"
+                )
+                try await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+                attempt += 1
+                continue
+            }
+
             let body = String(data: data, encoding: .utf8) ?? ""
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
+    }
 
-        return try Self.parseResponse(data)
+    // MARK: - Retry policy (testable)
+
+    static func isRetryable(_ statusCode: Int) -> Bool {
+        statusCode == 429 || statusCode == 503
+    }
+
+    /// Backoff for the given attempt (0-based). Honors a `Retry-After` header when present,
+    /// otherwise exponential backoff (retryBaseDelay * 2^attempt), both capped.
+    func retryDelay(attempt: Int, response: HTTPURLResponse) -> Double {
+        if let header = response.value(forHTTPHeaderField: "Retry-After"),
+           let parsed = Self.parseRetryAfter(header) {
+            return min(parsed, Self.maxBackoffSeconds)
+        }
+        let exponential = retryBaseDelay * pow(2.0, Double(attempt))
+        return min(exponential, Self.maxBackoffSeconds)
+    }
+
+    /// Parse a `Retry-After` value: either delay-seconds (e.g. "5") or an HTTP-date.
+    /// Returns the number of seconds to wait, or nil if unparseable.
+    static func parseRetryAfter(_ value: String) -> Double? {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        if let seconds = Double(trimmed) {
+            return seconds >= 0 ? seconds : nil
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: trimmed) {
+            return max(0, date.timeIntervalSinceNow)
+        }
+        return nil
     }
 
     // MARK: - Internal (testable via @testable import)
