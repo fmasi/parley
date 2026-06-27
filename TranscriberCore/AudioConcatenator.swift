@@ -43,7 +43,7 @@ public enum AudioConcatenator {
     ) async throws -> AudioConcatenationResult {
         guard !sources.isEmpty else { throw AudioConcatenatorError.noSources }
 
-        Logger.files.info("AudioConcatenator: stitching \(sources.count, privacy: .public) chunks → \(outputName, privacy: .public).m4a")
+        Logger.files.info("AudioConcatenator: stitching \(sources.count, privacy: .public) chunks → \(outputName, privacy: .private).m4a")
 
         // Single source: nothing to stitch.
         if sources.count == 1 {
@@ -83,7 +83,7 @@ public enum AudioConcatenator {
             fileType: .m4a
         ) {
             deleteSources(sources)
-            Logger.files.info("AudioConcatenator: passthrough export succeeded → \(outputURL.lastPathComponent, privacy: .public)")
+            Logger.files.info("AudioConcatenator: passthrough export succeeded → \(outputURL.lastPathComponent, privacy: .private)")
             return AudioConcatenationResult(outputPath: result, usedPassthrough: true)
         }
 
@@ -97,7 +97,7 @@ public enum AudioConcatenator {
             fileType: .m4a
         )
         deleteSources(sources)
-        Logger.files.info("AudioConcatenator: re-encode succeeded → \(outputURL.lastPathComponent, privacy: .public)")
+        Logger.files.info("AudioConcatenator: re-encode succeeded → \(outputURL.lastPathComponent, privacy: .private)")
         return AudioConcatenationResult(outputPath: result, usedPassthrough: false)
     }
 

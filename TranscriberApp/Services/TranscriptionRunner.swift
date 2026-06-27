@@ -202,7 +202,7 @@ final class TranscriptionRunner {
         }
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .public)")
+        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .private)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
@@ -275,7 +275,7 @@ final class TranscriptionRunner {
                 )
                 audioPaths = [concatResult.outputPath]
                 Logger.files.info(
-                    "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .public) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
+                    "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .private) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
@@ -339,7 +339,7 @@ final class TranscriptionRunner {
         SessionState.delete(directory: outputDirectory)
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .public)")
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .private)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
@@ -461,7 +461,7 @@ final class TranscriptionRunner {
             return StreamResult(segments: [], speakerDatabase: [:])
         }
 
-        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .public) (\(fileSize) bytes)")
+        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .private) (\(fileSize) bytes)")
 
         let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
 

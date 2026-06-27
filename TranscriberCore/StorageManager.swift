@@ -72,7 +72,7 @@ public enum StorageManager {
             try FileManager.default.removeItem(at: file)
             totalSize -= fileSize
             deleted.append(file)
-            Logger.files.info("StorageManager: deleted \(file.lastPathComponent, privacy: .public) (\(fileSize) bytes) to enforce quota")
+            Logger.files.info("StorageManager: deleted \(file.lastPathComponent, privacy: .private) (\(fileSize) bytes) to enforce quota")
         }
 
         if !deleted.isEmpty {

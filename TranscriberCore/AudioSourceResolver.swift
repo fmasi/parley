@@ -41,17 +41,17 @@ public enum AudioSourceResolver {
         let stereoAac = directory.appendingPathComponent("\(baseName).m4a")
 
         if fm.fileExists(atPath: systemWav.path) && fm.fileExists(atPath: micWav.path) {
-            Logger.files.debug("AudioSourceResolver: dual WAV detected for \(baseName, privacy: .public)")
+            Logger.files.debug("AudioSourceResolver: dual WAV detected for \(baseName, privacy: .private)")
             return .dualWav(system: systemWav, mic: micWav)
         }
 
         if fm.fileExists(atPath: systemWav.path) {
-            Logger.files.debug("AudioSourceResolver: single WAV detected for \(baseName, privacy: .public)")
+            Logger.files.debug("AudioSourceResolver: single WAV detected for \(baseName, privacy: .private)")
             return .singleWav(systemWav)
         }
 
         if fm.fileExists(atPath: stereoAac.path) {
-            Logger.files.debug("AudioSourceResolver: stereo AAC detected for \(baseName, privacy: .public)")
+            Logger.files.debug("AudioSourceResolver: stereo AAC detected for \(baseName, privacy: .private)")
             return .stereoAac(stereoAac)
         }
 
@@ -130,7 +130,7 @@ public enum AudioSourceResolver {
         localWriter.finalize()
         remoteWriter.finalize()
 
-        Logger.files.info("Split stereo AAC into L=\(localPath.lastPathComponent, privacy: .public), R=\(remotePath.lastPathComponent, privacy: .public)")
+        Logger.files.info("Split stereo AAC into L=\(localPath.lastPathComponent, privacy: .private), R=\(remotePath.lastPathComponent, privacy: .private)")
         return (local: localPath, remote: remotePath)
     }
 }

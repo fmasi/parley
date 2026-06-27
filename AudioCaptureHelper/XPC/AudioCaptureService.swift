@@ -63,7 +63,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
 
-        Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .public), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
+        Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
 
         let sysPath = (outputDirectory as NSString).appendingPathComponent(baseName + ".wav")
         let micFilePath = (outputDirectory as NSString).appendingPathComponent(baseName + "_mic.wav")
@@ -224,7 +224,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
 
-        Logger.audio.info("Rotating chunk — new base: \(newBaseName, privacy: .public)")
+        Logger.audio.info("Rotating chunk — new base: \(newBaseName, privacy: .private)")
 
         let newSysPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + ".wav")
         let newMicPath = (outputDirectory as NSString).appendingPathComponent(newBaseName + "_mic.wav")
@@ -246,7 +246,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.systemPath = newSysPath
                 self.micPath = newMicPath
             }
-            Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .public)")
+            Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .private)")
             reply(oldPaths.systemPath, oldPaths.micPath, nil)
         } catch {
             Logger.audio.error("Chunk rotation failed: \(error, privacy: .public)")

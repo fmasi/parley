@@ -227,7 +227,7 @@ public enum EchoDeduplicator {
         for (remote, overlap) in overlappingRemotes {
             let textSim = textSimilarity(local.text, remote.text)
             Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs '\(remote.speaker, privacy: .public)' — temporal=\(String(format: "%.3f", overlap), privacy: .public) text=\(String(format: "%.3f", textSim), privacy: .public) (thresholds: \(String(format: "%.2f", temporalThreshold), privacy: .public)/\(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .public)\" remote=\"\(remote.text.prefix(60), privacy: .public)\""
+                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs '\(remote.speaker, privacy: .public)' — temporal=\(String(format: "%.3f", overlap), privacy: .public) text=\(String(format: "%.3f", textSim), privacy: .public) (thresholds: \(String(format: "%.2f", temporalThreshold), privacy: .public)/\(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" remote=\"\(remote.text.prefix(60), privacy: .private)\""
             )
             if textSim > textThreshold {
                 Logger.transcription.debug(
@@ -260,7 +260,7 @@ public enum EchoDeduplicator {
             let windowSim = textSimilarity(local.text, windowText)
             let speakers = Array(Set(sorted.map(\.0.speaker))).joined(separator: "+")
             Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs WINDOW(\(sorted.count, privacy: .public) segs) — text=\(String(format: "%.3f", windowSim), privacy: .public) (threshold: \(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .public)\" window=\"\(windowText.prefix(80), privacy: .public)\""
+                "Echo dedup: '\(localSpeakerName, privacy: .public)' vs WINDOW(\(sorted.count, privacy: .public) segs) — text=\(String(format: "%.3f", windowSim), privacy: .public) (threshold: \(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" window=\"\(windowText.prefix(80), privacy: .private)\""
             )
             if windowSim > textThreshold {
                 Logger.transcription.debug(

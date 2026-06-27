@@ -78,7 +78,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
 
         let startTime = ContinuousClock.now
 
-        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .public) with FluidAudio (source: \(String(describing: audioSource), privacy: .public))")
+        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .private) with FluidAudio (source: \(String(describing: audioSource), privacy: .public))")
 
         // FluidAudio v0.14 dropped the `source:` parameter — caller now manages decoder state.
         // We allocate a fresh state per transcribe() since each call is an offline file pass.
