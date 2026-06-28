@@ -107,7 +107,8 @@ public enum EchoDeduplicator {
         remoteSpeakerDatabase: [String: [Float]],
         temporalThreshold: Double? = nil,
         textThreshold: Double? = nil,
-        embeddingThreshold: Double? = nil
+        embeddingThreshold: Double? = nil,
+        embeddingDim: Int? = nil
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
@@ -117,18 +118,23 @@ public enum EchoDeduplicator {
             "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .private), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .private), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
         )
 
-        // Infer the base embedding dimension from the GCD of all non-empty entry lengths
-        // across both databases. When TranscriptionRunner accumulates embeddings across
-        // crash-recovery segments (existing + new), each entry grows to N × dim floats for
-        // its own N. Using the minimum length only recovers `dim` when some speaker appears
-        // in exactly one segment; the GCD recovers it even when every speaker appears in
-        // ≥2 segments (e.g. a 2-person meeting recovered as 2 chunks → all entries 2×dim,
-        // min would wrongly infer 2×dim). For single-segment databases (the common case)
-        // the GCD is exactly `dim`, so centroid() is a no-op.
-        var allLengths: [Int] = []
-        for v in localSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
-        for v in remoteSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
-        let baseDim = allLengths.reduce(0) { gcd($0, $1) }
+        // Base embedding dimension, used to pool accumulated multi-segment embeddings into a
+        // centroid. The robust source is `embeddingDim` passed by the caller, captured from a
+        // known single-segment embedding before any accumulation (TranscriptionRunner does
+        // this in the crash-recovery merge path). When it isn't supplied we fall back to the
+        // GCD of all non-empty entry lengths — correct whenever speakers have differing
+        // segment counts, but it cannot recover `dim` if EVERY speaker appears the same number
+        // of times ≥2 (e.g. a 2-person call recovered as 2 chunks → all entries 2×dim →
+        // gcd = 2×dim). Hence callers on the accumulation path should pass `embeddingDim`.
+        let baseDim: Int
+        if let embeddingDim, embeddingDim > 0 {
+            baseDim = embeddingDim
+        } else {
+            var allLengths: [Int] = []
+            for v in localSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
+            for v in remoteSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
+            baseDim = allLengths.reduce(0) { gcd($0, $1) }
+        }
 
         // Pool each speaker's accumulated embedding vectors into a single centroid so that
         // cosineSimilarity always receives equal-length vectors regardless of per-speaker

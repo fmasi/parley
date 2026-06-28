@@ -152,6 +152,26 @@ struct EchoDeduplicatorTests {
         #expect(result.removedCount == 1)
     }
 
+    @Test func removesEchoWithAccumulatedEmbeddingsWhenDimThreaded() {
+        // Crash-recovery path: each speaker's embedding is accumulated across 2 segments,
+        // so DB entries are 2×dim (8 floats). Passing embeddingDim lets centroid() pool them
+        // back to dim regardless of segment counts (no inference). Echo should still be removed.
+        let segments = [
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
+            LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+        ]
+        let remoteDb: [String: [Float]] = ["Speaker 1": [1.0, 0.5, 0.3, 0.2, 1.0, 0.5, 0.3, 0.2]]
+        let localDb: [String: [Float]] = ["Speaker 1": [0.98, 0.52, 0.31, 0.19, 0.99, 0.50, 0.30, 0.20]]
+
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb,
+            embeddingDim: 4
+        )
+        #expect(result.removedCount == 1)
+        #expect(result.segments.count == 1)
+        #expect(result.segments[0].source == "remote")
+    }
+
     @Test func keepsLocalWhenTextDiffers() {
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
