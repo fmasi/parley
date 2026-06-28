@@ -38,7 +38,7 @@ public enum AudioArchiver {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
 
-        Logger.files.info("AudioArchiver: starting archive '\(baseName)'")
+        Logger.files.info("AudioArchiver: starting archive '\(baseName, privacy: .private)'")
 
         // 1. Open both WAVs (no bulk load — files are streamed in blocks).
         let micFile: AVAudioFile
@@ -106,7 +106,7 @@ public enum AudioArchiver {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
 
-        Logger.files.info("AudioArchiver: starting system-only archive '\(baseName)'")
+        Logger.files.info("AudioArchiver: starting system-only archive '\(baseName, privacy: .private)'")
 
         let sysFile: AVAudioFile
         do {

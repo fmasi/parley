@@ -73,6 +73,9 @@ final class TranscriptionRunner {
         var audioPaths: [URL] = []
         var localSpeakerDb: [String: [Float]] = [:]
         var remoteSpeakerDb: [String: [Float]] = [:]
+        // Captured from a single-segment embedding (length == dim) before any accumulation,
+        // so EchoDeduplicator can pool multi-segment embeddings without inferring the dim.
+        var embeddingDim = 0
         // #93: every segment that actually contributed audio, so each (not just the base pair)
         // is archived to its own AAC and reflected in the transcript's audio_paths.
         var contributingPairs: [AudioArchiver.SegmentPair] = []
@@ -91,6 +94,9 @@ final class TranscriptionRunner {
                 config: config
             )
             allSegments.append(contentsOf: systemResult.segments)
+            if embeddingDim == 0 {
+                embeddingDim = systemResult.speakerDatabase.values.first(where: { !$0.isEmpty })?.count ?? 0
+            }
             remoteSpeakerDb.merge(systemResult.speakerDatabase) { existing, new in existing + new }
             audioPaths.append(segmentPair.system)
 
@@ -137,7 +143,8 @@ final class TranscriptionRunner {
                 remoteSpeakerDatabase: remoteSpeakerDb,
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold
+                embeddingThreshold: config.echoEmbeddingThreshold,
+                embeddingDim: embeddingDim > 0 ? embeddingDim : nil
             )
             allSegments = dedupResult.segments
             echoRemoved = dedupResult.removedCount
