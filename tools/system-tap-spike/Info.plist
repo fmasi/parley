@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>eu.fmasi.parley.spike</string>
+
+    <key>CFBundleName</key>
+    <string>ParleySpike</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Parley Tap Spike</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <key>CFBundleExecutable</key>
+    <string>system-tap-spike</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- The whole point of the spike: this is the System Audio Recording TCC prompt. -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Parley Tap Spike captures system audio output to validate Continuity/telephony call capture.</string>
+</dict>
+</plist>
