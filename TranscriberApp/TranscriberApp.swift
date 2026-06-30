@@ -300,6 +300,14 @@ struct TranscriberApp: App {
                 appState.interruptionWarning = "Recording briefly interrupted — continuing."
             }
         }
+        // #86: the helper could not restart the mid-recording system (remote) stream within budget.
+        // The local mic keeps recording on its own AVCaptureSession — warn, never stop.
+        captureClient.onSystemAudioUnrecoverable = { _ in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
+            }
+        }
         captureClient.onFatalFailure = { _ in
             Task { @MainActor in
                 guard appState.isRecording else { return }

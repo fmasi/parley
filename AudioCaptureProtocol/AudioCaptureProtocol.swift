@@ -60,6 +60,10 @@ import Foundation
     func captureDidRestartInPlace()
     /// Capture failed and could not be restarted within budget; the session must stop.
     func captureDidFailFatally(reason: String)
+    /// The MID-RECORDING system (remote) stream could not be restarted within budget (#86). The mic
+    /// keeps recording on its own AVCaptureSession — the recording is NOT stopped, only a "mic only"
+    /// warning is surfaced.
+    func captureSystemAudioUnrecoverable(reason: String)
     /// The mic auto-switched to a new device — `deviceId` is the new device UID (nil = system default).
     @objc optional func micDeviceChanged(to deviceId: String?)
 }

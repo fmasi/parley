@@ -1,4 +1,30 @@
-# Test Checklist — v0.6.3 (PR #99)
+# Test Checklist — v0.6.4 (capture trust) + v0.6.3 (PR #99)
+
+## ⚠️ v0.6.4 — must device-test before commit (capture subsystem)
+Build/install this worktree first: `cd /Users/fmasi/Git/Transcriber-v064 && python3 scripts/dev.py`
+(Resets TCC — re-grant Screen Recording + Microphone on first launch.)
+
+### #86 — verified in-place restart (the headline test)
+- [ ] During a **capturable call** (Zoom/Teams/Meet), trigger an audio **route change** (connect/disconnect AirPods, switch output device). The SCStream stops and restarts in place.
+- [ ] Remote audio **resumes** after the route change — confirm by transcript content; the restart is only trusted once real system buffers arrive again (≈4s liveness probe).
+- [ ] A clean route change shows the transient banner: **"Audio device changed — recording resumed automatically."** and `system_audio_unrecovered` is **false**.
+
+### #86 — system stream unrecoverable → mic preserved, no teardown
+- [ ] Force a call where the **remote side can't be captured** at all (an **iPhone call answered on the Mac** is the known case) so the rebuilt stream delivers **no frames**.
+- [ ] After the restart budget is exhausted, the menu shows: **"Remote audio couldn't be recovered — only your microphone is recording."**
+- [ ] Your **mic keeps recording** the whole time — the session is NOT stopped/finalized (no crash-recovery relaunch).
+- [ ] Stop → transcript `metadata.capture_provenance.system_audio_unrecovered` is **true**, and a `.diag.jsonl` exists (it's an anomaly).
+
+### #86 — no false success on a good call
+- [ ] Record a **normal capturable call**. Remote audio present throughout.
+- [ ] **No** unrecoverable warning appears; `system_audio_unrecovered` is **false**.
+
+### #101 — provenance no longer leaks across sessions
+- [ ] Record **two short sessions back-to-back** (the app stays running between them).
+- [ ] The **second** transcript's `capture_provenance` shows `route_changes: 0`, `anomaly_count: 0` (its own clean numbers) — NOT the first session's tallies.
+- [ ] The second session's `.diag.jsonl` (if written) contains **only** that session's events, none from the first.
+
+---
 
 ## ⚠️ Must device-test before tagging v0.6.3
 These three change **runtime behavior** and can't be validated by unit tests.
