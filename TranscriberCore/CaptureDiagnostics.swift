@@ -19,6 +19,9 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case xpcInvalidation
     case retry
     case launchRecovery
+    /// The MID-RECORDING system (remote) stream could not be restarted within budget — the remote side
+    /// stopped being captured even though the mic kept recording (#86). Severity `.anomaly`.
+    case systemAudioUnrecovered
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.
@@ -59,6 +62,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     public let retries: Int
     public let recovered: Bool
     public let anomalyCount: Int
+    /// True when the MID-RECORDING system (remote) stream could not be restarted within budget during
+    /// the session — the remote side stopped being captured even though the mic kept recording (#86).
+    public let systemAudioUnrecovered: Bool
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -69,6 +75,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case retries
         case recovered
         case anomalyCount = "anomaly_count"
+        case systemAudioUnrecovered = "system_audio_unrecovered"
     }
 
     public init(
@@ -79,7 +86,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         routeChanges: Int,
         retries: Int,
         recovered: Bool,
-        anomalyCount: Int
+        anomalyCount: Int,
+        systemAudioUnrecovered: Bool = false
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -89,6 +97,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.retries = retries
         self.recovered = recovered
         self.anomalyCount = anomalyCount
+        self.systemAudioUnrecovered = systemAudioUnrecovered
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -99,6 +108,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "retries": retries,
             "recovered": recovered,
             "anomaly_count": anomalyCount,
+            "system_audio_unrecovered": systemAudioUnrecovered,
         ]
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
@@ -182,6 +192,8 @@ public struct CaptureDiagnostics: Sendable {
     public var retryCount: Int { events.lazy.filter { $0.kind == .retry }.count }
     public var didRecover: Bool { events.contains { $0.kind == .launchRecovery } }
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
+    /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
+    public var systemAudioUnrecovered: Bool { events.contains { $0.kind == .systemAudioUnrecovered } }
 
     /// Newline-delimited JSON of all events (the `.diag.jsonl` payload).
     public func jsonlData() -> Data {
@@ -217,7 +229,8 @@ public struct CaptureDiagnostics: Sendable {
             routeChanges: routeChangeCount,
             retries: retryCount,
             recovered: didRecover,
-            anomalyCount: anomalyCount
+            anomalyCount: anomalyCount,
+            systemAudioUnrecovered: systemAudioUnrecovered
         )
     }
 }
@@ -234,6 +247,12 @@ public final class LockedDiagnostics: @unchecked Sendable {
 
     public func record(_ event: CaptureEvent) {
         lock.withLock { $0.record(event) }
+    }
+
+    /// Empty the ring (per-session reset at the start of capture, #101) so a skipped finalize (crash)
+    /// can't carry the previous session's events into the next one.
+    public func clear() {
+        lock.withLock { $0.clear() }
     }
 
     /// Snapshot the ring for transport and clear it, atomically.

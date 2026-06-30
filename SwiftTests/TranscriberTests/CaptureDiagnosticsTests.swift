@@ -113,6 +113,52 @@ struct CaptureDiagnosticsTests {
         #expect(d.events.isEmpty)
         #expect(d.droppedCount == 0)
     }
+
+    // #101: per-session reset. After clear(), provenance counters must reflect ONLY post-clear events
+    // — a clean session must not inherit the prior session's tallies.
+    @Test func clearThenProvenanceReflectsOnlyNewEvents() {
+        var d = CaptureDiagnostics()
+        // "Previous session": route changes, retries, recovery, anomalies.
+        d.record(event(.restartInPlace, .warning, at: 0))
+        d.record(event(.restartInPlace, .warning, at: 1))
+        d.record(event(.retry, .warning, at: 2))
+        d.record(event(.launchRecovery, .warning, at: 3))
+        d.record(event(.streamStopError, .anomaly, at: 4))
+        let dirty = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(dirty.routeChanges == 2)
+        #expect(dirty.anomalyCount == 1)
+
+        d.clear()
+        // "New session": a single clean start event.
+        d.record(event(.captureStart, .info, at: 10))
+        let clean = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(clean.routeChanges == 0)
+        #expect(clean.retries == 0)
+        #expect(clean.recovered == false)
+        #expect(clean.anomalyCount == 0)
+        #expect(clean.systemAudioUnrecovered == false)
+    }
+
+    // #86: a system-stream-unrecovered event must surface in provenance + metadata.
+    @Test func systemAudioUnrecoveredFlagsProvenance() {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStart, .info, at: 0))
+        #expect(d.systemAudioUnrecovered == false)
+        d.record(event(.systemAudioUnrecovered, .anomaly, at: 1))
+        #expect(d.systemAudioUnrecovered == true)
+
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.systemAudioUnrecovered == true)
+        #expect(p.anomalyCount == 1)
+        #expect(p.asMetadataDictionary()["system_audio_unrecovered"] as? Bool == true)
+    }
+
+    @Test func cleanRunMetadataHasUnrecoveredFalse() {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStart, .info, at: 0))
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.asMetadataDictionary()["system_audio_unrecovered"] as? Bool == false)
+    }
 }
 
 struct CaptureProvenanceTests {

@@ -39,6 +39,11 @@ final class AudioCaptureClient {
     /// resolved UID (`nil` = system default). Used to refresh the menu label without a banner.
     var onMicDeviceChanged: (@Sendable (String?) -> Void)?
 
+    /// Invoked (reverse channel) when the helper could not restart the MID-RECORDING system (remote)
+    /// stream within budget (#86) — surface a "mic only" warning. The recording is NEVER stopped (the
+    /// mic keeps recording on its own AVCaptureSession).
+    var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
+
     func connect() {
         crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
@@ -121,6 +126,14 @@ final class AudioCaptureClient {
         record(.launchRecovery, .warning, detail)
     }
 
+    /// Reverse-channel receipt of a system-stream-unrecoverable warning (#86). Records the anomaly into
+    /// the app ring — so it lands in the transcript provenance (`system_audio_unrecovered`) and flags
+    /// the session — then surfaces the warning. The recording is NEVER stopped (the mic keeps recording).
+    func handleSystemAudioUnrecoverable(reason: String) {
+        record(.systemAudioUnrecovered, .anomaly, ["reason": reason])
+        onSystemAudioUnrecoverable?(reason)
+    }
+
     /// Pull and clear the helper's diagnostic ring over XPC, merging its events into the app ring.
     func drainHelperDiagnostics() async {
         guard let conn = connection else { return }
@@ -177,7 +190,14 @@ final class AudioCaptureClient {
         )
     }
 
-    func start(outputDirectory: URL, baseName: String, microphoneDeviceId: String? = nil) async throws {
+    func start(
+        outputDirectory: URL,
+        baseName: String,
+        microphoneDeviceId: String? = nil
+    ) async throws {
+        // Per-session reset (#101): the app ring accumulates across ALL sessions, so a clean session
+        // would otherwise report the prior session's tallies. Clear it at the very top of start.
+        diagnostics.clear()
         // crashHandlerFired is reset only in connect() — its sole reset point (#54). Resetting it
         // here would re-arm the dedup latch on a restart that reuses an about-to-be-invalidated
         // connection, letting the trailing invalidation re-fire onServiceCrash (a spurious retry).
@@ -334,6 +354,13 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
         Task { @MainActor [weak client] in
             Logger.audio.info("Mic device auto-switched to: \(deviceId ?? "default", privacy: .public)")
             client?.onMicDeviceChanged?(deviceId)
+        }
+    }
+
+    func captureSystemAudioUnrecoverable(reason: String) {
+        Task { @MainActor [weak client] in
+            Logger.audio.warning("Helper reports system stream unrecoverable — remote side not captured: \(reason, privacy: .public)")
+            client?.handleSystemAudioUnrecoverable(reason: reason)
         }
     }
 }

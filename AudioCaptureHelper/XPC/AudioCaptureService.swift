@@ -33,11 +33,25 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// One-shot latch so the reverse-channel fatal notification fires at most once per session
     /// even if both fatal emitters race (council F8). Reset on a fresh startCapture.
     private var hasFailedFatally = false
+    /// One-shot latch: the system stream exhausted its restart budget and was declared unrecoverable.
+    /// Once set, the lingering silent stream's further `didStopWithError` callbacks are ignored, the
+    /// "unrecoverable" warning fires at most once, and — critically — a system-stream death NEVER
+    /// routes to `failFatally` (which would tear down the still-good mic). Reset on a fresh startCapture.
+    private var systemStreamGivenUp = false
     private let maxRestartAttempts = 3
+    /// #86 liveness probe: after a rebuilt system stream "starts", wait this long for it to actually
+    /// deliver a buffer before trusting the restart. SCStream accepting the config is NOT proof of
+    /// audio; 4s comfortably exceeds the stream warm-up so a genuinely live stream has delivered by then.
+    private let livenessProbeNanos: UInt64 = 4_000_000_000
+    /// Backoff between failed in-place restart attempts (transient failure or no-frames probe miss).
+    private let restartBackoffNanos: UInt64 = 300_000_000
 
     /// Reverse-channel callbacks to the app (wired in main.swift from the connection proxy).
     var onRestartInPlace: (() -> Void)?
     var onFailFatally: ((String) -> Void)?
+    /// Invoked when the MID-RECORDING system stream could not be restarted within budget (#86). The
+    /// mic (separate AVCaptureSession) keeps recording — this only warns; it NEVER stops the session.
+    var onSystemAudioUnrecoverable: ((String) -> Void)?
     /// Invoked when the mic auto-switches during a session (route change, fallback, re-pin).
     /// Passes the resolved device UID (`nil` = system default) for menu-label refresh.
     var onMicDeviceChanged: ((String?) -> Void)?
@@ -62,6 +76,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             reply(false, "Capture already in progress")
             return
         }
+
+        // Per-session reset (#101): a skipped finalize (crash) leaves stale events in the helper ring,
+        // which would otherwise be drained into the next session's provenance. Clear them up front.
+        diagnostics.clear()
 
         Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
 
@@ -90,6 +108,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.restartAttempts = 0
                 self.isRestarting = false
                 self.hasFailedFatally = false
+                self.systemStreamGivenUp = false
             }
 
             Task {
@@ -411,9 +430,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// SCStream `didStopWithError` handoff. Decides whether the stop is a user stop (ignore), a
     /// recoverable route change (restart in place), or a terminal fault (surface fatal).
     private func handleStreamStopped(_ error: Error) {
-        let (capturing, userStopping, attempts) = stateLock.sync {
-            (isCapturing, isUserStopping, restartAttempts)
+        let (capturing, userStopping, attempts, givenUp) = stateLock.sync {
+            (isCapturing, isUserStopping, restartAttempts, systemStreamGivenUp)
         }
+        // Already declared the system stream unrecoverable: the lingering silent stream may keep
+        // firing didStopWithError. Ignore them — the mic is recording and must not be torn down.
+        guard !givenUp else { return }
         let decision = RestartDecision.evaluate(
             isUserStopped: userStopping, isCapturing: capturing,
             attempts: attempts, maxAttempts: maxRestartAttempts
@@ -422,8 +444,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         case .ignore:
             Logger.audio.info("Stream stop ignored — user stop or capture already inactive")
         case .failFatal:
-            Logger.audio.error("Stream stop: restart budget exhausted — fatal")
-            failFatally("restart budget exhausted")
+            // Budget exhausted. A system-stream death must NOT failFatally (that stops the mic, which
+            // runs on a separate AVCaptureSession and is recording fine). If a restart loop is active,
+            // let IT own exhaustion via attemptRestart; otherwise declare unrecoverable here.
+            let shouldDeclare = stateLock.sync { !isRestarting }
+            if shouldDeclare { handleSystemStreamUnrecoverable() }
         case .restart:
             // Atomic check-and-set so two concurrent didStopWithError callbacks can't both launch
             // a restart loop (council F10).
@@ -472,7 +497,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// Rebuild and restart the dead stream into the SAME handler/writers, re-pinning the mic.
-    /// Loops on transient failures up to the restart budget, then surfaces a fatal failure.
+    /// Loops on transient failures up to the restart budget. A rebuild that "starts" but delivers no
+    /// frames counts as a failed attempt (#86 verified autoheal), and budget exhaustion surfaces a
+    /// system-only warning WITHOUT tearing down the mic.
     private func attemptRestart() async {
         defer { stateLock.sync { isRestarting = false } }
         while true {
@@ -484,29 +511,83 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 attempts: attempts, maxAttempts: maxRestartAttempts
             )
             guard decision == .restart, let currentHandler else {
-                if decision == .failFatal { failFatally("restart budget exhausted") }
+                // Budget exhausted MID-RECORDING. Do NOT failFatally — that tears down the mic + whole
+                // session, but the mic runs on a separate AVCaptureSession and is still recording fine.
+                // Warn the app, keep the mic, stop retrying; the system track is silence-padded (#86).
+                if decision == .failFatal { handleSystemStreamUnrecoverable() }
                 return
             }
             do {
                 if let oldStream { try? await oldStream.stopCapture() }  // tear down the dead stream
+                // Snapshot the probe start BEFORE the rebuild so only buffers delivered AFTER this
+                // point count as "frames resumed".
+                let probeStartNanos = DispatchTime.now().uptimeNanoseconds
                 try await buildAndStartStream(handler: currentHandler)
                 // A stop may have begun during the restart's awaits; if so, don't claim success or
                 // notify — the stop path owns teardown now (council F1).
                 if stateLock.sync(execute: { isUserStopping }) { return }
-                stateLock.sync { restartAttempts = 0 }
-                Logger.audio.info("System-audio stream restarted in place")
-                record(.restartInPlace, .warning, ["source": "system"])
-                onRestartInPlace?()
-                return
+
+                // Liveness probe (#86): buildAndStartStream returning only means SCStream ACCEPTED the
+                // config — not that it delivers audio. The original false-success bug declared the
+                // restart healed here and lost 47 min of a real call when the rebuilt stream produced
+                // no frames. Wait, then verify a real system buffer arrived AFTER the rebuild before
+                // trusting it. (CancellationError from this sleep is handled by the catch below.)
+                try await Task.sleep(nanoseconds: livenessProbeNanos)
+                if stateLock.sync(execute: { isUserStopping }) { return }
+                let resumed = SystemStreamLiveness.framesResumed(
+                    lastArrivalNanos: currentHandler.lastSystemBufferArrivalNanos(),
+                    probeStartNanos: probeStartNanos
+                )
+                if resumed {
+                    stateLock.sync { restartAttempts = 0 }
+                    Logger.audio.info("System-audio stream restarted in place — frames resumed")
+                    record(.restartInPlace, .warning, ["source": "system"])
+                    onRestartInPlace?()
+                    return
+                }
+                // Rebuilt stream produced NO frames — count it as a failed attempt and retry within
+                // budget (the loop re-evaluates the budget at the top).
+                stateLock.sync { restartAttempts += 1 }
+                record(.restartFailed, .anomaly, ["reason": "no frames after restart"])
+                Logger.audio.error("In-place restart produced no frames — retrying")
+                try? await Task.sleep(nanoseconds: restartBackoffNanos)
             } catch is CancellationError {
-                // buildAndStartStream bailed because a stop began — abandon the restart silently.
+                // buildAndStartStream (or the probe sleep) bailed because a stop began — abandon silently.
                 Logger.audio.info("In-place restart aborted — session stopping")
                 return
             } catch {
                 stateLock.sync { restartAttempts += 1 }
                 Logger.audio.error("In-place restart attempt failed: \(error, privacy: .public)")
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? await Task.sleep(nanoseconds: restartBackoffNanos)
             }
         }
+    }
+
+    /// Budget exhausted for the MID-RECORDING system-stream restart (#86). Unlike `failFatally`, this
+    /// does NOT stop the mic, finalize, or tear down the session: the mic runs on a separate
+    /// AVCaptureSession and is still recording (a real call captured 47 good mic minutes while the
+    /// system stream was dead). Record the anomaly, warn the app over the reverse channel, and stop
+    /// retrying — the system track is silence-padded but the local audio is preserved.
+    ///
+    /// Reachable from BOTH the `attemptRestart` loop-top exhaustion AND `handleStreamStopped`'s
+    /// `.failFatal`, so it latches on `systemStreamGivenUp` to fire exactly once per give-up, and it
+    /// stops + clears the lingering silent stream so its further `didStopWithError` callbacks stop
+    /// arriving (which `handleStreamStopped`'s `givenUp` guard also ignores).
+    private func handleSystemStreamUnrecoverable() {
+        let shouldWarn = stateLock.sync { () -> Bool in
+            if systemStreamGivenUp { return false }
+            systemStreamGivenUp = true
+            return true
+        }
+        guard shouldWarn else { return }
+        // Stop and drop the zombie (silent) SCStream so it stops firing callbacks. Keep the handler,
+        // writers, and mic untouched — finalize uses the writers, not the stream.
+        let zombie = stateLock.sync { () -> SCStream? in let s = stream; stream = nil; return s }
+        if let zombie { Task { try? await zombie.stopCapture() } }
+        Logger.audio.error("System-audio stream unrecoverable after \(self.maxRestartAttempts) restarts — mic still recording")
+        record(.systemAudioUnrecovered, .anomaly, [
+            "reason": "system stream produced no frames after \(maxRestartAttempts) restarts"
+        ])
+        onSystemAudioUnrecoverable?("Remote audio couldn’t be recovered — only your microphone is recording.")
     }
 }

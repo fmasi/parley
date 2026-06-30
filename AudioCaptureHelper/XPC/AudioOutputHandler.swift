@@ -35,6 +35,19 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
 
+    /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
+    /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
+    /// in-place restart's liveness probe reads it from the service's restart task to verify a rebuilt
+    /// stream actually delivers frames — a muted remote still delivers buffers, so this never confuses
+    /// mute with failure. Written on the serial audio queue, read on another queue: an unfair lock
+    /// guards the single `UInt64`.
+    private let systemBufferArrival = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+
+    /// Last system-buffer arrival timestamp (`uptimeNanoseconds`), 0 until the first buffer (#86).
+    func lastSystemBufferArrivalNanos() -> UInt64 {
+        systemBufferArrival.withLock { $0 }
+    }
+
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
         self.systemWriter = systemWriter
         self.micWriter = micWriter
@@ -117,6 +130,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        // Liveness stamp (#86): record that a real system buffer arrived, independent of its energy.
+        // The in-place restart's probe reads this from another queue to verify a rebuilt stream is
+        // actually delivering frames. Stamped on EVERY system buffer, before any format-drop early
+        // return — a muted remote still delivers buffers, so this never mistakes mute for failure.
+        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
         // `.changed` means a transient route anomaly — record it and DROP the buffer rather than
