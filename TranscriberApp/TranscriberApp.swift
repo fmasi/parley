@@ -132,7 +132,10 @@ struct TranscriberApp: App {
                 content.title = "Model Integrity Problem"
                 content.body = ManifestHealthStore.problemMessage(for: result)
                 content.sound = .default
-                content.interruptionLevel = .timeSensitive
+                // .active (not .timeSensitive): a model-integrity problem at launch is worth surfacing
+                // but isn't urgent enough to punch through Focus/DND. (The "Recording Resumed" alerts
+                // below stay .timeSensitive — those fire mid-recording when audio may be at risk.)
+                content.interruptionLevel = .active
                 let request = UNNotificationRequest(
                     identifier: "manifest-verify", content: content, trigger: nil
                 )

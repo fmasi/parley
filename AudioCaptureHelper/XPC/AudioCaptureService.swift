@@ -447,6 +447,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // Budget exhausted. A system-stream death must NOT failFatally (that stops the mic, which
             // runs on a separate AVCaptureSession and is recording fine). If a restart loop is active,
             // let IT own exhaustion via attemptRestart; otherwise declare unrecoverable here.
+            // The `!isRestarting` check is only an optimisation — `handleSystemStreamUnrecoverable` is
+            // latched on `systemStreamGivenUp`, so it stays correct even if attemptRestart races in and
+            // fires it first (the second call is a no-op).
             let shouldDeclare = stateLock.sync { !isRestarting }
             if shouldDeclare { handleSystemStreamUnrecoverable() }
         case .restart:
