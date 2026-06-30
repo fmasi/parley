@@ -48,6 +48,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         systemBufferArrival.withLock { $0 }
     }
 
+    /// Clear the arrival timestamp so the next restart's liveness probe only counts buffers from the
+    /// rebuilt stream — drops any stale in-flight buffer that the just-stopped stream left on the audio
+    /// queue (#86 probe hardening). Called by the service right after a rebuild, before the probe wait.
+    func resetSystemBufferArrival() {
+        systemBufferArrival.withLock { $0 = 0 }
+    }
+
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
         self.systemWriter = systemWriter
         self.micWriter = micWriter
