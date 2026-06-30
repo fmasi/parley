@@ -281,6 +281,10 @@ final class MockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        guard !MockURLProtocol.responses.isEmpty else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
         let index = min(MockURLProtocol.requestCount, MockURLProtocol.responses.count - 1)
         MockURLProtocol.requestCount += 1
         let entry = MockURLProtocol.responses[index]
