@@ -359,7 +359,7 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
 
     func captureSystemAudioUnrecoverable(reason: String) {
         Task { @MainActor [weak client] in
-            Logger.audio.warning("Helper reports system stream unrecoverable — remote side not captured: \(reason, privacy: .public)")
+            Logger.audio.warning("Helper reports system stream unrecoverable — remote side not captured: \(reason, privacy: .private)")
             client?.handleSystemAudioUnrecoverable(reason: reason)
         }
     }

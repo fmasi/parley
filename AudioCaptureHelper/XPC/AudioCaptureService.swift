@@ -523,6 +523,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 // point count as "frames resumed".
                 let probeStartNanos = DispatchTime.now().uptimeNanoseconds
                 try await buildAndStartStream(handler: currentHandler)
+                // Drop any stale in-flight buffer the just-stopped stream may have left on the audio
+                // queue, so the probe below only counts frames from the rebuilt stream. (If the old
+                // stopCapture() silently failed and its stream still delivers, systemStreamGivenUp
+                // still caps the downstream harm — full stream-identity gating is a future hardening.)
+                currentHandler.resetSystemBufferArrival()
                 // A stop may have begun during the restart's awaits; if so, don't claim success or
                 // notify — the stop path owns teardown now (council F1).
                 if stateLock.sync(execute: { isUserStopping }) { return }
