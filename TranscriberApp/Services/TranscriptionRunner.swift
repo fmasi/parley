@@ -128,6 +128,10 @@ final class TranscriptionRunner {
         }
 
         if isDualStream && !allSegments.isEmpty {
+            SpeakerAssignment.resolveUnknownsWithinSource(&allSegments, sourceSpeakerCounts: [
+                "local": localSpeakerDb.count,
+                "remote": remoteSpeakerDb.count,
+            ])
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 

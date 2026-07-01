@@ -32,6 +32,15 @@ NEW recording. On the first tap recording macOS prompts for **System Audio Recor
 
 ---
 
+## #71 — dual-stream speaker labeling (device-test before commit)
+- [ ] Record a **1-party phone call** (you + one remote) via the tap. Transcript labels are a clean `Local Speaker N` (or your name) + `Remote Speaker 1` — **no bare `Unknown`**, no fragmentation of the remote.
+- [ ] Any leftover uncertain segment reads `Local Unknown` / `Remote Unknown` (side-attributed), never bare `Unknown`.
+- [ ] **Conference room / TV in background** (2+ people on your mic): the collapse does NOT merge them — the diarizer's 2+ count leaves their `Unknown`s as `Local Unknown` rather than folding into one speaker.
+- [ ] Single-stream (non-dual) recording: labels unchanged (no spurious `Local/Remote` prefix).
+- [ ] Known-still-open: multi-chunk (>30 min) recordings do NOT yet reconcile speakers across chunks (reconciler namespace fix pending).
+
+---
+
 ## Regression (always)
 - [ ] Start recording → stop → transcription completes
 - [ ] Multi-chunk recording merges to a single `.m4a`, plays back with no gaps
