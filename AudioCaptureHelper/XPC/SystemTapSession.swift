@@ -72,7 +72,10 @@ final class SystemTapSession {
         self.onSamples = onSamples
     }
 
-    deinit { stopDeviceMonitoring() }
+    // stop() (not just stopDeviceMonitoring) so a partial start() failure — createTap() succeeds but
+    // buildAggregateAndStart() throws — doesn't leak the HAL-level process tap. The caller (startSystemTap)
+    // never retains the session on a throw, so this is the only place that cleanup runs. Idempotent.
+    deinit { stop() }
 
     // MARK: - Lifecycle
 
@@ -251,6 +254,11 @@ final class SystemTapSession {
             let a = aggregateID, p = procID
             aggregateID = AudioObjectID(kAudioObjectUnknown)
             procID = nil
+            // Clear so mid-rebuild IOProc callbacks hit the same nil-format guard as initial start,
+            // instead of converting against the stale pre-rebuild format (wrong rate/channel count
+            // if the new output device differs, e.g. speakers -> AirPods).
+            tapFormat = nil
+            bytesPerFrame = 0
             return (a, p)
         }
         if agg != kAudioObjectUnknown, let proc {
