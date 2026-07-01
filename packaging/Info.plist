@@ -46,7 +46,7 @@
     <string>https://github.com/fmasi/parley/releases/latest/download/appcast.xml</string>
 
     <key>SUPublicEDKey</key>
-    <string>OM3k1dGfhM5yA9WA/RMZJHkqSMG8KVZyLAvTzjviBQU=</string>
+    <string>Dicb23byatYhUeYjHfT1VVrTRaVg908grTArF8ge8XE=</string>
 
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
