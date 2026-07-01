@@ -7,6 +7,8 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
 - EdDSA signing key pair generated (`generate_keys`), private key in the login Keychain,
   `SUPublicEDKey` in `packaging/Info.plist`.
 - `SUFeedURL` points at `https://github.com/fmasi/parley/releases/latest/download/appcast.xml`.
+- Python 3 available (`python3 --version`) — used by `scripts/release.sh` for the appcast URL
+  fixup; ships with Xcode / Command Line Tools.
 
 ## Per-release steps
 

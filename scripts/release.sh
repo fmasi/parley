@@ -107,10 +107,16 @@ tree = ET.parse(path)
 for enclosure in tree.findall(".//enclosure"):
     url = enclosure.get("url", "")
     match = re.search(r"/Parley-(\d+\.\d+\.\d+)\.zip$", url)
+    # .delta entries intentionally keep the current-release prefix: all accumulated deltas are
+    # re-uploaded to every GitHub release (docs/release-checklist.md step 5), so the current tag
+    # is the correct download location for all of them, not just the newest .zip.
     if match:
         fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)
         enclosure.set("url", fixed)
-tree.write(path, xml_declaration=True, encoding="unicode")
+# encoding="utf-8" (not "unicode") so the written bytes match the declared encoding -- "unicode"
+# writes a text string but still stamps an encoding='us-ascii' declaration regardless of content,
+# which would be wrong the moment a title/note ever contains a non-ASCII character.
+tree.write(path, xml_declaration=True, encoding="utf-8")
 PYEOF
 
 echo
