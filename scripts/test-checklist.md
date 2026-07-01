@@ -49,3 +49,4 @@ NEW recording. On the first tap recording macOS prompts for **System Audio Recor
 - [ ] Summary auto-generates (`-summary.md`) when an LLM endpoint is configured
 - [ ] App survives quit + relaunch (LaunchAgent)
 - [ ] During a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
+- [ ] **#86 (SCK default path)** Route change during a SCK recording (System Audio Capture set to the default, not the tap) → stream restarts in place; remote audio resumes; no "unrecovered" warning.

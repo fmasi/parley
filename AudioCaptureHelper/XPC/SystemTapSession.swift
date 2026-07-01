@@ -172,6 +172,7 @@ final class SystemTapSession {
                 Logger.audio.warning("System tap: aggregate delivers \(aggFmt.mSampleRate)Hz but tap reports \(tapFmt.mSampleRate)Hz — using aggregate rate (avoids chipmunk)")
             }
         } else if tapFmtOK {
+            Logger.audio.warning("System tap: aggregate input stream not yet readable — falling back to tap-reported format (\(tapFmt.mSampleRate)Hz), which can be the wrong rate (chipmunk risk)")
             asbd = tapFmt
         } else {
             AudioHardwareDestroyAggregateDevice(agg)
