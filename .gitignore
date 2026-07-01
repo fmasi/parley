@@ -42,6 +42,9 @@ bin/audio-capture-helper
 # Build output
 dist/
 
+# Release artifacts (archives, generated appcast, signed deltas) -- release-machine output, not source
+release/
+
 # Git worktrees
 .worktrees/
 
