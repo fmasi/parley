@@ -24,23 +24,30 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
    `CFBundleShortVersionString` comes from this tag (minus the `v`); `CFBundleVersion` is the
    total commit count (`git rev-list --count HEAD`) — monotonically increasing, never resets.
 
-3. **Build, archive, and sign**:
+3. **Write the Sparkle in-app release notes BEFORE building** — `generate_appcast` only embeds a
+   `sparkle:releaseNotesLink` in an entry if the matching HTML file already exists at signing time
+   (step 4 runs `generate_appcast` against `release/updates/`, so this must happen first or every
+   entry ships with a blank notes pane in Sparkle's update dialog):
+   ```bash
+   mkdir -p release/updates
+   $EDITOR release/updates/Parley-0.7.0.html   # same base filename as the zip release.sh will create
+   ```
+
+4. **Build, archive, and sign**:
    ```bash
    bash scripts/release.sh 0.7.0
    ```
    This builds `--release`, archives `dist/Parley.app` to `release/Parley-0.7.0.zip` (symlinks
    preserved — required for `Sparkle.framework`'s internal `Versions/Current` symlink), and runs
    Sparkle's `generate_appcast` against `release/updates/` to (re)sign every release ever placed
-   there and (re)generate `release/updates/appcast.xml` + any `*.delta` files. `release/` is
-   git-ignored — this is release-machine output, not source.
+   there and (re)generate `release/updates/appcast.xml` + any `*.delta` files, picking up the HTML
+   from step 3 for `sparkle:releaseNotesLink`. `release/` is git-ignored — this is release-machine
+   output, not source.
 
-4. **Write release notes — two distinct files, two distinct purposes:**
-   - `release/release-notes/0.7.0.html` — shown **inside Sparkle's update dialog**, referenced by
-     `sparkle:releaseNotesLink` in the generated appcast item (check `release/updates/appcast.xml`
-     for the exact expected filename/path if `generate_appcast` didn't find one and used a fallback).
-   - `release/release-notes/0.7.0.md` — the **GitHub release page body**, passed to `gh release
-     create --notes-file` below. Can be the same content in markdown form; they don't have to match
-     word-for-word, but should describe the same release.
+   Separately, write `release/release-notes/0.7.0.md` — the **GitHub release page body**, passed
+   to `gh release create --notes-file` below. Distinct file, distinct purpose (Sparkle's dialog vs.
+   the GitHub releases page); can be the same content in markdown form, doesn't need to match the
+   HTML word-for-word.
 
 5. **Create the GitHub release**, uploading the zip, the appcast, and any delta files:
    ```bash

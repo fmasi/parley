@@ -17,12 +17,16 @@ final class CheckForUpdatesViewModel: ObservableObject {
 }
 
 struct CheckForUpdatesView: View {
-    @ObservedObject private var viewModel: CheckForUpdatesViewModel
+    // @StateObject (not @ObservedObject) -- this view creates its own ViewModel, so its lifetime
+    // must be tied to the view's SwiftUI identity, not to this struct's init running again. With
+    // @ObservedObject a parent rebuild (e.g. AppState changing while the menu is open) would
+    // reallocate a fresh ViewModel and reset canCheckForUpdates to false until the next KVO tick.
+    @StateObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater
 
     init(updater: SPUUpdater) {
         self.updater = updater
-        self.viewModel = CheckForUpdatesViewModel(updater: updater)
+        self._viewModel = StateObject(wrappedValue: CheckForUpdatesViewModel(updater: updater))
     }
 
     var body: some View {

@@ -102,7 +102,13 @@ import sys
 import xml.etree.ElementTree as ET
 
 path = sys.argv[1]
-ET.register_namespace("sparkle", "http://www.andymatuschak.org/xml-namespaces/sparkle")
+# Re-register every namespace prefix the file actually declares (not just "sparkle") before
+# parsing, so ElementTree round-trips them by their real prefix on write instead of inventing
+# ns0:/ns1:-style aliases for anything it wasn't told about -- e.g. if generate_appcast ever adds
+# dc:/atom: elements, an unregistered namespace would otherwise make the appcast unparseable.
+raw = open(path, encoding="utf-8").read()
+for prefix, uri in re.findall(r'xmlns:(\w+)=["\']([^"\']+)["\']', raw):
+    ET.register_namespace(prefix, uri)
 tree = ET.parse(path)
 for enclosure in tree.findall(".//enclosure"):
     url = enclosure.get("url", "")
