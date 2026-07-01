@@ -82,8 +82,17 @@ cp "$RELEASE_DIR/$ZIP_NAME" "$UPDATES_DIR/$ZIP_NAME"
 # generate_appcast signs every archive under updates/ with the EdDSA key from the login Keychain
 # and (re)writes appcast.xml + *.delta covering all releases ever placed in this folder -- so
 # updates/ is a persistent accumulation point across releases, not per-release scratch space.
+#
+# --download-url-prefix is required: without it, generate_appcast writes only the bare filename
+# as the enclosure URL, which Sparkle resolves relative to SUFeedURL
+# (releases/latest/download/...) -- that only works for the CURRENT latest release; once the next
+# version ships, this release's zip is no longer a "latest" asset and downloads 404. GitHub's
+# actual per-release asset URLs are versioned (releases/download/<tag>/<file>), so point there.
+# Caveat: this prefix applies to whatever generate_appcast (re)writes on THIS run. If updates/
+# already has older releases in it for delta generation, verify their enclosure URLs in the
+# regenerated appcast.xml still point at their OWN tags, not this one, before publishing.
 echo "==> Generating signed appcast (Keychain access may prompt)..."
-"$GENERATE_APPCAST" "$UPDATES_DIR"
+"$GENERATE_APPCAST" --download-url-prefix "https://github.com/fmasi/parley/releases/download/$TAG/" "$UPDATES_DIR"
 
 echo
 echo "==> Done."

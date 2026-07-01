@@ -90,8 +90,11 @@ fi
 cp -a "$SPARKLE_FW" "$FRAMEWORKS/Sparkle.framework"
 
 # Parley is not sandboxed, so it must not use Sparkle's XPC installer/downloader services
-# (see Sparkle's "Removing the XPC Services" doc). Strip them from the embedded copy.
+# (see Sparkle's "Removing the XPC Services" doc). Strip them from the embedded copy, including the
+# top-level Versions/Current-relative convenience symlink -- cp -a preserves it, and leaving it
+# dangling after removing its target can make codesign reject the framework as malformed.
 rm -rf "$FRAMEWORKS/Sparkle.framework/Versions/B/XPCServices"
+rm -f  "$FRAMEWORKS/Sparkle.framework/XPCServices"
 
 # SPM builds the executable with rpath=@loader_path (i.e. Contents/MacOS/), not the app-bundle
 # convention of @executable_path/../Frameworks -- Xcode's "Embed Frameworks" phase adds that
@@ -104,6 +107,10 @@ echo "==> Signing (ad-hoc)..."
 # Sign inner components first, then the app bundle
 SPARKLE_VB="$FRAMEWORKS/Sparkle.framework/Versions/B"
 codesign --force --sign - "$SPARKLE_VB/Autoupdate"
+# Inner executable before its enclosing .app bundle -- codesign requires nested code to be signed
+# innermost-first. Ad-hoc signing tolerates the wrong order today, but a real Developer ID cert
+# would reject it, so get the order right now rather than only when that cert arrives.
+codesign --force --sign - "$SPARKLE_VB/Updater.app/Contents/MacOS/Updater"
 codesign --force --sign - "$SPARKLE_VB/Updater.app"
 codesign --force --sign - "$FRAMEWORKS/Sparkle.framework"
 codesign --force --sign - "$XPC_BUNDLE"

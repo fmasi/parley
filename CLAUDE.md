@@ -27,6 +27,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
 - `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter)
+- `TranscriberApp/Services/UpdaterController.swift` -- hosts `CheckForUpdatesViewModel` + `CheckForUpdatesView`, driving the "Check for Updates..." menu item via `SPUUpdater.canCheckForUpdates` KVO
 - `TranscriberApp/Views/MenuView.swift` -- menu bar dropdown content
 - `TranscriberApp/Views/SettingsView.swift` -- settings Form with Permissions section; triggers eager model download on Save when engine requires it
 - `TranscriberApp/Views/SetupView.swift` -- permission + engine setup window (shown at first launch or when model not cached); gates Continue on permissions AND model download
