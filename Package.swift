@@ -11,6 +11,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/orchetect/SettingsAccess", from: "2.0.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.14.4"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.3"),
     ],
     targets: [
         .target(
@@ -26,7 +27,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "TranscriberApp",
-            dependencies: ["AudioCaptureProtocol", "SettingsAccess", "TranscriberCore"],
+            dependencies: [
+                "AudioCaptureProtocol", "SettingsAccess", "TranscriberCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "TranscriberApp"
         ),
         .executableTarget(

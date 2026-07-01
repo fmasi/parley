@@ -30,6 +30,10 @@ env/
 .env
 *.token
 
+# Sparkle EdDSA private key backup (private key itself lives in the login Keychain)
+*.pem
+sparkle_private_key*
+
 # Swift build artifacts
 .build/
 audio_capture_helper/.build/

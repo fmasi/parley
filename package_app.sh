@@ -78,9 +78,34 @@ cp packaging/AppIcon.icns "$RESOURCES/AppIcon.icns"
 cp "$BUILD_DIR/Parley"           "$MACOS/Parley"
 cp "$BUILD_DIR/audio-capture-helper-xpc"  "$XPC_MACOS/audio-capture-helper-xpc"
 
+# ── Embed Sparkle.framework ───────────────────────────────────────────────────
+FRAMEWORKS="$CONTENTS/Frameworks"
+mkdir -p "$FRAMEWORKS"
+SPARKLE_FW="$BUILD_DIR/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FW" ]]; then
+    echo "error: Sparkle.framework not found at $SPARKLE_FW (did swift build resolve the SPM dependency?)"
+    exit 1
+fi
+# -a preserves symlinks — required so the framework's Versions/Current link stays intact.
+cp -a "$SPARKLE_FW" "$FRAMEWORKS/Sparkle.framework"
+
+# Parley is not sandboxed, so it must not use Sparkle's XPC installer/downloader services
+# (see Sparkle's "Removing the XPC Services" doc). Strip them from the embedded copy.
+rm -rf "$FRAMEWORKS/Sparkle.framework/Versions/B/XPCServices"
+
+# SPM builds the executable with rpath=@loader_path (i.e. Contents/MacOS/), not the app-bundle
+# convention of @executable_path/../Frameworks -- Xcode's "Embed Frameworks" phase adds that
+# automatically, but a hand-assembled SPM bundle doesn't get it for free. Without this the app
+# fails to launch (DYLD: Library not loaded: @rpath/Sparkle.framework/...).
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/Parley"
+
 # ── Code sign (ad-hoc) ────────────────────────────────────────────────────────
 echo "==> Signing (ad-hoc)..."
 # Sign inner components first, then the app bundle
+SPARKLE_VB="$FRAMEWORKS/Sparkle.framework/Versions/B"
+codesign --force --sign - "$SPARKLE_VB/Autoupdate"
+codesign --force --sign - "$SPARKLE_VB/Updater.app"
+codesign --force --sign - "$FRAMEWORKS/Sparkle.framework"
 codesign --force --sign - "$XPC_BUNDLE"
 codesign --force --sign - "$APP"
 

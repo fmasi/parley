@@ -2,6 +2,7 @@ import SwiftUI
 import UserNotifications
 import TranscriberCore
 import FluidAudio
+import Sparkle
 import os
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -89,6 +90,12 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
+    // Recording app: never silent-install (no userDriverDelegate override) — the standard user
+    // driver always prompts before installing. startingUpdater: true runs the check-on-launch +
+    // 24h background cadence configured via SUScheduledCheckInterval in Info.plist.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
+    )
     private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark", "summarize"]
 
     init() {
@@ -329,7 +336,8 @@ struct TranscriberApp: App {
                     captureClient: captureClient,
                     transcriptionRunner: transcriptionRunner,
                     configManager: configManager,
-                    calendarService: calendarService
+                    calendarService: calendarService,
+                    updater: updaterController.updater
                 )
             } else {
                 Button("Setup required...") {}
