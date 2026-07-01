@@ -44,8 +44,8 @@ if [[ "$CURRENT_TAG" != "$TAG" ]]; then
     exit 1
 fi
 
-if ! git diff --quiet HEAD; then
-    echo "error: working tree is dirty — commit or stash changes before cutting a release (the built .app must match the tagged commit exactly)"
+if ! git diff --quiet HEAD || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+    echo "error: working tree is dirty (modified or untracked files) — commit or stash changes before cutting a release (the built .app must match the tagged commit exactly)"
     exit 1
 fi
 
@@ -88,11 +88,30 @@ cp "$RELEASE_DIR/$ZIP_NAME" "$UPDATES_DIR/$ZIP_NAME"
 # (releases/latest/download/...) -- that only works for the CURRENT latest release; once the next
 # version ships, this release's zip is no longer a "latest" asset and downloads 404. GitHub's
 # actual per-release asset URLs are versioned (releases/download/<tag>/<file>), so point there.
-# Caveat: this prefix applies to whatever generate_appcast (re)writes on THIS run. If updates/
-# already has older releases in it for delta generation, verify their enclosure URLs in the
-# regenerated appcast.xml still point at their OWN tags, not this one, before publishing.
 echo "==> Generating signed appcast (Keychain access may prompt)..."
 "$GENERATE_APPCAST" --download-url-prefix "https://github.com/fmasi/parley/releases/download/$TAG/" "$UPDATES_DIR"
+
+# generate_appcast applies --download-url-prefix to EVERY entry it (re)writes, including older
+# releases already accumulated in updates/ for delta generation -- so on the 2nd+ release, this
+# just stamped THIS release's tag onto every older entry's URL too, breaking their downloads.
+# Restore each entry's URL to reference its own version's tag, parsed from its filename.
+echo "==> Fixing older entries' download URLs to their own release tags..."
+python3 - "$UPDATES_DIR/appcast.xml" <<'PYEOF'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+ET.register_namespace("sparkle", "http://www.andymatuschak.org/xml-namespaces/sparkle")
+tree = ET.parse(path)
+for enclosure in tree.findall(".//enclosure"):
+    url = enclosure.get("url", "")
+    match = re.search(r"/Parley-(\d+\.\d+\.\d+)\.zip$", url)
+    if match:
+        fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)
+        enclosure.set("url", fixed)
+tree.write(path, xml_declaration=True, encoding="unicode")
+PYEOF
 
 echo
 echo "==> Done."

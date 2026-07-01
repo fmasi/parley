@@ -94,7 +94,7 @@ cp -a "$SPARKLE_FW" "$FRAMEWORKS/Sparkle.framework"
 # top-level Versions/Current-relative convenience symlink -- cp -a preserves it, and leaving it
 # dangling after removing its target can make codesign reject the framework as malformed.
 rm -rf "$FRAMEWORKS/Sparkle.framework/Versions/B/XPCServices"
-rm -f  "$FRAMEWORKS/Sparkle.framework/XPCServices"
+rm -rf "$FRAMEWORKS/Sparkle.framework/XPCServices"
 
 # SPM builds the executable with rpath=@loader_path (i.e. Contents/MacOS/), not the app-bundle
 # convention of @executable_path/../Frameworks -- Xcode's "Embed Frameworks" phase adds that

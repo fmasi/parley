@@ -60,10 +60,10 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
 
 6. **Verify the update actually works** by installing the *previous* released build (or a build from
    before this tag) and using **Check for Updates…** from the menu bar. Confirm:
-   - `release/updates/appcast.xml`'s `<enclosure url="...">` values are the versioned GitHub
-     download URLs (`releases/download/v0.7.0/...`), not bare filenames, and that any OLDER
-     entries in the same file (if `updates/` has accumulated multiple releases) still point at
-     their own tags, not this one.
+   - Spot-check `release/updates/appcast.xml`: every `<enclosure url="...">` is a versioned GitHub
+     download URL (`releases/download/v0.7.0/...`, each pointing at *its own* release's tag) —
+     `scripts/release.sh` fixes this automatically after `generate_appcast` runs (which otherwise
+     stamps the current release's tag onto every accumulated entry), but it's cheap to eyeball.
    - The update is detected (new-version dialog appears with these release notes).
    - The EdDSA signature validates (Sparkle would show a corrupt-update error otherwise).
    - Install & Relaunch works, and the relaunched app reports the new version in Settings/About.
