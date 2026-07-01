@@ -204,7 +204,7 @@ public enum SpeakerAssignment {
                 finalSpeaker = bestSpeaker
                 shouldInclude = false
                 Logger.transcription.debug(
-                    "VAD filtered [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] \(bestSpeaker, privacy: .public): speechOverlap=\(speechOverlap, privacy: .public), quality=\(quality, privacy: .public)"
+                    "VAD filtered [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] \(bestSpeaker, privacy: .private): speechOverlap=\(speechOverlap, privacy: .public), quality=\(quality, privacy: .public)"
                 )
             }
 
@@ -281,7 +281,7 @@ public enum SpeakerAssignment {
                 collapsed += 1
             }
             if collapsed > 0 {
-                Logger.transcription.debug("Collapsed \(collapsed) Unknown \(source, privacy: .public) segments to \(target, privacy: .public) (diarizer found 1 speaker)")
+                Logger.transcription.debug("Collapsed \(collapsed) Unknown \(source, privacy: .public) segments to \(target, privacy: .private) (diarizer found 1 speaker)")
             }
         }
     }
