@@ -6,11 +6,14 @@ import Foundation
     /// Start capturing system audio + microphone to WAV files in the given directory.
     /// `microphoneDeviceId` selects a specific mic (AVCaptureDevice.uniqueID);
     /// pass nil to use the system default input device.
+    /// `systemAudioSource` is the `SystemAudioSource` raw value ("sck" | "core_audio_tap") selecting
+    /// the system-audio capture mechanism (#103); an unrecognized value falls back to SCK.
     /// Reply: (success: Bool, errorMessage: String?)
     func startCapture(
         outputDirectory: String,
         baseName: String,
         microphoneDeviceId: String?,
+        systemAudioSource: String,
         reply: @escaping (Bool, String?) -> Void
     )
 

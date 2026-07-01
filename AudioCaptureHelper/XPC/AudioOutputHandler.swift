@@ -224,6 +224,38 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Append pre-normalized 48 kHz mono Int16 system samples from the Core Audio output tap (#103,
+    /// phase 2). Unlike `handleSystemAudio`, there is no per-buffer format tracking: `SystemTapSession`
+    /// converts at the source, so the format is a fixed canonical 48 kHz/1ch/Int16 by construction and
+    /// the writer is pinned once. Stamps the #86 liveness arrival and timeline-pads exactly like the SCK
+    /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
+    /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
+    func appendSystemSamples(_ samples: [Int16], pts: CMTime) {
+        // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
+        // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
+        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        guard !samples.isEmpty else { return }
+
+        // Pin the writer to the canonical tap format exactly once. swapWriters re-applies systemFormatInfo
+        // to each rotated writer, so chunk rotation keeps the format without re-detecting. The
+        // systemFormatDetected diagnostic is emitted by SystemTapSession with the REAL source rate — NOT
+        // here (a hardcoded 48000 would overwrite that truth in provenance and hide a rate mismatch).
+        if systemFormatInfo == nil {
+            let rate = AudioConverter.outputSampleRate
+            systemFormatInfo = FormatInfo(rate: rate, channels: 1, isFloat: false, bitsPerChannel: 16)
+            systemWriter.setSampleRate(UInt32(rate))
+            systemWriter.setChannelCount(1)
+            Logger.audio.info("System audio (tap): normalized \(Int(rate))Hz, 1ch, Int16")
+        }
+
+        let rate = systemFormatInfo?.rate ?? AudioConverter.outputSampleRate
+        systemFramesWritten += timelineSilencePad(
+            into: systemWriter, framesWritten: systemFramesWritten, rate: rate, pts: pts, label: "system"
+        )
+        samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
+        systemFramesWritten += Int64(samples.count)
+    }
+
     // MARK: - Mic audio (normalized via AudioConverter)
 
     /// Append a microphone sample buffer captured by the decoupled `AVCaptureSession` (#96). MUST be

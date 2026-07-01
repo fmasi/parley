@@ -193,7 +193,8 @@ final class AudioCaptureClient {
     func start(
         outputDirectory: URL,
         baseName: String,
-        microphoneDeviceId: String? = nil
+        microphoneDeviceId: String? = nil,
+        systemAudioSource: SystemAudioSource = .screenCaptureKit
     ) async throws {
         // Per-session reset (#101): the app ring accumulates across ALL sessions, so a clean session
         // would otherwise report the prior session's tallies. Clear it at the very top of start.
@@ -212,7 +213,8 @@ final class AudioCaptureClient {
             proxy.startCapture(
                 outputDirectory: outputDirectory.path,
                 baseName: baseName,
-                microphoneDeviceId: microphoneDeviceId
+                microphoneDeviceId: microphoneDeviceId,
+                systemAudioSource: systemAudioSource.rawValue
             ) { success, errorMessage in
                 if success {
                     cont.resume()

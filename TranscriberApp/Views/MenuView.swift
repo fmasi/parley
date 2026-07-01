@@ -228,7 +228,8 @@ struct MenuView: View {
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
-                microphoneDeviceId: microphoneDeviceId
+                microphoneDeviceId: microphoneDeviceId,
+                systemAudioSource: configManager.config.systemAudioSource
             )
             helperMicKnown = true
             helperMicId = microphoneDeviceId
@@ -469,7 +470,8 @@ struct MenuView: View {
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
-                microphoneDeviceId: sentinel.micDeviceUID
+                microphoneDeviceId: sentinel.micDeviceUID,
+                systemAudioSource: configManager.config.systemAudioSource
             )
             try RecordingSentinel.write(newSentinel)
             // council FV2: a Stop pressed while we were restarting now runs cleanly — capture is back
