@@ -32,16 +32,25 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
    there and (re)generate `release/updates/appcast.xml` + any `*.delta` files. `release/` is
    git-ignored — this is release-machine output, not source.
 
-4. **Write release notes** at `release/release-notes/0.7.0.html` (referenced by
-   `sparkle:releaseNotesLink` in the generated appcast item — check `release/updates/appcast.xml`
-   for the exact expected filename/path if `generate_appcast` didn't find one and used a fallback).
+4. **Write release notes — two distinct files, two distinct purposes:**
+   - `release/release-notes/0.7.0.html` — shown **inside Sparkle's update dialog**, referenced by
+     `sparkle:releaseNotesLink` in the generated appcast item (check `release/updates/appcast.xml`
+     for the exact expected filename/path if `generate_appcast` didn't find one and used a fallback).
+   - `release/release-notes/0.7.0.md` — the **GitHub release page body**, passed to `gh release
+     create --notes-file` below. Can be the same content in markdown form; they don't have to match
+     word-for-word, but should describe the same release.
 
 5. **Create the GitHub release**, uploading the zip, the appcast, and any delta files:
    ```bash
+   # No delta files exist until the second release ever cut — glob only if the array is non-empty,
+   # otherwise gh would be passed the literal unexpanded string "release/updates/*.delta" and fail.
+   deltas=(release/updates/*.delta)
+   [[ -e "${deltas[0]}" ]] || deltas=()
+
    gh release create v0.7.0 \
      release/Parley-0.7.0.zip \
      release/updates/appcast.xml \
-     release/updates/*.delta \
+     "${deltas[@]}" \
      --title "Parley 0.7.0" \
      --notes-file release/release-notes/0.7.0.md
    ```

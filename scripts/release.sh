@@ -44,6 +44,11 @@ if [[ "$CURRENT_TAG" != "$TAG" ]]; then
     exit 1
 fi
 
+if ! git diff --quiet HEAD; then
+    echo "error: working tree is dirty — commit or stash changes before cutting a release (the built .app must match the tagged commit exactly)"
+    exit 1
+fi
+
 SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
 GENERATE_APPCAST="$SPARKLE_BIN/generate_appcast"
 if [[ ! -x "$GENERATE_APPCAST" ]]; then

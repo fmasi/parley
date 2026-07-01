@@ -91,10 +91,12 @@ struct TranscriberApp: App {
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
     // Recording app: never silent-install (no userDriverDelegate override) — the standard user
-    // driver always prompts before installing. startingUpdater: true runs the check-on-launch +
-    // 24h background cadence configured via SUScheduledCheckInterval in Info.plist.
+    // driver always prompts before installing. startingUpdater: false -- stored properties init
+    // before init()'s body runs, so starting it here would fire Sparkle's background timer/threads
+    // even for a CLI invocation (parley transcribe, etc.) that's about to exit. Started explicitly
+    // below, only once the CLI-mode check has passed.
     private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
+        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
     )
     private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark", "summarize"]
 
@@ -103,6 +105,15 @@ struct TranscriberApp: App {
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
             CLIHandler.run()  // Never returns
+        }
+
+        // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
+        // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
+        // never start Sparkle's updater at all.
+        do {
+            try updaterController.updater.start()
+        } catch {
+            Logger.state.error("Sparkle updater failed to start: \(error, privacy: .public)")
         }
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared

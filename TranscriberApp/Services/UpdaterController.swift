@@ -3,6 +3,11 @@ import Sparkle
 
 /// Publishes whether the user can currently trigger an update check (drives the menu item's
 /// enabled state — disabled while a check is already in flight).
+///
+/// No unit tests: its only logic is forwarding `SPUUpdater.canCheckForUpdates` through a
+/// `@Published` property, and `SPUUpdater` is a concrete Sparkle framework class with no seam to
+/// substitute a fake in a test target. Not a precedent for skipping tests elsewhere — this one
+/// genuinely has no testable logic path.
 final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false
 
