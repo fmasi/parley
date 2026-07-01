@@ -69,6 +69,11 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
 
 6. **Verify the update actually works** by installing the *previous* released build (or a build from
    before this tag) and using **Check for Updates…** from the menu bar. Confirm:
+   - **The GitHub release is published as non-draft, non-prerelease** — `SUFeedURL` resolves
+     `releases/latest/download/appcast.xml` to whichever release currently holds the "latest"
+     designation. If a future release is ever un-published (converted back to draft, or deleted
+     and recreated), "latest" silently reverts to the previous release and every installed client
+     stops seeing new updates until it's fixed — no error, just quietly nothing happening.
    - Spot-check `release/updates/appcast.xml`: every `<enclosure url="...">` is a versioned GitHub
      download URL (`releases/download/v0.7.0/...`, each pointing at *its own* release's tag) —
      `scripts/release.sh` fixes this automatically after `generate_appcast` runs (which otherwise
