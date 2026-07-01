@@ -96,34 +96,7 @@ echo "==> Generating signed appcast (Keychain access may prompt)..."
 # just stamped THIS release's tag onto every older entry's URL too, breaking their downloads.
 # Restore each entry's URL to reference its own version's tag, parsed from its filename.
 echo "==> Fixing older entries' download URLs to their own release tags..."
-python3 - "$UPDATES_DIR/appcast.xml" <<'PYEOF'
-import re
-import sys
-import xml.etree.ElementTree as ET
-
-path = sys.argv[1]
-# Re-register every namespace prefix the file actually declares (not just "sparkle") before
-# parsing, so ElementTree round-trips them by their real prefix on write instead of inventing
-# ns0:/ns1:-style aliases for anything it wasn't told about -- e.g. if generate_appcast ever adds
-# dc:/atom: elements, an unregistered namespace would otherwise make the appcast unparseable.
-raw = open(path, encoding="utf-8").read()
-for prefix, uri in re.findall(r'xmlns:(\w+)=["\']([^"\']+)["\']', raw):
-    ET.register_namespace(prefix, uri)
-tree = ET.parse(path)
-for enclosure in tree.findall(".//enclosure"):
-    url = enclosure.get("url", "")
-    match = re.search(r"/Parley-(\d+\.\d+\.\d+)\.zip$", url)
-    # .delta entries intentionally keep the current-release prefix: all accumulated deltas are
-    # re-uploaded to every GitHub release (docs/release-checklist.md step 5), so the current tag
-    # is the correct download location for all of them, not just the newest .zip.
-    if match:
-        fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)
-        enclosure.set("url", fixed)
-# encoding="utf-8" (not "unicode") so the written bytes match the declared encoding -- "unicode"
-# writes a text string but still stamps an encoding='us-ascii' declaration regardless of content,
-# which would be wrong the moment a title/note ever contains a non-ASCII character.
-tree.write(path, xml_declaration=True, encoding="utf-8")
-PYEOF
+python3 "$SCRIPT_DIR/scripts/fix_appcast_urls.py" "$UPDATES_DIR/appcast.xml"
 
 echo
 echo "==> Done."

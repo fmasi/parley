@@ -46,7 +46,12 @@ else
 fi
 # CFBundleVersion must increase monotonically across builds for Sparkle to detect updates.
 # Commit distance from `git describe` resets to 0 on every tag, so use the total commit
-# count instead -- it only ever goes up.
+# count instead -- it only ever goes up. But `git rev-list --count HEAD` returns a TRUNCATED
+# count in a shallow clone (silently, no error) -- guard against that breaking monotonicity.
+if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+    echo "error: shallow clone detected -- git rev-list --count HEAD would return a truncated commit count, breaking CFBundleVersion monotonicity. Use a full clone (git fetch --unshallow)."
+    exit 1
+fi
 BUILD_NUMBER="$(git rev-list --count HEAD)"
 
 echo "   Version: $VERSION (build: $BUILD_NUMBER, git: $GIT_DESCRIPTION)"
