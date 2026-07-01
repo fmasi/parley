@@ -1,63 +1,43 @@
-# Test Checklist — v0.6.4 (capture trust) + v0.6.3 (PR #99)
+# Test Checklist — #103 Phase 2 (Core Audio system-audio tap)
 
-## ⚠️ v0.6.4 — must device-test before commit (capture subsystem)
-Build/install this worktree first: `cd /Users/fmasi/Git/Transcriber-v064 && python3 scripts/dev.py`
+## ⚠️ Must device-test before commit (capture subsystem)
+Build/install this tree first: `python3 scripts/dev.py`
 (Resets TCC — re-grant Screen Recording + Microphone on first launch.)
 
-### #86 — verified in-place restart (the headline test)
-- [ ] During a **capturable call** (Zoom/Teams/Meet), trigger an audio **route change** (connect/disconnect AirPods, switch output device). The SCStream stops and restarts in place.
-- [ ] Remote audio **resumes** after the route change — confirm by transcript content; the restart is only trusted once real system buffers arrive again (≈4s liveness probe).
-- [ ] A clean route change shows the transient banner: **"Audio device changed — recording resumed automatically."** and `system_audio_unrecovered` is **false**.
+The new path is **off by default** (SCK stays the default). Enable it in
+**Settings → Recording → System Audio Capture → "Core Audio Tap (captures calls)"**, then start a
+NEW recording. On the first tap recording macOS prompts for **System Audio Recording** — allow it.
+(If it silently captures nothing after a rebuild: `tccutil reset All eu.fmasi.parley` and relaunch.)
 
-### #86 — system stream unrecoverable → mic preserved, no teardown
-- [ ] Force a call where the **remote side can't be captured** at all (an **iPhone call answered on the Mac** is the known case) so the rebuilt stream delivers **no frames**.
-- [ ] After the restart budget is exhausted, the menu shows: **"Remote audio couldn't be recovered — only your microphone is recording."**
-- [ ] Your **mic keeps recording** the whole time — the session is NOT stopped/finalized (no crash-recovery relaunch).
-- [ ] Stop → transcript `metadata.capture_provenance.system_audio_unrecovered` is **true**, and a `.diag.jsonl` exists (it's an anomaly).
+### Parity — the tap must not regress capturable meetings
+- [ ] With the tap enabled, record a **Zoom/Teams/Meet** call. Remote audio is captured on the system channel (confirm by transcript content).
+- [ ] Dual-stream `.m4a` is stereo (L=mic, R=system); the **R/system channel has the remote party**, not silence.
+- [ ] Echo-dedup still behaves on **speakers** (remote bleed removed; your own speech preserved).
 
-### #86 — no false success on a good call
-- [ ] Record a **normal capturable call**. Remote audio present throughout.
-- [ ] **No** unrecoverable warning appears; `system_audio_unrecovered` is **false**.
+### ⭐ The win — telephony/VoIP that SCK misses
+- [ ] Answer an **iPhone cellular call on the Mac** (Continuity). With the tap, the **system channel captures the remote party** (the case SCK left at the noise floor). Confirm in the transcript / by listening to the system channel.
+- [ ] Repeat for a **WhatsApp / FaceTime** call.
+- [ ] Run these on **headphones/AirPods** at least once — proves the tap captures the far end from the output graph, not mic bleed.
 
-### #101 — provenance no longer leaks across sessions
-- [ ] Record **two short sessions back-to-back** (the app stays running between them).
-- [ ] The **second** transcript's `capture_provenance` shows `route_changes: 0`, `anomaly_count: 0` (its own clean numbers) — NOT the first session's tallies.
-- [ ] The second session's `.diag.jsonl` (if written) contains **only** that session's events, none from the first.
+### Output-switch clock continuity (HAL rebuild)
+- [ ] Mid-recording, switch the **output device** (speakers → AirPods, or unplug). System audio keeps recording after a brief gap (the aggregate rebuilds around the new default output). No crash; the mic is never interrupted.
 
----
+### Lifecycle / teardown
+- [ ] Stop a tap recording → WAVs finalize, archive to `.m4a`, transcript completes (no orphaned private aggregate device — check Audio MIDI Setup shows nothing leftover; the helper also sweeps orphans on next start).
+- [ ] Toggle back to **Screen Recording (default)** → next recording uses SCK exactly as before (no behavior change on the default path).
+- [ ] Permission-denied case: deny System Audio Recording → start fails with a clear, actionable message (not a silent empty recording).
 
-## ⚠️ Must device-test before tagging v0.6.3
-These three change **runtime behavior** and can't be validated by unit tests.
-
-### #59 — single-stream recordings now archive to .m4a (no WAV left behind)
-The behavior change: a recording with **no mic** (mic permission off, or system-audio-only) used
-to leave raw `.wav` files on disk forever. Now every chunk flushes to `.m4a`.
-- [ ] Record a **system-audio-only** session (deny/disable mic). Stop.
-- [ ] The recording folder contains a `.m4a` and **no leftover `.wav`** files.
-- [ ] The `.m4a` plays back and transcribes correctly.
-- [ ] **Failure fallback:** if archival fails (rare), the `.wav` is kept (never deleted with no `.m4a` replacement) — check log for an archive-failure warning if you can force one.
-
-### #60 — echo dedup across crash-recovery segments
-Internal embedding change (accumulate + centroid). Verify it didn't regress normal echo removal.
-- [ ] Record with audio on **speakers** (no headphones), speak a few sentences over it.
-- [ ] Your speech is preserved; bleed removed (`echo_segments_removed > 0` in JSON metadata).
-- [ ] Bonus (crash-recovery): after a session that survived a crash, echo dedup still runs and removes nothing it shouldn't (no real local speech wrongly dropped).
-
-### #49 — summary uses the recording date, not "today"
-- [ ] Summarize a transcript (ideally one recorded on a **previous day**).
-- [ ] The summary's date reflects when it was **recorded**, not when the summary ran.
+### Timeline alignment
+- [ ] In a tap recording with both speakers active, mic and system tracks stay **aligned** in the stereo `.m4a` (no drift / no large leading offset between L and R).
 
 ---
 
-## Quick UI / behavior checks (this PR)
-- [ ] **#57** Settings → Summary: fill in context-overhead % and max-output-tokens, Save, reopen Settings → both **persist** (previously dropped).
-- [ ] **#33** Settings shows an **About** section with version + build number.
-- [ ] **#55** Multi-chunk dual-stream transcript: speaker labels read `Local Speaker N` / `Remote Speaker N` — **never** `Local Local Speaker N`.
-- [ ] **#56** Multi-chunk transcript: segments are in correct **time order** end to end.
-- [ ] **#44/#45** Delete a file from the FluidAudio cache, relaunch → a **user-visible** warning (launch notification + red indicator in Settings), and the log reports **both** missing and corrupt files (not just the first problem).
-- [ ] **#53** During a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows speaker names / file paths / session names as `<private>` — **not** in clear text.
-- [ ] **#61** Long meeting with a few well-spaced XPC restarts → no "crashed repeatedly" lockout.
-- [ ] **#62** `Parley transcribe -i file.m4a --debug` exits cleanly even if the log stream couldn't start (no crash on exit).
+## #71 — dual-stream speaker labeling (device-test before commit)
+- [ ] Record a **1-party phone call** (you + one remote) via the tap. Transcript labels are a clean `Local Speaker N` (or your name) + `Remote Speaker 1` — **no bare `Unknown`**, no fragmentation of the remote.
+- [ ] Any leftover uncertain segment reads `Local Unknown` / `Remote Unknown` (side-attributed), never bare `Unknown`.
+- [ ] **Conference room / TV in background** (2+ people on your mic): the collapse does NOT merge them — the diarizer's 2+ count leaves their `Unknown`s as `Local Unknown` rather than folding into one speaker.
+- [ ] Single-stream (non-dual) recording: labels unchanged (no spurious `Local/Remote` prefix).
+- [ ] **Multi-chunk reconcile (#71 part 2):** record a call **longer than the chunk duration** (lower `chunk_duration_minutes` to 10 in config to force it) so it produces 2+ chunks with the remote speaking in both. The remote is labeled the **same** `Remote Speaker 1` across the whole transcript — not `Remote Speaker 1` in chunk 1 and `Remote spk_0` in chunk 2.
 
 ---
 
@@ -68,3 +48,5 @@ Internal embedding change (accumulate + centroid). Verify it didn't regress norm
 - [ ] Rename dialog works; play button plays correct channel per speaker
 - [ ] Summary auto-generates (`-summary.md`) when an LLM endpoint is configured
 - [ ] App survives quit + relaunch (LaunchAgent)
+- [ ] During a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
+- [ ] **#86 (SCK default path)** Route change during a SCK recording (System Audio Capture set to the default, not the tap) → stream restarts in place; remote audio resumes; no "unrecovered" warning.

@@ -15,14 +15,27 @@ struct ConfigTests {
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
         #expect(config.engine == .resolvedDefault)
+        // SCK is the shipped default — the #103 Core Audio tap is opt-in during phase-2 rollout.
+        #expect(config.systemAudioSource == .screenCaptureKit)
     }
 
     @Test func newFieldsRoundTrip() throws {
         var config = Config.default
         config.engine = .fluidAudio
+        config.systemAudioSource = .coreAudioTap
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(Config.self, from: data)
         #expect(decoded.engine == .fluidAudio)
+        #expect(decoded.systemAudioSource == .coreAudioTap)
+    }
+
+    @Test func systemAudioSourceRawValues() throws {
+        // The raw values cross the XPC boundary as strings — pin them so a rename can't silently
+        // desync the app (encoder) and helper (SystemAudioSource(rawValue:)).
+        #expect(SystemAudioSource.screenCaptureKit.rawValue == "sck")
+        #expect(SystemAudioSource.coreAudioTap.rawValue == "core_audio_tap")
+        #expect(SystemAudioSource(rawValue: "core_audio_tap") == .coreAudioTap)
+        #expect(SystemAudioSource(rawValue: "nonsense") == nil)
     }
 
     @Test func newFieldsSnakeCaseKeys() throws {
@@ -40,6 +53,8 @@ struct ConfigTests {
         """
         let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
         #expect(config.engine == .resolvedDefault)
+        // A config written before #103 has no system_audio_source key — must default to SCK, not throw.
+        #expect(config.systemAudioSource == .screenCaptureKit)
     }
 
     @Test func memberWiseInit() {

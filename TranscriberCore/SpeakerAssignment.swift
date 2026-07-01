@@ -204,7 +204,7 @@ public enum SpeakerAssignment {
                 finalSpeaker = bestSpeaker
                 shouldInclude = false
                 Logger.transcription.debug(
-                    "VAD filtered [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] \(bestSpeaker, privacy: .public): speechOverlap=\(speechOverlap, privacy: .public), quality=\(quality, privacy: .public)"
+                    "VAD filtered [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] \(bestSpeaker, privacy: .private): speechOverlap=\(speechOverlap, privacy: .public), quality=\(quality, privacy: .public)"
                 )
             }
 
@@ -252,6 +252,40 @@ public enum SpeakerAssignment {
         })
     }
 
+    /// In dual-stream, each source (local mic / remote system) is a known channel the diarizer
+    /// clustered SEPARATELY. `sourceSpeakerCounts` is the DIARIZER's speaker-cluster count per source
+    /// (`speakerDatabase.count`) — the authority on how many people are on that channel. When it found
+    /// exactly ONE speaker, every segment on that channel is that speaker, including the ones a later
+    /// VAD quality gate blanked to `Unknown` (telephony/quiet audio fails the quality threshold even
+    /// when the diarizer was right). Collapse those `Unknown`s to the one speaker. A channel the
+    /// diarizer split into 2+ speakers — a conference room, or a background TV it separated — is left
+    /// UNTOUCHED: its `Unknown`s stay `Unknown`, since we can't safely attribute them (#71). This
+    /// leans on the diarizer's clustering rather than guessing from surviving labels, so a quiet
+    /// second speaker that the gate happened to blank entirely is NOT merged into the main speaker.
+    /// Runs BEFORE `tagWithSourcePrefix`, on raw (unprefixed) labels.
+    public static func resolveUnknownsWithinSource(
+        _ segments: inout [LabeledSegment], sourceSpeakerCounts: [String: Int]
+    ) {
+        let indicesBySource = Dictionary(grouping: segments.indices, by: { segments[$0].source })
+        for (source, indices) in indicesBySource {
+            guard sourceSpeakerCounts[source] == 1 else { continue }
+            // Collapse only toward a speaker the channel actually CONFIRMED on ≥1 segment — never
+            // invent one. If the diarizer found 1 speaker but the VAD gate blanked EVERY segment,
+            // leave them `Unknown` (honest: audio captured, nothing met the confidence bar) rather
+            // than asserting a definite speaker no segment corroborated (#71 / courtroom-grade truth).
+            guard let target = indices.map({ segments[$0].speaker })
+                .first(where: { !$0.isEmpty && $0 != "Unknown" }) else { continue }
+            var collapsed = 0
+            for i in indices where segments[i].speaker.isEmpty || segments[i].speaker == "Unknown" {
+                segments[i].speaker = target
+                collapsed += 1
+            }
+            if collapsed > 0 {
+                Logger.transcription.debug("Collapsed \(collapsed) Unknown \(source, privacy: .public) segments to \(target, privacy: .private) (diarizer found 1 speaker)")
+            }
+        }
+    }
+
     public static func tagWithSourcePrefix(_ segments: inout [LabeledSegment]) {
         for i in segments.indices {
             let speaker = segments[i].speaker
@@ -261,11 +295,15 @@ public enum SpeakerAssignment {
                 continue
             }
             let source = segments[i].source
+            // Only genuine dual-stream sources get a side prefix (single-stream uses source "").
+            guard source == "local" || source == "remote" else { continue }
             let label = source == "local" ? "Local" : "Remote"
             if !speaker.isEmpty && speaker != "Unknown" {
                 segments[i].speaker = "\(label) \(speaker)"
-            } else if speaker != "Unknown" {
-                segments[i].speaker = label
+            } else {
+                // Unknown/empty on a known channel: still attribute the SIDE so the segment is
+                // identifiable as `Local Unknown` / `Remote Unknown` rather than a bare `Unknown` (#71).
+                segments[i].speaker = "\(label) Unknown"
             }
         }
     }

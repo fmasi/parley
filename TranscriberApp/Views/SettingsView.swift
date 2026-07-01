@@ -142,6 +142,15 @@ struct SettingsView: View {
                     Text("srt").tag("srt")
                     Text("json").tag("json")
                 }
+                Picker("System Audio Capture", selection: $config.systemAudioSource) {
+                    Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
+                    Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
+                }
+                if config.systemAudioSource == .coreAudioTap {
+                    Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Audio Archive") {

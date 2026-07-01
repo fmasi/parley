@@ -117,6 +117,13 @@ final class ChunkProcessor {
         var allSegments = systemResult.segments + micResult.segments
         let hasDualStream = !micResult.segments.isEmpty
         if hasDualStream && !allSegments.isEmpty {
+            // Resolve within-source Unknowns to the single speaker of that channel BEFORE prefixing,
+            // so a 1-party call / your own mic doesn't fragment into `Remote Speaker 1` + `Unknown` (#71).
+            // The diarizer's per-channel speaker count (speakerDatabase.count) gates the collapse.
+            SpeakerAssignment.resolveUnknownsWithinSource(&allSegments, sourceSpeakerCounts: [
+                "local": micResult.speakerDatabase.count,
+                "remote": systemResult.speakerDatabase.count,
+            ])
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
         allSegments.sort { $0.start < $1.start }

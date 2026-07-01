@@ -203,7 +203,8 @@ struct TranscriberApp: App {
                 try await captureClient.start(
                     outputDirectory: outputDir,
                     baseName: baseName,
-                    microphoneDeviceId: sentinel.micDeviceUID
+                    microphoneDeviceId: sentinel.micDeviceUID,
+                    systemAudioSource: ConfigManager.shared.config.systemAudioSource
                 )
                 try RecordingSentinel.write(newSentinel)
                 appState.phase = .recording(since: sentinel.startedAt)
@@ -261,7 +262,8 @@ struct TranscriberApp: App {
                     try await captureClient.start(
                         outputDirectory: outputDir,
                         baseName: baseName,
-                        microphoneDeviceId: sentinel.micDeviceUID
+                        microphoneDeviceId: sentinel.micDeviceUID,
+                        systemAudioSource: ConfigManager.shared.config.systemAudioSource
                     )
                     try RecordingSentinel.write(newSentinel)
                     appState.interruptionWarning = "Recording briefly interrupted. Resuming."

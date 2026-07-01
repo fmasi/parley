@@ -5,6 +5,14 @@ public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case lmstudio
 }
 
+/// Which mechanism captures system (remote) audio. `screenCaptureKit` is the shipped default;
+/// `coreAudioTap` selects the Core Audio output process tap (#103) — a strict superset that also
+/// captures Continuity/telephony + VoIP that SCK misses. Behind a flag during phase 2 rollout.
+public enum SystemAudioSource: String, Codable, Equatable, Sendable {
+    case screenCaptureKit = "sck"
+    case coreAudioTap = "core_audio_tap"
+}
+
 public struct SummaryConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var provider: SummaryProviderType
@@ -71,6 +79,7 @@ public struct Config: Codable, Equatable, Sendable {
     public var suppressCaptureWarning: Bool
     public var lastMicrophoneDeviceId: String?
     public var engine: EngineID
+    public var systemAudioSource: SystemAudioSource
     public var vadSpeechThreshold: Double?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
@@ -114,6 +123,7 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
+        systemAudioSource: .screenCaptureKit,
         vadSpeechThreshold: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
@@ -137,6 +147,7 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
         engine: EngineID = .resolvedDefault,
+        systemAudioSource: SystemAudioSource = .screenCaptureKit,
         vadSpeechThreshold: Double? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
@@ -158,6 +169,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.suppressCaptureWarning = suppressCaptureWarning
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
         self.engine = engine
+        self.systemAudioSource = systemAudioSource
         self.vadSpeechThreshold = vadSpeechThreshold
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
@@ -181,6 +193,7 @@ public struct Config: Codable, Equatable, Sendable {
         case suppressCaptureWarning = "suppress_capture_warning"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
         case engine
+        case systemAudioSource = "system_audio_source"
         case vadSpeechThreshold = "vad_speech_threshold"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
@@ -205,6 +218,7 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
+        systemAudioSource = try c.decodeIfPresent(SystemAudioSource.self, forKey: .systemAudioSource) ?? .screenCaptureKit
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)

@@ -115,12 +115,79 @@ struct SpeakerAssignmentTests {
         #expect(segments[0].speaker == "Remote Speaker 1")
     }
 
-    @Test func tagSegmentsUnknownSpeakerGetsSourceOnly() {
+    @Test func tagSegmentsUnknownOrEmptyGetsSidePrefixed() {
+        // A known-source segment must never be a bare "Unknown"/"" — it carries the side so it's
+        // identifiable as `Local Unknown` / `Remote Unknown` (#71).
         var segments = [
             LabeledSegment(start: 0.0, end: 1.0, speaker: "", text: "hi", source: "local"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Unknown", text: "yo", source: "remote"),
         ]
         SpeakerAssignment.tagWithSourcePrefix(&segments)
-        #expect(segments[0].speaker == "Local")
+        #expect(segments[0].speaker == "Local Unknown")
+        #expect(segments[1].speaker == "Remote Unknown")
+    }
+
+    @Test func tagWithSourcePrefixLeavesSingleStreamUntouched() {
+        // Single-stream segments (source "") must not gain a side prefix.
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "hi", source: ""),
+        ]
+        SpeakerAssignment.tagWithSourcePrefix(&segments)
+        #expect(segments[0].speaker == "Speaker 1")
+    }
+
+    // MARK: - #71 within-source Unknown collapse
+
+    @Test func collapseUnknownsWhenDiarizerFoundOneSpeaker() {
+        // Remote channel: diarizer clustered exactly 1 speaker; the VAD gate blanked one segment to
+        // Unknown. It must collapse to that speaker so a clean 1-party call doesn't fragment.
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "a", source: "remote"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Unknown", text: "b", source: "remote"),
+        ]
+        SpeakerAssignment.resolveUnknownsWithinSource(&segments, sourceSpeakerCounts: ["remote": 1])
+        #expect(segments[0].speaker == "Speaker 1")
+        #expect(segments[1].speaker == "Speaker 1")
+    }
+
+    @Test func doesNotCollapseWhenDiarizerFoundMultipleSpeakers() {
+        // Conference room / TV-in-background: diarizer found 2 speakers on the mic → Unknown must
+        // NOT be merged into either (we can't safely attribute it).
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "a", source: "local"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Speaker 2", text: "b", source: "local"),
+            LabeledSegment(start: 2.0, end: 3.0, speaker: "Unknown", text: "c", source: "local"),
+        ]
+        SpeakerAssignment.resolveUnknownsWithinSource(&segments, sourceSpeakerCounts: ["local": 2])
+        #expect(segments[2].speaker == "Unknown")
+    }
+
+    @Test func doesNotInventSpeakerWhenChannelFullyGated() {
+        // Diarizer clustered 1 speaker, but every segment was quality-gated to Unknown. We must NOT
+        // manufacture a "Speaker 1" — leave them Unknown (honest), since nothing was confirmed (#71).
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Unknown", text: "a", source: "remote"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Unknown", text: "b", source: "remote"),
+        ]
+        SpeakerAssignment.resolveUnknownsWithinSource(&segments, sourceSpeakerCounts: ["remote": 1])
+        #expect(segments[0].speaker == "Unknown")
+        #expect(segments[1].speaker == "Unknown")
+    }
+
+    @Test func collapsePerSourceIndependently() {
+        // Mic has 1 speaker (collapse its Unknown), system has 2 (leave its Unknown).
+        var segments = [
+            LabeledSegment(start: 0.0, end: 1.0, speaker: "Speaker 1", text: "a", source: "local"),
+            LabeledSegment(start: 1.0, end: 2.0, speaker: "Unknown", text: "b", source: "local"),
+            LabeledSegment(start: 2.0, end: 3.0, speaker: "Speaker 1", text: "c", source: "remote"),
+            LabeledSegment(start: 3.0, end: 4.0, speaker: "Speaker 2", text: "d", source: "remote"),
+            LabeledSegment(start: 4.0, end: 5.0, speaker: "Unknown", text: "e", source: "remote"),
+        ]
+        SpeakerAssignment.resolveUnknownsWithinSource(
+            &segments, sourceSpeakerCounts: ["local": 1, "remote": 2]
+        )
+        #expect(segments[1].speaker == "Speaker 1")   // local Unknown collapsed
+        #expect(segments[4].speaker == "Unknown")     // remote Unknown left (2 speakers)
     }
 
     @Test func tagWithSourcePrefixIsIdempotent() {

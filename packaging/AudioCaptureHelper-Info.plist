@@ -27,6 +27,11 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>Parley needs Screen Recording permission to capture system audio from meetings.</string>
 
+    <!-- SystemTapSession calls AudioHardwareCreateProcessTap from THIS process (the XPC helper), so
+         the System Audio Recording TCC grant is keyed to this bundle, not the main app (#103). -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Parley needs System Audio Recording permission to capture meeting and call audio (including Continuity calls).</string>
+
     <key>XPCService</key>
     <dict>
         <key>ServiceType</key>
