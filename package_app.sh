@@ -44,15 +44,12 @@ if [[ -n "$TAG" ]]; then
 else
     VERSION="0.0.0"
 fi
-# Commit distance for CFBundleVersion: "v0.6.1-12-ga3f9c12" -> "12", on tag -> "0"
-if [[ "$GIT_DESCRIPTION" == *-*-g* ]]; then
-    # Has distance component
-    DISTANCE="$(echo "$GIT_DESCRIPTION" | sed -E 's/^v?[0-9]+\.[0-9]+\.[0-9]+-([0-9]+)-g.*/\1/')"
-else
-    DISTANCE="0"
-fi
+# CFBundleVersion must increase monotonically across builds for Sparkle to detect updates.
+# Commit distance from `git describe` resets to 0 on every tag, so use the total commit
+# count instead -- it only ever goes up.
+BUILD_NUMBER="$(git rev-list --count HEAD)"
 
-echo "   Version: $VERSION (distance: $DISTANCE, git: $GIT_DESCRIPTION)"
+echo "   Version: $VERSION (build: $BUILD_NUMBER, git: $GIT_DESCRIPTION)"
 
 # ── Assemble app bundle ───────────────────────────────────────────────────────
 APP="dist/Parley.app"
@@ -70,7 +67,7 @@ mkdir -p "$MACOS" "$RESOURCES" "$XPC_MACOS"
 # Info plist with version injection
 cp packaging/Info.plist "$CONTENTS/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$CONTENTS/Info.plist"
-plutil -replace CFBundleVersion -string "$DISTANCE" "$CONTENTS/Info.plist"
+plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS/Info.plist"
 plutil -insert ATGitDescription -string "$GIT_DESCRIPTION" "$CONTENTS/Info.plist"
 cp packaging/AudioCaptureHelper-Info.plist "$XPC_BUNDLE/Contents/Info.plist"
 
