@@ -124,7 +124,9 @@ struct SpeakerReconcilerTests {
         )
 
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk])
-        #expect(mapping[0]?.isEmpty == true)
+        // An empty-database chunk yields no remaps — absent or present-empty are equivalent, since
+        // TranscriptMerger reads `mapping[index] ?? [:]`.
+        #expect((mapping[0] ?? [:]).isEmpty)
     }
 
     @Test func reconcileSpeakerLeavesAfterChunk1() {
@@ -149,57 +151,71 @@ struct SpeakerReconcilerTests {
         #expect(mapping[1]?.count == 1)
     }
 
-    // MARK: - localSpeakerDatabase merge (#64)
+    // MARK: - Per-source dual-stream reconciliation (#64 / #71)
 
-    @Test func reconcileIncludesLocalOnlySpeaker() {
-        // localSpeakerDatabase carries a speaker key absent from speakerDatabase.
-        // After the merge, that local speaker must participate in reconciliation.
+    @Test func reconcileSeedsBothChannelsPrefixed() {
+        // In dual-stream, both a local-only and a remote speaker are seeded in their OWN prefixed
+        // namespace — keys match the "Local/Remote Speaker N" labels the segments carry.
         var remoteEmb = [Float](repeating: 0, count: 256); remoteEmb[0] = 1.0
         var localEmb  = [Float](repeating: 0, count: 256); localEmb[1] = 1.0
 
         let chunk = ProcessedChunk(
-            index: 0,
-            startTime: Date(),
-            audioPath: "/tmp/chunk0.wav",
+            index: 0, startTime: Date(), audioPath: "/tmp/chunk0.wav",
             segments: [],
-            speakerDatabase: ["spk_0": remoteEmb],
-            localSpeakerDatabase: ["local_spk": localEmb]
+            speakerDatabase: ["Speaker 1": remoteEmb],
+            localSpeakerDatabase: ["Speaker 1": localEmb]
         )
 
-        let mapping = SpeakerReconciler.reconcile(chunks: [chunk])
-        // Both the remote and the local-only speaker get seeded on the first chunk.
-        #expect(mapping[0]?["spk_0"] == "spk_0")
-        #expect(mapping[0]?["local_spk"] == "local_spk")
+        let mapping = SpeakerReconciler.reconcile(chunks: [chunk], isDualStream: true)
+        #expect(mapping[0]?["Remote Speaker 1"] == "Remote Speaker 1")
+        #expect(mapping[0]?["Local Speaker 1"] == "Local Speaker 1")
     }
 
-    @Test func reconcileRemoteWinsOnKeyCollision() {
-        // Both databases share key "spk_0" with DIFFERENT embeddings.
-        // The merge must keep the REMOTE embedding (axis 1), not the local one (axis 0).
+    @Test func localAndRemoteNeverMergeOnSharedKey() {
+        // Both channels use key "Speaker 1" with DIFFERENT (orthogonal) embeddings. The old code
+        // merged them (remote clobbered local); now they must stay SEPARATE, and later chunks match
+        // each channel to its OWN reference — a remote probe → Remote, a local probe → Local.
         var localEmb  = [Float](repeating: 0, count: 256); localEmb[0] = 1.0
         var remoteEmb = [Float](repeating: 0, count: 256); remoteEmb[1] = 1.0
 
         let chunk0 = ProcessedChunk(
-            index: 0,
-            startTime: Date(),
-            audioPath: "/tmp/chunk0.wav",
+            index: 0, startTime: Date(), audioPath: "/tmp/chunk0.wav",
             segments: [],
-            speakerDatabase: ["spk_0": remoteEmb],
-            localSpeakerDatabase: ["spk_0": localEmb]
+            speakerDatabase: ["Speaker 1": remoteEmb],
+            localSpeakerDatabase: ["Speaker 1": localEmb]
         )
-
-        // Probe matches the REMOTE embedding (axis 1). If remote won the merge,
-        // it matches spk_0; if local had won (axis 0), it would be orthogonal → new ID.
-        var probeEmb = [Float](repeating: 0, count: 256); probeEmb[1] = 1.0
+        // chunk1 probes: remote-axis on the system channel, local-axis on the mic channel.
+        var remoteProbe = [Float](repeating: 0, count: 256); remoteProbe[1] = 1.0
+        var localProbe  = [Float](repeating: 0, count: 256); localProbe[0] = 1.0
         let chunk1 = ProcessedChunk(
-            index: 1,
-            startTime: Date(),
-            audioPath: "/tmp/chunk1.wav",
+            index: 1, startTime: Date(), audioPath: "/tmp/chunk1.wav",
             segments: [],
-            speakerDatabase: ["probe": probeEmb]
+            speakerDatabase: ["Speaker 1": remoteProbe],
+            localSpeakerDatabase: ["Speaker 1": localProbe]
         )
 
-        let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], threshold: 0.65)
-        #expect(mapping[1]?["probe"] == "spk_0")
+        let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], isDualStream: true, threshold: 0.65)
+        // Each channel's chunk-1 speaker matches its OWN chunk-0 reference (local axis0 was NOT lost).
+        #expect(mapping[1]?["Remote Speaker 1"] == "Remote Speaker 1")
+        #expect(mapping[1]?["Local Speaker 1"] == "Local Speaker 1")
+    }
+
+    @Test func reconcilesRemoteSpeakerAcrossChunks() {
+        // The core #71 fix: the same remote speaker in two chunks must map to ONE global label, keyed
+        // to match the prefixed segment label so TranscriptMerger's remap actually applies.
+        var emb = [Float](repeating: 0, count: 256); emb[3] = 1.0
+        let localEmb = { () -> [Float] in var e = [Float](repeating: 0, count: 256); e[0] = 1.0; return e }()
+        let chunk0 = ProcessedChunk(
+            index: 0, startTime: Date(), audioPath: "a.wav", segments: [],
+            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb]
+        )
+        let chunk1 = ProcessedChunk(
+            index: 1, startTime: Date(), audioPath: "b.wav", segments: [],
+            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb]
+        )
+        let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], isDualStream: true, threshold: 0.65)
+        #expect(mapping[0]?["Remote Speaker 1"] == "Remote Speaker 1")
+        #expect(mapping[1]?["Remote Speaker 1"] == "Remote Speaker 1")   // same global across chunks
     }
 
     @Test func reconcileSingleSpeakerThroughout() {

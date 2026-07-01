@@ -229,9 +229,16 @@ final class TranscriptionRunner {
         // 1. Speaker reconciliation — chunks must be in recording order so the reconciler's
         // greedy cosine matching builds reference embeddings chronologically. (#56)
         let sortedChunks = sessionState.chunks.sorted { $0.index < $1.index }
-        Logger.transcription.info("Reconciling speakers across \(sortedChunks.count) chunks (cosine threshold: 0.65)")
+        // Dual-stream chunks carry `Local/Remote Speaker N` segment labels; the reconciler must
+        // reconcile each channel in its own prefixed namespace so its output keys match those labels
+        // (otherwise the remap is inert — the #64/#71 bug). Detect it the same way the tagging does.
+        let chunksAreDualStream = sortedChunks.contains { chunk in
+            chunk.segments.contains { $0.source == "local" }
+        }
+        Logger.transcription.info("Reconciling speakers across \(sortedChunks.count) chunks (dual-stream: \(chunksAreDualStream), cosine threshold: 0.65)")
         let speakerMapping = SpeakerReconciler.reconcile(
             chunks: sortedChunks,
+            isDualStream: chunksAreDualStream,
             threshold: 0.65
         )
 

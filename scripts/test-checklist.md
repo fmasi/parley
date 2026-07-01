@@ -37,7 +37,7 @@ NEW recording. On the first tap recording macOS prompts for **System Audio Recor
 - [ ] Any leftover uncertain segment reads `Local Unknown` / `Remote Unknown` (side-attributed), never bare `Unknown`.
 - [ ] **Conference room / TV in background** (2+ people on your mic): the collapse does NOT merge them — the diarizer's 2+ count leaves their `Unknown`s as `Local Unknown` rather than folding into one speaker.
 - [ ] Single-stream (non-dual) recording: labels unchanged (no spurious `Local/Remote` prefix).
-- [ ] Known-still-open: multi-chunk (>30 min) recordings do NOT yet reconcile speakers across chunks (reconciler namespace fix pending).
+- [ ] **Multi-chunk reconcile (#71 part 2):** record a call **longer than the chunk duration** (lower `chunk_duration_minutes` to 10 in config to force it) so it produces 2+ chunks with the remote speaking in both. The remote is labeled the **same** `Remote Speaker 1` across the whole transcript — not `Remote Speaker 1` in chunk 1 and `Remote spk_0` in chunk 2.
 
 ---
 

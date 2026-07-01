@@ -36,35 +36,65 @@ public enum SpeakerReconciler {
     ///
     /// - Parameters:
     ///   - chunks: Ordered array of `ProcessedChunk` values.
+    ///   - isDualStream: When true, the mic (local) and system (remote) channels are reconciled in
+    ///     SEPARATE namespaces and the output keys/values are `Local `/`Remote `-prefixed to match the
+    ///     labels `tagWithSourcePrefix` put on the segments. A mic speaker never merges with a system
+    ///     speaker (they are different channels — acoustic bleed can make their embeddings similar),
+    ///     and the prefixed keys actually match `seg.speaker`, so `TranscriptMerger`'s remap applies —
+    ///     fixing the previously-inert cross-chunk reconciliation for dual-stream (#64/#71).
     ///   - threshold: Minimum cosine similarity to consider two embeddings a match (default 0.65).
-    /// - Returns: `[chunkIndex: [localSpeakerID: globalSpeakerID]]`
+    /// - Returns: `[chunkIndex: [speakerLabel: globalSpeakerLabel]]`, keyed to match `seg.speaker`.
     public static func reconcile(
         chunks: [ProcessedChunk],
+        isDualStream: Bool = false,
         threshold: Float = 0.65
+    ) -> [Int: [String: String]] {
+        guard isDualStream else {
+            // Single-stream: one namespace, unprefixed — matches the unprefixed "Speaker N" segments.
+            return reconcileNamespace(
+                chunks: chunks, database: \.speakerDatabase, prefix: "", threshold: threshold
+            )
+        }
+        // Dual-stream: reconcile each channel independently, prefixed to match the segment labels.
+        var result: [Int: [String: String]] = [:]
+        for (idx, mapping) in reconcileNamespace(
+            chunks: chunks, database: \.localSpeakerDatabase, prefix: "Local ", threshold: threshold
+        ) {
+            result[idx, default: [:]].merge(mapping) { existing, _ in existing }
+        }
+        for (idx, mapping) in reconcileNamespace(
+            chunks: chunks, database: \.speakerDatabase, prefix: "Remote ", threshold: threshold
+        ) {
+            result[idx, default: [:]].merge(mapping) { existing, _ in existing }
+        }
+        return result
+    }
+
+    /// Greedy cross-chunk cosine reconciliation over ONE channel's per-chunk database. Output labels
+    /// are `prefix`-tagged so they match the segment labels (`prefix` is `""` for single-stream). New
+    /// global IDs are `prefix`-tagged too, so a local `spk_0` and a remote `spk_0` never collide.
+    private static func reconcileNamespace(
+        chunks: [ProcessedChunk],
+        database: KeyPath<ProcessedChunk, [String: [Float]]>,
+        prefix: String,
+        threshold: Float
     ) -> [Int: [String: String]] {
 
         var result: [Int: [String: String]] = [:]
-        // Global reference embeddings: globalID → embedding
-        var referenceEmbeddings: [String: [Float]] = [:]
-        // Auto-increment counter for new global IDs
+        var referenceEmbeddings: [String: [Float]] = [:]   // unprefixed globalID → embedding
         var nextGlobalIndex: Int = 0
 
         for chunk in chunks {
-            // Merge remote (system) and local (mic) speaker databases so the reconciler
-            // can match speakers regardless of which audio stream they came from. (#64)
-            // Remote embeddings take precedence on key collision.
-            let db = chunk.localSpeakerDatabase.merging(chunk.speakerDatabase) { _, remote in remote }
+            let db = chunk[keyPath: database]
+            if db.isEmpty { continue }   // this channel had no identified speakers in this chunk
             var mapping: [String: String] = [:]
 
             if referenceEmbeddings.isEmpty {
-                // First chunk (or first non-empty database): identity mapping, seed references
+                // First non-empty chunk for this channel: identity mapping, seed references.
                 for (localID, embedding) in db {
-                    let globalID = localID
-                    mapping[localID] = globalID
-                    referenceEmbeddings[globalID] = embedding
-                    // Keep next index ahead of any numeric suffix in seed IDs
-                    if let suffix = localID.components(separatedBy: "_").last,
-                       let n = Int(suffix) {
+                    mapping[prefix + localID] = prefix + localID
+                    referenceEmbeddings[localID] = embedding
+                    if let suffix = localID.components(separatedBy: "_").last, let n = Int(suffix) {
                         nextGlobalIndex = max(nextGlobalIndex, n + 1)
                     }
                 }
@@ -72,18 +102,14 @@ public enum SpeakerReconciler {
                 continue
             }
 
-            // Build candidate pairs: (localID, globalID, similarity)
             var candidates: [(localID: String, globalID: String, similarity: Float)] = []
             for (localID, localEmb) in db {
                 for (globalID, refEmb) in referenceEmbeddings {
                     let sim = cosineSimilarity(localEmb, refEmb)
-                    if sim >= threshold {
-                        candidates.append((localID, globalID, sim))
-                    }
+                    if sim >= threshold { candidates.append((localID, globalID, sim)) }
                 }
             }
 
-            // Greedy assignment: highest similarity first
             candidates.sort { $0.similarity > $1.similarity }
             var assignedLocals  = Set<String>()
             var assignedGlobals = Set<String>()
@@ -92,32 +118,30 @@ public enum SpeakerReconciler {
                 guard !assignedLocals.contains(candidate.localID),
                       !assignedGlobals.contains(candidate.globalID) else { continue }
 
-                mapping[candidate.localID] = candidate.globalID
+                mapping[prefix + candidate.localID] = prefix + candidate.globalID
                 assignedLocals.insert(candidate.localID)
                 assignedGlobals.insert(candidate.globalID)
 
-                // EMA update reference embedding (alpha = 0.9)
                 let alpha: Float = 0.9
                 if let oldRef = referenceEmbeddings[candidate.globalID],
                    let chunkEmb = db[candidate.localID] {
-                    let newRef = zip(oldRef, chunkEmb).map { alpha * $0 + (1 - alpha) * $1 }
-                    referenceEmbeddings[candidate.globalID] = newRef
+                    referenceEmbeddings[candidate.globalID] =
+                        zip(oldRef, chunkEmb).map { alpha * $0 + (1 - alpha) * $1 }
                 }
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(candidate.localID, privacy: .public) → \(candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .public) → \(prefix + candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
                 )
             }
 
-            // Unmatched local speakers → new global IDs
-            for (localID, embedding) in db where mapping[localID] == nil {
+            for (localID, embedding) in db where mapping[prefix + localID] == nil {
                 let newGlobalID = "spk_\(nextGlobalIndex)"
                 nextGlobalIndex += 1
-                mapping[localID] = newGlobalID
+                mapping[prefix + localID] = prefix + newGlobalID
                 referenceEmbeddings[newGlobalID] = embedding
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(localID, privacy: .public) → \(newGlobalID, privacy: .public)"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(prefix + localID, privacy: .public) → \(prefix + newGlobalID, privacy: .public)"
                 )
             }
 
