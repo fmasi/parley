@@ -36,9 +36,6 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>Parley needs Screen Recording permission to capture system audio from meetings.</string>
 
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>Parley needs System Audio Recording permission to capture meeting and call audio (including Continuity calls).</string>
-
     <key>NSMicrophoneUsageDescription</key>
     <string>Parley needs microphone access to record your voice.</string>
 

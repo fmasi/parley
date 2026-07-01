@@ -371,10 +371,17 @@ final class SystemTapSession {
         _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
     }
 
+    /// Cancellable pending rebuild, so a burst of HAL notifications from one output switch collapses
+    /// into a single rebuild instead of one per notification. Only touched on `monitorQueue`.
+    private var reevaluationItem: DispatchWorkItem?
+
     /// Debounce a burst of HAL notifications (a single output switch fires several) and let the new
     /// route settle before rebuilding. Runs on `monitorQueue`.
     private func scheduleOutputReevaluation() {
-        monitorQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.rebuildForOutputChange() }
+        reevaluationItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.rebuildForOutputChange() }
+        reevaluationItem = item
+        monitorQueue.asyncAfter(deadline: .now() + 0.2, execute: item)
     }
 
     /// Rebuild the aggregate + IOProc around the new default output, keeping the same global tap. Runs
