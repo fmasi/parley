@@ -44,21 +44,26 @@ if [[ -n "$TAG" ]]; then
 else
     VERSION="0.0.0"
 fi
-# CFBundleVersion must increase monotonically across builds for Sparkle to detect updates.
-# Commit distance from `git describe` resets to 0 on every tag, so use the total commit
-# count instead -- it only ever goes up. But `git rev-list --count HEAD` returns a TRUNCATED
-# count in a shallow clone (silently, no error) -- guard against that breaking monotonicity.
-# Only enforced for --release: monotonicity only matters for builds that get distributed via
-# Sparkle, so a debug build (routine local iteration) shouldn't be blocked by a shallow checkout.
-# != "false" (not == "true") so pre-2.15 git, where --is-shallow-repository exits non-zero and
-# this captures an empty string, fails closed instead of silently passing the guard.
-if [[ "$CONFIG" == "release" ]] && [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "false" ]]; then
-    echo "error: shallow clone detected (or git is too old to check -- need >= 2.15) -- git rev-list --count HEAD would return a truncated commit count, breaking CFBundleVersion monotonicity. Use a full clone (git fetch --unshallow)."
-    exit 1
-fi
-BUILD_NUMBER="$(git rev-list --count HEAD)"
+# CFBundleVersion must increase monotonically across ALL builds Sparkle might compare -- including
+# hotfixes cut from divergent maintenance branches. `git rev-list --count HEAD` only increases along
+# a SINGLE lineage: a hotfix off release/v0.6.x gets a lower count than a later mainline build, so if
+# it were ever the "latest" appcast it would look OLDER (#110). Use the HEAD commit's committer
+# timestamp instead -- a commit made later always has a larger value regardless of branch, so the
+# number is monotonic across the whole release graph. It's deterministic (fixed once committed) and
+# needs only HEAD, so it works in a shallow clone with no guard. Safe transition: any %ct (~1.7e9) is
+# far above the old count-based numbers (e.g. v0.7.0 = 412), so every future build still compares as
+# newer than already-shipped builds.
+BUILD_NUMBER="$(git show -s --format=%ct HEAD)"
 
 echo "   Version: $VERSION (build: $BUILD_NUMBER, git: $GIT_DESCRIPTION)"
+
+# Dev-build note: a build from a commit that isn't exactly a release tag gets a build number higher
+# than the last release's, so Sparkle on THIS machine won't offer the real release as an update
+# (installed build > appcast build). Harmless for a throwaway dev build -- flagged so it isn't
+# mistaken for a broken updater. (#110)
+if [[ -z "$(git describe --tags --exact-match 2>/dev/null)" ]]; then
+    echo "   note: non-tagged commit -- CFBundleVersion ($BUILD_NUMBER) exceeds the last release's, so this local build won't see published updates via Sparkle."
+fi
 
 # ── Assemble app bundle ───────────────────────────────────────────────────────
 APP="dist/Parley.app"

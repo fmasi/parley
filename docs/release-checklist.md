@@ -96,3 +96,11 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
   of a delta for anyone updating from an older version — but delta generation resumes once you
   reconstruct it by re-downloading prior releases' zips from their GitHub release pages (they're
   already there as release assets) back into `release/updates/`.
+- **Never mark a maintenance / non-Sparkle release as GitHub "latest" while a Sparkle-enabled line
+  is live (#110).** `SUFeedURL` resolves `releases/latest/download/appcast.xml`, so whichever release
+  holds "latest" must carry the current `appcast.xml`. A v0.6.x stable build (no `appcast.xml` asset)
+  published as "latest" would 404 the feed and silently stop updates for every v0.7.0+ client. Cut
+  such builds as **non-latest** releases (or don't publish them to Releases at all). Relatedly,
+  `CFBundleVersion` is now the HEAD commit timestamp (monotonic across branches), so a later hotfix
+  never gets a lower build number than an earlier mainline release — but the "latest"/appcast-asset
+  rule above is still what actually keeps the feed resolving.
