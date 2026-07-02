@@ -116,11 +116,27 @@ rm -rf "$FRAMEWORKS/Sparkle.framework/XPCServices"
 # fails to launch (DYLD: Library not loaded: @rpath/Sparkle.framework/...).
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/Parley"
 
-# ── Code sign (ad-hoc) ────────────────────────────────────────────────────────
-echo "==> Signing (ad-hoc)..."
+# ── Code sign ─────────────────────────────────────────────────────────────────
+# Prefer a STABLE self-signed identity so macOS TCC permission grants (Microphone, Screen
+# Recording, Calendar) survive Sparkle auto-updates: TCC pins each grant to the app's designated
+# requirement, and a fixed certificate keeps that requirement constant across rebuilds. Ad-hoc
+# signing (`-`) mints a fresh cdhash every build, so every update looks like a new app and drops
+# all grants. Run scripts/setup-signing-cert.sh once to create the identity; without it we fall
+# back to ad-hoc so CI / fresh clones still build (their updates just re-prompt for permissions).
+SIGN_IDENTITY="Parley Self-Signed"
+# Capture-then-grep, not `… | grep -qF`: grep's first-match exit SIGPIPEs security, and pipefail
+# would then wrongly report the identity as absent and silently drop to ad-hoc signing.
+if grep -qF "$SIGN_IDENTITY" <<<"$(security find-identity -v -p codesigning 2>/dev/null || true)"; then
+    SIGN_ID="$SIGN_IDENTITY"
+    echo "==> Signing with stable identity '$SIGN_IDENTITY' (TCC grants survive updates)..."
+else
+    SIGN_ID="-"
+    echo "==> Signing ad-hoc — no stable identity found; updates will re-prompt for permissions."
+    echo "    Run scripts/setup-signing-cert.sh once to make TCC grants persist across updates."
+fi
 # Sign inner components first, then the app bundle
-# TODO(Developer ID): ad-hoc signing doesn't require Hardened Runtime, but notarization with a
-# real Developer ID cert does -- every codesign call below (Autoupdate, Updater.app, the
+# TODO(Developer ID): ad-hoc and self-signed don't require Hardened Runtime, but notarization with
+# a real Developer ID cert does -- every codesign call below (Autoupdate, Updater.app, the
 # framework, the XPC bundle, the app) will need --options runtime --timestamp added before the
 # first notarized release, or notarization will reject them (--options runtime enables Hardened
 # Runtime; --timestamp embeds a secure timestamp, required for stapling).
@@ -129,15 +145,15 @@ if [[ ! -d "$SPARKLE_VB" ]]; then
     echo "error: Sparkle.framework/Versions/B not found -- Sparkle may have changed its internal bundle layout. Check $FRAMEWORKS/Sparkle.framework/Versions/ and update SPARKLE_VB."
     exit 1
 fi
-codesign --force --sign - "$SPARKLE_VB/Autoupdate"
+codesign --force --sign "$SIGN_ID" "$SPARKLE_VB/Autoupdate"
 # Inner executable before its enclosing .app bundle -- codesign requires nested code to be signed
 # innermost-first. Ad-hoc signing tolerates the wrong order today, but a real Developer ID cert
 # would reject it, so get the order right now rather than only when that cert arrives.
-codesign --force --sign - "$SPARKLE_VB/Updater.app/Contents/MacOS/Updater"
-codesign --force --sign - "$SPARKLE_VB/Updater.app"
-codesign --force --sign - "$FRAMEWORKS/Sparkle.framework"
-codesign --force --sign - "$XPC_BUNDLE"
-codesign --force --sign - "$APP"
+codesign --force --sign "$SIGN_ID" "$SPARKLE_VB/Updater.app/Contents/MacOS/Updater"
+codesign --force --sign "$SIGN_ID" "$SPARKLE_VB/Updater.app"
+codesign --force --sign "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
+codesign --force --sign "$SIGN_ID" "$XPC_BUNDLE"
+codesign --force --sign "$SIGN_ID" "$APP"
 # Ad-hoc signing tolerates a lot (wrong nesting order, missing inner components) -- verify now so
 # a subtle signing error is caught here, not at launch as a cryptic "damaged or incomplete" alert.
 codesign --verify --deep --strict "$APP"
