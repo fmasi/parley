@@ -14,11 +14,15 @@ public enum LaunchAgentManager {
 
     /// Returns an XML plist string for a LaunchAgent that relaunches the app on abnormal exit.
     ///
-    /// `KeepAlive` is intentionally a dict with `SuccessfulExit: false` (NOT a plain `<true/>`).
-    /// With the boolean form, `launchctl load -w` will spawn the app immediately even when an
-    /// instance is already running via LaunchServices (e.g. dev.py's `open Parley.app`),
-    /// producing two menu-bar icons. The dict form scopes relaunch to crash recovery only, which
-    /// matches the actual purpose of this LaunchAgent.
+    /// `KeepAlive` is a dict with `SuccessfulExit: false` (NOT a plain `<true/>`) to scope relaunch
+    /// to *abnormal* exits — i.e. only after a crash, which is this agent's whole purpose. A clean
+    /// quit or a single-instance-guard `exit(0)` therefore does NOT trigger a relaunch.
+    ///
+    /// NOTE (#109): the dict form does NOT prevent the launch-on-load duplicate. launchd starts a
+    /// KeepAlive job at load time regardless of dict-vs-boolean, so `install(loadAgent: true)` from
+    /// inside the running app spawns a second instance. That is handled by the single-instance guard
+    /// in `TranscriberApp` (`SingleInstanceGuard`), which makes the duplicate exit cleanly — see
+    /// gotcha #54. The dict form is still correct for its own reason (crash-only relaunch).
     public static func generatePlist(executablePath: String) -> String {
         return """
         <?xml version="1.0" encoding="UTF-8"?>
