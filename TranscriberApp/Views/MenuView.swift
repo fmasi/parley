@@ -28,6 +28,8 @@ struct MenuView: View {
     /// and the recovery handler honors it once capture is back up.
     @State private var recoveryInFlight = false
     @State private var stopRequestedDuringRecovery = false
+    /// Closes the window-style MenuBarExtra panel (macOS 14+ honors dismiss here).
+    @Environment(\.dismiss) private var dismissPanel
 
     init(
         appState: AppState,
@@ -47,81 +49,175 @@ struct MenuView: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            statusHeader
+
+            if appState.criticalError != nil || appState.interruptionWarning != nil
+                || appState.truncatedErrorMessage != nil {
+                alertBanners
+            }
+
+            recordButton
+
+            MenuActionRow(icon: "mic", title: activeMicName, subtitle: "Microphone") {
+                dismissPanel()
+                openMicPicker()
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 2) {
+                MenuActionRow(icon: "folder", title: "Open Recordings Folder") {
+                    dismissPanel()
+                    let dir = URL(fileURLWithPath: configManager.config.recordingDirectory)
+                    NSWorkspace.shared.open(dir)
+                }
+
+                MenuActionRow(
+                    icon: "person.2",
+                    title: "Rename Speakers…",
+                    isDisabled: !appState.isIdle || appState.lastJsonPath == nil
+                ) {
+                    dismissPanel()
+                    if let jsonPath = appState.lastJsonPath {
+                        RenameWindowController.shared.show(jsonPath: URL(fileURLWithPath: jsonPath))
+                    }
+                }
+
+                SettingsLink {
+                    MenuRowLabel(icon: "gearshape", title: "Settings…")
+                } preAction: {
+                    dismissPanel()
+                } postAction: {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .buttonStyle(.plain)
+
+                CheckForUpdatesView(updater: updater)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 2) {
+                MenuActionRow(icon: "info.circle", title: "About Parley") {
+                    dismissPanel()
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.orderFrontStandardAboutPanel(options: [
+                        .version: AppVersion.displayString,
+                        .applicationVersion: "",
+                        .credits: aboutCredits,
+                    ])
+                }
+
+                MenuActionRow(icon: "power", title: "Quit Parley") {
+                    LaunchAgentManager.uninstall()
+                    NSApplication.shared.terminate(nil)
+                }
+                .keyboardShortcut("q")
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+    }
+
+    // MARK: - Panel sections
+
+    /// App name + live state. The one animated element: a pulsing dot and a
+    /// ticking timer while recording; a small spinner while transcribing.
+    private var statusHeader: some View {
+        HStack(spacing: 10) {
+            StatusDot(color: statusColor, pulsing: appState.isRecording)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Parley")
+                    .font(.headline)
+                Text(statusText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if case .recording(let since) = appState.phase {
+                TimelineView(.periodic(from: since, by: 1)) { context in
+                    Text(recordingTimerString(from: since, to: context.date))
+                        .font(.title3.monospacedDigit())
+                        .fontDesign(.rounded)
+                        .foregroundStyle(.red)
+                }
+            } else if appState.isTranscribing {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
+    }
+
+    private var statusColor: Color {
+        if appState.criticalError != nil { return .red }
+        switch appState.phase {
+        case .idle: return .green
+        case .recording: return .red
+        case .transcribing: return .orange
+        }
+    }
+
+    private var statusText: String {
+        switch appState.phase {
+        case .idle: return "Ready to record"
+        case .recording: return appState.interruptionWarning == nil ? "Recording" : "Recording — interrupted"
+        case .transcribing(let progress): return progress
+        }
+    }
+
+    @ViewBuilder
+    private var alertBanners: some View {
         if let critical = appState.criticalError {
-            Button("🔴 \(critical)") {}
-                .disabled(true)
-            Button("Acknowledge") {
+            AlertBanner(severity: .critical, message: critical) {
                 appState.criticalError = nil
             }
-            Divider()
         }
-
         if let warning = appState.interruptionWarning {
-            Button("⚠ \(warning)") {}
-                .disabled(true)
-            Button("Dismiss") {
+            AlertBanner(severity: .warning, message: warning) {
                 appState.interruptionWarning = nil
             }
-            Divider()
         }
-
         if let errorText = appState.truncatedErrorMessage {
-            Button("⚠ Error: \(errorText)") {}
-                .disabled(true)
-            Button("Dismiss Error") {
+            AlertBanner(severity: .warning, message: errorText) {
                 Logger.state.debug("User dismissed error")
                 appState.errorMessage = nil
             }
-            Divider()
         }
+    }
 
-        Button(appState.recordingToggleLabel) {
+    /// The primary action. Red is reserved for exactly this (and criticals).
+    private var recordButton: some View {
+        Button {
+            // Starting opens the session-name panel — close this one first so
+            // they don't stack. Stopping keeps the panel up: the header flips
+            // to "Transcribing…" as live feedback.
+            if appState.isIdle { dismissPanel() }
             Task { await toggleRecording() }
-        }
-        .disabled(appState.isTranscribing)
-
-        Button { openMicPicker() } label: {
-            Label(activeMicName, systemImage: "mic")
-        }
-
-        Divider()
-
-        Button("Open Recordings Folder") {
-            let dir = URL(fileURLWithPath: configManager.config.recordingDirectory)
-            NSWorkspace.shared.open(dir)
-        }
-
-        Button("Rename Speakers...") {
-            if let jsonPath = appState.lastJsonPath {
-                RenameWindowController.shared.show(jsonPath: URL(fileURLWithPath: jsonPath))
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: appState.isRecording ? "stop.fill" : "record.circle")
+                Text(recordButtonTitle)
+                    .fontWeight(.medium)
             }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 2)
         }
-        .disabled(!appState.isIdle || appState.lastJsonPath == nil)
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(.red)
+        .disabled(appState.isTranscribing)
+    }
 
-        SettingsLink {
-            Text("Settings...")
-        } preAction: {
-        } postAction: {
+    private var recordButtonTitle: String {
+        switch appState.phase {
+        case .idle: return "Start Recording"
+        case .recording: return "Stop Recording"
+        case .transcribing: return "Transcribing…"
         }
-
-        CheckForUpdatesView(updater: updater)
-
-        Divider()
-
-        Button("About Parley") {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.orderFrontStandardAboutPanel(options: [
-                .version: AppVersion.displayString,
-                .applicationVersion: "",
-                .credits: aboutCredits,
-            ])
-        }
-
-        Button("Quit") {
-            LaunchAgentManager.uninstall()
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
     }
 
     /// Author + attribution shown in the standard macOS About panel.

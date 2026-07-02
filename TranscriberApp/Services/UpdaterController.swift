@@ -35,7 +35,14 @@ struct CheckForUpdatesView: View {
     }
 
     var body: some View {
-        Button("Check for Updates...", action: updater.checkForUpdates)
-            .disabled(!viewModel.canCheckForUpdates)
+        // Styled as a MenuActionRow so it sits seamlessly among the other rows
+        // of the window-style menu bar panel (see Views/DesignSystem.swift).
+        MenuActionRow(
+            icon: "arrow.triangle.2.circlepath",
+            title: "Check for Updates…",
+            isDisabled: !viewModel.canCheckForUpdates
+        ) {
+            updater.checkForUpdates()
+        }
     }
 }
