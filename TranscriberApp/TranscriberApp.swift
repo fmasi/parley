@@ -113,7 +113,10 @@ struct TranscriberApp: App {
         do {
             try updaterController.updater.start()
         } catch {
-            Logger.state.error("Sparkle updater failed to start: \(error, privacy: .public)")
+            // NSError.localizedDescription can include filesystem paths -- .private, not .public.
+            // Non-critical (a recording app shouldn't crash over the updater), but the only visible
+            // symptom otherwise is "Check for Updates..." staying permanently disabled with no clue why.
+            Logger.state.error("Sparkle updater failed to start (\"Check for Updates...\" will stay disabled): \(error, privacy: .private)")
         }
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared

@@ -120,6 +120,10 @@ echo "==> Signing (ad-hoc)..."
 # first notarized release, or notarization will reject them (--options runtime enables Hardened
 # Runtime; --timestamp embeds a secure timestamp, required for stapling).
 SPARKLE_VB="$FRAMEWORKS/Sparkle.framework/Versions/B"
+if [[ ! -d "$SPARKLE_VB" ]]; then
+    echo "error: Sparkle.framework/Versions/B not found -- Sparkle may have changed its internal bundle layout. Check $FRAMEWORKS/Sparkle.framework/Versions/ and update SPARKLE_VB."
+    exit 1
+fi
 codesign --force --sign - "$SPARKLE_VB/Autoupdate"
 # Inner executable before its enclosing .app bundle -- codesign requires nested code to be signed
 # innermost-first. Ad-hoc signing tolerates the wrong order today, but a real Developer ID cert
@@ -129,6 +133,9 @@ codesign --force --sign - "$SPARKLE_VB/Updater.app"
 codesign --force --sign - "$FRAMEWORKS/Sparkle.framework"
 codesign --force --sign - "$XPC_BUNDLE"
 codesign --force --sign - "$APP"
+# Ad-hoc signing tolerates a lot (wrong nesting order, missing inner components) -- verify now so
+# a subtle signing error is caught here, not at launch as a cryptic "damaged or incomplete" alert.
+codesign --verify --deep --strict "$APP"
 
 echo "==> Done: $APP"
 

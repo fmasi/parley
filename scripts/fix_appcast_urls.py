@@ -45,6 +45,11 @@ def fix_appcast_urls(path: str) -> None:
         if match:
             fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)
             enclosure.set("url", fixed)
+        elif url.endswith(".zip"):
+            # A .zip that didn't match the expected version pattern keeps whatever prefix
+            # generate_appcast gave it (likely wrong past the first release) -- surface this now,
+            # during the release run, rather than only discovering it via a user's 404 later.
+            print(f"warning: .zip enclosure URL did not match expected pattern, left unchanged: {url}", file=sys.stderr)
 
     # Write to a temp file in the same directory + atomic rename, not a direct write. This file
     # accumulates ALL release history in one place -- an interrupted direct write (disk full,
