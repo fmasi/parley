@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UserNotifications
 import TranscriberCore
 import FluidAudio
@@ -107,6 +108,15 @@ struct TranscriberApp: App {
             CLIHandler.run()  // Never returns
         }
 
+        // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
+        // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest
+        // instance; any duplicate exits cleanly here (status 0, so KeepAlive won't relaunch it). Runs
+        // AFTER the CLI check so `parley transcribe`-style invocations are never blocked by a running
+        // GUI app, and BEFORE Sparkle/notification/recovery setup so a doomed duplicate does no work.
+        // A real crash still recovers: the dead process isn't in the running list, so the relaunched
+        // instance sees no rival and proceeds.
+        Self.yieldIfDuplicateInstance()
+
         // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
         // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
         // never start Sparkle's updater at all.
@@ -172,6 +182,22 @@ struct TranscriberApp: App {
 
         if !LaunchAgentManager.isInstalled() {
             try? LaunchAgentManager.install()
+        }
+    }
+
+    /// If another instance of this app is already running, exit cleanly so exactly one survives (#109).
+    /// The decision (which instance is the oldest) lives in the pure, unit-tested `SingleInstanceGuard`;
+    /// this only gathers the running-app identities from AppKit and acts on the verdict.
+    private static func yieldIfDuplicateInstance() {
+        let me = NSRunningApplication.current
+        let bundleID = Bundle.main.bundleIdentifier ?? LaunchAgentManager.label
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != me.processIdentifier }
+            .map { SingleInstanceGuard.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
+        let mine = SingleInstanceGuard.Instance(pid: me.processIdentifier, launchDate: me.launchDate)
+        if SingleInstanceGuard.shouldYield(me: mine, others: others) {
+            Logger.state.info("Another Parley instance is already running — this duplicate is exiting (#109).")
+            exit(0)
         }
     }
 
