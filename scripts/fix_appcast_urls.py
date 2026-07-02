@@ -14,8 +14,10 @@ current release's tag is the correct download location for all of them, not just
 Usage:
     python3 scripts/fix_appcast_urls.py <path-to-appcast.xml>
 """
+import os
 import re
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 
@@ -41,11 +43,19 @@ def fix_appcast_urls(path: str) -> None:
             fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)
             enclosure.set("url", fixed)
 
-    # encoding="utf-8" (not "unicode") so the written bytes match the declared encoding --
-    # "unicode" writes a text string but still stamps an encoding='us-ascii' declaration
-    # regardless of content, which would be wrong the moment a title/note ever contains a
-    # non-ASCII character.
-    tree.write(path, xml_declaration=True, encoding="utf-8")
+    # Write to a temp file in the same directory + atomic rename, not a direct write. This file
+    # accumulates ALL release history in one place -- an interrupted direct write (disk full,
+    # SIGKILL) would leave every installed client's next update check hitting a truncated/corrupt
+    # appcast, silently breaking updates until someone notices and repairs it by hand.
+    directory = os.path.dirname(os.path.abspath(path))
+    with tempfile.NamedTemporaryFile("wb", dir=directory, delete=False) as tmp:
+        # encoding="utf-8" (not "unicode") so the written bytes match the declared encoding --
+        # "unicode" writes a text string but still stamps an encoding='us-ascii' declaration
+        # regardless of content, which would be wrong the moment a title/note ever contains a
+        # non-ASCII character.
+        tree.write(tmp, xml_declaration=True, encoding="utf-8")
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)  # atomic on POSIX within the same filesystem
 
 
 if __name__ == "__main__":

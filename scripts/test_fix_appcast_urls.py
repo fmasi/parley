@@ -55,6 +55,27 @@ class FixAppcastUrlsTests(unittest.TestCase):
             "https://github.com/fmasi/parley/releases/download/v0.6.0/Parley-0.6.0.zip",
         )
 
+    def test_mixed_appcast_old_fixed_current_unchanged(self):
+        # The primary production scenario: an old entry needing correction AND the current
+        # entry (already correct) present in the SAME parse, confirming the two rewrites don't
+        # interfere with each other.
+        result = self._run("""
+            <item><title>Parley 0.6.0</title>
+            <enclosure url="https://github.com/fmasi/parley/releases/download/v0.7.0/Parley-0.6.0.zip"
+                       sparkle:version="300" length="1" type="application/octet-stream"/></item>
+            <item><title>Parley 0.7.0</title>
+            <enclosure url="https://github.com/fmasi/parley/releases/download/v0.7.0/Parley-0.7.0.zip"
+                       sparkle:version="416" length="1" type="application/octet-stream"/></item>
+        """)
+        self.assertEqual(
+            enclosure_url(result, "Parley 0.6.0"),
+            "https://github.com/fmasi/parley/releases/download/v0.6.0/Parley-0.6.0.zip",
+        )
+        self.assertEqual(
+            enclosure_url(result, "Parley 0.7.0"),
+            "https://github.com/fmasi/parley/releases/download/v0.7.0/Parley-0.7.0.zip",
+        )
+
     def test_current_release_url_unaffected(self):
         result = self._run("""
             <item><title>Parley 0.7.0</title>

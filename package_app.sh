@@ -114,8 +114,9 @@ echo "==> Signing (ad-hoc)..."
 # Sign inner components first, then the app bundle
 # TODO(Developer ID): ad-hoc signing doesn't require Hardened Runtime, but notarization with a
 # real Developer ID cert does -- every codesign call below (Autoupdate, Updater.app, the
-# framework, the XPC bundle, the app) will need --options runtime added before the first
-# notarized release, or notarization will reject them.
+# framework, the XPC bundle, the app) will need --options runtime --timestamp added before the
+# first notarized release, or notarization will reject them (--options runtime enables Hardened
+# Runtime; --timestamp embeds a secure timestamp, required for stapling).
 SPARKLE_VB="$FRAMEWORKS/Sparkle.framework/Versions/B"
 codesign --force --sign - "$SPARKLE_VB/Autoupdate"
 # Inner executable before its enclosing .app bundle -- codesign requires nested code to be signed
