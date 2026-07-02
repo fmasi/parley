@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UserNotifications
 import TranscriberCore
 import FluidAudio
@@ -96,6 +97,20 @@ struct TranscriberApp: App {
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
             CLIHandler.run()  // Never returns
+        }
+
+        // Single-instance guard: the crash-recovery LaunchAgent (installed below) uses KeepAlive,
+        // which launchd starts the moment it loads — so a GUI launch + the agent's load would bring
+        // up TWO menu-bar instances (competing recorders). If another Parley is already running, exit
+        // now, before any UI, tasks, or agent install. Runs AFTER the CLI check so subcommands are
+        // unaffected; crash recovery is unaffected (after a crash no instance runs, so this passes).
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "eu.fmasi.parley")
+            .map { SingleInstanceGuard.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
+        if SingleInstanceGuard.shouldTerminate(
+            selfPid: ProcessInfo.processInfo.processIdentifier, instances: running
+        ) {
+            Logger.state.info("Another Parley instance is already running — exiting duplicate")
+            exit(0)
         }
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
