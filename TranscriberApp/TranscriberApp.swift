@@ -2,6 +2,7 @@ import SwiftUI
 import UserNotifications
 import TranscriberCore
 import FluidAudio
+import Sparkle
 import os
 
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -89,6 +90,14 @@ struct TranscriberApp: App {
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
+    // Recording app: never silent-install (no userDriverDelegate override) — the standard user
+    // driver always prompts before installing. startingUpdater: false -- stored properties init
+    // before init()'s body runs, so starting it here would fire Sparkle's background timer/threads
+    // even for a CLI invocation (parley transcribe, etc.) that's about to exit. Started explicitly
+    // below, only once the CLI-mode check has passed.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
+    )
     private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark", "summarize"]
 
     init() {
@@ -96,6 +105,18 @@ struct TranscriberApp: App {
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
             CLIHandler.run()  // Never returns
+        }
+
+        // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
+        // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
+        // never start Sparkle's updater at all.
+        do {
+            try updaterController.updater.start()
+        } catch {
+            // NSError.localizedDescription can include filesystem paths -- .private, not .public.
+            // Non-critical (a recording app shouldn't crash over the updater), but the only visible
+            // symptom otherwise is "Check for Updates..." staying permanently disabled with no clue why.
+            Logger.state.error("Sparkle updater failed to start (\"Check for Updates...\" will stay disabled): \(error, privacy: .private)")
         }
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
@@ -329,7 +350,8 @@ struct TranscriberApp: App {
                     captureClient: captureClient,
                     transcriptionRunner: transcriptionRunner,
                     configManager: configManager,
-                    calendarService: calendarService
+                    calendarService: calendarService,
+                    updater: updaterController.updater
                 )
             } else {
                 Button("Setup required...") {}

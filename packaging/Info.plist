@@ -41,5 +41,14 @@
 
     <key>NSCalendarsUsageDescription</key>
     <string>Parley uses your calendar to suggest a name for the recording based on your current meeting.</string>
+
+    <key>SUFeedURL</key>
+    <string>https://github.com/fmasi/parley/releases/latest/download/appcast.xml</string>
+
+    <key>SUPublicEDKey</key>
+    <string>Dicb23byatYhUeYjHfT1VVrTRaVg908grTArF8ge8XE=</string>
+
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
 </dict>
 </plist>

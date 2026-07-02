@@ -3,6 +3,7 @@ import AppKit
 import SettingsAccess
 import TranscriberCore
 import UserNotifications
+import Sparkle
 import os
 
 struct MenuView: View {
@@ -11,6 +12,7 @@ struct MenuView: View {
     let transcriptionRunner: TranscriptionRunner
     let configManager: ConfigManager
     let calendarService: CalendarService
+    let updater: SPUUpdater
     @State private var xpcRetryCount = 0
     @State private var lastCrashAt: Date?
     @State private var selectedMicId: String?
@@ -32,13 +34,15 @@ struct MenuView: View {
         captureClient: AudioCaptureClient,
         transcriptionRunner: TranscriptionRunner,
         configManager: ConfigManager,
-        calendarService: CalendarService
+        calendarService: CalendarService,
+        updater: SPUUpdater
     ) {
         self.appState = appState
         self.captureClient = captureClient
         self.transcriptionRunner = transcriptionRunner
         self.configManager = configManager
         self.calendarService = calendarService
+        self.updater = updater
         self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
     }
 
@@ -99,6 +103,8 @@ struct MenuView: View {
         } preAction: {
         } postAction: {
         }
+
+        CheckForUpdatesView(updater: updater)
 
         Divider()
 
