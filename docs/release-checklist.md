@@ -90,4 +90,9 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
   `*.pem` / `sparkle_private_key*` already).
 - `release/updates/` is a **persistent accumulation folder across releases**, not per-release scratch
   space — keep every prior release's archive in it so `generate_appcast` can keep generating delta
-  patches between versions.
+  patches between versions. It's git-ignored, so it only exists on the machine that cut each
+  release. If that machine is ever unavailable (new laptop, etc.) and `release/updates/` is empty
+  on a fresh checkout, the next release will still work — Sparkle just serves the full zip instead
+  of a delta for anyone updating from an older version — but delta generation resumes once you
+  reconstruct it by re-downloading prior releases' zips from their GitHub release pages (they're
+  already there as release assets) back into `release/updates/`.

@@ -38,6 +38,9 @@ def fix_appcast_urls(path: str) -> None:
 
     for enclosure in tree.findall(".//enclosure"):
         url = enclosure.get("url", "")
+        # Matches plain X.Y.Z versions only (this project's tags are always e.g. v0.7.0, never
+        # pre-release suffixes like v0.8.0-rc1) -- intentionally out of scope. A pre-release zip
+        # would silently fail this match and keep whatever prefix generate_appcast gave it.
         match = re.search(r"/Parley-(\d+\.\d+\.\d+)\.zip$", url)
         if match:
             fixed = re.sub(r"/releases/download/[^/]+/", f"/releases/download/v{match.group(1)}/", url)

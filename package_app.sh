@@ -48,9 +48,11 @@ fi
 # Commit distance from `git describe` resets to 0 on every tag, so use the total commit
 # count instead -- it only ever goes up. But `git rev-list --count HEAD` returns a TRUNCATED
 # count in a shallow clone (silently, no error) -- guard against that breaking monotonicity.
+# Only enforced for --release: monotonicity only matters for builds that get distributed via
+# Sparkle, so a debug build (routine local iteration) shouldn't be blocked by a shallow checkout.
 # != "false" (not == "true") so pre-2.15 git, where --is-shallow-repository exits non-zero and
 # this captures an empty string, fails closed instead of silently passing the guard.
-if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "false" ]]; then
+if [[ "$CONFIG" == "release" ]] && [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "false" ]]; then
     echo "error: shallow clone detected (or git is too old to check -- need >= 2.15) -- git rev-list --count HEAD would return a truncated commit count, breaking CFBundleVersion monotonicity. Use a full clone (git fetch --unshallow)."
     exit 1
 fi
