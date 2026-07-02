@@ -82,7 +82,8 @@ struct SpeakerReconcilerTests {
     }
 
     @Test func reconcileDetectsNewSpeaker() {
-        // Chunk 0: spk_0 → axis 0
+        // Seed with the realistic friendly label production actually produces ("Speaker 1" via
+        // remapDatabaseKeys), so this exercises the real minting path (#113 test-fidelity).
         var emb0 = [Float](repeating: 0, count: 256); emb0[0] = 1.0
 
         let chunk0 = ProcessedChunk(
@@ -90,10 +91,12 @@ struct SpeakerReconcilerTests {
             startTime: Date(),
             audioPath: "/tmp/chunk0.wav",
             segments: [],
-            speakerDatabase: ["spk_0": emb0]
+            speakerDatabase: ["Speaker 1": emb0]
         )
 
-        // Chunk 1: "newPerson" → axis 1 (orthogonal to axis 0 → no match)
+        // Chunk 1: a genuinely new voice (axis 1, orthogonal → no match). The per-chunk diarizer
+        // independently labels its own speaker "Speaker 1" too — the reconciler must recognize it as
+        // NEW (not identity-match the label) and mint a fresh global label.
         var embNew = [Float](repeating: 0, count: 256); embNew[1] = 1.0
 
         let chunk1 = ProcessedChunk(
@@ -101,17 +104,26 @@ struct SpeakerReconcilerTests {
             startTime: Date(),
             audioPath: "/tmp/chunk1.wav",
             segments: [],
-            speakerDatabase: ["newPerson": embNew]
+            speakerDatabase: ["Speaker 1": embNew]
         )
 
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1])
 
-        // newPerson is orthogonal → below threshold → assigned a new global ID
-        let globalID = mapping[1]?["newPerson"]
-        #expect(globalID != nil)
-        #expect(globalID != "spk_0")
-        // New speakers get IDs of the form "spk_N"
-        #expect(globalID?.hasPrefix("spk_") == true)
+        // The new speaker gets a human-friendly label that CONTINUES the numbering ("Speaker 2"),
+        // never a raw internal "spk_N" leaking into the transcript (#113).
+        let globalID = mapping[1]?["Speaker 1"]
+        #expect(globalID == "Speaker 2")
+        #expect(globalID?.hasPrefix("spk_") == false)
+    }
+
+    @Test func trailingIndexParsesBothLabelForms() {
+        // Production labels are space-separated ("Speaker 3"); legacy/internal are "spk_3". Both must
+        // parse so nextGlobalIndex stays above every in-use index (#113).
+        #expect(SpeakerReconciler.trailingIndex("Speaker 3") == 3)
+        #expect(SpeakerReconciler.trailingIndex("spk_3") == 3)
+        #expect(SpeakerReconciler.trailingIndex("Speaker 12") == 12)
+        #expect(SpeakerReconciler.trailingIndex("Unknown") == nil)
+        #expect(SpeakerReconciler.trailingIndex("") == nil)
     }
 
     @Test func reconcileEmptyDatabaseProducesEmptyMapping() {
