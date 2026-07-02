@@ -88,6 +88,17 @@ cp "$RELEASE_DIR/$ZIP_NAME" "$UPDATES_DIR/$ZIP_NAME"
 # (releases/latest/download/...) -- that only works for the CURRENT latest release; once the next
 # version ships, this release's zip is no longer a "latest" asset and downloads 404. GitHub's
 # actual per-release asset URLs are versioned (releases/download/<tag>/<file>), so point there.
+#
+# generate_appcast only embeds sparkle:releaseNotesLink if a same-named .html/.md/.txt file
+# already exists next to the archive -- docs/release-checklist.md step 3 says to write it first,
+# but nothing enforces that. Not a hard failure (skipping notes is a valid choice), just a heads-up
+# so a forgotten file doesn't silently ship a blank notes pane with no clue why.
+HTML_NOTES="$UPDATES_DIR/$ZIP_NAME"
+HTML_NOTES="${HTML_NOTES%.zip}.html"
+if [[ ! -f "$HTML_NOTES" ]]; then
+    echo "warning: $HTML_NOTES not found -- Sparkle's update dialog will show no release notes for this version (see docs/release-checklist.md step 3)."
+fi
+
 echo "==> Generating signed appcast (Keychain access may prompt)..."
 "$GENERATE_APPCAST" --download-url-prefix "https://github.com/fmasi/parley/releases/download/$TAG/" "$UPDATES_DIR"
 

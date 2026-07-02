@@ -12,7 +12,12 @@ final class CheckForUpdatesViewModel: ObservableObject {
     @Published var canCheckForUpdates = false
 
     init(updater: SPUUpdater) {
-        updater.publisher(for: \.canCheckForUpdates).assign(to: &$canCheckForUpdates)
+        // Sparkle doesn't document that this KVO publisher fires on the main thread -- receive(on:)
+        // makes that assumption explicit rather than relying on it, since publishing to @Published
+        // off-main would trigger a SwiftUI re-render from a background thread.
+        updater.publisher(for: \.canCheckForUpdates)
+            .receive(on: RunLoop.main)
+            .assign(to: &$canCheckForUpdates)
     }
 }
 

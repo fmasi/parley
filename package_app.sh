@@ -48,8 +48,10 @@ fi
 # Commit distance from `git describe` resets to 0 on every tag, so use the total commit
 # count instead -- it only ever goes up. But `git rev-list --count HEAD` returns a TRUNCATED
 # count in a shallow clone (silently, no error) -- guard against that breaking monotonicity.
-if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-    echo "error: shallow clone detected -- git rev-list --count HEAD would return a truncated commit count, breaking CFBundleVersion monotonicity. Use a full clone (git fetch --unshallow)."
+# != "false" (not == "true") so pre-2.15 git, where --is-shallow-repository exits non-zero and
+# this captures an empty string, fails closed instead of silently passing the guard.
+if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != "false" ]]; then
+    echo "error: shallow clone detected (or git is too old to check -- need >= 2.15) -- git rev-list --count HEAD would return a truncated commit count, breaking CFBundleVersion monotonicity. Use a full clone (git fetch --unshallow)."
     exit 1
 fi
 BUILD_NUMBER="$(git rev-list --count HEAD)"
@@ -110,6 +112,10 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS/Parley"
 # ── Code sign (ad-hoc) ────────────────────────────────────────────────────────
 echo "==> Signing (ad-hoc)..."
 # Sign inner components first, then the app bundle
+# TODO(Developer ID): ad-hoc signing doesn't require Hardened Runtime, but notarization with a
+# real Developer ID cert does -- every codesign call below (Autoupdate, Updater.app, the
+# framework, the XPC bundle, the app) will need --options runtime added before the first
+# notarized release, or notarization will reject them.
 SPARKLE_VB="$FRAMEWORKS/Sparkle.framework/Versions/B"
 codesign --force --sign - "$SPARKLE_VB/Autoupdate"
 # Inner executable before its enclosing .app bundle -- codesign requires nested code to be signed
