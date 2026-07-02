@@ -83,7 +83,27 @@ if [[ "$ACTUAL_VERSION" != "$VERSION" ]]; then
     exit 1
 fi
 
-EMBEDDED_PUBKEY="$(plutil -extract SUPublicEDKey raw dist/Parley.app/Contents/Info.plist 2>/dev/null)"
+# ── Guard: the release build MUST carry the stable signing identity ────────────────────────────
+# package_app.sh falls back to ad-hoc signing when "Parley Self-Signed" isn't in the login keychain
+# (fresh clone / new laptop / removed-or-expired cert / locked keychain at build time) and still
+# exits 0 — so a release could ship ad-hoc SILENTLY. Ad-hoc changes the app's designated
+# requirement, which drops every existing user's TCC grants (Microphone, Screen Recording, Calendar)
+# on the next update — the exact regression stable signing exists to prevent, and silent audio/
+# evidence loss on a courtroom-grade recorder. sparkle-dryrun.sh already asserts this; the real
+# release path must too. Capture-then-grep (not `codesign … | grep -q`) to dodge SIGPIPE+pipefail.
+SIGN_INFO="$(codesign -dvv dist/Parley.app 2>&1 || true)"
+if ! grep -q "Authority=Parley Self-Signed" <<<"$SIGN_INFO"; then
+    echo "error: release build is NOT signed with the stable 'Parley Self-Signed' identity — it fell"
+    echo "       back to ad-hoc signing, so shipping it would drop every existing user's TCC grants"
+    echo "       (mic, screen recording) on update. Run scripts/setup-signing-cert.sh, then re-release."
+    exit 1
+fi
+echo "   Release is signed with the stable identity ✓"
+
+# `|| true`: a missing SUPublicEDKey makes plutil exit non-zero, which under `set -euo pipefail`
+# would abort here silently (2>/dev/null swallows the message) and skip the actionable #114 error
+# below. Fall to an empty string so the mismatch branch runs and explains the problem.
+EMBEDDED_PUBKEY="$(plutil -extract SUPublicEDKey raw dist/Parley.app/Contents/Info.plist 2>/dev/null || true)"
 if [[ "$KEYCHAIN_PUBKEY" != "$EMBEDDED_PUBKEY" ]]; then
     echo "error: Keychain signing key does not match the app's embedded SUPublicEDKey."
     echo "       Keychain public key: $KEYCHAIN_PUBKEY"

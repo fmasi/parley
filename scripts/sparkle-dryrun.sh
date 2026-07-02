@@ -33,22 +33,41 @@ PORT=8477
 DRYRUN_DIR="release/dryrun"
 UPDATES_DIR="$DRYRUN_DIR/updates"          # served over http; holds appcast.xml + NEW zip
 STAGE_DIR="$DRYRUN_DIR/stage"
-PIDFILE="$DRYRUN_DIR/server.pid"
+# PIDFILE lives OUTSIDE DRYRUN_DIR: a fresh run does `rm -rf "$DRYRUN_DIR"`, and if the pidfile were
+# inside it the previous server would be orphaned (its PID gone) and the port left bound forever.
+PIDFILE="release/dryrun-server.pid"
 IDENTITY="Parley Self-Signed"
 SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
 FEED_URL="http://localhost:$PORT/appcast.xml"
 
+# Stop any running local feed server: the recorded PID first, then a backstop that kills whatever is
+# still bound to $PORT (a prior run that lost its PID). Idempotent; safe to call when nothing runs.
+stop_feed_server() {
+    if [[ -f "$PIDFILE" ]]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        rm -f "$PIDFILE"
+    fi
+    local held
+    held="$(lsof -ti "tcp:$PORT" 2>/dev/null || true)"
+    [[ -n "$held" ]] && kill $held 2>/dev/null || true
+    return 0
+}
+
 # ── --stop: tear down ─────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--stop" ]]; then
-    if [[ -f "$PIDFILE" ]] && kill "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "Stopped local feed server (pid $(cat "$PIDFILE"))."
+    if [[ -f "$PIDFILE" ]] || lsof -ti "tcp:$PORT" >/dev/null 2>&1; then
+        stop_feed_server
+        echo "Stopped local feed server on port $PORT."
     else
         echo "No running feed server found."
     fi
-    rm -f "$PIDFILE"
     echo "Staging left at $DRYRUN_DIR (rm -rf it when done). /Applications/Parley.app is the tested build."
     exit 0
 fi
+
+# A fresh run must reap any server still alive from a prior run BEFORE it wipes DRYRUN_DIR, otherwise
+# that server is orphaned and the new one hits EADDRINUSE (silently, since it's backgrounded).
+stop_feed_server
 
 # ── 0. Stable signing identity (required so TCC persistence is what we're testing) ────────────
 # Capture-then-grep (not `… | grep -qF`): pipefail + grep's early-exit SIGPIPE can otherwise turn a
