@@ -166,13 +166,22 @@ final class SystemTapSession {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let tapFmtOK = AudioObjectGetPropertyData(tap, &fmtAddr, 0, nil, &size, &tapFmt) == noErr
-        if let aggFmt = Self.aggregateInputFormat(agg), aggFmt.mSampleRate > 0 {
+        // On a rebuild the just-created aggregate's input stream can be briefly unreadable, so poll it
+        // for a short bounded window before falling back to the tap-reported rate (which may be the
+        // wrong rate → chipmunk). Runs on configQueue (the build path), never the audio path, so a
+        // short sleep is acceptable; ≤~105ms worst case and only when the stream is slow to appear (#111).
+        var aggFmt: AudioStreamBasicDescription?
+        for attempt in 0..<8 {
+            if let f = Self.aggregateInputFormat(agg), f.mSampleRate > 0 { aggFmt = f; break }
+            if attempt < 7 { Thread.sleep(forTimeInterval: 0.015) }
+        }
+        if let aggFmt {
             asbd = aggFmt
             if tapFmtOK, tapFmt.mSampleRate != aggFmt.mSampleRate {
                 Logger.audio.warning("System tap: aggregate delivers \(aggFmt.mSampleRate)Hz but tap reports \(tapFmt.mSampleRate)Hz — using aggregate rate (avoids chipmunk)")
             }
         } else if tapFmtOK {
-            Logger.audio.warning("System tap: aggregate input stream not yet readable — falling back to tap-reported format (\(tapFmt.mSampleRate)Hz), which can be the wrong rate (chipmunk risk)")
+            Logger.audio.warning("System tap: aggregate input stream not readable after retries — falling back to tap-reported format (\(tapFmt.mSampleRate)Hz), which can be the wrong rate (chipmunk risk)")
             asbd = tapFmt
         } else {
             AudioHardwareDestroyAggregateDevice(agg)
@@ -196,8 +205,23 @@ final class SystemTapSession {
             throw SystemTapError.ioProcCreateFailed(ioSt)
         }
 
+        // Publish the delivery format BEFORE starting the device (#111). AudioDeviceStart delivers on
+        // deliveryQueue — a different queue from this configQueue build — so a callback can fire the
+        // instant Start returns. Committing tapFormat/bytesPerFrame first means those first frames pass
+        // the handleTapBuffers guard with the correct format, instead of reading a nil format and being
+        // dropped (then silence-padded). Previously the commit happened after Start, so the leading
+        // frames after every start AND every output-switch rebuild were lost to silence.
+        // aggregateID/procID stay unset until Start succeeds so teardown never targets a dead aggregate;
+        // handleTapBuffers doesn't read those, only tapFormat/bytesPerFrame/isStopping.
+        stateLock.sync {
+            tapFormat = avFormat
+            bytesPerFrame = asbd.mBytesPerFrame
+        }
+
         let startSt = AudioDeviceStart(agg, proc)
         guard startSt == noErr else {
+            // Roll back the just-published format so a failed start leaves no stale state behind.
+            stateLock.sync { tapFormat = nil; bytesPerFrame = 0 }
             AudioDeviceDestroyIOProcID(agg, proc)
             AudioHardwareDestroyAggregateDevice(agg)
             throw SystemTapError.deviceStartFailed(startSt)
@@ -206,8 +230,6 @@ final class SystemTapSession {
         stateLock.sync {
             aggregateID = agg
             procID = proc
-            tapFormat = avFormat
-            bytesPerFrame = asbd.mBytesPerFrame
         }
         Logger.audio.info("System tap aggregate started — output \(Self.deviceName(output), privacy: .public), delivery format \(asbd.mSampleRate)Hz \(asbd.mChannelsPerFrame)ch (converter → 48000Hz 1ch)")
         // Surface the REAL tap delivery format for provenance/diagnostics — the WAV is always the
@@ -262,6 +284,13 @@ final class SystemTapSession {
             bytesPerFrame = 0
             return (a, p)
         }
+        // Concurrency note (#112): the IOProc block runs on `deliveryQueue`, a different queue from
+        // this `configQueue` teardown, so a callback can be in flight here. We rely on CoreAudio's
+        // documented contract that `AudioDeviceStop` blocks until any executing IOProc has returned
+        // before it completes — so once Stop returns, no callback is running and the subsequent
+        // DestroyIOProcID/DestroyAggregateDevice cannot race a live `srcABL` read in handleTapBuffers.
+        // (The nil-format guard set above is a second layer: a callback that already passed the guard
+        // finishes under Stop's barrier; one that hasn't yet reads the nil format and bails.)
         if agg != kAudioObjectUnknown, let proc {
             AudioDeviceStop(agg, proc)
             AudioDeviceDestroyIOProcID(agg, proc)
@@ -366,10 +395,19 @@ final class SystemTapSession {
             outputListenerBlock = nil
             return b
         }
-        guard let block else { return }
-        let system = AudioObjectID(kAudioObjectSystemObject)
-        var addr = Self.defaultOutputAddress
-        _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
+        if let block {
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            var addr = Self.defaultOutputAddress
+            _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
+        }
+        // Listener removed first (so no new rebuild can be scheduled), then cancel any already-pending
+        // debounced rebuild so it doesn't fire after stop() or keep a [weak self] closure alive (#112).
+        // reevaluationItem is monitorQueue-confined; the sync also serializes AFTER any in-flight
+        // listener block, so an item that block just scheduled is cancelled too.
+        monitorQueue.sync {
+            reevaluationItem?.cancel()
+            reevaluationItem = nil
+        }
     }
 
     /// Cancellable pending rebuild, so a burst of HAL notifications from one output switch collapses
