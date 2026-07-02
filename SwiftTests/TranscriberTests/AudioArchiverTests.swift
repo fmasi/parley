@@ -178,7 +178,9 @@ struct AudioArchiverTests {
         for w in [s0, m0, s1, m1] { #expect(!FileManager.default.fileExists(atPath: w.path)) }
     }
 
-    @Test func archiveAllKeepsSystemWavWhenMicMissing() async throws {
+    @Test func archiveAllEncodesSystemOnlySegmentToM4a() async throws {
+        // #105: a system-only segment (no mic) on the archiveAll batch path must still flush to .m4a
+        // via archiveSystemOnly — it used to be returned as a raw .wav, leaking a lossless file.
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("archiver-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -193,8 +195,33 @@ struct AudioArchiverTests {
             bitrateKbps: 64
         )
 
-        #expect(out == [s0])
-        #expect(FileManager.default.fileExists(atPath: s0.path))  // kept, not deleted
+        #expect(out.count == 1)
+        #expect(out[0].lastPathComponent == "seg-0.m4a")          // encoded, not the raw WAV
+        #expect(FileManager.default.fileExists(atPath: out[0].path))
+        #expect(!FileManager.default.fileExists(atPath: s0.path)) // source WAV flushed, not left behind
+        let file = try AVAudioFile(forReading: out[0])
+        #expect(file.processingFormat.channelCount == 2)          // stereo layout, mic channel silent
+    }
+
+    @Test func archiveAllKeepsSystemOnlyWavWhenEncodingFails() async throws {
+        // The #93 per-segment isolation must still hold for the new system-only branch: a corrupt
+        // system WAV keeps its .wav and never throws.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let bad = dir.appendingPathComponent("bad-0.wav")
+        try Data([0, 1, 2]).write(to: bad)  // not a valid WAV
+
+        let out = await AudioArchiver.archiveAll(
+            pairs: [.init(system: bad, mic: nil)],
+            outputDirectory: dir,
+            bitrateKbps: 64
+        )
+
+        #expect(out == [bad])
+        #expect(FileManager.default.fileExists(atPath: bad.path))  // kept on failure
     }
 
     @Test func archiveAllIsolatesPerSegmentFailure() async throws {
