@@ -185,19 +185,27 @@ struct TranscriberApp: App {
         }
     }
 
+    /// Holds the single-instance lock fd for the whole process lifetime. It must stay open (closing
+    /// it, or dropping the last reference, releases the kernel lock), so it lives as a static here.
+    private static var instanceLockFD: Int32 = -1
+
     /// If another instance of this app is already running, exit cleanly so exactly one survives (#109).
-    /// The decision (which instance is the oldest) lives in the pure, unit-tested `SingleInstanceGuard`;
-    /// this only gathers the running-app identities from AppKit and acts on the verdict.
+    /// Uses a `flock`-based lock (unit-tested in `SingleInstanceGuard`) rather than scanning
+    /// `NSRunningApplication`: a launchd-spawned duplicate runs this inside `init()` before the first
+    /// instance is registered with LaunchServices, so a running-app scan sees no rival and both
+    /// survive. The kernel lock has no such race.
     private static func yieldIfDuplicateInstance() {
-        let me = NSRunningApplication.current
-        let bundleID = Bundle.main.bundleIdentifier ?? LaunchAgentManager.label
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != me.processIdentifier }
-            .map { SingleInstanceGuard.Instance(pid: $0.processIdentifier, launchDate: $0.launchDate) }
-        let mine = SingleInstanceGuard.Instance(pid: me.processIdentifier, launchDate: me.launchDate)
-        if SingleInstanceGuard.shouldYield(me: mine, others: others) {
+        let dir = AppPaths.dataDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let lockPath = dir.appendingPathComponent("instance.lock").path
+        switch SingleInstanceGuard.acquireLock(at: lockPath) {
+        case .heldByOther:
             Logger.state.info("Another Parley instance is already running — this duplicate is exiting (#109).")
             exit(0)
+        case .acquired(let fd):
+            instanceLockFD = fd  // held for the process lifetime; intentionally never closed
+        case .unavailable:
+            Logger.state.error("Single-instance lock unavailable — proceeding unguarded (#109).")
         }
     }
 

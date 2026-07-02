@@ -4,74 +4,65 @@ import Testing
 
 @Suite("SingleInstanceGuard")
 struct SingleInstanceGuardTests {
-    typealias Instance = SingleInstanceGuard.Instance
 
-    @Test("A lone instance never yields")
-    func loneInstanceDoesNotYield() {
-        let me = Instance(pid: 100, launchDate: Date(timeIntervalSince1970: 1000))
-        #expect(SingleInstanceGuard.shouldYield(me: me, others: []) == false)
+    /// A unique lock path under the temp dir for each test (no shared state between tests).
+    private func tempLockPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("parley-instance-\(UUID().uuidString).lock")
+            .path
     }
 
-    @Test("Yields when an older-by-date instance is running")
-    func yieldsToOlderByDate() {
-        let older = Instance(pid: 200, launchDate: Date(timeIntervalSince1970: 1000))
-        let me = Instance(pid: 100, launchDate: Date(timeIntervalSince1970: 2000)) // later launch, lower PID
-        // Date must win over PID: I launched later, so I yield even though my PID is lower.
-        #expect(SingleInstanceGuard.shouldYield(me: me, others: [older]) == true)
-    }
+    @Test("First instance acquires the lock")
+    func firstAcquires() {
+        let path = tempLockPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
 
-    @Test("Does not yield when the only other instance is younger")
-    func doesNotYieldToYounger() {
-        let younger = Instance(pid: 999, launchDate: Date(timeIntervalSince1970: 3000))
-        let me = Instance(pid: 100, launchDate: Date(timeIntervalSince1970: 1000))
-        #expect(SingleInstanceGuard.shouldYield(me: me, others: [younger]) == false)
-    }
-
-    @Test("Equal dates fall back to PID: lower PID survives")
-    func equalDatesTieBreakOnPID() {
-        let date = Date(timeIntervalSince1970: 1000)
-        let lowerPID = Instance(pid: 50, launchDate: date)
-        let higherPID = Instance(pid: 80, launchDate: date)
-        // The higher-PID instance yields to the lower-PID one.
-        #expect(SingleInstanceGuard.shouldYield(me: higherPID, others: [lowerPID]) == true)
-        // The lower-PID instance does not yield to the higher-PID one.
-        #expect(SingleInstanceGuard.shouldYield(me: lowerPID, others: [higherPID]) == false)
-    }
-
-    @Test("Nil launch dates fall back to PID ordering")
-    func nilDatesTieBreakOnPID() {
-        let a = Instance(pid: 10, launchDate: nil)
-        let b = Instance(pid: 20, launchDate: nil)
-        #expect(SingleInstanceGuard.shouldYield(me: b, others: [a]) == true)   // 20 yields to 10
-        #expect(SingleInstanceGuard.shouldYield(me: a, others: [b]) == false)  // 10 keeps running
-    }
-
-    @Test("One known date beats a nil date via PID fallback, consistently both ways")
-    func mixedNilAndKnownDateIsConsistent() {
-        let withDate = Instance(pid: 30, launchDate: Date(timeIntervalSince1970: 1000))
-        let noDate = Instance(pid: 10, launchDate: nil)
-        // Comparison falls back to PID (10 < 30), so noDate is "older". Exactly one yields.
-        let aYields = SingleInstanceGuard.shouldYield(me: withDate, others: [noDate])
-        let bYields = SingleInstanceGuard.shouldYield(me: noDate, others: [withDate])
-        #expect(aYields != bYields)
-    }
-
-    @Test("Exactly one survivor across a crowd of duplicates")
-    func exactlyOneSurvivorInACrowd() {
-        // Five instances with assorted dates/PIDs (all PIDs unique). Every instance evaluates the
-        // guard against all the others; exactly one must NOT yield.
-        let instances = [
-            Instance(pid: 5, launchDate: Date(timeIntervalSince1970: 1000)),
-            Instance(pid: 9, launchDate: Date(timeIntervalSince1970: 1000)), // date tie with pid 5
-            Instance(pid: 3, launchDate: Date(timeIntervalSince1970: 1500)),
-            Instance(pid: 42, launchDate: nil),
-            Instance(pid: 7, launchDate: Date(timeIntervalSince1970: 900)),  // earliest date -> should survive
-        ]
-        let survivors = instances.filter { me in
-            let others = instances.filter { $0.pid != me.pid }
-            return SingleInstanceGuard.shouldYield(me: me, others: others) == false
+        guard case .acquired(let fd) = SingleInstanceGuard.acquireLock(at: path) else {
+            Issue.record("expected .acquired for a fresh lock path")
+            return
         }
-        #expect(survivors.count == 1)
-        #expect(survivors.first?.pid == 7) // earliest launch date wins
+        #expect(fd >= 0)
+        close(fd)
+    }
+
+    @Test("A second concurrent instance is told the lock is held")
+    func secondYields() {
+        let path = tempLockPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        guard case .acquired(let firstFD) = SingleInstanceGuard.acquireLock(at: path) else {
+            Issue.record("first acquire should succeed"); return
+        }
+        // While the first still holds it, a second attempt on the same path must report it held —
+        // this is the case that the old NSRunningApplication scan missed during launch (#109).
+        #expect(SingleInstanceGuard.acquireLock(at: path) == .heldByOther)
+        close(firstFD)
+    }
+
+    @Test("Releasing the lock lets the next instance acquire it (crash-recovery relaunch)")
+    func reacquireAfterRelease() {
+        let path = tempLockPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        guard case .acquired(let firstFD) = SingleInstanceGuard.acquireLock(at: path) else {
+            Issue.record("first acquire should succeed"); return
+        }
+        // Closing the fd releases the kernel lock — exactly what happens when a holder exits/crashes.
+        close(firstFD)
+
+        guard case .acquired(let secondFD) = SingleInstanceGuard.acquireLock(at: path) else {
+            Issue.record("a released lock must be re-acquirable"); return
+        }
+        #expect(secondFD >= 0)
+        close(secondFD)
+    }
+
+    @Test("An unopenable lock path fails open (proceed unguarded, never wedge shut)")
+    func unopenablePathFailsOpen() {
+        // Parent directory does not exist, so open(O_CREAT) fails — the guard must not block launch.
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-such-dir-\(UUID().uuidString)/instance.lock")
+            .path
+        #expect(SingleInstanceGuard.acquireLock(at: path) == .unavailable)
     }
 }

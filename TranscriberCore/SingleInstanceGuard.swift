@@ -1,49 +1,50 @@
 import Foundation
 
-/// Decides whether a just-started app instance should yield (exit) because another instance of the
-/// same app is already running.
+/// Race-free single-instance guard for the app (#109).
 ///
-/// Why this exists (#109): the crash-recovery `LaunchAgent` (`KeepAlive = {SuccessfulExit: false}`)
-/// causes `launchd` to spawn a *duplicate* copy of the app at load time while a user-launched
-/// instance is already running — `launchd` starts a KeepAlive job on load regardless of the dict
-/// form (the dict only scopes *restart-after-exit*, not the initial launch). Rather than depend on
-/// subtle, version-dependent launchd semantics, the app runs this guard at startup and the duplicate
-/// exits cleanly. A clean (status 0) exit is NOT an "unsuccessful exit", so `KeepAlive` will not
-/// relaunch the yielded copy — no respawn loop. A genuine crash still recovers correctly: the crashed
-/// process is gone, so the relaunched instance sees no rival and does not yield.
+/// Why this exists: the crash-recovery `LaunchAgent` (`KeepAlive = {SuccessfulExit: false}`) makes
+/// `launchd` spawn a *duplicate* copy of the app at load time while a user-launched instance is
+/// already running — `launchd` starts a KeepAlive job on load regardless of the dict form (the dict
+/// only scopes *restart-after-exit*, not the initial launch). The duplicate must detect the original
+/// and exit cleanly.
 ///
-/// The decision is a **strict total order** over instances — by launch date when both are known and
-/// differ, otherwise by PID (unique among concurrently-running processes). This guarantees exactly
-/// one survivor (the global minimum) even if several duplicates evaluate the guard simultaneously and
-/// each sees all the others: every instance except the single oldest yields.
+/// Why a file lock and not `NSRunningApplication`: an earlier version compared the running-app list
+/// (oldest instance wins). That races during launch — a launchd-spawned duplicate runs its check
+/// inside `App.init()`, *before* the first instance has registered with LaunchServices, so it sees an
+/// empty peer list and both instances survive (device-confirmed #109). `flock` closes the race: it's
+/// atomic in the kernel and independent of any app-level registration. Exactly one concurrently
+/// launching instance acquires the exclusive lock; the rest observe it held and yield.
+///
+/// Interaction with crash recovery: the lock is tied to the open file description, so the kernel
+/// releases it automatically when the holder exits — including a crash. A crash-recovery relaunch
+/// therefore re-acquires the now-free lock and proceeds. A duplicate that yields exits with status 0,
+/// which `KeepAlive = {SuccessfulExit: false}` does NOT relaunch, so there is no respawn loop.
 public enum SingleInstanceGuard {
 
-    /// Identity of a running instance, as read from `NSRunningApplication` at the call site.
-    public struct Instance: Sendable, Equatable {
-        public let pid: Int32
-        public let launchDate: Date?
-        public init(pid: Int32, launchDate: Date?) {
-            self.pid = pid
-            self.launchDate = launchDate
-        }
+    /// Result of trying to take the single-instance lock.
+    public enum LockOutcome: Equatable {
+        /// This instance now holds the lock. Keep `fd` open for the whole process lifetime (never
+        /// close it) — closing it, or letting it be collected, releases the lock.
+        case acquired(fd: Int32)
+        /// Another live instance already holds the lock. The caller should exit cleanly (status 0).
+        case heldByOther
+        /// The lock file could not be opened (e.g. missing parent directory, permissions). The
+        /// caller should proceed UNGUARDED — failing open is better than refusing to launch.
+        case unavailable
     }
 
-    /// Returns `true` if `me` should exit because at least one strictly-older instance is running.
-    ///
-    /// - Parameters:
-    ///   - me: this process's identity.
-    ///   - others: the OTHER running instances of the same app (must exclude `me`).
-    public static func shouldYield(me: Instance, others: [Instance]) -> Bool {
-        others.contains { isOlder($0, than: me) }
-    }
-
-    /// Strict total order used to pick the single survivor. `lhs` is "older" than `rhs` when it
-    /// launched earlier; ties (equal or unknown dates) fall back to the unique PID so the order is
-    /// always total and every instance agrees on who wins.
-    static func isOlder(_ lhs: Instance, than rhs: Instance) -> Bool {
-        if let l = lhs.launchDate, let r = rhs.launchDate, l != r {
-            return l < r
+    /// Attempt to take an exclusive, non-blocking `flock` on the file at `path`, creating it if
+    /// needed. See the type doc for why this is race-free where an `NSRunningApplication` scan is not.
+    public static func acquireLock(at path: String) -> LockOutcome {
+        let fd = open(path, O_CREAT | O_RDWR, 0o644)
+        if fd < 0 { return .unavailable }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            return .acquired(fd: fd)
         }
-        return lhs.pid < rhs.pid
+        // Only EWOULDBLOCK means "a live instance holds it, yield". Any other errno is unexpected;
+        // fail open (proceed unguarded) rather than wedge the app shut on a transient lock error.
+        let heldByOther = (errno == EWOULDBLOCK)
+        close(fd)
+        return heldByOther ? .heldByOther : .unavailable
     }
 }
