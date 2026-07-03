@@ -48,6 +48,13 @@ struct MeetingSenseDeciderTests {
         #expect(MeetingSenseDecider.decide(signal: meeting, mode: .prompt, secondsSinceLastAction: past) == .prompt)
     }
 
+    @Test("cooldown boundary: exactly at the window it acts (since < cooldown is exclusive)")
+    func actsExactlyAtCooldownBoundary() {
+        // Pins the < vs <= fence-post: at secondsSinceLastAction == cooldown the guard must NOT suppress.
+        let atBoundary = MeetingSenseDecider.defaultCooldown
+        #expect(MeetingSenseDecider.decide(signal: meeting, mode: .prompt, secondsSinceLastAction: atBoundary) == .prompt)
+    }
+
     @Test("known conferencing apps are in the match set; ambiguous browsers are not")
     func meetingAppsSetIsConferencingOnly() {
         #expect(MeetingApps.bundleIDs.contains("us.zoom.xos"))

@@ -133,7 +133,7 @@ public enum SpeakerReconciler {
                 }
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .public) → \(prefix + candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .private) → \(prefix + candidate.globalID, privacy: .private) (sim=\(candidate.similarity, privacy: .public))"
                 )
             }
 
