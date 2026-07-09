@@ -298,6 +298,13 @@ public enum SpeakerAssignment {
                 }
 
                 // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
+                // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
+                // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
+                // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
+                // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
+                // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
+                // real engine's output ever produces — so this is pre-existing, deliberately
+                // unguarded, and tracked (not forgotten) in #122.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                 }
@@ -371,6 +378,13 @@ public enum SpeakerAssignment {
                 }
 
                 // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
+                // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
+                // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
+                // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
+                // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
+                // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
+                // real engine's output ever produces — so this is pre-existing, deliberately
+                // unguarded, and tracked (not forgotten) in #122.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore

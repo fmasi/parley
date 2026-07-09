@@ -362,4 +362,8 @@ struct SpeakerBoundarySplitTests {
         let words = SpeakerAssignment.speechAnalyzerWordTimings(runs: runs, trimmedSegmentText: "Hello world")
         #expect(words == nil)
     }
+
+    @Test func speechAnalyzerWordTimingsNilWhenRunsIsEmpty() {
+        #expect(SpeakerAssignment.speechAnalyzerWordTimings(runs: [], trimmedSegmentText: "") == nil)
+    }
 }
