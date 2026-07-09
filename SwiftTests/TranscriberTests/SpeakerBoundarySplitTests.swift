@@ -324,6 +324,9 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].text == "one two")
         #expect(pieces[1].text == "three four")
         #expect(pieces[2].text == "five")
+        // Middle piece keeps its (non-nil, sorted) words; only anchored first/last get nil.
+        #expect(pieces[1].words != nil)
+        #expect(pieces[1].words?.first?.start ?? .infinity <= pieces[1].words?.last?.start ?? -.infinity)
     }
 
     // MARK: - dominantDiarSpeaker gap fallback + tiebreaker

@@ -217,15 +217,19 @@ public enum SpeakerAssignment {
         _ segments: [TranscriptSegment],
         diarizationSegments diar: [DiarizedSegment]
     ) -> [TranscriptSegment] {
-        // Debug-only enforcement of the "raw engine output only" contract documented on the
-        // emitted.isEmpty fallback below: this function must never be called on its own prior output
-        // (or any other already-split segments), since that fallback's correctness relies on
-        // dominantSpeaker being nil on entry. Both current call sites satisfy this; a stripped no-op
-        // in release builds.
-        assert(
-            segments.allSatisfy { $0.dominantSpeaker == nil },
-            "splitAcrossSpeakerBoundaries must receive raw engine output; do not pass previously-split segments"
-        )
+        // Enforcement of the "raw engine output only" contract documented on the emitted.isEmpty
+        // fallback below: this function must never be called on its own prior output (or any other
+        // already-split segments), since that fallback's correctness relies on dominantSpeaker being
+        // nil on entry. A plain `assert` here would be silently stripped in release builds — a
+        // violation would then silently propagate a stale, wrong dominantSpeaker into production
+        // output with no diagnostic. Instead: crash in debug (assertionFailure), log in release
+        // (release-visible, unlike assert), and fail safe either way by returning the input unchanged
+        // rather than proceeding on a violated invariant. Both current call sites satisfy this.
+        if !segments.allSatisfy({ $0.dominantSpeaker == nil }) {
+            Logger.transcription.error("splitAcrossSpeakerBoundaries received already-split segments — contact the maintainer")
+            assertionFailure("splitAcrossSpeakerBoundaries must receive raw engine output; do not pass previously-split segments")
+            return segments
+        }
         guard !diar.isEmpty else { return segments }
 
         var out: [TranscriptSegment] = []
@@ -300,15 +304,15 @@ public enum SpeakerAssignment {
             // (incl. FluidAudio ITN) is preserved exactly — no reconstruction, no regression — but
             // carry the word-derived speaker forward on `dominantSpeaker` so assign() can trust it
             // instead of re-deriving one from raw geometric overlap (see TranscriptSegment.dominantSpeaker).
-            // `words: seg.words` below is the ORIGINAL (possibly out-of-order) array, not the sorted
-            // local `words` copy used for grouping above — harmless today since only `dominantSpeaker`
-            // is consumed downstream (LabeledSegment doesn't carry `words` forward), but a future
-            // word-timing consumer would see unsorted words on this passthrough path while split
-            // pieces get `words: nil` (see the matching NOTE on the anchoring fixup below).
+            // `words: words` (the already-sorted local copy, not `seg.words`) keeps this passthrough
+            // path consistent with split middle pieces, which also get sorted words — costs nothing
+            // since `words` is already in scope. (First/last split pieces still get `words: nil`, per
+            // the anchoring fixup's NOTE below — that inconsistency is a real anchoring side effect,
+            // not just a missed sort.)
             guard pieces.count > 1 else {
                 out.append(TranscriptSegment(
                     start: seg.start, end: seg.end, text: seg.text,
-                    language: seg.language, confidence: seg.confidence, words: seg.words,
+                    language: seg.language, confidence: seg.confidence, words: words,
                     dominantSpeaker: pieces.first?.speaker
                 ))
                 continue
