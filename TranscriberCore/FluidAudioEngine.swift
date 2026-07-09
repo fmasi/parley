@@ -104,7 +104,9 @@ public actor FluidAudioEngine: TranscriptionEngine {
                 if normalized != seg.text {
                     // Keep word timings alive through ITN so the assignment layer can still split
                     // this segment at a diarization boundary (issue #120). ITN only reformats the
-                    // whole-segment text; the per-token timings are unaffected.
+                    // whole-segment text — `words[*].text` stays the raw PRE-ITN token text. If this
+                    // segment IS later split, the resulting piece(s) are reconstructed from those raw
+                    // tokens and will NOT carry ITN formatting (documented known limitation, PR #121).
                     return TranscriptSegment(start: seg.start, end: seg.end, text: normalized, language: seg.language, confidence: seg.confidence, words: seg.words)
                 }
                 return seg

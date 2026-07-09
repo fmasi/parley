@@ -279,4 +279,55 @@ struct SpeakerBoundarySplitTests {
         #expect(result[1].words?.count == 3)
         #expect(result[1].words?.first?.start == 2.0)
     }
+
+    // MARK: - splitAcrossSpeakerBoundaries: empty (non-nil) words array
+
+    @Test func passesThroughSegmentWithEmptyWordArray() {
+        // words = [] (non-nil, zero entries) must pass through unchanged exactly like words == nil —
+        // pins the words.count >= 2 guard's documented empty-array behavior explicitly.
+        let seg = TranscriptSegment(start: 0, end: 5, text: "hi", language: nil, words: [])
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries(
+            [seg], diarizationSegments: [DiarizedSegment(start: 0, end: 5, speaker: "S0")]
+        )
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "hi")
+    }
+
+    // MARK: - SpeakerAssignment.speechAnalyzerWordTimings (pure, engine-independent)
+    //
+    // SpeechAnalyzerEngine itself requires macOS 26 / Swift 6.2+ and is compiled out entirely on
+    // CI's Swift 6.0 runner, so its live SpeechTranscriber loop can't be exercised here. The word-
+    // timing DECISION logic (issue #120) was deliberately extracted into this pure function so its
+    // three outcome paths stay unit-tested regardless.
+
+    @Test func speechAnalyzerWordTimingsPopulatedWhenAllRunsTimedAndRoundTripHolds() {
+        let runs: [(text: String, start: Double?, end: Double?)] = [
+            (text: "Hello", start: 0.0, end: 0.5),
+            (text: " world", start: 0.5, end: 1.0),
+        ]
+        let words = SpeakerAssignment.speechAnalyzerWordTimings(runs: runs, trimmedSegmentText: "Hello world")
+        #expect(words?.count == 2)
+        #expect(words?.first?.start == 0.0)
+        #expect(words?.last?.end == 1.0)
+    }
+
+    @Test func speechAnalyzerWordTimingsNilWhenAnyRunLacksTiming() {
+        let runs: [(text: String, start: Double?, end: Double?)] = [
+            (text: "Hello", start: 0.0, end: 0.5),
+            (text: " world", start: nil, end: nil),  // e.g. a run with no audioTimeRange
+        ]
+        let words = SpeakerAssignment.speechAnalyzerWordTimings(runs: runs, trimmedSegmentText: "Hello world")
+        #expect(words == nil)
+    }
+
+    @Test func speechAnalyzerWordTimingsNilWhenRoundTripFails() {
+        // Every run IS timed, but concatenating them doesn't reproduce the segment's own text —
+        // simulates a space silently lost or misattributed at a run boundary.
+        let runs: [(text: String, start: Double?, end: Double?)] = [
+            (text: "Hello", start: 0.0, end: 0.5),
+            (text: "world", start: 0.5, end: 1.0),  // missing its leading space
+        ]
+        let words = SpeakerAssignment.speechAnalyzerWordTimings(runs: runs, trimmedSegmentText: "Hello world")
+        #expect(words == nil)
+    }
 }

@@ -71,28 +71,24 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
             if result.isFinal {
                 let text = String(result.text.characters)
 
-                // Extract timestamp range from AttributedString runs. Retain each run's own
-                // timing + text as a WordTiming so the assignment layer can split a segment that
-                // spans a diarization speaker boundary (issue #120) — the same shared mechanism
-                // FluidAudio feeds with its token timings.
+                // Extract timestamp range + text from AttributedString runs. Whether these runs can
+                // safely support boundary-splitting (issue #120) is decided by the pure, independently
+                // unit-tested SpeakerAssignment.speechAnalyzerWordTimings — kept out of this actor
+                // (macOS 26+/Swift 6.2+ only, compiled out entirely on CI's Swift 6.0 runner) so the
+                // decision logic itself stays testable everywhere.
                 var segStart: Double = .greatestFiniteMagnitude
                 var segEnd: Double = 0
-                var words: [WordTiming] = []
-                // If ANY run lacks audioTimeRange, `words` cannot represent the segment's full text —
-                // reconstructing split pieces from `words` alone would silently drop that run's text.
-                // Track completeness and disable splitting (words: nil) for this segment rather than
-                // risk text loss; the full, untouched `text` field below is unaffected either way.
-                var allRunsTimed = true
+                var runsData: [(text: String, start: Double?, end: Double?)] = []
                 for run in result.text.runs {
+                    let runText = String(result.text[run.range].characters)
                     if let timeRange = run.audioTimeRange {
                         let s = CMTimeGetSeconds(timeRange.start)
                         let e = CMTimeGetSeconds(timeRange.end)
                         if s < segStart { segStart = s }
                         if e > segEnd { segEnd = e }
-                        let runText = String(result.text[run.range].characters)
-                        words.append(WordTiming(start: s, end: e, text: runText))
+                        runsData.append((text: runText, start: s, end: e))
                     } else {
-                        allRunsTimed = false
+                        runsData.append((text: runText, start: nil, end: nil))
                     }
                 }
 
@@ -100,22 +96,15 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                 if segStart == .greatestFiniteMagnitude { segStart = 0 }
 
                 let trimmed = text.trimmingCharacters(in: .whitespaces)
-                // `allRunsTimed` only proves every run HAD timing — it says nothing about whether
-                // concatenating those runs' text faithfully reproduces the segment (SpeechAnalyzer's
-                // run/space boundaries are an Apple-internal detail; a space could be omitted from
-                // every run, or split across a run boundary, without any run being untimed). Verify
-                // the round-trip explicitly and disable splitting if it doesn't hold — a REAL runtime
-                // check, not a debug-only assert, since `assert` compiles out of release builds and
-                // would give a shipped app zero protection against silently garbled split text.
-                let wordsReconstructSegment = words.map(\.text).joined()
-                    .trimmingCharacters(in: .whitespaces) == trimmed
                 if !trimmed.isEmpty {
                     segments.append(TranscriptSegment(
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
                         language: language ?? locale.language.languageCode?.identifier,
-                        words: (allRunsTimed && !words.isEmpty && wordsReconstructSegment) ? words : nil
+                        words: SpeakerAssignment.speechAnalyzerWordTimings(
+                            runs: runsData, trimmedSegmentText: trimmed
+                        )
                     ))
                 }
             }

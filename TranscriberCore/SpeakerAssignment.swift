@@ -126,6 +126,37 @@ public enum SpeakerAssignment {
         return nearest
     }
 
+    /// Decide whether a SpeechAnalyzer result segment's per-run timing can safely support boundary
+    /// splitting (issue #120). Pure logic with no Speech-framework dependency, extracted from the
+    /// live `SpeechTranscriber` result loop specifically so it's unit-testable — `SpeechAnalyzerEngine`
+    /// itself requires macOS 26 / Swift 6.2+ and is compiled out entirely on CI's Swift 6.0 runner, so
+    /// logic that stayed inline there would be untestable there too; this function has no such
+    /// constraint and lives here instead.
+    ///
+    /// Three outcomes: every run timed AND concatenating their text reconstructs the segment's own
+    /// text exactly → `words` populated, splitting enabled. Any run lacking timing → `nil` (can't
+    /// represent the segment's full text in word form without it). Every run timed but concatenation
+    /// does NOT match the segment's text → `nil` (SpeechAnalyzer's run/space boundaries are an
+    /// Apple-internal detail; a space could be silently lost or attached inconsistently at a run
+    /// boundary) — disable splitting rather than risk reconstructing garbled text.
+    public static func speechAnalyzerWordTimings(
+        runs: [(text: String, start: Double?, end: Double?)],
+        trimmedSegmentText: String
+    ) -> [WordTiming]? {
+        var words: [WordTiming] = []
+        var allRunsTimed = true
+        for run in runs {
+            if let s = run.start, let e = run.end {
+                words.append(WordTiming(start: s, end: e, text: run.text))
+            } else {
+                allRunsTimed = false
+            }
+        }
+        guard allRunsTimed, !words.isEmpty else { return nil }
+        let reconstructed = words.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+        return reconstructed == trimmedSegmentText ? words : nil
+    }
+
     /// Re-split any transcript segment whose words straddle a diarization speaker-change boundary.
     ///
     /// ARCHITECTURE (issue #120): ASR segmentation is diarization-unaware. FluidAudio splits on
