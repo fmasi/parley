@@ -402,6 +402,37 @@ struct SpeakerBoundarySplitTests {
         #expect(labeled[1].speaker == "Speaker 2")
     }
 
+    @Test func splitHandlesHeterogeneousArrayOfSpanningAndCleanSegments() {
+        // Every other splitAcrossSpeakerBoundaries test passes either a single segment or a
+        // homogeneous array (all-spanning or all-clean). A mixed array [spanning, clean, spanning]
+        // must independently split each spanning entry (2 pieces each) while leaving the clean one
+        // untouched (1), concatenated in input order: 2 + 1 + 2 = 5 total, no cross-segment state
+        // leakage or off-by-one in the output ordering.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let spanning1 = spanningSegment(boundary: 26.0, end: 72.0)
+        let clean = TranscriptSegment(start: 100.0, end: 105.0, text: "clean", language: nil)
+        let spanning2 = spanningSegment(boundary: 26.0, end: 72.0)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries(
+            [spanning1, clean, spanning2], diarizationSegments: diar
+        )
+
+        #expect(pieces.count == 5)
+        // spanning1 -> 2 pieces
+        #expect(pieces[0].text == "So what happened?")
+        #expect(pieces[1].text == "Well, it went on for quite a while")
+        // clean -> 1 piece, untouched
+        #expect(pieces[2].text == "clean")
+        #expect(pieces[2].start == 100.0)
+        #expect(pieces[2].end == 105.0)
+        // spanning2 -> 2 more pieces, independently re-split (no leakage from spanning1's grouping)
+        #expect(pieces[3].text == "So what happened?")
+        #expect(pieces[4].text == "Well, it went on for quite a while")
+    }
+
     // MARK: - assign() integration (VAD/quality overload)
 
     @Test func assignVadOverloadSplitsAndLabels() {
@@ -469,6 +500,29 @@ struct SpeakerBoundarySplitTests {
             transcriptSegments: [seg],
             diarizationSegments: diar,
             speechMap: nil
+        )
+
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    @Test func assignVadOverloadUnchangedForCleanSingleSpeakerSegments() {
+        // VAD-overload counterpart to assignUnchangedForCleanSingleSpeakerSegments: clean,
+        // single-speaker segments (no spanning boundary) through the VAD/quality-gated overload must
+        // come out correctly attributed and unaffected by the split logic.
+        let transcript = [
+            TranscriptSegment(start: 0.0, end: 5.0, text: "hello", language: nil),
+            TranscriptSegment(start: 5.0, end: 10.0, text: "world", language: nil),
+        ]
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 6.0, speaker: "S0", qualityScore: 0.9),
+            DiarizedSegment(start: 6.0, end: 10.0, speaker: "S1", qualityScore: 0.9),
+        ]
+        let speechMap = [SpeechRegion(start: 0.0, end: 10.0, probability: 0.95)]
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: transcript, diarizationSegments: diar, speechMap: speechMap
         )
 
         #expect(labeled.count == 2)
@@ -732,5 +786,33 @@ struct SpeakerBoundarySplitTests {
         #expect(labeled.count == 2)
         #expect(labeled[0].speaker == "Speaker 1")
         #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    @Test func gapFallbackSplitPiecesAreNotDowngradedByNonOverlappingLowQualityTurn() {
+        // Regression for a real bug caught in review on the bestQuality re-derivation above: with
+        // BOTH evidenced turns' qualityScore set low (0.1, below the 0.3 threshold), and neither turn
+        // geometrically overlapping either piece (same gap geometry as the sibling test), bestQuality
+        // must fall back to nil -> 1.0 ("trust the diarizer") rather than inheriting 0.1 from a turn
+        // that never actually overlaps this piece. Without the `overlap > 0` filter before `.max`,
+        // Swift's max(by:) returns a value even when every candidate ties at overlap == 0, silently
+        // downgrading a correct gap-fallback attribution to "Unknown" through the quality gate.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "S0", qualityScore: 0.1),
+            DiarizedSegment(start: 15.0, end: 20.0, speaker: "S1", qualityScore: 0.1),
+        ]
+        let words = [
+            WordTiming(start: 6.0, end: 7.0, text: "one"),
+            WordTiming(start: 12.0, end: 13.0, text: " two"),
+        ]
+        let seg = TranscriptSegment(start: 6.0, end: 13.0, text: "one two", language: nil, words: words)
+        let speechMap = [SpeechRegion(start: 0.0, end: 20.0, probability: 0.95)]
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg], diarizationSegments: diar,
+            speechMap: speechMap, vadSpeechThreshold: 0.5, qualityScoreThreshold: 0.3
+        )
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")  // NOT "Unknown"
+        #expect(labeled[1].speaker == "Speaker 2")  // NOT "Unknown"
     }
 }

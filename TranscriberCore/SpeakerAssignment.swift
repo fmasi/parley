@@ -1,27 +1,6 @@
 import Foundation
 import os
 
-/// Timing for one ASR unit inside a segment — a FluidAudio token (sub-word) or a
-/// SpeechAnalyzer run. Engine-neutral (no SDK types) so both engines can populate it and the
-/// shared assignment layer can re-split segments at true speaker-change boundaries (issue #120).
-/// `text` is expected to carry the unit's own leading spacing verbatim, so a piece's text
-/// reconstructs by plain concatenation + trim — confirmed true for FluidAudio tokens (verified in
-/// `groupTokensAttachesWordTimings`); NOT independently verifiable for SpeechAnalyzer's runs, whose
-/// space-ownership is an Apple-internal detail — `SpeechAnalyzerEngine` explicitly round-trip-checks
-/// this per segment before ever populating `words`, and disables splitting (falls to `nil`) if the
-/// assumption doesn't hold for that segment.
-public struct WordTiming: Sendable {
-    public let start: Double
-    public let end: Double
-    public let text: String
-
-    public init(start: Double, end: Double, text: String) {
-        self.start = start
-        self.end = end
-        self.text = text
-    }
-}
-
 public struct TranscriptSegment: Sendable {
     public let start: Double
     public let end: Double
@@ -506,17 +485,9 @@ public enum SpeakerAssignment {
                 }
 
                 // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
-                // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
-                // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
-                // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
-                // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
-                // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
-                // real engine's output ever produces — so this is pre-existing, deliberately
-                // unguarded, and tracked (not forgotten) in #122. Also, unlike dominantDiarSpeaker,
-                // this is still a plain `if` (not `else if`) — also tracked in #122 — so among genuine
-                // ties it exhibits the same intentional last-wins-among-ties behavior documented in
-                // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
-                // caveat); see that comment for the full reasoning rather than repeating it here.
+                // Same overlap>0-guard omission and if-vs-else-if difference as the basic assign()
+                // overload above (~line 423) — see that comment for the full reasoning (tracked in
+                // #122) rather than repeating it here.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
                     overlapSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore
@@ -540,8 +511,17 @@ public enum SpeakerAssignment {
                 // if none overlaps at all (a gap-fallback-derived piece may not literally overlap its
                 // own evidenced turn), leave it nil — `?? 1.0` below then trusts the diarizer, the
                 // existing safe default, rather than borrowing an unrelated turn's confidence.
+                // The `overlap > 0` filter is load-bearing, not decorative: `max(by:)` on a non-empty
+                // collection ALWAYS returns a value, even when every candidate ties at overlap == 0
+                // (the comparator `oa < ob` is false for a 0/0 tie, so the first element survives).
+                // Without it, a gap-fallback piece whose evidenced speaker's OTHER turns all happen to
+                // have low quality would silently inherit one of THEIR scores despite none of them
+                // actually overlapping this piece — forcing a correct attribution to "Unknown" through
+                // the quality gate rather than the speaker choice (caught in review — this exact
+                // omission was present in an earlier version of this fix).
                 bestQuality = diarizationSegments
                     .filter { $0.speaker == dominant }
+                    .filter { max(0, min(seg.end, $0.end) - max(seg.start, $0.start)) > 0 }
                     .max { a, b in
                         let oa = max(0, min(seg.end, a.end) - max(seg.start, a.start))
                         let ob = max(0, min(seg.end, b.end) - max(seg.start, b.start))
