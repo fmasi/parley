@@ -101,6 +101,29 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].text == seg.text)
     }
 
+    @Test func leavesITNReformattedTextUntouchedWhenNotSplit() {
+        // The key ITN-preservation guarantee behind the `guard pieces.count > 1 else { … }` early
+        // return: `leavesSingleSpeakerSegmentUntouched` only checks `pieces[0].text == seg.text`,
+        // which passes trivially even if seg.text were reconstructed from words — it doesn't prove
+        // ITN-reformatted text specifically survives. Here seg.text is a POST-ITN string ("2026")
+        // that does NOT match what concatenating the raw PRE-ITN words would produce ("two thousand
+        // twenty-six") — if the passthrough ever started reconstructing text instead of returning
+        // `seg` unchanged, this would catch it immediately.
+        let words = [
+            WordTiming(start: 0.0, end: 0.3, text: "two"),
+            WordTiming(start: 0.3, end: 0.6, text: " thousand"),
+            WordTiming(start: 0.6, end: 0.9, text: " twenty"),
+            WordTiming(start: 0.9, end: 1.0, text: "-six"),
+        ]
+        let seg = TranscriptSegment(start: 0.0, end: 1.0, text: "2026", language: "en", words: words)
+        let diar = [DiarizedSegment(start: 0.0, end: 1.0, speaker: "S0")]
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "2026")
+    }
+
     @Test func passesThroughSegmentWithoutWordTiming() {
         // No word timing available → cannot split; segment passes through unchanged (fallback C).
         let diar = [
@@ -253,6 +276,36 @@ struct SpeakerBoundarySplitTests {
         #expect(labeled[0].speaker == "Speaker 1")
         #expect(labeled[0].text == "So what happened?")
         #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    @Test func assignVadOverloadLowQualityShortSplitPieceIsUnknown() {
+        // The operationally important case: a short split-off piece (the reattributed question,
+        // ~2s) with LOW diarizer confidence, distinct from the long piece it was split from. Both
+        // pieces have full speech coverage (isolating quality as the deciding factor) — the short
+        // piece's own turn has qualityScore 0.1 (below the 0.3 threshold) while the long piece's
+        // turn is 0.9. Confirms the split fix doesn't bypass VAD/quality gating for the piece it
+        // creates: high speech + low quality → "Unknown" per the decision matrix, not silently
+        // trusted just because it was reattributed from the wrong speaker.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0", qualityScore: 0.1),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1", qualityScore: 0.9),
+        ]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+        let speechMap = [SpeechRegion(start: 0.0, end: 80.0, probability: 0.95)]
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg],
+            diarizationSegments: diar,
+            speechMap: speechMap,
+            vadSpeechThreshold: 0.5,
+            qualityScoreThreshold: 0.3
+        )
+
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Unknown")
+        #expect(labeled[0].text == "So what happened?")
+        #expect(labeled[1].speaker == "Speaker 2")
+        #expect(labeled[1].text == "Well, it went on for quite a while")
     }
 
     @Test func assignVadOverloadNilSpeechMapStillSplits() {

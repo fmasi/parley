@@ -107,6 +107,16 @@ public enum SpeakerAssignment {
                 // it, a genuinely non-overlapping turn whose span happens to touch the midpoint would
                 // match `0 == 0` on the first candidate, pre-empting the nil-fallback (nearest-turn)
                 // path below for a candidate that never actually overlapped the word.
+                //
+                // Last-wins-among-ties, intentionally: a LATER candidate satisfying this branch always
+                // overwrites an earlier strict winner. That's correct GIVEN this tiebreaker's own
+                // purpose — prefer whichever turn contains the midpoint over one that merely tied on
+                // raw overlap — so if a later candidate genuinely satisfies "contains the midpoint"
+                // where the earlier winner didn't, it SHOULD replace it. Only safe as long as at most
+                // one diarization segment can ever contain a given midpoint, which holds for
+                // FluidAudioDiarizer's non-overlapping turns; a diarizer producing overlapping segments
+                // could make this order-dependent among genuine multi-candidate ties. Don't "fix" this
+                // without first checking whether that assumption still holds.
                 best = sp.speaker
             }
         }
@@ -139,7 +149,7 @@ public enum SpeakerAssignment {
     /// does NOT match the segment's text → `nil` (SpeechAnalyzer's run/space boundaries are an
     /// Apple-internal detail; a space could be silently lost or attached inconsistently at a run
     /// boundary) — disable splitting rather than risk reconstructing garbled text.
-    public static func speechAnalyzerWordTimings(
+    static func speechAnalyzerWordTimings(
         runs: [(text: String, start: Double?, end: Double?)],
         trimmedSegmentText: String
     ) -> [WordTiming]? {
