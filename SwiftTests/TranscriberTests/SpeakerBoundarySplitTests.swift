@@ -87,6 +87,51 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[1].end == 42.0)     // anchored to seg.end, not the last word's end (40.0)
     }
 
+    @Test func splitFallsBackToOriginalSegmentWhenAllPiecesAreEmpty() {
+        // A degenerate (currently unreachable — neither engine emits empty-text tokens) case: both
+        // words are whitespace-only, so BOTH resulting pieces trim to empty text and get filtered.
+        // `emitted` ends up empty; must fall back to the original, unsplit `seg` rather than silently
+        // dropping the segment from the transcript entirely (no text, no playback range, no log line).
+        let words = [
+            WordTiming(start: 1.0, end: 2.0, text: "  "),
+            WordTiming(start: 6.0, end: 7.0, text: "  "),
+        ]
+        let seg = TranscriptSegment(start: 0.0, end: 10.0, text: "  ", language: nil, words: words)
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "S0"),
+            DiarizedSegment(start: 5.0, end: 10.0, speaker: "S1"),
+        ]
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 1)
+        #expect(pieces[0].start == seg.start)
+        #expect(pieces[0].end == seg.end)
+    }
+
+    @Test func splitAnchorsBothBoundsWhenOnlyOnePieceSurvivesTextFilter() {
+        // pieces.count > 1 (a real boundary WAS detected — S0 then S1), but only ONE of the two
+        // resulting pieces has non-empty text (the S0 piece is whitespace-only and gets filtered).
+        // Exercises the firstIdx == lastIdx branch: the single surviving piece must be anchored to
+        // BOTH seg.start and seg.end, not just whichever bound its own position would suggest.
+        let words = [
+            WordTiming(start: 1.0, end: 2.0, text: "  "),       // → S0, trims empty, filtered
+            WordTiming(start: 6.0, end: 7.0, text: "hello"),    // → S1, survives
+        ]
+        let seg = TranscriptSegment(start: 0.0, end: 10.0, text: "hello", language: nil, words: words)
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "S0"),
+            DiarizedSegment(start: 5.0, end: 10.0, speaker: "S1"),
+        ]
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "hello")
+        #expect(pieces[0].start == seg.start)  // anchored to seg.start, not the surviving word's own start (6.0)
+        #expect(pieces[0].end == seg.end)      // anchored to seg.end, not the surviving word's own end (7.0)
+    }
+
     @Test func leavesSingleSpeakerSegmentUntouched() {
         // Whole segment falls inside one diarized turn → must be returned byte-identical (keeps the
         // engine's own text, incl. FluidAudio ITN, with no reconstruction).

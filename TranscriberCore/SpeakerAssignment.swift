@@ -282,7 +282,13 @@ public enum SpeakerAssignment {
                     language: l.language, confidence: l.confidence, words: l.words
                 )
             }
-            out.append(contentsOf: emitted)
+            // If EVERY piece trimmed to empty text, `emitted` is empty here — appending it would
+            // silently drop this segment from the transcript entirely (no text, no audio-playback
+            // range, no log line), which is strictly worse than the misattribution this whole fix
+            // exists to prevent. Unreachable today (neither engine emits empty-text tokens), but fall
+            // back to the original, unsplit `seg` rather than nothing — the same fallback the nil/
+            // short-words guard above already uses.
+            out.append(contentsOf: emitted.isEmpty ? [seg] : emitted)
         }
 
         return out
