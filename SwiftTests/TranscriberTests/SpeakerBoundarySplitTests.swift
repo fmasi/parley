@@ -454,6 +454,23 @@ struct SpeakerBoundarySplitTests {
         #expect(result[1].words?.first?.start == 2.0)
     }
 
+    @Test func groupTokensAttachesWordTimingsOnTrailingUnpunctuatedFlush() {
+        // The other segment-flush trigger in groupTokensIntoSegments besides `.!?` punctuation:
+        // `i == timings.count - 1` flushes a trailing segment that never hit sentence-ending
+        // punctuation. That branch also accumulates currentWords, but only the punctuation-terminated
+        // path was tested above — this pins that a purely token-exhaustion-triggered flush still
+        // carries correct word timing too.
+        let timings = [
+            TokenTiming(startTime: 0.0, endTime: 0.5, token: "Hello"),
+            TokenTiming(startTime: 0.5, endTime: 1.0, token: " world"),
+        ]
+        let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: "en")
+        #expect(result.count == 1)
+        #expect(result[0].words?.count == 2)
+        #expect(result[0].words?.first?.start == 0.0)
+        #expect(result[0].words?.last?.end == 1.0)
+    }
+
     // MARK: - splitAcrossSpeakerBoundaries: empty (non-nil) words array
 
     @Test func passesThroughSegmentWithEmptyWordArray() {

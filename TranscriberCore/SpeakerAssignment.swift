@@ -126,7 +126,10 @@ public enum SpeakerAssignment {
         }
         if best != nil { return best }
         // Word lies fully inside a gap between turns: glue it to the nearest turn by edge distance
-        // rather than opening a phantom boundary on silence.
+        // rather than opening a phantom boundary on silence. Same adjacent-boundary-coincidence
+        // ordering dependency as the tiebreaker above (~line 104): a word touching two turns that
+        // share an exact edge (e.g. sp0.end == sp1.start == wordEnd) gives both dist == 0, and the
+        // strict `<` below keeps whichever candidate comes first in `diar`'s array order.
         var nearest: String? = nil
         var nearestDist = Double.greatestFiniteMagnitude
         for sp in diar {
