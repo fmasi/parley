@@ -147,11 +147,15 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[1].end == 42.0)     // anchored to seg.end, not the last word's end (40.0)
     }
 
-    @Test func splitFallsBackToOriginalSegmentWhenAllPiecesAreEmpty() {
-        // A degenerate (currently unreachable — neither engine emits empty-text tokens) case: both
-        // words are whitespace-only, so BOTH resulting pieces trim to empty text and get filtered.
-        // `emitted` ends up empty; must fall back to the original, unsplit `seg` rather than silently
-        // dropping the segment from the transcript entirely (no text, no playback range, no log line).
+    @Test func splitReturnsOriginalSegmentWhenAllWordsAreWhitespaceOnly() {
+        // Both words are whitespace-only. Word 1 opens a piece (S0, since `pieces.isEmpty` bypasses
+        // the glue rule for the very first word); word 2 is also whitespace-only and glues onto that
+        // SAME piece per the whitespace-glue rule (line 278) rather than opening a second one for S1.
+        // So this never reaches the `emitted.isEmpty` fallback (see the comment at that line: it's
+        // structurally unreachable via this grouping logic, since only the FIRST piece can ever end
+        // up all-empty) — this exercises the earlier `guard pieces.count > 1 else` single-piece early
+        // return instead, which must still return the original, unsplit `seg` (not silently drop it)
+        // when the sole piece's text is empty.
         let words = [
             WordTiming(start: 1.0, end: 2.0, text: "  "),
             WordTiming(start: 6.0, end: 7.0, text: "  "),

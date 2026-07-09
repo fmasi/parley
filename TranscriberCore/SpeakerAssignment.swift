@@ -357,12 +357,16 @@ public enum SpeakerAssignment {
             // If EVERY piece trimmed to empty text, `emitted` is empty here — appending it would
             // silently drop this segment from the transcript entirely (no text, no audio-playback
             // range, no log line), which is strictly worse than the misattribution this whole fix
-            // exists to prevent. Unreachable today (neither engine emits empty-text tokens), but fall
-            // back to the original, unsplit `seg` rather than nothing — the same fallback the nil/
-            // short-words guard above already uses. `seg` here carries no dominantSpeaker (multiple
-            // pieces existed with potentially DIFFERENT speakers and all were discarded — there's no
-            // single evidenced owner left to propagate), so assign() correctly falls back to its own
-            // raw-overlap heuristic for this already-degenerate, currently-unreachable case.
+            // exists to prevent. Unreachable today for two independent reasons: neither engine emits
+            // empty-text tokens, AND even with synthetic all-whitespace input the grouping loop's
+            // glue rule (line 278) can produce at most ONE all-empty piece — every piece after the
+            // first is opened by a non-glued (i.e. real-content) word, so it can never be all-empty
+            // itself. Still, fall back to the original, unsplit `seg` rather than nothing — the same
+            // fallback the nil/short-words guard above already uses. `seg` here carries no
+            // dominantSpeaker (multiple pieces existed with potentially DIFFERENT speakers and all
+            // were discarded — there's no single evidenced owner left to propagate), so assign()
+            // correctly falls back to its own raw-overlap heuristic for this already-degenerate,
+            // currently-unreachable case.
             out.append(contentsOf: emitted.isEmpty ? [seg] : emitted)
         }
 
