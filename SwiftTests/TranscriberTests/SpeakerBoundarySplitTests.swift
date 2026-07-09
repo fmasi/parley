@@ -55,6 +55,33 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].end <= pieces[1].start)
     }
 
+    @Test func wordStraddlingBoundaryIsNeverSplitMidWord() {
+        // A word CAN'T be split mid-word — the function only groups/cuts between whole words. A word
+        // whose own time range straddles the diarization boundary [25.5,26.5] with boundary at 26.0
+        // ties on overlap (0.5s each side) and has its midpoint (26.0) exactly on the boundary,
+        // hitting the documented last-wins-among-ties tiebreak (S1, the second diar entry, wins —
+        // verified by hand-trace matching dominantDiarSpeaker's actual algorithm). The straddling word
+        // goes whole to S1 along with the rest of the answer; it is never itself cut in two.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 25.5, end: 26.5, text: "question"),  // straddles the boundary
+            WordTiming(start: 26.5, end: 72.0, text: " answer"),
+        ]
+        let seg = TranscriptSegment(start: 25.5, end: 72.0, text: "question answer", language: "en", words: words)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        // No split: both words resolve to S1 (the straddling word via the tiebreak), so one piece.
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "question answer")
+        // The straddling word itself is untouched — never cut into two WordTimings.
+        #expect(words[0].start == 25.5)
+        #expect(words[0].end == 26.5)
+    }
+
     @Test func splitSortsOutOfOrderWordsBeforeGrouping() {
         // Neither current engine produces out-of-order word timing, but nothing in the type enforces
         // it. Passes the SAME words as splitsSegmentSpanningTwoSpeakers, deliberately shuffled in the

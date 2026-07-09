@@ -204,7 +204,7 @@ public enum SpeakerAssignment {
     /// Segments that fall entirely within one speaker, or that carry no word timing, pass through
     /// byte-identical — zero behaviour change for the common case, and FluidAudio's ITN text on those
     /// segments is preserved verbatim (only the rare split pieces are rebuilt from raw tokens).
-    public static func splitAcrossSpeakerBoundaries(
+    static func splitAcrossSpeakerBoundaries(
         _ segments: [TranscriptSegment],
         diarizationSegments diar: [DiarizedSegment]
     ) -> [TranscriptSegment] {
@@ -281,17 +281,25 @@ public enum SpeakerAssignment {
                 ))
             }
             if let firstIdx = emitted.indices.first, let lastIdx = emitted.indices.last {
+                // Anchoring can move `start`/`end` away from `words.first.start`/`words.last.end` (the
+                // whole point — see the anchoring rationale above). That means `words` would then
+                // describe a narrower span than the piece itself claims: an invisible trap if any
+                // future code ever assumed `piece.words` is bounded by `piece.start`/`piece.end` (a
+                // waveform visualizer, an audio-highlight feature, ...). `words` is otherwise a
+                // transient, single-pass input to THIS function — `LabeledSegment` (assign()'s output)
+                // doesn't carry it forward — so nil it out on exactly the piece(s) whose bound moved,
+                // rather than let the array quietly disagree with the segment it's attached to.
                 let f = emitted[firstIdx]
                 emitted[firstIdx] = TranscriptSegment(
                     start: seg.start, end: f.end, text: f.text,
-                    language: f.language, confidence: f.confidence, words: f.words
+                    language: f.language, confidence: f.confidence, words: nil
                 )
                 // Re-read AFTER the first-index fixup: when only one piece was emitted (firstIdx ==
                 // lastIdx), this must carry the just-applied seg.start forward, not the original.
                 let l = emitted[lastIdx]
                 emitted[lastIdx] = TranscriptSegment(
                     start: l.start, end: seg.end, text: l.text,
-                    language: l.language, confidence: l.confidence, words: l.words
+                    language: l.language, confidence: l.confidence, words: nil
                 )
             }
             // If EVERY piece trimmed to empty text, `emitted` is empty here — appending it would
