@@ -55,6 +55,39 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].end <= pieces[1].start)
     }
 
+    @Test func splitSortsOutOfOrderWordsBeforeGrouping() {
+        // Neither current engine produces out-of-order word timing, but nothing in the type enforces
+        // it. Passes the SAME words as splitsSegmentSpanningTwoSpeakers, deliberately shuffled in the
+        // input array — the sort must restore chronological order before grouping, so the output is
+        // identical to the correctly-ordered case (no inverted start > end pieces, correct text/cuts).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 27.0, end: 72.0, text: " it went on for quite a while"),
+            WordTiming(start: 24.0, end: 24.7, text: "So"),
+            WordTiming(start: 26.2, end: 27.0, text: " Well,"),
+            WordTiming(start: 25.4, end: 26.0, text: " happened?"),
+            WordTiming(start: 24.7, end: 25.4, text: " what"),
+        ]
+        let seg = TranscriptSegment(
+            start: 24.0, end: 72.0, text: "So what happened? Well, it went on for quite a while",
+            language: "en", words: words
+        )
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 2)
+        #expect(pieces[0].start == 24.0)
+        #expect(pieces[0].end == 26.0)
+        #expect(pieces[0].text == "So what happened?")
+        #expect(pieces[1].start == 26.2)
+        #expect(pieces[1].end == 72.0)
+        #expect(pieces[1].text == "Well, it went on for quite a while")
+        #expect(pieces[0].end <= pieces[1].start)
+    }
+
     @Test func splitAnchorsFirstAndLastPieceToOriginalSegmentBounds() {
         // Constructs a segment whose OWN start/end extend beyond its first/last word's timing —
         // simulating lead-in/lead-out silence a future engine change could introduce (today neither

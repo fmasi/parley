@@ -219,10 +219,19 @@ public enum SpeakerAssignment {
             // with zero entries; neither current engine does (FluidAudio always appends >=1 word
             // before a segment boundary fires; SpeechAnalyzer forces nil on empty, see its round-trip
             // check).
-            guard let words = seg.words, words.count >= 2 else {
+            guard var words = seg.words, words.count >= 2 else {
                 out.append(seg)
                 continue
             }
+            // The grouping below assumes `words` is chronologically ordered — both current engines
+            // guarantee this (FluidAudio tokens are assembled in ASR-decode order; SpeechAnalyzer
+            // runs are emitted in utterance order from result.text.runs), but nothing in the type
+            // enforces it. If it were ever violated, a piece's `first`/`last` word could invert
+            // (first.start > last.end), producing a TranscriptSegment with start > end that — for any
+            // piece that ISN'T the first/last — wouldn't even get caught by the seg.start/seg.end
+            // anchoring, and would propagate a nonsensical time range into assign(). Cheap enough
+            // (typically tens of entries per segment) to just guarantee the invariant here.
+            words.sort { $0.start < $1.start }
 
             // Group consecutive words by their covering diarized speaker; a change marks a cut.
             var pieces: [[WordTiming]] = []
