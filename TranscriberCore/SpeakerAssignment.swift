@@ -163,6 +163,11 @@ public enum SpeakerAssignment {
         out.reserveCapacity(segments.count)
 
         for seg in segments {
+            // `words.count >= 2` also correctly passes through a non-nil-but-EMPTY array (0 >= 2 is
+            // false) the same as nil — matters only if a future third engine ever populates `words`
+            // with zero entries; neither current engine does (FluidAudio always appends >=1 word
+            // before a segment boundary fires; SpeechAnalyzer forces nil on empty, see its round-trip
+            // check).
             guard let words = seg.words, words.count >= 2 else {
                 out.append(seg)
                 continue
