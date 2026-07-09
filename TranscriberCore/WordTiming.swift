@@ -9,7 +9,7 @@ import Foundation
 /// space-ownership is an Apple-internal detail — `SpeechAnalyzerEngine` explicitly round-trip-checks
 /// this per segment before ever populating `words`, and disables splitting (falls to `nil`) if the
 /// assumption doesn't hold for that segment.
-public struct WordTiming: Sendable {
+public struct WordTiming: Sendable, Equatable {
     public let start: Double
     public let end: Double
     public let text: String

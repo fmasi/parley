@@ -366,7 +366,9 @@ public enum SpeakerAssignment {
             // dominantSpeaker (multiple pieces existed with potentially DIFFERENT speakers and all
             // were discarded — there's no single evidenced owner left to propagate), so assign()
             // correctly falls back to its own raw-overlap heuristic for this already-degenerate,
-            // currently-unreachable case.
+            // currently-unreachable case. This guarantee relies on `seg.dominantSpeaker` being nil on
+            // entry — true for both current call sites (raw engine output, never previously split) —
+            // so callers must not pass segments that have already been through this function.
             out.append(contentsOf: emitted.isEmpty ? [seg] : emitted)
         }
 
@@ -498,6 +500,12 @@ public enum SpeakerAssignment {
             var bestOverlap: Double = 0
             var bestQuality: Float? = nil
 
+            // TODO(perf): when seg.dominantSpeaker is set (the common case post-#120 fix), this whole
+            // O(diarizationSegments) loop's overlapSpeaker result is discarded below in favor of word
+            // evidence, and bestQuality gets re-derived separately — only the re-derivation is actually
+            // needed in that case. Not worth restructuring for correctness (this is negligible in
+            // post-processing), but worth short-circuiting if recording length or diarizer resolution
+            // ever makes this loop show up in profiling.
             for sp in diarizationSegments {
                 let overlapStart = max(seg.start, sp.start)
                 let overlapEnd = min(seg.end, sp.end)
