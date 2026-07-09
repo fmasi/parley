@@ -245,29 +245,44 @@ public enum SpeakerAssignment {
                 "Boundary split: segment [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] spans \(pieces.count, privacy: .public) diarized turns — re-splitting at word boundaries"
             )
 
-            for (idx, piece) in pieces.enumerated() {
+            // Build all emitted pieces first (raw first/last-word timing), THEN anchor the first/last
+            // ONE ACTUALLY EMITTED to the original segment's own outer bounds — not the first/last
+            // ENTRY OF `pieces`. `pieces[0]`/`pieces.last` could in principle be skipped below (empty
+            // text after trim) while a middle entry survives; anchoring by position-in-`pieces` would
+            // then silently leave THAT entry un-anchored, opening an unaccounted gap versus this
+            // segment's neighbor. Indexing on the emitted array instead makes the anchor land on
+            // whichever piece is actually first/last in the OUTPUT, regardless of any skip. Currently
+            // unreachable (neither engine emits empty-text tokens), but the same latent-hole shape as
+            // the anchoring itself, so it gets the same defensive treatment.
+            var emitted: [TranscriptSegment] = []
+            for piece in pieces {
                 guard let first = piece.first, let last = piece.last else { continue }
                 let text = piece.map(\.text).joined().trimmingCharacters(in: .whitespaces)
                 guard !text.isEmpty else { continue }
-                // Anchor the first/last piece to the ORIGINAL segment's own outer bounds, not just
-                // its first/last word's timing. Today these are equal by construction for both
-                // engines (segStart/segEnd are themselves derived from the first/last word's timing —
-                // see groupTokensIntoSegments and speechAnalyzerWordTimings' callers), so this is a
-                // no-op in practice. But anchoring explicitly protects against a future engine change
-                // that includes lead-in/lead-out silence in segment bounds, which would otherwise
-                // silently clip that time from audio playback and leave an unaccounted gap between
-                // this segment and its neighbor in the timeline.
-                let pieceStart = idx == 0 ? seg.start : first.start
-                let pieceEnd = idx == pieces.count - 1 ? seg.end : last.end
-                out.append(TranscriptSegment(
-                    start: pieceStart,
-                    end: pieceEnd,
+                emitted.append(TranscriptSegment(
+                    start: first.start,
+                    end: last.end,
                     text: text,
                     language: seg.language,
                     confidence: seg.confidence,
                     words: piece
                 ))
             }
+            if let firstIdx = emitted.indices.first, let lastIdx = emitted.indices.last {
+                let f = emitted[firstIdx]
+                emitted[firstIdx] = TranscriptSegment(
+                    start: seg.start, end: f.end, text: f.text,
+                    language: f.language, confidence: f.confidence, words: f.words
+                )
+                // Re-read AFTER the first-index fixup: when only one piece was emitted (firstIdx ==
+                // lastIdx), this must carry the just-applied seg.start forward, not the original.
+                let l = emitted[lastIdx]
+                emitted[lastIdx] = TranscriptSegment(
+                    start: l.start, end: seg.end, text: l.text,
+                    language: l.language, confidence: l.confidence, words: l.words
+                )
+            }
+            out.append(contentsOf: emitted)
         }
 
         return out

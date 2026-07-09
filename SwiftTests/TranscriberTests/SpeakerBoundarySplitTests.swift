@@ -145,6 +145,50 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].text == seg.text)
     }
 
+    @Test func doesNotSplitWhenAllWordsLandInDiarizationGap() {
+        // Gap between turns [0,5) and [15,30); all three words sit in [6,9) — closer to S0's end
+        // (dist 1..3) than to S1's start (dist 6..8) for every word, so dominantDiarSpeaker's
+        // nearest-turn fallback glues all of them to the SAME turn (verified: no word's distance
+        // ordering flips). End-to-end path for wordInGapGluesToNearestTurn: a segment landing
+        // entirely in silence between turns must not open a spurious boundary.
+        let diar = [
+            DiarizedSegment(start: 0, end: 5, speaker: "S0"),
+            DiarizedSegment(start: 15, end: 30, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 6, end: 7, text: "one"),
+            WordTiming(start: 7, end: 8, text: " two"),
+            WordTiming(start: 8, end: 9, text: " three"),
+        ]
+        let seg = TranscriptSegment(start: 6, end: 9, text: "one two three", language: nil, words: words)
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == seg.text)
+    }
+
+    @Test func splitPiecesAreRebuiltFromPreITNTokens() {
+        // Complements leavesITNReformattedTextUntouchedWhenNotSplit: this is the OTHER side of the
+        // contract — a segment that IS split reconstructs its pieces from the raw pre-ITN words, not
+        // from seg.text. seg.text is post-ITN ("$1,000 dollars"); the words are the pre-ITN tokens
+        // ITN was applied to. Documented known limitation (FluidAudioEngine.swift, PR #121 body) —
+        // this pins it so a future attempt to re-apply ITN to split pieces doesn't silently break
+        // reconstruction if ITN ever shifts token boundaries.
+        let words = [
+            WordTiming(start: 0, end: 0.4, text: "one"),
+            WordTiming(start: 0.4, end: 0.9, text: " thousand"),
+            WordTiming(start: 10, end: 10.5, text: " dollars"),
+        ]
+        let seg = TranscriptSegment(start: 0, end: 11, text: "$1,000 dollars", language: "en", words: words)
+        let diar = [
+            DiarizedSegment(start: 0, end: 5, speaker: "S0"),
+            DiarizedSegment(start: 5, end: 15, speaker: "S1"),
+        ]
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+        #expect(pieces.count == 2)
+        #expect(pieces[0].text == "one thousand")  // pre-ITN, not "$1,000"
+        #expect(pieces[1].text == "dollars")        // pre-ITN
+    }
+
     @Test func splitsThreeWayWhenSpeakerRecurs() {
         // A → B → A within one segment (interviewer interjects mid-answer). Same speaker id "A"
         // recurring must still produce three consecutive pieces cut at each change.
