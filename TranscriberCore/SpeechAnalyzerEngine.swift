@@ -100,13 +100,22 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                 if segStart == .greatestFiniteMagnitude { segStart = 0 }
 
                 let trimmed = text.trimmingCharacters(in: .whitespaces)
+                // `allRunsTimed` only proves every run HAD timing — it says nothing about whether
+                // concatenating those runs' text faithfully reproduces the segment (SpeechAnalyzer's
+                // run/space boundaries are an Apple-internal detail; a space could be omitted from
+                // every run, or split across a run boundary, without any run being untimed). Verify
+                // the round-trip explicitly and disable splitting if it doesn't hold — a REAL runtime
+                // check, not a debug-only assert, since `assert` compiles out of release builds and
+                // would give a shipped app zero protection against silently garbled split text.
+                let wordsReconstructSegment = words.map(\.text).joined()
+                    .trimmingCharacters(in: .whitespaces) == trimmed
                 if !trimmed.isEmpty {
                     segments.append(TranscriptSegment(
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
                         language: language ?? locale.language.languageCode?.identifier,
-                        words: (allRunsTimed && !words.isEmpty) ? words : nil
+                        words: (allRunsTimed && !words.isEmpty && wordsReconstructSegment) ? words : nil
                     ))
                 }
             }

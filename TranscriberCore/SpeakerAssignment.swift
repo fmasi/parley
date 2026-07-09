@@ -4,9 +4,12 @@ import os
 /// Timing for one ASR unit inside a segment — a FluidAudio token (sub-word) or a
 /// SpeechAnalyzer run. Engine-neutral (no SDK types) so both engines can populate it and the
 /// shared assignment layer can re-split segments at true speaker-change boundaries (issue #120).
-/// `text` carries the unit's own leading spacing verbatim (both engines emit space-prefixed units),
-/// so a piece's text reconstructs by plain concatenation + trim — the same way FluidAudio already
-/// assembles a full segment.
+/// `text` is expected to carry the unit's own leading spacing verbatim, so a piece's text
+/// reconstructs by plain concatenation + trim — confirmed true for FluidAudio tokens (verified in
+/// `groupTokensAttachesWordTimings`); NOT independently verifiable for SpeechAnalyzer's runs, whose
+/// space-ownership is an Apple-internal detail — `SpeechAnalyzerEngine` explicitly round-trip-checks
+/// this per segment before ever populating `words`, and disables splitting (falls to `nil`) if the
+/// assumption doesn't hold for that segment.
 public struct WordTiming: Sendable {
     public let start: Double
     public let end: Double
@@ -95,13 +98,15 @@ public enum SpeakerAssignment {
             if overlap > bestOverlap {
                 bestOverlap = overlap
                 best = sp.speaker
-            }
-            // Midpoint tiebreaker: on equal overlap, prefer the turn containing the word midpoint.
-            // `overlap > 0` guards the initial bestOverlap==0 sentinel: without it, a genuinely
-            // non-overlapping turn whose span happens to touch the midpoint would match `0 == 0`
-            // on the first candidate and win by default, pre-empting the nil-fallback (nearest-turn)
-            // path below for a candidate that never actually overlapped the word.
-            if overlap > 0 && sp.start <= mid && mid <= sp.end && overlap == bestOverlap {
+            } else if overlap > 0 && sp.start <= mid && mid <= sp.end && overlap == bestOverlap {
+                // Midpoint tiebreaker: on equal overlap, prefer the turn containing the word midpoint.
+                // `else if` so this only ever evaluates for a candidate that did NOT just win via
+                // strict overlap above — otherwise `overlap == bestOverlap` is trivially true for the
+                // very candidate that just set it, redundantly (if harmlessly) re-writing `best` to
+                // the same value. `overlap > 0` guards the initial bestOverlap==0 sentinel: without
+                // it, a genuinely non-overlapping turn whose span happens to touch the midpoint would
+                // match `0 == 0` on the first candidate, pre-empting the nil-fallback (nearest-turn)
+                // path below for a candidate that never actually overlapped the word.
                 best = sp.speaker
             }
         }

@@ -260,4 +260,23 @@ struct SpeakerBoundarySplitTests {
         let rebuilt = (words ?? []).map(\.text).joined().trimmingCharacters(in: .whitespaces)
         #expect(rebuilt == result[0].text)
     }
+
+    @Test func groupTokensWordTimingsResetBetweenSentences() {
+        // Regression guard for the currentWords accumulator reset: if a future edit dropped the
+        // `currentWords = []` reset after each completed segment, the second sentence would silently
+        // inherit the first's words too — this pins that each segment carries ONLY its own words.
+        let timings = [
+            TokenTiming(startTime: 0.0, endTime: 0.5, token: "Hello"),
+            TokenTiming(startTime: 0.5, endTime: 1.0, token: " world"),
+            TokenTiming(startTime: 1.0, endTime: 1.2, token: "."),
+            TokenTiming(startTime: 2.0, endTime: 2.5, token: "Goodbye"),
+            TokenTiming(startTime: 2.5, endTime: 3.0, token: " world"),
+            TokenTiming(startTime: 3.0, endTime: 3.2, token: "."),
+        ]
+        let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: "en")
+        #expect(result.count == 2)
+        #expect(result[0].words?.count == 3)
+        #expect(result[1].words?.count == 3)
+        #expect(result[1].words?.first?.start == 2.0)
+    }
 }
