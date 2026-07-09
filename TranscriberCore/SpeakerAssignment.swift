@@ -300,6 +300,11 @@ public enum SpeakerAssignment {
             // (incl. FluidAudio ITN) is preserved exactly — no reconstruction, no regression — but
             // carry the word-derived speaker forward on `dominantSpeaker` so assign() can trust it
             // instead of re-deriving one from raw geometric overlap (see TranscriptSegment.dominantSpeaker).
+            // `words: seg.words` below is the ORIGINAL (possibly out-of-order) array, not the sorted
+            // local `words` copy used for grouping above — harmless today since only `dominantSpeaker`
+            // is consumed downstream (LabeledSegment doesn't carry `words` forward), but a future
+            // word-timing consumer would see unsorted words on this passthrough path while split
+            // pieces get `words: nil` (see the matching NOTE on the anchoring fixup below).
             guard pieces.count > 1 else {
                 out.append(TranscriptSegment(
                     start: seg.start, end: seg.end, text: seg.text,

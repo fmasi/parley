@@ -74,12 +74,12 @@ struct SpeakerBoundarySplitTests {
 
         let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
 
-        // No split: both words resolve to S1 (the straddling word via the tiebreak), so one piece.
+        // No split: both words resolve to S1 (the straddling word via the tiebreak), so one piece —
+        // which is itself the proof the straddling word was never cut in two (Swift's array/struct
+        // value semantics already guarantee splitAcrossSpeakerBoundaries can't mutate the input
+        // `words` it was passed, so asserting against that local binding here would prove nothing).
         #expect(pieces.count == 1)
         #expect(pieces[0].text == "question answer")
-        // The straddling word itself is untouched — never cut into two WordTimings.
-        #expect(words[0].start == 25.5)
-        #expect(words[0].end == 26.5)
     }
 
     @Test func splitSortsOutOfOrderWordsBeforeGrouping() {
