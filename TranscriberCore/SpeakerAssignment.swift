@@ -263,7 +263,19 @@ public enum SpeakerAssignment {
                 let trimmedWord = w.text.trimmingCharacters(in: .whitespaces)
                 let isPunctuationOnly = !trimmedWord.isEmpty
                     && !trimmedWord.contains { $0.isLetter || $0.isNumber || $0.isSymbol }
-                if isPunctuationOnly, !pieces.isEmpty {
+                // Both punctuation-only AND empty/whitespace-only tokens glue to the current piece
+                // rather than opening a new one — but ONLY when there IS a current piece to glue to
+                // (`!pieces.isEmpty` guards the WHOLE condition, not just the punctuation half — an
+                // empty-first-token variant of this check that let `trimmedWord.isEmpty` alone bypass
+                // that guard would index `pieces[pieces.count - 1]` with `pieces.count == 0`, an
+                // out-of-bounds crash). Without gluing an empty token, it would fall to the normal path
+                // below, call dominantDiarSpeaker, and — if that differs from the current piece's
+                // speaker — open a phantom group boundary that severs what should be one continuous
+                // piece (the empty group itself gets filtered at emission, but by then the next real
+                // word is already artificially split off). Neither current engine emits empty-text
+                // tokens, so this is unreachable today — same defensive-guard reasoning as
+                // `words.count >= 2` above and the `emitted.isEmpty` fallback below.
+                if (isPunctuationOnly || trimmedWord.isEmpty), !pieces.isEmpty {
                     pieces[pieces.count - 1].words.append(w)
                     continue
                 }
@@ -506,6 +518,9 @@ public enum SpeakerAssignment {
             // Word-level evidence overrides the geometrically-derived speaker when present — see the
             // basic assign() overload and TranscriptSegment.dominantSpeaker's doc comment for the full
             // rationale (independent code-council review, confirmed 3/3).
+            // bestSpeaker commits to word-evidenced speaker here; bestQuality is still the overlap
+            // loop's value at this point and is re-derived below to match (see the `if let dominant`
+            // block immediately following).
             let bestSpeaker = seg.dominantSpeaker.map { speakerMap[$0] ?? $0 } ?? overlapSpeaker
             if let dominant = seg.dominantSpeaker {
                 // `bestQuality` from the loop above is the quality of whichever turn geometrically

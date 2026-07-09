@@ -204,6 +204,7 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].start == seg.start)
         #expect(pieces[0].end == seg.end)
         #expect(pieces[0].text == seg.text)
+        #expect(pieces[0].dominantSpeaker == "S0")  // must propagate for assign() to trust word evidence
     }
 
     @Test func leavesITNReformattedTextUntouchedWhenNotSplit() {
