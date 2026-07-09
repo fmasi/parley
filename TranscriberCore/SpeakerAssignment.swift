@@ -33,14 +33,30 @@ public struct TranscriptSegment: Sendable {
     /// diarization speaker boundary (issue #120). `nil` for engines/paths without word timing —
     /// those segments pass through the boundary split untouched.
     public let words: [WordTiming]?
+    /// The raw diarizer speaker ID that word-level evidence (`dominantDiarSpeaker`, run per-word by
+    /// `splitAcrossSpeakerBoundaries`) already determined for this segment/piece — set for every
+    /// segment that carried usable `words`, whether or not it ended up split. `nil` only when no
+    /// word-level evidence was available (no `words`, or too few to evaluate).
+    ///
+    /// `assign()` trusts this directly instead of re-deriving a speaker from raw geometric time-
+    /// overlap, which can silently disagree with word-level evidence: a diarization turn with ZERO
+    /// covering words (a breath, room noise, an untranscribed cross-talk speaker) could otherwise
+    /// win an unsplit segment's label purely by having more wall-clock duration than the turns real
+    /// words were actually assigned to, and a split piece born from `dominantDiarSpeaker`'s gap-
+    /// fallback (words glued to the nearest turn across silence) could otherwise fail to
+    /// geometrically overlap ANY diarization turn at all and collapse to "Unknown" — discarding the
+    /// very ownership decision that justified splitting it out in the first place. (Independent
+    /// code-council review, confirmed 3/3 across both findings.)
+    public let dominantSpeaker: String?
 
-    public init(start: Double, end: Double, text: String, language: String?, confidence: Float? = nil, words: [WordTiming]? = nil) {
+    public init(start: Double, end: Double, text: String, language: String?, confidence: Float? = nil, words: [WordTiming]? = nil, dominantSpeaker: String? = nil) {
         self.start = start
         self.end = end
         self.text = text
         self.language = language
         self.confidence = confidence
         self.words = words
+        self.dominantSpeaker = dominantSpeaker
     }
 }
 
@@ -189,9 +205,22 @@ public enum SpeakerAssignment {
     ///
     /// The fix restores the per-unit timing both engines already compute but used to discard
     /// (`TranscriptSegment.words`) and cuts a multi-speaker segment at the word boundaries where the
-    /// covering diarized speaker changes. Each resulting piece is single-speaker BY CONSTRUCTION, so
-    /// the existing overlap/VAD/quality logic that follows labels it correctly with no further change
-    /// — this function is a pure normalizer of `assign()`'s input, not a second labeller.
+    /// covering diarized speaker changes. Each resulting piece is single-speaker BY CONSTRUCTION.
+    ///
+    /// This DOES also make a labeling decision now — `TranscriptSegment.dominantSpeaker` — set to the
+    /// raw diarizer id every kept word in a piece agreed on via `dominantDiarSpeaker` (whole-segment
+    /// or per-piece). Originally this was "a pure normalizer of assign()'s input, not a second
+    /// labeller," relying on the existing overlap/VAD/quality logic in `assign()` to re-derive the
+    /// speaker correctly from each single-speaker piece's own time range. That assumption broke on
+    /// three counts an independent code-council review found (all 3/3 confirmed): a diarization turn
+    /// with ZERO covering words could still out-vote real word evidence on raw duration for an unsplit
+    /// segment; a piece born from `dominantDiarSpeaker`'s gap-fallback (words glued across a silence
+    /// gap to the nearest turn) might not geometrically overlap ANY diarization turn at all and
+    /// collapse to "Unknown" in `assign()`'s plain-overlap loop; and a standalone punctuation token
+    /// (FluidAudio emits `.!?` as its own `TokenTiming`) could be carved into its own phantom piece.
+    /// `dominantSpeaker` closes the first two by giving `assign()` a word-evidenced answer to trust
+    /// directly instead of re-deriving one geometrically; the punctuation case is closed separately,
+    /// in the grouping loop below, by never letting a punctuation-only token start a new piece.
     ///
     /// It lives at the shared assignment layer (not per-engine) because this is the one place where
     /// BOTH the transcript words and the diarization turns are in hand, so a single code path fixes
@@ -202,8 +231,9 @@ public enum SpeakerAssignment {
     /// is the built-in fallback: a segment with `nil`/empty `words` simply passes through unchanged.)
     ///
     /// Segments that fall entirely within one speaker, or that carry no word timing, pass through
-    /// byte-identical — zero behaviour change for the common case, and FluidAudio's ITN text on those
-    /// segments is preserved verbatim (only the rare split pieces are rebuilt from raw tokens).
+    /// with byte-identical text (zero text-behaviour change for the common case, and FluidAudio's ITN
+    /// text on those segments is preserved verbatim — only the rare split pieces are rebuilt from raw
+    /// tokens) — only `dominantSpeaker` is newly attached where it wasn't present before.
     static func splitAcrossSpeakerBoundaries(
         _ segments: [TranscriptSegment],
         diarizationSegments diar: [DiarizedSegment]
@@ -234,22 +264,39 @@ public enum SpeakerAssignment {
             words.sort { $0.start < $1.start }
 
             // Group consecutive words by their covering diarized speaker; a change marks a cut.
-            var pieces: [[WordTiming]] = []
-            var currentSpeaker: String? = nil
+            // Standalone punctuation-only tokens (e.g. a trailing "?" FluidAudio emits as its own
+            // token — see groupTokensQuestionMark) never START a new group, regardless of which
+            // diarized turn their own brief timing happens to touch: they're glued to whichever piece
+            // they trail. Without this, a boundary landing between a word and its own punctuation
+            // could carve the punctuation into its own phantom one-character "utterance" and
+            // misattribute it to the wrong speaker (independent code-council review finding).
+            var pieces: [(speaker: String?, words: [WordTiming])] = []
             for w in words {
+                let trimmedWord = w.text.trimmingCharacters(in: .whitespaces)
+                let isPunctuationOnly = !trimmedWord.isEmpty
+                    && !trimmedWord.contains { $0.isLetter || $0.isNumber }
+                if isPunctuationOnly, !pieces.isEmpty {
+                    pieces[pieces.count - 1].words.append(w)
+                    continue
+                }
                 let spk = dominantDiarSpeaker(wordStart: w.start, wordEnd: w.end, in: diar)
-                if pieces.isEmpty || spk != currentSpeaker {
-                    pieces.append([w])
-                    currentSpeaker = spk
+                if pieces.isEmpty || spk != pieces[pieces.count - 1].speaker {
+                    pieces.append((speaker: spk, words: [w]))
                 } else {
-                    pieces[pieces.count - 1].append(w)
+                    pieces[pieces.count - 1].words.append(w)
                 }
             }
 
-            // One covering speaker across the whole segment: emit unchanged so the engine's own
-            // text (incl. FluidAudio ITN) is preserved exactly — no reconstruction, no regression.
+            // One covering speaker across the whole segment: emit unchanged so the engine's own text
+            // (incl. FluidAudio ITN) is preserved exactly — no reconstruction, no regression — but
+            // carry the word-derived speaker forward on `dominantSpeaker` so assign() can trust it
+            // instead of re-deriving one from raw geometric overlap (see TranscriptSegment.dominantSpeaker).
             guard pieces.count > 1 else {
-                out.append(seg)
+                out.append(TranscriptSegment(
+                    start: seg.start, end: seg.end, text: seg.text,
+                    language: seg.language, confidence: seg.confidence, words: seg.words,
+                    dominantSpeaker: pieces.first?.speaker
+                ))
                 continue
             }
 
@@ -268,8 +315,8 @@ public enum SpeakerAssignment {
             // the anchoring itself, so it gets the same defensive treatment.
             var emitted: [TranscriptSegment] = []
             for piece in pieces {
-                guard let first = piece.first, let last = piece.last else { continue }
-                let text = piece.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+                guard let first = piece.words.first, let last = piece.words.last else { continue }
+                let text = piece.words.map(\.text).joined().trimmingCharacters(in: .whitespaces)
                 guard !text.isEmpty else { continue }
                 emitted.append(TranscriptSegment(
                     start: first.start,
@@ -277,7 +324,8 @@ public enum SpeakerAssignment {
                     text: text,
                     language: seg.language,
                     confidence: seg.confidence,
-                    words: piece
+                    words: piece.words,
+                    dominantSpeaker: piece.speaker
                 ))
             }
             if let firstIdx = emitted.indices.first, let lastIdx = emitted.indices.last {
@@ -289,17 +337,21 @@ public enum SpeakerAssignment {
                 // transient, single-pass input to THIS function — `LabeledSegment` (assign()'s output)
                 // doesn't carry it forward — so nil it out on exactly the piece(s) whose bound moved,
                 // rather than let the array quietly disagree with the segment it's attached to.
+                // `dominantSpeaker` is untouched by anchoring — the speaker decision it carries stays
+                // correct regardless of where the piece's playback boundary ends up.
                 let f = emitted[firstIdx]
                 emitted[firstIdx] = TranscriptSegment(
                     start: seg.start, end: f.end, text: f.text,
-                    language: f.language, confidence: f.confidence, words: nil
+                    language: f.language, confidence: f.confidence, words: nil,
+                    dominantSpeaker: f.dominantSpeaker
                 )
                 // Re-read AFTER the first-index fixup: when only one piece was emitted (firstIdx ==
                 // lastIdx), this must carry the just-applied seg.start forward, not the original.
                 let l = emitted[lastIdx]
                 emitted[lastIdx] = TranscriptSegment(
                     start: l.start, end: seg.end, text: l.text,
-                    language: l.language, confidence: l.confidence, words: nil
+                    language: l.language, confidence: l.confidence, words: nil,
+                    dominantSpeaker: l.dominantSpeaker
                 )
             }
             // If EVERY piece trimmed to empty text, `emitted` is empty here — appending it would
@@ -307,7 +359,10 @@ public enum SpeakerAssignment {
             // range, no log line), which is strictly worse than the misattribution this whole fix
             // exists to prevent. Unreachable today (neither engine emits empty-text tokens), but fall
             // back to the original, unsplit `seg` rather than nothing — the same fallback the nil/
-            // short-words guard above already uses.
+            // short-words guard above already uses. `seg` here carries no dominantSpeaker (multiple
+            // pieces existed with potentially DIFFERENT speakers and all were discarded — there's no
+            // single evidenced owner left to propagate), so assign() correctly falls back to its own
+            // raw-overlap heuristic for this already-degenerate, currently-unreachable case.
             out.append(contentsOf: emitted.isEmpty ? [seg] : emitted)
         }
 
@@ -338,35 +393,49 @@ public enum SpeakerAssignment {
         Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .public)")
 
         return transcriptSegments.map { seg in
-            let segMid = (seg.start + seg.end) / 2
-            var bestSpeaker = "Unknown"
-            var bestOverlap: Double = 0
+            let bestSpeaker: String
+            if let dominant = seg.dominantSpeaker {
+                // Word-level evidence already determined this segment's speaker (via
+                // dominantDiarSpeaker, run per-word during splitting, including its gap-fallback) —
+                // trust it directly instead of re-deriving one from raw geometric overlap below,
+                // which can silently disagree with real word evidence. See
+                // TranscriptSegment.dominantSpeaker's doc comment for the full rationale
+                // (independent code-council review, confirmed 3/3).
+                bestSpeaker = speakerMap[dominant] ?? dominant
+            } else {
+                // No word-level evidence available for this segment (no `words`, or too few) — fall
+                // back to the original raw time-overlap heuristic.
+                let segMid = (seg.start + seg.end) / 2
+                var overlapSpeaker = "Unknown"
+                var bestOverlap: Double = 0
 
-            for sp in diarizationSegments {
-                let overlapStart = max(seg.start, sp.start)
-                let overlapEnd = min(seg.end, sp.end)
-                let overlap = max(0, overlapEnd - overlapStart)
+                for sp in diarizationSegments {
+                    let overlapStart = max(seg.start, sp.start)
+                    let overlapEnd = min(seg.end, sp.end)
+                    let overlap = max(0, overlapEnd - overlapStart)
 
-                if overlap > bestOverlap {
-                    bestOverlap = overlap
-                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    if overlap > bestOverlap {
+                        bestOverlap = overlap
+                        overlapSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    }
+
+                    // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
+                    // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
+                    // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
+                    // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
+                    // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
+                    // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
+                    // real engine's output ever produces — so this is pre-existing, deliberately
+                    // unguarded, and tracked (not forgotten) in #122. Also, unlike dominantDiarSpeaker,
+                    // this is still a plain `if` (not `else if`) — also tracked in #122 — so among genuine
+                    // ties it exhibits the same intentional last-wins-among-ties behavior documented in
+                    // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
+                    // caveat); see that comment for the full reasoning rather than repeating it here.
+                    if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
+                        overlapSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    }
                 }
-
-                // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
-                // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
-                // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
-                // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
-                // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
-                // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
-                // real engine's output ever produces — so this is pre-existing, deliberately
-                // unguarded, and tracked (not forgotten) in #122. Also, unlike dominantDiarSpeaker,
-                // this is still a plain `if` (not `else if`) — also tracked in #122 — so among genuine
-                // ties it exhibits the same intentional last-wins-among-ties behavior documented in
-                // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
-                // caveat); see that comment for the full reasoning rather than repeating it here.
-                if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
-                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
-                }
+                bestSpeaker = overlapSpeaker
             }
 
             return LabeledSegment(
@@ -421,7 +490,7 @@ public enum SpeakerAssignment {
 
         for seg in transcriptSegments {
             let segMid = (seg.start + seg.end) / 2
-            var bestSpeaker = "Unknown"
+            var overlapSpeaker = "Unknown"
             var bestOverlap: Double = 0
             var bestQuality: Float? = nil
 
@@ -432,7 +501,7 @@ public enum SpeakerAssignment {
 
                 if overlap > bestOverlap {
                     bestOverlap = overlap
-                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    overlapSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore
                 }
 
@@ -449,9 +518,35 @@ public enum SpeakerAssignment {
                 // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
                 // caveat); see that comment for the full reasoning rather than repeating it here.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
-                    bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
+                    overlapSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore
                 }
+            }
+
+            // Word-level evidence overrides the geometrically-derived speaker when present — see the
+            // basic assign() overload and TranscriptSegment.dominantSpeaker's doc comment for the full
+            // rationale (independent code-council review, confirmed 3/3).
+            let bestSpeaker = seg.dominantSpeaker.map { speakerMap[$0] ?? $0 } ?? overlapSpeaker
+            if let dominant = seg.dominantSpeaker {
+                // `bestQuality` from the loop above is the quality of whichever turn geometrically
+                // overlaps THIS SEGMENT most — which, now that bestSpeaker can come from word
+                // evidence instead, may belong to a DIFFERENT, non-evidenced speaker (exactly finding
+                // 1's wordless-turn scenario: a turn with no covering words but heavy overlap). Using
+                // that mismatched turn's quality score to gate the evidenced speaker would let a low-
+                // confidence turn nobody transcribed force a real, word-evidenced attribution to
+                // "Unknown" — reintroducing a variant of the same bug through the quality gate instead
+                // of the speaker choice. Re-derive quality from whichever turn actually matches the
+                // evidenced raw speaker id (by overlap with this segment among that speaker's turns);
+                // if none overlaps at all (a gap-fallback-derived piece may not literally overlap its
+                // own evidenced turn), leave it nil — `?? 1.0` below then trusts the diarizer, the
+                // existing safe default, rather than borrowing an unrelated turn's confidence.
+                bestQuality = diarizationSegments
+                    .filter { $0.speaker == dominant }
+                    .max { a, b in
+                        let oa = max(0, min(seg.end, a.end) - max(seg.start, a.start))
+                        let ob = max(0, min(seg.end, b.end) - max(seg.start, b.start))
+                        return oa < ob
+                    }?.qualityScore
             }
 
             let speechOverlap: Double

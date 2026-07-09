@@ -602,4 +602,135 @@ struct SpeakerBoundarySplitTests {
     @Test func speechAnalyzerWordTimingsNilWhenRunsIsEmpty() {
         #expect(SpeakerAssignment.speechAnalyzerWordTimings(runs: [], trimmedSegmentText: "") == nil)
     }
+
+    // MARK: - Independent code-council review findings (all 3/3 confirmed)
+    //
+    // These three findings share one root cause: assign() used to re-derive a segment's speaker from
+    // raw geometric time-overlap, completely independent of the word-level ownership decision
+    // splitAcrossSpeakerBoundaries/dominantDiarSpeaker already computed. TranscriptSegment now carries
+    // that decision forward as `dominantSpeaker`, and assign() trusts it when present.
+
+    @Test func wordlessDiarizationTurnDoesNotOutvoteWordEvidencedSpeaker() {
+        // Finding 1 (High): a diarization turn with ZERO covering words (a breath, room noise, an
+        // untranscribed cross-talk speaker "X") sits entirely inside an unsplit segment's span and has
+        // MORE raw wall-clock overlap than the turns the segment's actual words were assigned to.
+        // diar: A[0,2) "So I think", X[2.5,8) wordless (silent pause), A[9,10) "we should go" (same
+        // raw id A, reflecting cross-chunk reconciliation). Segment spans [1,9.8] with only 2 words,
+        // both independently evidenced as A. Before the fix, assign()'s raw-overlap vote picked X
+        // (5.5s > A's 1.0+0.8s, scored per-turn not aggregated) — attributing BOTH real words'
+        // segment, wholesale, to a speaker with nothing actually transcribed. Verified via script:
+        // X's raw overlap (5.5) > either individual A turn (1.0, 0.8).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 2.0, speaker: "A"),
+            DiarizedSegment(start: 2.5, end: 8.0, speaker: "X"),
+            DiarizedSegment(start: 9.0, end: 10.0, speaker: "A"),
+        ]
+        let words = [
+            WordTiming(start: 1.0, end: 1.9, text: "So I think"),
+            WordTiming(start: 9.2, end: 9.8, text: " we should go"),
+        ]
+        let seg = TranscriptSegment(start: 1.0, end: 9.8, text: "So I think we should go", language: nil, words: words)
+
+        // Split step: both words agree on "A", so this stays ONE piece — but must now carry that
+        // word-derived speaker forward rather than discarding it.
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+        #expect(pieces.count == 1)
+        #expect(pieces[0].dominantSpeaker == "A")
+
+        // End-to-end: assign() must label the segment as A ("Speaker 1", the first raw id
+        // encountered), never X ("Speaker 2") despite X's larger raw overlap.
+        let labeled = SpeakerAssignment.assign(transcriptSegments: [seg], diarizationSegments: diar)
+        #expect(labeled.count == 1)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[0].speaker != "Speaker 2")
+    }
+
+    @Test func standalonePunctuationTokenNeverBecomesItsOwnSplitPiece() {
+        // Finding 2 (Medium): FluidAudio emits sentence-final punctuation as its OWN TokenTiming
+        // (already true of "?" in groupTokensQuestionMark). If a diarization boundary falls exactly
+        // between the last real word and its trailing punctuation, dominantDiarSpeaker independently
+        // assigns them to DIFFERENT turns. Before the fix, the lone "?" would be split into its own
+        // one-character piece and misattributed to whichever speaker happened to own that instant —
+        // a phantom "utterance" nobody spoke. Verified via script: "happened"[25.4,26.0] -> S0,
+        // "?"[26.0,26.15] -> S1 (different turns, would trigger a spurious cut).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 24.0, end: 24.7, text: "So"),
+            WordTiming(start: 24.7, end: 25.4, text: " what"),
+            WordTiming(start: 25.4, end: 26.0, text: " happened"),
+            WordTiming(start: 26.0, end: 26.15, text: "?"),  // standalone punctuation token
+            WordTiming(start: 26.2, end: 27.0, text: " Well,"),
+            WordTiming(start: 27.0, end: 40.0, text: " it went on"),
+        ]
+        let seg = TranscriptSegment(
+            start: 24.0, end: 40.0, text: "So what happened? Well, it went on", language: "en", words: words
+        )
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        // Two pieces (the real speaker change), NOT three — the "?" never gets its own piece.
+        #expect(pieces.count == 2)
+        #expect(pieces[0].text == "So what happened?")  // "?" glued to the question, not split off
+        #expect(pieces[1].text == "Well, it went on")
+    }
+
+    @Test func gapFallbackSplitPiecesKeepTheirEvidencedSpeakerThroughAssign() {
+        // Finding 3 (Medium), end-to-end split->assign (the exact case the existing
+        // doesNotSplitWhenAllWordsLandInDiarizationGap test does NOT cover, since there every word
+        // agrees on ONE nearest turn). Here the words disagree: diar has a genuine silence gap
+        // between S0[0,5) and S1[15,20). Word "one"[6,7] is nearer S0 (dist 1 vs 8); word "two"[12,13]
+        // is nearer S1 (dist 2 vs 7) -- dominantDiarSpeaker's gap-fallback confidently assigns each to
+        // a DIFFERENT turn, so the segment splits into two pieces. Before the fix, assign()'s plain
+        // overlap loop (no gap-fallback of its own) found ZERO overlap for either piece against
+        // either turn and collapsed BOTH to "Unknown" -- reproduced live by the code-council's own
+        // probe. The split must not discard the very ownership decision that justified it.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "S0"),
+            DiarizedSegment(start: 15.0, end: 20.0, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 6.0, end: 7.0, text: "one"),
+            WordTiming(start: 12.0, end: 13.0, text: " two"),
+        ]
+        let seg = TranscriptSegment(start: 6.0, end: 13.0, text: "one two", language: nil, words: words)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+        #expect(pieces.count == 2)
+        #expect(pieces[0].dominantSpeaker == "S0")
+        #expect(pieces[1].dominantSpeaker == "S1")
+
+        let labeled = SpeakerAssignment.assign(transcriptSegments: [seg], diarizationSegments: diar)
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")  // NOT "Unknown"
+        #expect(labeled[1].speaker == "Speaker 2")  // NOT "Unknown"
+    }
+
+    @Test func gapFallbackSplitPiecesKeepEvidencedSpeakerThroughVadOverload() {
+        // Same scenario as above, through the VAD/quality-gated assign() overload -- confirms the
+        // dominantSpeaker override also survives quality-gate interaction, and that bestQuality is
+        // re-derived from a turn matching the EVIDENCED speaker rather than borrowing a mismatched
+        // turn's score (neither turn geometrically overlaps either piece here, so quality naturally
+        // falls back to nil -> "trust the diarizer" -- both pieces must still pass the gate).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 5.0, speaker: "S0", qualityScore: 0.9),
+            DiarizedSegment(start: 15.0, end: 20.0, speaker: "S1", qualityScore: 0.9),
+        ]
+        let words = [
+            WordTiming(start: 6.0, end: 7.0, text: "one"),
+            WordTiming(start: 12.0, end: 13.0, text: " two"),
+        ]
+        let seg = TranscriptSegment(start: 6.0, end: 13.0, text: "one two", language: nil, words: words)
+        let speechMap = [SpeechRegion(start: 0.0, end: 20.0, probability: 0.95)]
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg], diarizationSegments: diar,
+            speechMap: speechMap, vadSpeechThreshold: 0.5, qualityScoreThreshold: 0.3
+        )
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[1].speaker == "Speaker 2")
+    }
 }
