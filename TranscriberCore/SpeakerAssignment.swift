@@ -149,7 +149,10 @@ public enum SpeakerAssignment {
             if let s = run.start, let e = run.end {
                 words.append(WordTiming(start: s, end: e, text: run.text))
             } else {
+                // Bail immediately: the guard below discards `words` entirely once any run lacks
+                // timing, so there's no point building WordTiming entries for runs after this one.
                 allRunsTimed = false
+                break
             }
         }
         guard allRunsTimed, !words.isEmpty else { return nil }
@@ -228,13 +231,23 @@ public enum SpeakerAssignment {
                 "Boundary split: segment [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] spans \(pieces.count, privacy: .public) diarized turns — re-splitting at word boundaries"
             )
 
-            for piece in pieces {
+            for (idx, piece) in pieces.enumerated() {
                 guard let first = piece.first, let last = piece.last else { continue }
                 let text = piece.map(\.text).joined().trimmingCharacters(in: .whitespaces)
                 guard !text.isEmpty else { continue }
+                // Anchor the first/last piece to the ORIGINAL segment's own outer bounds, not just
+                // its first/last word's timing. Today these are equal by construction for both
+                // engines (segStart/segEnd are themselves derived from the first/last word's timing —
+                // see groupTokensIntoSegments and speechAnalyzerWordTimings' callers), so this is a
+                // no-op in practice. But anchoring explicitly protects against a future engine change
+                // that includes lead-in/lead-out silence in segment bounds, which would otherwise
+                // silently clip that time from audio playback and leave an unaccounted gap between
+                // this segment and its neighbor in the timeline.
+                let pieceStart = idx == 0 ? seg.start : first.start
+                let pieceEnd = idx == pieces.count - 1 ? seg.end : last.end
                 out.append(TranscriptSegment(
-                    start: first.start,
-                    end: last.end,
+                    start: pieceStart,
+                    end: pieceEnd,
                     text: text,
                     language: seg.language,
                     confidence: seg.confidence,
