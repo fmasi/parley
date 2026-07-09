@@ -117,7 +117,7 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[2].text == "five")
     }
 
-    // MARK: - dominantDiarSpeaker gap fallback
+    // MARK: - dominantDiarSpeaker gap fallback + tiebreaker
 
     @Test func wordInGapGluesToNearestTurn() {
         // Word sits fully inside a gap between two turns; must glue to the nearer edge, not open a
@@ -128,6 +128,37 @@ struct SpeakerBoundarySplitTests {
         ]
         let spk = SpeakerAssignment.dominantDiarSpeaker(wordStart: 38.0, wordEnd: 39.0, in: diar)
         #expect(spk == "S1")
+    }
+
+    @Test func tiebreakerPrefersTurnContainingMidpointOnEqualOverlap() {
+        // Primary tiebreaker case: two turns overlap the word by an EQUAL amount, so raw overlap
+        // alone can't decide. Word [0,10], mid=5. "A"=[0,4] overlaps 4 but does NOT contain mid (5>4).
+        // "B"=[3,7] also overlaps 4 AND contains mid (3<=5<=7). The tiebreaker must promote B even
+        // though a naive "first strictly-greater overlap wins" scan would otherwise leave A in place.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 4.0, speaker: "A"),
+            DiarizedSegment(start: 3.0, end: 7.0, speaker: "B"),
+        ]
+        let spk = SpeakerAssignment.dominantDiarSpeaker(wordStart: 0.0, wordEnd: 10.0, in: diar)
+        #expect(spk == "B")
+    }
+
+    @Test func tiebreakerNeverFiresOnZeroOverlap() {
+        // Regression for the overlap>0 guard: a zero-duration word at t=10 touches BOTH "FIRST"=[10,15]
+        // and "SECOND"=[5,10] at their exact boundary — each has overlap=0, but each span's inclusive
+        // bounds "contain" the word's midpoint (also 10). Without requiring overlap>0, the tiebreaker
+        // fires on both via the initial bestOverlap==0 sentinel and — since it unconditionally
+        // overwrites `best` on every match — the LAST candidate in iteration order wins (SECOND), never
+        // reaching the nil-fallback path. With the guard, neither zero-overlap candidate can trigger
+        // the tiebreaker, so `best` stays nil and control correctly passes to the nearest-turn fallback,
+        // whose strict `<` tie rule keeps the FIRST candidate on an exact distance tie (both are 0).
+        // The differing winner (FIRST vs SECOND) proves the guard changes behavior, not just intent.
+        let diar = [
+            DiarizedSegment(start: 10.0, end: 15.0, speaker: "FIRST"),
+            DiarizedSegment(start: 5.0, end: 10.0, speaker: "SECOND"),
+        ]
+        let spk = SpeakerAssignment.dominantDiarSpeaker(wordStart: 10.0, wordEnd: 10.0, in: diar)
+        #expect(spk == "FIRST")
     }
 
     // MARK: - assign() integration (basic overload)

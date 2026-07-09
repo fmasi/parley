@@ -78,6 +78,11 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                 var segStart: Double = .greatestFiniteMagnitude
                 var segEnd: Double = 0
                 var words: [WordTiming] = []
+                // If ANY run lacks audioTimeRange, `words` cannot represent the segment's full text —
+                // reconstructing split pieces from `words` alone would silently drop that run's text.
+                // Track completeness and disable splitting (words: nil) for this segment rather than
+                // risk text loss; the full, untouched `text` field below is unaffected either way.
+                var allRunsTimed = true
                 for run in result.text.runs {
                     if let timeRange = run.audioTimeRange {
                         let s = CMTimeGetSeconds(timeRange.start)
@@ -86,6 +91,8 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                         if e > segEnd { segEnd = e }
                         let runText = String(result.text[run.range].characters)
                         words.append(WordTiming(start: s, end: e, text: runText))
+                    } else {
+                        allRunsTimed = false
                     }
                 }
 
@@ -99,7 +106,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                         end: segEnd,
                         text: trimmed,
                         language: language ?? locale.language.languageCode?.identifier,
-                        words: words.isEmpty ? nil : words
+                        words: (allRunsTimed && !words.isEmpty) ? words : nil
                     ))
                 }
             }

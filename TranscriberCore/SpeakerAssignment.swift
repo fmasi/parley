@@ -97,7 +97,11 @@ public enum SpeakerAssignment {
                 best = sp.speaker
             }
             // Midpoint tiebreaker: on equal overlap, prefer the turn containing the word midpoint.
-            if sp.start <= mid && mid <= sp.end && overlap == bestOverlap {
+            // `overlap > 0` guards the initial bestOverlap==0 sentinel: without it, a genuinely
+            // non-overlapping turn whose span happens to touch the midpoint would match `0 == 0`
+            // on the first candidate and win by default, pre-empting the nil-fallback (nearest-turn)
+            // path below for a candidate that never actually overlapped the word.
+            if overlap > 0 && sp.start <= mid && mid <= sp.end && overlap == bestOverlap {
                 best = sp.speaker
             }
         }
