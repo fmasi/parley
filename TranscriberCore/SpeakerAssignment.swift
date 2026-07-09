@@ -217,6 +217,15 @@ public enum SpeakerAssignment {
         _ segments: [TranscriptSegment],
         diarizationSegments diar: [DiarizedSegment]
     ) -> [TranscriptSegment] {
+        // Debug-only enforcement of the "raw engine output only" contract documented on the
+        // emitted.isEmpty fallback below: this function must never be called on its own prior output
+        // (or any other already-split segments), since that fallback's correctness relies on
+        // dominantSpeaker being nil on entry. Both current call sites satisfy this; a stripped no-op
+        // in release builds.
+        assert(
+            segments.allSatisfy { $0.dominantSpeaker == nil },
+            "splitAcrossSpeakerBoundaries must receive raw engine output; do not pass previously-split segments"
+        )
         guard !diar.isEmpty else { return segments }
 
         var out: [TranscriptSegment] = []
@@ -339,6 +348,10 @@ public enum SpeakerAssignment {
                 // rather than let the array quietly disagree with the segment it's attached to.
                 // `dominantSpeaker` is untouched by anchoring — the speaker decision it carries stays
                 // correct regardless of where the piece's playback boundary ends up.
+                // NOTE for future maintainers: if LabeledSegment or ProcessedChunk.Segment ever gains a
+                // word-timing field (audio-highlight, per-word confidence, ...), this nil-ing becomes a
+                // silent data loss on exactly the anchored pieces — revisit this decision at that point
+                // rather than assuming it's still safe just because it compiles.
                 let f = emitted[firstIdx]
                 emitted[firstIdx] = TranscriptSegment(
                     start: seg.start, end: f.end, text: f.text,
@@ -502,10 +515,14 @@ public enum SpeakerAssignment {
 
             // TODO(perf): when seg.dominantSpeaker is set (the common case post-#120 fix), this whole
             // O(diarizationSegments) loop's overlapSpeaker result is discarded below in favor of word
-            // evidence, and bestQuality gets re-derived separately — only the re-derivation is actually
-            // needed in that case. Not worth restructuring for correctness (this is negligible in
-            // post-processing), but worth short-circuiting if recording length or diarizer resolution
-            // ever makes this loop show up in profiling.
+            // evidence, and bestQuality gets re-derived separately using only overlap > 0 turns — only
+            // that re-derivation is actually needed in that case. Not worth restructuring for
+            // correctness (this is negligible in post-processing), but worth short-circuiting if
+            // recording length or diarizer resolution ever makes this loop show up in profiling. Not a
+            // trivial one-liner though: the bestQuality re-derivation would need to be hoisted out of
+            // the `if let dominant` block and run independently of overlapSpeaker — a naive "just skip
+            // the loop when dominantSpeaker is set" refactor would drop quality-gate filtering entirely
+            // for evidenced speakers.
             for sp in diarizationSegments {
                 let overlapStart = max(seg.start, sp.start)
                 let overlapEnd = min(seg.end, sp.end)
