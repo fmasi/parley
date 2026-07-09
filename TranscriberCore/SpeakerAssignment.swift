@@ -244,16 +244,25 @@ public enum SpeakerAssignment {
 
             // Group consecutive words by their covering diarized speaker; a change marks a cut.
             // Standalone punctuation-only tokens (e.g. a trailing "?" FluidAudio emits as its own
-            // token — see groupTokensQuestionMark) never START a new group, regardless of which
-            // diarized turn their own brief timing happens to touch: they're glued to whichever piece
-            // they trail. Without this, a boundary landing between a word and its own punctuation
-            // could carve the punctuation into its own phantom one-character "utterance" and
-            // misattribute it to the wrong speaker (independent code-council review finding).
+            // token — see groupTokensQuestionMark) never START a new group when they trail an
+            // existing piece, regardless of which diarized turn their own brief timing happens to
+            // touch: they're glued to whichever piece they trail. Without this, a boundary landing
+            // between a word and its own punctuation could carve the punctuation into its own phantom
+            // one-character "utterance" and misattribute it to the wrong speaker (independent
+            // code-council review finding). EXCEPTION: if a punctuation-only token is the very FIRST
+            // word (`pieces.isEmpty`), there's no preceding piece to glue it to, so it falls through
+            // to the normal grouping path below and can open its own group like any other word —
+            // neither current engine emits punctuation as a segment's first token, so this is
+            // unreachable in practice, but it's a real difference from "never starts a new group",
+            // not just an edge case of the same rule. `isSymbol` (not just `isLetter`/`isNumber`) is
+            // required to correctly treat emoji as real content rather than punctuation — Swift's
+            // isLetter/isNumber are both false for emoji, which would otherwise misclassify e.g. "👍"
+            // as punctuation-only and silently glue it to the preceding piece.
             var pieces: [(speaker: String?, words: [WordTiming])] = []
             for w in words {
                 let trimmedWord = w.text.trimmingCharacters(in: .whitespaces)
                 let isPunctuationOnly = !trimmedWord.isEmpty
-                    && !trimmedWord.contains { $0.isLetter || $0.isNumber }
+                    && !trimmedWord.contains { $0.isLetter || $0.isNumber || $0.isSymbol }
                 if isPunctuationOnly, !pieces.isEmpty {
                     pieces[pieces.count - 1].words.append(w)
                     continue
@@ -519,14 +528,13 @@ public enum SpeakerAssignment {
                 // actually overlapping this piece — forcing a correct attribution to "Unknown" through
                 // the quality gate rather than the speaker choice (caught in review — this exact
                 // omission was present in an earlier version of this fix).
+                let overlapWithSeg: (DiarizedSegment) -> Double = {
+                    max(0, min(seg.end, $0.end) - max(seg.start, $0.start))
+                }
                 bestQuality = diarizationSegments
                     .filter { $0.speaker == dominant }
-                    .filter { max(0, min(seg.end, $0.end) - max(seg.start, $0.start)) > 0 }
-                    .max { a, b in
-                        let oa = max(0, min(seg.end, a.end) - max(seg.start, a.start))
-                        let ob = max(0, min(seg.end, b.end) - max(seg.start, b.start))
-                        return oa < ob
-                    }?.qualityScore
+                    .filter { overlapWithSeg($0) > 0 }
+                    .max { overlapWithSeg($0) < overlapWithSeg($1) }?.qualityScore
             }
 
             let speechOverlap: Double

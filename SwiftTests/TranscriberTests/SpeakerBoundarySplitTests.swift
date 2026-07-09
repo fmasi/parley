@@ -731,6 +731,31 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[1].text == "Well, it went on")
     }
 
+    @Test func emojiTokenIsTreatedAsRealContentNotPunctuation() {
+        // Swift's Character.isLetter/.isNumber are both false for emoji, so without also checking
+        // .isSymbol, isPunctuationOnly would misclassify an emoji reaction as punctuation and silently
+        // glue it to the preceding speaker's piece — even when it's a genuinely different speaker's
+        // own content (e.g. a reaction). "hello"[24,25]->S0, then a DIFFERENT speaker's "👍"[26.0,26.3]
+        // and "bye"[26.3,27.0], both ->S1. The emoji must open (or join) S1's piece, not vanish into
+        // S0's — proven by the emoji surviving into the second piece's text.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let words = [
+            WordTiming(start: 24.0, end: 25.0, text: "hello"),
+            WordTiming(start: 26.0, end: 26.3, text: " 👍"),
+            WordTiming(start: 26.3, end: 27.0, text: " bye"),
+        ]
+        let seg = TranscriptSegment(start: 24.0, end: 27.0, text: "hello 👍 bye", language: "en", words: words)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 2)
+        #expect(pieces[0].text == "hello")
+        #expect(pieces[1].text == "👍 bye")  // emoji correctly carried into S1's piece, not dropped
+    }
+
     @Test func gapFallbackSplitPiecesKeepTheirEvidencedSpeakerThroughAssign() {
         // Finding 3 (Medium), end-to-end split->assign (the exact case the existing
         // doesNotSplitWhenAllWordsLandInDiarizationGap test does NOT cover, since there every word
