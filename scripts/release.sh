@@ -51,8 +51,25 @@ fi
 
 SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
 GENERATE_APPCAST="$SPARKLE_BIN/generate_appcast"
+GENERATE_KEYS="$SPARKLE_BIN/generate_keys"
 if [[ ! -x "$GENERATE_APPCAST" ]]; then
     echo "error: $GENERATE_APPCAST not found. Run 'swift build' first to resolve the Sparkle SPM dependency."
+    exit 1
+fi
+
+# ── Guard: the Keychain signing key must match the public key shipped in the app ──────────────
+# generate_appcast signs with whatever EdDSA private key is in the login Keychain -- nothing
+# otherwise checks that it's the SAME key whose public half is embedded as SUPublicEDKey. After a
+# key rotation (e.g. the leaked-key rotation in #98), a stale key left in the Keychain would sign
+# updates that every shipped client silently REJECTS. Assert the match up front and abort on
+# mismatch (#114). Compares against the packaged Info.plist's SUPublicEDKey below, after build.
+if [[ ! -x "$GENERATE_KEYS" ]]; then
+    echo "error: $GENERATE_KEYS not found. Run 'swift build' first to resolve the Sparkle SPM dependency."
+    exit 1
+fi
+KEYCHAIN_PUBKEY="$("$GENERATE_KEYS" -p 2>/dev/null)"
+if [[ -z "$KEYCHAIN_PUBKEY" ]]; then
+    echo "error: no Sparkle EdDSA signing key found in the login Keychain (generate_keys -p returned nothing)."
     exit 1
 fi
 
@@ -65,6 +82,37 @@ if [[ "$ACTUAL_VERSION" != "$VERSION" ]]; then
     echo "error: built version ($ACTUAL_VERSION) doesn't match requested version ($VERSION)."
     exit 1
 fi
+
+# ── Guard: the release build MUST carry the stable signing identity ────────────────────────────
+# package_app.sh falls back to ad-hoc signing when "Parley Self-Signed" isn't in the login keychain
+# (fresh clone / new laptop / removed-or-expired cert / locked keychain at build time) and still
+# exits 0 — so a release could ship ad-hoc SILENTLY. Ad-hoc changes the app's designated
+# requirement, which drops every existing user's TCC grants (Microphone, Screen Recording, Calendar)
+# on the next update — the exact regression stable signing exists to prevent, and silent audio/
+# evidence loss on a courtroom-grade recorder. sparkle-dryrun.sh already asserts this; the real
+# release path must too. Capture-then-grep (not `codesign … | grep -q`) to dodge SIGPIPE+pipefail.
+SIGN_INFO="$(codesign -dvv dist/Parley.app 2>&1 || true)"
+if ! grep -q "Authority=Parley Self-Signed" <<<"$SIGN_INFO"; then
+    echo "error: release build is NOT signed with the stable 'Parley Self-Signed' identity — it fell"
+    echo "       back to ad-hoc signing, so shipping it would drop every existing user's TCC grants"
+    echo "       (mic, screen recording) on update. Run scripts/setup-signing-cert.sh, then re-release."
+    exit 1
+fi
+echo "   Release is signed with the stable identity ✓"
+
+# `|| true`: a missing SUPublicEDKey makes plutil exit non-zero, which under `set -euo pipefail`
+# would abort here silently (2>/dev/null swallows the message) and skip the actionable #114 error
+# below. Fall to an empty string so the mismatch branch runs and explains the problem.
+EMBEDDED_PUBKEY="$(plutil -extract SUPublicEDKey raw dist/Parley.app/Contents/Info.plist 2>/dev/null || true)"
+if [[ "$KEYCHAIN_PUBKEY" != "$EMBEDDED_PUBKEY" ]]; then
+    echo "error: Keychain signing key does not match the app's embedded SUPublicEDKey."
+    echo "       Keychain public key: $KEYCHAIN_PUBKEY"
+    echo "       Embedded SUPublicEDKey: $EMBEDDED_PUBKEY"
+    echo "       generate_appcast would sign updates that shipped clients reject. Fix the Keychain"
+    echo "       key or SUPublicEDKey before releasing (see #114)."
+    exit 1
+fi
+echo "   Signing key matches embedded SUPublicEDKey ✓"
 
 # ── Archive ───────────────────────────────────────────────────────────────────
 # -k (zip) with -c --sequesterRsrc --keepParent preserves symlinks, which matters here:

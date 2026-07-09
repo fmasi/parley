@@ -161,7 +161,8 @@ public enum AudioArchiver {
     ///
     /// Each pair is isolated: a per-segment failure keeps that segment's source WAV and still
     /// returns it, so a single bad segment never drops the others or throws (#93). A system-only
-    /// pair (no mic) is returned as-is — there is nothing to combine into stereo.
+    /// pair (no mic) is still flushed to .m4a via `archiveSystemOnly` — it must NOT be left as a raw
+    /// .wav (#105, extending #59's single-stream flush to this crash-recovery/CLI batch path).
     public static func archiveAll(
         pairs: [SegmentPair],
         outputDirectory: URL,
@@ -169,17 +170,22 @@ public enum AudioArchiver {
     ) async -> [URL] {
         var results: [URL] = []
         for pair in pairs {
-            guard let mic = pair.mic else {
-                results.append(pair.system)
-                continue
-            }
             do {
-                let archived = try await archive(
-                    systemAudio: pair.system,
-                    micAudio: mic,
-                    outputDirectory: outputDirectory,
-                    bitrateKbps: bitrateKbps
-                )
+                let archived: AudioArchiveResult
+                if let mic = pair.mic {
+                    archived = try await archive(
+                        systemAudio: pair.system,
+                        micAudio: mic,
+                        outputDirectory: outputDirectory,
+                        bitrateKbps: bitrateKbps
+                    )
+                } else {
+                    archived = try await archiveSystemOnly(
+                        systemAudio: pair.system,
+                        outputDirectory: outputDirectory,
+                        bitrateKbps: bitrateKbps
+                    )
+                }
                 results.append(archived.archivePath)
             } catch {
                 Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .private)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")

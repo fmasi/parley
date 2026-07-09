@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UserNotifications
 import TranscriberCore
 import FluidAudio
@@ -107,6 +108,15 @@ struct TranscriberApp: App {
             CLIHandler.run()  // Never returns
         }
 
+        // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
+        // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest
+        // instance; any duplicate exits cleanly here (status 0, so KeepAlive won't relaunch it). Runs
+        // AFTER the CLI check so `parley transcribe`-style invocations are never blocked by a running
+        // GUI app, and BEFORE Sparkle/notification/recovery setup so a doomed duplicate does no work.
+        // A real crash still recovers: the dead process isn't in the running list, so the relaunched
+        // instance sees no rival and proceeds.
+        Self.yieldIfDuplicateInstance()
+
         // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
         // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
         // never start Sparkle's updater at all.
@@ -172,6 +182,30 @@ struct TranscriberApp: App {
 
         if !LaunchAgentManager.isInstalled() {
             try? LaunchAgentManager.install()
+        }
+    }
+
+    /// Holds the single-instance lock fd for the whole process lifetime. It must stay open (closing
+    /// it, or dropping the last reference, releases the kernel lock), so it lives as a static here.
+    private static var instanceLockFD: Int32 = -1
+
+    /// If another instance of this app is already running, exit cleanly so exactly one survives (#109).
+    /// Uses a `flock`-based lock (unit-tested in `SingleInstanceGuard`) rather than scanning
+    /// `NSRunningApplication`: a launchd-spawned duplicate runs this inside `init()` before the first
+    /// instance is registered with LaunchServices, so a running-app scan sees no rival and both
+    /// survive. The kernel lock has no such race.
+    private static func yieldIfDuplicateInstance() {
+        let dir = AppPaths.dataDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let lockPath = dir.appendingPathComponent("instance.lock").path
+        switch SingleInstanceGuard.acquireLock(at: lockPath) {
+        case .heldByOther:
+            Logger.state.info("Another Parley instance is already running — this duplicate is exiting (#109).")
+            exit(0)
+        case .acquired(let fd):
+            instanceLockFD = fd  // held for the process lifetime; intentionally never closed
+        case .unavailable:
+            Logger.state.error("Single-instance lock unavailable — proceeding unguarded (#109).")
         }
     }
 

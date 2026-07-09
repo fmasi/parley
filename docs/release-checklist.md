@@ -22,7 +22,8 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
    git push origin v0.7.0
    ```
    `CFBundleShortVersionString` comes from this tag (minus the `v`); `CFBundleVersion` is the
-   total commit count (`git rev-list --count HEAD`) — monotonically increasing, never resets.
+   HEAD commit's committer timestamp (`git show -s --format=%ct HEAD`) — monotonically increasing
+   across branches, never resets (#110).
 
 3. **Write the Sparkle in-app release notes BEFORE building** — `generate_appcast` only embeds a
    `sparkle:releaseNotesLink` in an entry if the matching HTML file already exists at signing time
@@ -67,8 +68,12 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
    "latest" release for the feed URL to resolve to it (true for the newest non-draft, non-prerelease
    release by default).
 
-6. **Verify the update actually works** by installing the *previous* released build (or a build from
-   before this tag) and using **Check for Updates…** from the menu bar. Confirm:
+6. **Verify the update actually works.** For a fast, fully-offline pre-flight (no GitHub release
+   needed), run `bash scripts/sparkle-dryrun.sh` — it stages this build as an older + newer version,
+   serves a signed appcast over localhost, and walks you through Check-for-Updates → install →
+   relaunch, including confirming TCC permissions survive the update (#114.3). For the real release,
+   install the *previous* released build (or a build from before this tag) and use **Check for
+   Updates…** from the menu bar. Confirm:
    - **The GitHub release is published as non-draft, non-prerelease** — `SUFeedURL` resolves
      `releases/latest/download/appcast.xml` to whichever release currently holds the "latest"
      designation. If a future release is ever un-published (converted back to draft, or deleted
@@ -96,3 +101,11 @@ wiring + monotonic `CFBundleVersion`) are already merged to `main`.
   of a delta for anyone updating from an older version — but delta generation resumes once you
   reconstruct it by re-downloading prior releases' zips from their GitHub release pages (they're
   already there as release assets) back into `release/updates/`.
+- **Never mark a maintenance / non-Sparkle release as GitHub "latest" while a Sparkle-enabled line
+  is live (#110).** `SUFeedURL` resolves `releases/latest/download/appcast.xml`, so whichever release
+  holds "latest" must carry the current `appcast.xml`. A v0.6.x stable build (no `appcast.xml` asset)
+  published as "latest" would 404 the feed and silently stop updates for every v0.7.0+ client. Cut
+  such builds as **non-latest** releases (or don't publish them to Releases at all). Relatedly,
+  `CFBundleVersion` is now the HEAD commit timestamp (monotonic across branches), so a later hotfix
+  never gets a lower build number than an earlier mainline release — but the "latest"/appcast-asset
+  rule above is still what actually keeps the feed resolving.

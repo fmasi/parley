@@ -94,7 +94,10 @@ public enum SpeakerReconciler {
                 for (localID, embedding) in db {
                     mapping[prefix + localID] = prefix + localID
                     referenceEmbeddings[localID] = embedding
-                    if let suffix = localID.components(separatedBy: "_").last, let n = Int(suffix) {
+                    // Keep nextGlobalIndex above every index already in use. Production labels are
+                    // "Speaker N" (space-separated), so the old "_"-split never parsed them and the
+                    // counter stayed at 0 -- causing minted speakers to leak as "spk_0" (#113).
+                    if let n = trailingIndex(localID) {
                         nextGlobalIndex = max(nextGlobalIndex, n + 1)
                     }
                 }
@@ -130,18 +133,22 @@ public enum SpeakerReconciler {
                 }
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .public) → \(prefix + candidate.globalID, privacy: .public) (sim=\(candidate.similarity, privacy: .public))"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .private) → \(prefix + candidate.globalID, privacy: .private) (sim=\(candidate.similarity, privacy: .public))"
                 )
             }
 
             for (localID, embedding) in db where mapping[prefix + localID] == nil {
-                let newGlobalID = "spk_\(nextGlobalIndex)"
+                // Mint a human-friendly global label that CONTINUES the seed chunk's "Speaker N"
+                // numbering rather than a raw internal "spk_N" that would surface verbatim in the
+                // transcript (#113). nextGlobalIndex is held above every index seen so far, so this
+                // never collides with an existing global label in this channel's namespace.
+                let newGlobalID = "Speaker \(nextGlobalIndex)"
                 nextGlobalIndex += 1
                 mapping[prefix + localID] = prefix + newGlobalID
                 referenceEmbeddings[newGlobalID] = embedding
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(prefix + localID, privacy: .public) → \(prefix + newGlobalID, privacy: .public)"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(prefix + localID, privacy: .private) → \(prefix + newGlobalID, privacy: .private)"
                 )
             }
 
@@ -149,5 +156,13 @@ public enum SpeakerReconciler {
         }
 
         return result
+    }
+
+    /// Extracts the trailing integer from a speaker label, handling both the production
+    /// space-separated form ("Speaker 3" → 3) and the legacy underscore form ("spk_3" → 3).
+    /// Returns nil when there is no trailing integer.
+    static func trailingIndex(_ label: String) -> Int? {
+        let digits = String(label.reversed().prefix { $0.isNumber }.reversed())
+        return digits.isEmpty ? nil : Int(digits)
     }
 }

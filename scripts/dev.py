@@ -168,9 +168,11 @@ def main() -> None:
     if "reset_tcc" in steps:
         do_reset_tcc()
     if "build" in steps:
-        # Fresh build = new ad-hoc signature, so TCC must be reset
-        if "reset_tcc" not in steps:
-            do_reset_tcc()
+        # Stable signing (scripts/setup-signing-cert.sh) keeps the app's designated requirement
+        # constant across rebuilds, so TCC grants survive and must NOT be auto-reset — resetting
+        # would throw away exactly the permissions we now preserve. Pass --reset-tcc explicitly if
+        # you need a clean slate (e.g. the one-time migration off ad-hoc, or ad-hoc fallback builds
+        # where the cdhash still changes each build).
         do_build(install="install" in steps)
     elif "install" in steps:
         # Install without build — delegate to package_app.sh --install
