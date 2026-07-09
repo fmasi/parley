@@ -1,0 +1,232 @@
+import Testing
+import Foundation
+@testable import TranscriberCore
+
+/// Tests for the diarization-boundary split fix (issue #120).
+///
+/// The bug: a single ASR transcript segment can straddle a real speaker-change boundary — classically
+/// one speaker's short question immediately followed (zero-gap) by the other's long answer. The old
+/// time-overlap assignment handed the whole block to the majority speaker, silently absorbing the
+/// other speaker's words and audio-playback range into the wrong person. The fix re-splits such a
+/// segment at the word boundaries where the covering diarized speaker changes, before labelling.
+///
+/// All fixtures are synthetic (generic Interviewer/Interviewee Q+A pairs), no real recording content.
+struct SpeakerBoundarySplitTests {
+
+    // Helper: a short interviewer question (words all before `boundary`) glued with zero gap to a
+    // long interviewee answer (words after `boundary`) as ONE segment — the exact bug shape.
+    private func spanningSegment(boundary: Double, end: Double) -> TranscriptSegment {
+        let words = [
+            WordTiming(start: boundary - 2.0, end: boundary - 1.4, text: "So"),
+            WordTiming(start: boundary - 1.4, end: boundary - 0.7, text: " what"),
+            WordTiming(start: boundary - 0.7, end: boundary, text: " happened?"),
+            WordTiming(start: boundary + 0.2, end: boundary + 1.0, text: " Well,"),
+            WordTiming(start: boundary + 1.0, end: (boundary + end) / 2, text: " it went on"),
+            WordTiming(start: (boundary + end) / 2, end: end, text: " for quite a while"),
+        ]
+        let text = words.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+        return TranscriptSegment(
+            start: boundary - 2.0, end: end, text: text, language: "en", words: words
+        )
+    }
+
+    // MARK: - splitAcrossSpeakerBoundaries (pure)
+
+    @Test func splitsSegmentSpanningTwoSpeakers() {
+        // Interviewer owns [0, 26); interviewee owns [26, 72). One segment spans both.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 2)
+        // First piece is the interviewer's question, cut at the boundary.
+        #expect(pieces[0].start == 24.0)
+        #expect(pieces[0].end == 26.0)
+        #expect(pieces[0].text == "So what happened?")
+        // Second piece is the interviewee's answer, starting after the boundary.
+        #expect(pieces[1].start == 26.2)
+        #expect(pieces[1].end == 72.0)
+        #expect(pieces[1].text == "Well, it went on for quite a while")
+        // Timings stay chronological and non-overlapping across the cut.
+        #expect(pieces[0].end <= pieces[1].start)
+    }
+
+    @Test func leavesSingleSpeakerSegmentUntouched() {
+        // Whole segment falls inside one diarized turn → must be returned byte-identical (keeps the
+        // engine's own text, incl. FluidAudio ITN, with no reconstruction).
+        let diar = [DiarizedSegment(start: 0.0, end: 100.0, speaker: "S0")]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 1)
+        #expect(pieces[0].start == seg.start)
+        #expect(pieces[0].end == seg.end)
+        #expect(pieces[0].text == seg.text)
+    }
+
+    @Test func passesThroughSegmentWithoutWordTiming() {
+        // No word timing available → cannot split; segment passes through unchanged (fallback C).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 3.0, speaker: "S0"),
+            DiarizedSegment(start: 3.0, end: 10.0, speaker: "S1"),
+        ]
+        let seg = TranscriptSegment(start: 0.0, end: 10.0, text: "spans two speakers", language: "en")
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "spans two speakers")
+    }
+
+    @Test func passesThroughWhenNoDiarization() {
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: [])
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == seg.text)
+    }
+
+    @Test func splitsThreeWayWhenSpeakerRecurs() {
+        // A → B → A within one segment (interviewer interjects mid-answer). Same speaker id "A"
+        // recurring must still produce three consecutive pieces cut at each change.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 10.0, speaker: "A"),
+            DiarizedSegment(start: 10.0, end: 20.0, speaker: "B"),
+            DiarizedSegment(start: 20.0, end: 30.0, speaker: "A"),
+        ]
+        let words = [
+            WordTiming(start: 5.0, end: 6.0, text: "one"),
+            WordTiming(start: 6.0, end: 9.5, text: " two"),      // A
+            WordTiming(start: 11.0, end: 13.0, text: " three"),  // B
+            WordTiming(start: 13.0, end: 18.0, text: " four"),   // B
+            WordTiming(start: 21.0, end: 24.0, text: " five"),   // A
+        ]
+        let seg = TranscriptSegment(
+            start: 5.0, end: 24.0, text: "one two three four five", language: "en", words: words
+        )
+
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries([seg], diarizationSegments: diar)
+
+        #expect(pieces.count == 3)
+        #expect(pieces[0].text == "one two")
+        #expect(pieces[1].text == "three four")
+        #expect(pieces[2].text == "five")
+    }
+
+    // MARK: - dominantDiarSpeaker gap fallback
+
+    @Test func wordInGapGluesToNearestTurn() {
+        // Word sits fully inside a gap between two turns; must glue to the nearer edge, not open a
+        // phantom boundary. Nearest by edge distance here is S1 (gap 30–40, word 38–39).
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 30.0, speaker: "S0"),
+            DiarizedSegment(start: 40.0, end: 70.0, speaker: "S1"),
+        ]
+        let spk = SpeakerAssignment.dominantDiarSpeaker(wordStart: 38.0, wordEnd: 39.0, in: diar)
+        #expect(spk == "S1")
+    }
+
+    // MARK: - assign() integration (basic overload)
+
+    @Test func assignReattributesAbsorbedQuestion() {
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg], diarizationSegments: diar
+        )
+
+        // The absorbed question now exists as its own segment attributed to the interviewer.
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[0].text == "So what happened?")
+        #expect(labeled[1].speaker == "Speaker 2")
+        #expect(labeled[1].text == "Well, it went on for quite a while")
+    }
+
+    @Test func assignUnchangedForCleanSingleSpeakerSegments() {
+        // Regression guard: segments that don't span a boundary behave exactly as before.
+        let transcript = [
+            TranscriptSegment(start: 0.0, end: 5.0, text: "hello", language: nil),
+            TranscriptSegment(start: 5.0, end: 10.0, text: "world", language: nil),
+        ]
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 6.0, speaker: "S0"),
+            DiarizedSegment(start: 6.0, end: 10.0, speaker: "S1"),
+        ]
+        let labeled = SpeakerAssignment.assign(transcriptSegments: transcript, diarizationSegments: diar)
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    // MARK: - assign() integration (VAD/quality overload)
+
+    @Test func assignVadOverloadSplitsAndLabels() {
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0", qualityScore: 0.9),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1", qualityScore: 0.9),
+        ]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+        // Speech present across the whole span so both pieces pass the VAD gate.
+        let speechMap = [SpeechRegion(start: 0.0, end: 80.0, probability: 0.95)]
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg],
+            diarizationSegments: diar,
+            speechMap: speechMap,
+            vadSpeechThreshold: 0.5,
+            qualityScoreThreshold: 0.3
+        )
+
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[0].text == "So what happened?")
+        #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    @Test func assignVadOverloadNilSpeechMapStillSplits() {
+        // speechMap == nil bypasses VAD filtering but must still re-split the spanning segment.
+        let diar = [
+            DiarizedSegment(start: 0.0, end: 26.0, speaker: "S0"),
+            DiarizedSegment(start: 26.0, end: 72.0, speaker: "S1"),
+        ]
+        let seg = spanningSegment(boundary: 26.0, end: 72.0)
+
+        let labeled = SpeakerAssignment.assign(
+            transcriptSegments: [seg],
+            diarizationSegments: diar,
+            speechMap: nil
+        )
+
+        #expect(labeled.count == 2)
+        #expect(labeled[0].speaker == "Speaker 1")
+        #expect(labeled[1].speaker == "Speaker 2")
+    }
+
+    // MARK: - FluidAudio token grouping now carries word timing
+
+    @Test func groupTokensAttachesWordTimings() {
+        let timings = [
+            TokenTiming(startTime: 0.0, endTime: 0.5, token: "Hello"),
+            TokenTiming(startTime: 0.5, endTime: 1.0, token: " world"),
+            TokenTiming(startTime: 1.0, endTime: 1.2, token: "."),
+        ]
+        let result = FluidAudioEngine.groupTokensIntoSegments(timings, language: "en")
+        #expect(result.count == 1)
+        let words = result[0].words
+        #expect(words?.count == 3)
+        #expect(words?.first?.start == 0.0)
+        #expect(words?.last?.end == 1.2)
+        // Concatenating the retained word text reproduces the segment text (post-trim).
+        let rebuilt = (words ?? []).map(\.text).joined().trimmingCharacters(in: .whitespaces)
+        #expect(rebuilt == result[0].text)
+    }
+}
