@@ -112,11 +112,15 @@ public enum SpeakerAssignment {
                 // overwrites an earlier strict winner. That's correct GIVEN this tiebreaker's own
                 // purpose — prefer whichever turn contains the midpoint over one that merely tied on
                 // raw overlap — so if a later candidate genuinely satisfies "contains the midpoint"
-                // where the earlier winner didn't, it SHOULD replace it. Only safe as long as at most
-                // one diarization segment can ever contain a given midpoint, which holds for
-                // FluidAudioDiarizer's non-overlapping turns; a diarizer producing overlapping segments
-                // could make this order-dependent among genuine multi-candidate ties. Don't "fix" this
-                // without first checking whether that assumption still holds.
+                // where the earlier winner didn't, it SHOULD replace it. Safe for FluidAudioDiarizer's
+                // genuinely non-overlapping turns EXCEPT at an exact boundary coincidence: two ADJACENT
+                // turns sharing an edge (`sp0.end == sp1.start`) both satisfy the inclusive
+                // `sp.start <= mid <= sp.end` check when a word's midpoint lands exactly on that shared
+                // point, so which one wins depends on the diarizer's array ordering, not audio content
+                // — a floating-point coincidence, negligible in practice, not a content-dependent bug.
+                // A diarizer producing genuinely OVERLAPPING segments could make this order-dependent
+                // among real multi-candidate ties too. Don't "fix" the last-wins behavior itself without
+                // first checking whether these assumptions still hold.
                 best = sp.speaker
             }
         }
@@ -314,7 +318,11 @@ public enum SpeakerAssignment {
                 // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
                 // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
                 // real engine's output ever produces — so this is pre-existing, deliberately
-                // unguarded, and tracked (not forgotten) in #122.
+                // unguarded, and tracked (not forgotten) in #122. Also, unlike dominantDiarSpeaker,
+                // this is still a plain `if` (not `else if`) — also tracked in #122 — so among genuine
+                // ties it exhibits the same intentional last-wins-among-ties behavior documented in
+                // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
+                // caveat); see that comment for the full reasoning rather than repeating it here.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                 }
@@ -394,7 +402,11 @@ public enum SpeakerAssignment {
                 // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
                 // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
                 // real engine's output ever produces — so this is pre-existing, deliberately
-                // unguarded, and tracked (not forgotten) in #122.
+                // unguarded, and tracked (not forgotten) in #122. Also, unlike dominantDiarSpeaker,
+                // this is still a plain `if` (not `else if`) — also tracked in #122 — so among genuine
+                // ties it exhibits the same intentional last-wins-among-ties behavior documented in
+                // dominantDiarSpeaker's tiebreaker comment (including the exact-boundary-coincidence
+                // caveat); see that comment for the full reasoning rather than repeating it here.
                 if sp.start <= segMid && segMid <= sp.end && overlap == bestOverlap {
                     bestSpeaker = speakerMap[sp.speaker] ?? sp.speaker
                     bestQuality = sp.qualityScore

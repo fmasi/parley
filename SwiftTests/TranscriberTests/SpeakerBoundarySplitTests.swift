@@ -378,6 +378,23 @@ struct SpeakerBoundarySplitTests {
         #expect(pieces[0].text == "hi")
     }
 
+    @Test func passesThroughSegmentWithSingleWord() {
+        // Completes the words.count >= 2 guard's edge-case set alongside the empty-array test above:
+        // a single word can't straddle a speaker boundary, so it must pass through unchanged too.
+        let seg = TranscriptSegment(
+            start: 0, end: 2, text: "hi", language: nil,
+            words: [WordTiming(start: 0, end: 2, text: "hi")]
+        )
+        let pieces = SpeakerAssignment.splitAcrossSpeakerBoundaries(
+            [seg], diarizationSegments: [
+                DiarizedSegment(start: 0, end: 1, speaker: "S0"),
+                DiarizedSegment(start: 1, end: 2, speaker: "S1"),
+            ]
+        )
+        #expect(pieces.count == 1)
+        #expect(pieces[0].text == "hi")
+    }
+
     // MARK: - SpeakerAssignment.speechAnalyzerWordTimings (pure, engine-independent)
     //
     // SpeechAnalyzerEngine itself requires macOS 26 / Swift 6.2+ and is compiled out entirely on
