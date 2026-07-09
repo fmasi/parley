@@ -71,15 +71,21 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
             if result.isFinal {
                 let text = String(result.text.characters)
 
-                // Extract timestamp range from AttributedString runs
+                // Extract timestamp range from AttributedString runs. Retain each run's own
+                // timing + text as a WordTiming so the assignment layer can split a segment that
+                // spans a diarization speaker boundary (issue #120) — the same shared mechanism
+                // FluidAudio feeds with its token timings.
                 var segStart: Double = .greatestFiniteMagnitude
                 var segEnd: Double = 0
+                var words: [WordTiming] = []
                 for run in result.text.runs {
                     if let timeRange = run.audioTimeRange {
                         let s = CMTimeGetSeconds(timeRange.start)
                         let e = CMTimeGetSeconds(timeRange.end)
                         if s < segStart { segStart = s }
                         if e > segEnd { segEnd = e }
+                        let runText = String(result.text[run.range].characters)
+                        words.append(WordTiming(start: s, end: e, text: runText))
                     }
                 }
 
@@ -92,7 +98,8 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
-                        language: language ?? locale.language.languageCode?.identifier
+                        language: language ?? locale.language.languageCode?.identifier,
+                        words: words.isEmpty ? nil : words
                     ))
                 }
             }

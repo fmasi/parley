@@ -1,19 +1,43 @@
 import Foundation
 import os
 
+/// Timing for one ASR unit inside a segment — a FluidAudio token (sub-word) or a
+/// SpeechAnalyzer run. Engine-neutral (no SDK types) so both engines can populate it and the
+/// shared assignment layer can re-split segments at true speaker-change boundaries (issue #120).
+/// `text` carries the unit's own leading spacing verbatim (both engines emit space-prefixed units),
+/// so a piece's text reconstructs by plain concatenation + trim — the same way FluidAudio already
+/// assembles a full segment.
+public struct WordTiming: Sendable {
+    public let start: Double
+    public let end: Double
+    public let text: String
+
+    public init(start: Double, end: Double, text: String) {
+        self.start = start
+        self.end = end
+        self.text = text
+    }
+}
+
 public struct TranscriptSegment: Sendable {
     public let start: Double
     public let end: Double
     public let text: String
     public let language: String?
     public let confidence: Float?
+    /// Per-unit timing (tokens/runs) that produced this segment, when the engine supplies it.
+    /// Kept alive past ASR grouping so the assignment layer can split a segment that straddles a
+    /// diarization speaker boundary (issue #120). `nil` for engines/paths without word timing —
+    /// those segments pass through the boundary split untouched.
+    public let words: [WordTiming]?
 
-    public init(start: Double, end: Double, text: String, language: String?, confidence: Float? = nil) {
+    public init(start: Double, end: Double, text: String, language: String?, confidence: Float? = nil, words: [WordTiming]? = nil) {
         self.start = start
         self.end = end
         self.text = text
         self.language = language
         self.confidence = confidence
+        self.words = words
     }
 }
 
@@ -56,11 +80,136 @@ public enum SpeakerAssignment {
         return cleaned
     }
 
+    /// The diarized speaker (raw diarizer ID) that owns a word's time span: greatest time-overlap,
+    /// with a midpoint tiebreaker (mirrors `assign()`), and a nearest-turn fallback when the word
+    /// lands in a diarization gap so every word gets a definite owner and silence never forces a
+    /// spurious cut. Returns `nil` only when there are no diarization segments at all.
+    static func dominantDiarSpeaker(
+        wordStart: Double, wordEnd: Double, in diar: [DiarizedSegment]
+    ) -> String? {
+        let mid = (wordStart + wordEnd) / 2
+        var best: String? = nil
+        var bestOverlap: Double = 0
+        for sp in diar {
+            let overlap = max(0, min(wordEnd, sp.end) - max(wordStart, sp.start))
+            if overlap > bestOverlap {
+                bestOverlap = overlap
+                best = sp.speaker
+            }
+            // Midpoint tiebreaker: on equal overlap, prefer the turn containing the word midpoint.
+            if sp.start <= mid && mid <= sp.end && overlap == bestOverlap {
+                best = sp.speaker
+            }
+        }
+        if best != nil { return best }
+        // Word lies fully inside a gap between turns: glue it to the nearest turn by edge distance
+        // rather than opening a phantom boundary on silence.
+        var nearest: String? = nil
+        var nearestDist = Double.greatestFiniteMagnitude
+        for sp in diar {
+            let dist = wordStart > sp.end ? wordStart - sp.end
+                     : (sp.start > wordEnd ? sp.start - wordEnd : 0)
+            if dist < nearestDist {
+                nearestDist = dist
+                nearest = sp.speaker
+            }
+        }
+        return nearest
+    }
+
+    /// Re-split any transcript segment whose words straddle a diarization speaker-change boundary.
+    ///
+    /// ARCHITECTURE (issue #120): ASR segmentation is diarization-unaware. FluidAudio splits on
+    /// sentence punctuation (`.!?`); SpeechAnalyzer splits on utterance/pause `isFinal` marks.
+    /// Either can emit one segment whose words cross a real speaker turn — classically one speaker's
+    /// short question immediately followed, with a zero-second gap, by the other's long answer. The
+    /// downstream time-overlap `assign()` then hands that WHOLE block (text AND its audio-playback
+    /// span) to the majority speaker, silently absorbing the other speaker's words into the wrong
+    /// person. For a courtroom-grade transcript that is close to worst-case.
+    ///
+    /// The fix restores the per-unit timing both engines already compute but used to discard
+    /// (`TranscriptSegment.words`) and cuts a multi-speaker segment at the word boundaries where the
+    /// covering diarized speaker changes. Each resulting piece is single-speaker BY CONSTRUCTION, so
+    /// the existing overlap/VAD/quality logic that follows labels it correctly with no further change
+    /// — this function is a pure normalizer of `assign()`'s input, not a second labeller.
+    ///
+    /// It lives at the shared assignment layer (not per-engine) because this is the one place where
+    /// BOTH the transcript words and the diarization turns are in hand, so a single code path fixes
+    /// both engines. (Design option A. Option B — diarization-first re-chunking, running ASR per turn
+    /// so segments are single-speaker by construction — was rejected: it multiplies ASR latency,
+    /// destroys cross-turn decoder context for short backchannels, and buys no attribution accuracy
+    /// over word-level splitting. Option C — splitting only the time range when word text is absent —
+    /// is the built-in fallback: a segment with `nil`/empty `words` simply passes through unchanged.)
+    ///
+    /// Segments that fall entirely within one speaker, or that carry no word timing, pass through
+    /// byte-identical — zero behaviour change for the common case, and FluidAudio's ITN text on those
+    /// segments is preserved verbatim (only the rare split pieces are rebuilt from raw tokens).
+    public static func splitAcrossSpeakerBoundaries(
+        _ segments: [TranscriptSegment],
+        diarizationSegments diar: [DiarizedSegment]
+    ) -> [TranscriptSegment] {
+        guard !diar.isEmpty else { return segments }
+
+        var out: [TranscriptSegment] = []
+        out.reserveCapacity(segments.count)
+
+        for seg in segments {
+            guard let words = seg.words, words.count >= 2 else {
+                out.append(seg)
+                continue
+            }
+
+            // Group consecutive words by their covering diarized speaker; a change marks a cut.
+            var pieces: [[WordTiming]] = []
+            var currentSpeaker: String? = nil
+            for w in words {
+                let spk = dominantDiarSpeaker(wordStart: w.start, wordEnd: w.end, in: diar)
+                if pieces.isEmpty || spk != currentSpeaker {
+                    pieces.append([w])
+                    currentSpeaker = spk
+                } else {
+                    pieces[pieces.count - 1].append(w)
+                }
+            }
+
+            // One covering speaker across the whole segment: emit unchanged so the engine's own
+            // text (incl. FluidAudio ITN) is preserved exactly — no reconstruction, no regression.
+            guard pieces.count > 1 else {
+                out.append(seg)
+                continue
+            }
+
+            Logger.transcription.debug(
+                "Boundary split: segment [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)] spans \(pieces.count, privacy: .public) diarized turns — re-splitting at word boundaries"
+            )
+
+            for piece in pieces {
+                guard let first = piece.first, let last = piece.last else { continue }
+                let text = piece.map(\.text).joined().trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { continue }
+                out.append(TranscriptSegment(
+                    start: first.start,
+                    end: last.end,
+                    text: text,
+                    language: seg.language,
+                    confidence: seg.confidence,
+                    words: piece
+                ))
+            }
+        }
+
+        return out
+    }
+
     /// Assign speaker labels to transcript segments based on time overlap with diarization.
     public static func assign(
         transcriptSegments: [TranscriptSegment],
         diarizationSegments: [DiarizedSegment]
     ) -> [LabeledSegment] {
+        // Normalize input so no segment straddles a speaker boundary (issue #120), then label.
+        let transcriptSegments = splitAcrossSpeakerBoundaries(
+            transcriptSegments, diarizationSegments: diarizationSegments
+        )
         var uniqueSpeakers: [String] = []
         for seg in diarizationSegments {
             if !uniqueSpeakers.contains(seg.speaker) {
@@ -125,6 +274,11 @@ public enum SpeakerAssignment {
         vadSpeechThreshold: Double = 0.5,
         qualityScoreThreshold: Float = 0.3
     ) -> [LabeledSegment] {
+        // Normalize input so no segment straddles a speaker boundary (issue #120), then label.
+        // Each resulting single-speaker piece runs through VAD/quality gating on its own.
+        let transcriptSegments = splitAcrossSpeakerBoundaries(
+            transcriptSegments, diarizationSegments: diarizationSegments
+        )
         var uniqueSpeakers: [String] = []
         for seg in diarizationSegments {
             if !uniqueSpeakers.contains(seg.speaker) {

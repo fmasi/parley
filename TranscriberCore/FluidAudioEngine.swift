@@ -102,7 +102,10 @@ public actor FluidAudioEngine: TranscriptionEngine {
             segments = segments.map { seg in
                 let normalized = normalizer.normalizeSentence(seg.text)
                 if normalized != seg.text {
-                    return TranscriptSegment(start: seg.start, end: seg.end, text: normalized, language: seg.language, confidence: seg.confidence)
+                    // Keep word timings alive through ITN so the assignment layer can still split
+                    // this segment at a diarization boundary (issue #120). ITN only reformats the
+                    // whole-segment text; the per-token timings are unaffected.
+                    return TranscriptSegment(start: seg.start, end: seg.end, text: normalized, language: seg.language, confidence: seg.confidence, words: seg.words)
                 }
                 return seg
             }
@@ -172,12 +175,17 @@ extension FluidAudioEngine {
     ) -> [TranscriptSegment] {
         var segments: [TranscriptSegment] = []
         var currentText = ""
+        var currentWords: [WordTiming] = []
         var segStart: Double = 0
         var segEnd: Double = 0
 
         for (i, t) in timings.enumerated() {
             if currentText.isEmpty { segStart = t.startTime }
             currentText += t.token
+            // Retain per-token timing so the assignment layer can split a segment that spans a
+            // diarization speaker boundary (issue #120). `token` carries its own leading spacing,
+            // matching how `currentText` is assembled, so a piece reconstructs by concatenation.
+            currentWords.append(WordTiming(start: t.startTime, end: t.endTime, text: t.token))
             segEnd = t.endTime
             let endsWithPunct = t.token.last.map { ".!?".contains($0) } ?? false
             // Don't split on "." when the next token starts with a digit (e.g. "1." + "5 million")
@@ -192,10 +200,12 @@ extension FluidAudioEngine {
                         end: segEnd,
                         text: trimmed,
                         language: language,
-                        confidence: confidence
+                        confidence: confidence,
+                        words: currentWords
                     ))
                 }
                 currentText = ""
+                currentWords = []
             }
         }
         return segments
