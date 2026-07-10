@@ -38,68 +38,18 @@ struct RenameDialog: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Rename Speakers")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Rename Speakers")
+                    .font(.headline)
+                Text("Play a sample to recognize each voice. Names replace the speaker labels in this recording's transcript.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             ForEach($speakers) { $speaker in
-                let speakerId = speaker.id
-                let sampleIdx = sampleIndices[speakerId, default: 0]
-                let sample = speaker.samples.indices.contains(sampleIdx) ? speaker.samples[sampleIdx] : nil
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(speaker.id)
-                            .frame(width: 120, alignment: .leading)
-                            .foregroundStyle(.secondary)
-
-                        TextField("Name", text: $speaker.displayName)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit { stopPlayback() }
-                            .onChange(of: speaker.displayName) { _, _ in stopPlayback() }
-
-                        if let sample, sample.audioFile != nil {
-                            Button {
-                                playSample(
-                                    sample.audioFile!,
-                                    from: sample.start,
-                                    to: sample.end,
-                                    isLocal: speaker.id.hasPrefix("Local")
-                                )
-                            } label: {
-                                Image(systemName: "play.circle")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-
-                        if speaker.samples.count > 1 {
-                            Button {
-                                let current = sampleIndices[speaker.id] ?? 0
-                                sampleIndices[speaker.id] = (current + 1) % speaker.samples.count
-                            } label: {
-                                Image(systemName: "forward.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Next sample (\(sampleIdx + 1)/\(speaker.samples.count))")
-                        }
-                    }
-
-                    if let sample {
-                        HStack(spacing: 4) {
-                            if speaker.samples.count > 1 {
-                                Text("\(sampleIdx + 1)/\(speaker.samples.count)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.quaternary)
-                                    .monospacedDigit()
-                            }
-                            Text(sample.text)
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(2)
-                        }
-                        .padding(.leading, 124)
-                    }
-                }
+                speakerCard($speaker)
             }
 
             HStack {
@@ -118,9 +68,87 @@ struct RenameDialog: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+    }
+
+    /// One card per detected speaker: label + sample controls, name field,
+    /// then the sample quote — no rigid label column, no magic padding.
+    private func speakerCard(_ speaker: Binding<SpeakerEntry>) -> some View {
+        let speakerId = speaker.wrappedValue.id
+        let samples = speaker.wrappedValue.samples
+        let sampleIdx = sampleIndices[speakerId, default: 0]
+        let sample = samples.indices.contains(sampleIdx) ? samples[sampleIdx] : nil
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(speakerId)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                if samples.count > 1 {
+                    Text("\(sampleIdx + 1) of \(samples.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                if let sample, sample.audioFile != nil {
+                    Button {
+                        playSample(
+                            sample.audioFile!,
+                            from: sample.start,
+                            to: sample.end,
+                            isLocal: speakerId.hasPrefix("Local")
+                        )
+                    } label: {
+                        Image(systemName: "play.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.title3)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .help("Play Sample")
+                }
+
+                if samples.count > 1 {
+                    Button {
+                        let current = sampleIndices[speakerId] ?? 0
+                        sampleIndices[speakerId] = (current + 1) % samples.count
+                    } label: {
+                        Image(systemName: "forward.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.title3)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .help("Next Sample")
+                }
+            }
+
+            TextField("Name", text: speaker.displayName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { stopPlayback() }
+                .onChange(of: speaker.wrappedValue.displayName) { _, _ in stopPlayback() }
+
+            if let sample {
+                Text("“\(sample.text)”")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.quinary)
+        )
     }
 
     @State private var stopTimer: Timer?
