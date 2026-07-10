@@ -48,7 +48,11 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] Red appears ONLY for: record/stop affordances, recording timer/dot, critical alerts, destructive rows (Quit is not red), meter clipping.
 - [ ] Dark mode: run the full pass once in dark mode — cards, glass, and meter must all adapt.
 
-## Regression (always)
+## Regression (always — do not trim; these are standing gates, not per-feature tests)
 - [ ] Start recording → stop → transcription completes
+- [ ] Multi-chunk recording merges to a single `.m4a`, plays back with no gaps
 - [ ] Dual-stream `.m4a` is stereo (L=mic, R=system); source WAVs deleted after archival
+- [ ] Rename dialog works; play button plays correct channel per speaker
 - [ ] Summary auto-generates (`-summary.md`) when an LLM endpoint is configured
+- [ ] App survives quit + relaunch (LaunchAgent) — `LaunchAgentManager.uninstall()` is reachable from both MenuView and SetupRequiredPanel, so exercise Quit from each
+- [ ] **Privacy:** during a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`

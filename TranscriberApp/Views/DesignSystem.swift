@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TranscriberCore
 
 // Shared design-language components for the v0.8.x UI revamp.
 // See docs/design/design-system-0.8.x.md ("Quiet Confidence") for the tokens
@@ -105,9 +106,14 @@ struct StatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 8, height: 8)
-            .opacity(pulsing && dimmed ? 0.35 : 1.0)
+            // Opacity tracks `dimmed` alone. Folding `pulsing` into the
+            // expression made a stopping dot snap back to full brightness:
+            // `pulsing` went false before SwiftUI could animate the change.
+            .opacity(dimmed ? 0.35 : 1.0)
             .animation(
-                pulsing ? .easeInOut(duration: 1.0).repeatForever(autoreverses: true) : .default,
+                pulsing
+                    ? .easeInOut(duration: 1.0).repeatForever(autoreverses: true)
+                    : .easeInOut(duration: 0.2),
                 value: dimmed
             )
             .onAppear { dimmed = pulsing }
@@ -184,7 +190,7 @@ func chooseFolderPath(message: String) -> String? {
     panel.prompt = "Select"
     panel.message = message
     guard panel.runModal() == .OK, let url = panel.url else { return nil }
-    return url.path
+    return url.path(percentEncoded: false)
 }
 
 /// Standardizes a path and abbreviates the home directory to `~` for display.
@@ -194,16 +200,5 @@ func abbreviatedDisplayPath(_ path: String) -> String {
     return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
 }
 
-// MARK: - Timer formatting
-
-/// "mm:ss" under an hour, "h:mm:ss" above. Monospaced-digit friendly.
-func recordingTimerString(from start: Date, to now: Date) -> String {
-    let total = max(0, Int(now.timeIntervalSince(start)))
-    let hours = total / 3600
-    let minutes = (total % 3600) / 60
-    let seconds = total % 60
-    if hours > 0 {
-        return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-    }
-    return String(format: "%02d:%02d", minutes, seconds)
-}
+// Timer formatting (`recordingTimerString`) lives in TranscriberCore so the
+// test suite can reach it.

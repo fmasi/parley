@@ -65,7 +65,8 @@ struct SettingsView: View {
                 .tabItem { Label("Audio", systemImage: "waveform") }
             tabPage(height: 440) { transcriptionSections }
                 .tabItem { Label("Transcription", systemImage: "text.quote") }
-            tabPage(height: 560) { summarySections }
+            // Tallest tab: LM Studio adds a third section of fields.
+            tabPage(height: 620) { summarySections }
                 .tabItem { Label("Summary", systemImage: "doc.text") }
             tabPage(height: 400) { permissionsSections }
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
