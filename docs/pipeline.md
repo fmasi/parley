@@ -163,7 +163,7 @@ Notes:
 
 ### Stage 6 — Speaker Assignment
 
-**What it does:** Assigns a speaker label to each transcript segment by finding the diarization segment with maximum temporal overlap. Applies a VAD + quality-score filter to suppress hallucinated or low-quality segments.
+**What it does:** First re-splits any ASR segment whose word timing straddles a diarization speaker-change boundary (issue #120) — neither ASR engine's own segmentation is diarization-aware, so one segment can otherwise span a real speaker turn. Each resulting piece is single-speaker by construction and carries its word-evidenced speaker forward. Then assigns a speaker label to each transcript segment/piece — trusting that word evidence when present, otherwise by finding the diarization segment with maximum temporal overlap. Applies a VAD + quality-score filter to suppress hallucinated or low-quality segments.
 
 **Decision matrix (when `speechMap` is provided):**
 
@@ -177,7 +177,7 @@ Notes:
 **Input:** `[TranscriptSegment]`, `[DiarizedSegment]`, `[SpeechRegion]?`. Output: `[LabeledSegment]` with `source` tag ("local" / "remote").
 
 **Key code path:**
-- `TranscriberCore/SpeakerAssignment.swift` — `assign(transcriptSegments:diarizationSegments:speechMap:vadSpeechThreshold:qualityScoreThreshold:)`
+- `TranscriberCore/SpeakerAssignment.swift` — `assign(transcriptSegments:diarizationSegments:speechMap:vadSpeechThreshold:qualityScoreThreshold:)`, which calls `splitAcrossSpeakerBoundaries(_:diarizationSegments:)` internally before labeling
 - `SpeakerAssignment.tagWithSourcePrefix(_:)` — adds "Local"/"Remote" prefix for dual-stream display
 
 Defaults: `vadSpeechThreshold = 0.5`, `qualityScoreThreshold = 0.3`.

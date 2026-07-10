@@ -71,15 +71,24 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
             if result.isFinal {
                 let text = String(result.text.characters)
 
-                // Extract timestamp range from AttributedString runs
+                // Extract timestamp range + text from AttributedString runs. Whether these runs can
+                // safely support boundary-splitting (issue #120) is decided by the pure, independently
+                // unit-tested SpeakerAssignment.speechAnalyzerWordTimings — kept out of this actor
+                // (macOS 26+/Swift 6.2+ only, compiled out entirely on CI's Swift 6.0 runner) so the
+                // decision logic itself stays testable everywhere.
                 var segStart: Double = .greatestFiniteMagnitude
                 var segEnd: Double = 0
+                var runsData: [(text: String, start: Double?, end: Double?)] = []
                 for run in result.text.runs {
+                    let runText = String(result.text[run.range].characters)
                     if let timeRange = run.audioTimeRange {
                         let s = CMTimeGetSeconds(timeRange.start)
                         let e = CMTimeGetSeconds(timeRange.end)
                         if s < segStart { segStart = s }
                         if e > segEnd { segEnd = e }
+                        runsData.append((text: runText, start: s, end: e))
+                    } else {
+                        runsData.append((text: runText, start: nil, end: nil))
                     }
                 }
 
@@ -92,7 +101,10 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
-                        language: language ?? locale.language.languageCode?.identifier
+                        language: language ?? locale.language.languageCode?.identifier,
+                        words: SpeakerAssignment.speechAnalyzerWordTimings(
+                            runs: runsData, trimmedSegmentText: trimmed
+                        )
                     ))
                 }
             }
