@@ -72,11 +72,4 @@ public final class AppState {
         }
     }
 
-    public var recordingToggleLabel: String {
-        switch phase {
-        case .idle: return "Start Recording"
-        case .recording: return "Stop Recording"
-        case .transcribing: return "Transcribing..."
-        }
-    }
 }

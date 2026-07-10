@@ -374,7 +374,7 @@ struct MenuView: View {
             RecordingSentinel.delete()
 
             transcriptionRunner.stopChunkRotation()
-            appState.phase = .transcribing(progress: "Transcribing...")
+            appState.phase = .transcribing(progress: "Transcribing…")
 
             if let rotator = transcriptionRunner.chunkRotator,
                let processor = transcriptionRunner.chunkProcessor {
