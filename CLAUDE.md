@@ -2,7 +2,7 @@
 
 ## Environment
 - macOS only (requires Apple Silicon for CoreML/ANE acceleration)
-- Requires macOS 15.0+ for microphone capture via ScreenCaptureKit
+- Requires macOS 15.0+ (deployment target). Microphone is captured via AVCaptureSession (#96); system audio via ScreenCaptureKit (default) or the Core Audio tap
 - No Python/conda required for the app itself (fully Swift-native)
 - Benchmark tool (`tools/engine-benchmark/`) optionally uses Python for mlx-whisper comparison — use conda if running that
 
