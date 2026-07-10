@@ -378,19 +378,31 @@ struct SettingsView: View {
         summaryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func summaryConfig(enabled: Bool) -> SummaryConfig {
+        SummaryConfig(
+            enabled: enabled,
+            provider: summaryProvider,
+            endpoint: trimmedSummaryEndpoint,
+            apiKey: summaryApiKey,
+            model: summaryModel,
+            contextLength: Int(summaryContextLength),
+            contextOverheadPercent: Int(summaryContextOverheadPercent),
+            maxOutputTokens: Int(summaryMaxOutputTokens)
+        )
+    }
+
     private func save() {
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
-            config.summary = SummaryConfig(
-                enabled: true,
-                provider: summaryProvider,
-                endpoint: trimmedSummaryEndpoint,
-                apiKey: summaryApiKey,
-                model: summaryModel,
-                contextLength: Int(summaryContextLength),
-                contextOverheadPercent: Int(summaryContextOverheadPercent),
-                maxOutputTokens: Int(summaryMaxOutputTokens)
-            )
+            config.summary = summaryConfig(enabled: true)
+        } else if summaryEndpointMissing {
+            // The user wants summaries but hasn't supplied an endpoint. Persist
+            // their typed provider/model/key with enabled:false rather than
+            // discarding them — the summarizer double-gates on enabled AND a
+            // non-empty endpoint (MeetingSummarizer), so it stays off, but the
+            // work they did survives the round-trip instead of vanishing.
+            config.summary = summaryConfig(enabled: false)
         } else {
+            // Summaries genuinely off: clear the block.
             config.summary = nil
         }
         config.lastMicrophoneDeviceId = settingsMicId
