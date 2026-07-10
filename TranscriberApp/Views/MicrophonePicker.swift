@@ -9,8 +9,10 @@ struct MicrophonePicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // SectionHeader token (design-system-0.8.x.md) — was a third
+            // distinct section-header style.
             Text("Microphone")
-                .font(.subheadline)
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
