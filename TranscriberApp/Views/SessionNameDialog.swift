@@ -6,6 +6,10 @@ struct SessionNameDialog: View {
     @State private var selectedDeviceId: String?
     @FocusState private var focused: Bool
 
+    /// The calendar-suggested name this dialog opened with ("" if none).
+    /// Kept so the field can say where its pre-filled value came from.
+    private let suggestedName: String
+
     let devices: [AudioInputDevice]
     let onStart: (String, String?) -> Void  // (sessionName, micDeviceId?)
     let onCancel: () -> Void
@@ -17,6 +21,7 @@ struct SessionNameDialog: View {
         onStart: @escaping (String, String?) -> Void,
         onCancel: @escaping () -> Void
     ) {
+        self.suggestedName = suggestedName
         self._name = State(initialValue: suggestedName)
         self._selectedDeviceId = State(initialValue: initialDeviceId)
         self.devices = devices
@@ -29,14 +34,24 @@ struct SessionNameDialog: View {
             Text("Name This Recording")
                 .font(.headline)
 
-            TextField("e.g. Weekly standup", text: $name)
-                .textFieldStyle(.roundedBorder)
-                .focused($focused)
-                .onSubmit { start() }
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("e.g. Weekly standup", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit { start() }
 
-            Text("Leave blank to use a timestamp.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                // Say where the pre-filled name came from; the hint steps
+                // aside as soon as the user types their own.
+                if !suggestedName.isEmpty && name == suggestedName {
+                    Label("Suggested from your calendar", systemImage: "calendar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Leave blank to use a timestamp.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             MicrophonePicker(
                 selectedDeviceId: $selectedDeviceId,
@@ -48,10 +63,11 @@ struct SessionNameDialog: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Start Recording") { start() }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding()
+        .padding(20)
         .frame(width: 380)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
         .onAppear { focused = true }
