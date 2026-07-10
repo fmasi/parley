@@ -47,6 +47,8 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] Every "opens further UI" label uses a true ellipsis (…): Settings…, Rename Speakers…, Choose…, Check for Updates…, Switching…
 - [ ] Red appears ONLY for: record/stop affordances, recording timer/dot, critical alerts, destructive rows (Quit is not red), meter clipping.
 - [ ] Dark mode: run the full pass once in dark mode — cards, glass, and meter must all adapt.
+- [ ] Large Text: with System Settings › Accessibility › Display › Larger Text raised, open each Settings tab. Rows grow; the grouped Form should scroll within its fixed tab height, never clip. (Same construction as the pre-revamp 600pt scrolling Form.)
+- [ ] VoiceOver: menu panel rows announce their title only, not the SF Symbol name; the status dot is not announced as an unlabelled element.
 
 ## Regression (always — do not trim; these are standing gates, not per-feature tests)
 - [ ] Start recording → stop → transcription completes
