@@ -10,6 +10,8 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] Panel opens as a 320pt window-style panel, not a text menu.
 - [ ] Idle: green dot, prominent red Start Recording button, hover-highlight on action rows.
 - [ ] Recording: pulsing red dot, live mm:ss timer ticking, Stop button.
+- [ ] Close and reopen the panel *while recording*: the dot fades in and picks up its pulse (no un-animated jump), and the timer shows the true elapsed time, not a restart from 00:00.
+- [ ] Stop recording with the panel open: the dot fades back to solid rather than snapping.
 - [ ] Transcribing: spinner in header, record button disabled.
 - [ ] Warnings/criticals appear as dismissible banners, not disabled menu items.
 
