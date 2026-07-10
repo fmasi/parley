@@ -64,6 +64,11 @@ jobs:
             The PR branch is already checked out. Post findings as GitHub comments
             only — use inline comments for specific lines and one top-level summary
             comment. Do not approve or block; just review.
+          # 20 turns was not enough for a large PR: the agent posted its inline
+          # findings, then aborted with `error_max_turns` before the summary
+          # comment, failing the job (PR #126). The review is advisory -- it is
+          # told not to approve or block -- so a truncated run is a false alarm,
+          # not a code signal. 40 gives headroom on a multi-file diff.
           claude_args: |
-            --max-turns 20
+            --max-turns 40
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
