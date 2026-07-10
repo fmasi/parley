@@ -108,5 +108,6 @@ Pass 1 redesigned MenuView + SetupView and established the shared components
 - **Settings instant-apply** — replacing the manual Save button touches config-write
   timing; discuss separately before changing.
 - `silence_detection_enabled` / `silence_timeout_minutes` have **no consumer in the
-  Swift codebase** — the Settings section drives a dead config key. Maintainer call:
-  wire it or remove it (pipeline lane, not this branch's).
+  Swift codebase**, so the Settings section for them was dropped (maintainer decision,
+  2026-07-10). The config keys still exist in `Config.swift`; removing those is the
+  pipeline track's call.

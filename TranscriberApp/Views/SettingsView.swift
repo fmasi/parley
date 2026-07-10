@@ -186,16 +186,9 @@ struct SettingsView: View {
             }
         }
 
-        Section("Silence Detection") {
-            Toggle("Enabled", isOn: $config.silenceDetectionEnabled)
-            if config.silenceDetectionEnabled {
-                TextField(
-                    "Timeout (Minutes)",
-                    value: $config.silenceTimeoutMinutes,
-                    format: .number
-                )
-            }
-        }
+        // Silence detection has no consumer in the codebase (dead config key),
+        // so it gets no UI. If the pipeline ever implements it, add the
+        // section back here.
 
         Section("Audio Archive") {
             Picker("Archive Quality", selection: $config.archiveBitrateKbps) {
