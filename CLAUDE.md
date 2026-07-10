@@ -39,7 +39,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol; drives system-audio capture via ScreenCaptureKit (default) or the Core Audio tap, plus mic capture
-- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters, auto-detects sample format (Float32/Int16) and channel count
+- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- writes system audio (from the SCStream `.audio` output) and mic buffers (fed via `appendMicSampleBuffer()` from `MicCaptureSession`, #96) to WavFileWriters; auto-detects sample format (Float32/Int16) and channel count. Since #96 the SCStream delivers system audio only — `.microphone` is no longer registered.
 - `AudioCaptureHelper/XPC/SystemTapSession.swift` -- Core Audio output process tap for system audio (#103), selected by `system_audio_source: core_audio_tap`; captures Continuity/VoIP calls ScreenCaptureKit misses
 - `AudioCaptureHelper/XPC/MicCaptureSession.swift` -- microphone capture session feeding the mic WAV stream
 - `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point, shared service instance, connection invalidation handler
