@@ -222,9 +222,14 @@ public enum SpeakerAssignment {
         // already-split segments), since that fallback's correctness relies on dominantSpeaker being
         // nil on entry. A plain `assert` here would be silently stripped in release builds — a
         // violation would then silently propagate a stale, wrong dominantSpeaker into production
-        // output with no diagnostic. Instead: crash in debug (assertionFailure), log in release
-        // (release-visible, unlike assert), and fail safe either way by returning the input unchanged
-        // rather than proceeding on a violated invariant. Both current call sites satisfy this.
+        // output with no diagnostic. Instead: log first (unconditional, so it fires in every build
+        // config including release), then assertionFailure — which TRAPS in -Onone builds (debug, and
+        // `swift test`'s default config) but is a no-op in -O/release, so `return segments` below is
+        // reachable, and is the actual fail-safe fallback, ONLY in release builds; in debug the crash
+        // itself IS the signal, by design, so a developer notices immediately rather than silently
+        // getting wrong output. Both current call sites satisfy this invariant, so neither path
+        // triggers in the current codebase — verified this behavior with a standalone experiment
+        // (assertionFailure exits with SIGTRAP under -Onone) rather than assuming it.
         if !segments.allSatisfy({ $0.dominantSpeaker == nil }) {
             Logger.transcription.error("splitAcrossSpeakerBoundaries received already-split segments — contact the maintainer")
             assertionFailure("splitAcrossSpeakerBoundaries must receive raw engine output; do not pass previously-split segments")
@@ -360,7 +365,7 @@ public enum SpeakerAssignment {
                 // NOTE for future maintainers: if LabeledSegment or ProcessedChunk.Segment ever gains a
                 // word-timing field (audio-highlight, per-word confidence, ...), this nil-ing becomes a
                 // silent data loss on exactly the anchored pieces — revisit this decision at that point
-                // rather than assuming it's still safe just because it compiles.
+                // rather than assuming it's still safe just because it compiles. Tracked in #123.
                 let f = emitted[firstIdx]
                 emitted[firstIdx] = TranscriptSegment(
                     start: seg.start, end: f.end, text: f.text,
@@ -522,7 +527,7 @@ public enum SpeakerAssignment {
             var bestOverlap: Double = 0
             var bestQuality: Float? = nil
 
-            // TODO(perf): when seg.dominantSpeaker is set (the common case post-#120 fix), this whole
+            // TODO(perf, #123): when seg.dominantSpeaker is set (the common case post-#120 fix), this whole
             // O(diarizationSegments) loop's overlapSpeaker result is discarded below in favor of word
             // evidence, and bestQuality gets re-derived separately using only overlap > 0 turns — only
             // that re-derivation is actually needed in that case. Not worth restructuring for
