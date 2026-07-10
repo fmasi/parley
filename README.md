@@ -20,7 +20,7 @@
 > app or service crash mid-recording with **zero data loss**.
 
 <p align="center">
-  <img src="docs/assets/menubar.png" width="360" alt="Parley menu bar dropdown">
+  <img src="docs/assets/menubar.png" width="360" alt="Parley menu bar panel, recording in progress">
 </p>
 
 ## Why this exists
@@ -61,11 +61,11 @@ it's a private, open stack of context I own.
 
 ## Screenshots
 
-<p align="center"><img src="docs/assets/new-recording.png" width="440" alt="New recording dialog"><br><em>Start a session — name it, pick a mic, and tell the diarizer how to count speakers.</em></p>
+<p align="center"><img src="docs/assets/new-recording.png" width="440" alt="New recording dialog"><br><em>Start a session — name it and pick a mic, with a live input level to confirm you're being heard.</em></p>
 
-<p align="center"><img src="docs/assets/meeting-summary.png" width="440" alt="On-device meeting summary"><br><em>Even the optional summary stays local — pointed at a model on <code>127.0.0.1</code>, never the cloud.</em></p>
+<p align="center"><img src="docs/assets/meeting-summary.png" width="440" alt="Summary settings pointed at a local model"><br><em>Even the optional summary stays local — point it at a model on <code>127.0.0.1</code>, never the cloud.</em></p>
 
-<p align="center"><img src="docs/assets/settings-permissions.png" width="440" alt="Permissions and engine settings"><br><em>Transparent permissions, and a one-click switch between the FluidAudio and Apple engines.</em></p>
+<p align="center"><img src="docs/assets/settings-permissions.png" width="440" alt="Settings — Permissions tab"><br><em>Tabbed settings with a transparent, plain-language permissions view.</em></p>
 
 ## Quickstart
 
