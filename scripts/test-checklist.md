@@ -26,6 +26,8 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] Transcription: engine switch to Parakeet when model uncached → "Model will download … when you save"; Save triggers download with progress; failure shows orange (not red).
 - [ ] Permissions tab: granted = green check; not-determined = Grant; denied = Open Settings (deep-links Privacy pane).
 - [ ] Summary: LM Studio provider reveals the Context section; empty fields show "Model default" prompts.
+- [ ] Summary: toggling "Summarize After Transcription" grows/shrinks the window (260 → 460/620pt). Confirm it reads as content revealing itself, not as a glitch.
+- [ ] Check for Updates…: the panel closes before Sparkle's dialog appears (it must not linger behind it).
 
 ## Rename Speakers dialog (NEW — cards)
 - [ ] One card per speaker: label top-left, sample counter + play/next top-right, name field, quoted sample text.
@@ -59,3 +61,4 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] App survives quit + relaunch (LaunchAgent) — `LaunchAgentManager.uninstall()` is reachable from both MenuView and SetupRequiredPanel, so exercise Quit from each
 - [ ] **Privacy:** during a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
 - [ ] **#86 (SCK default path):** mid-recording output switch (speakers → AirPods) while System Audio Capture is set to Screen Recording → stream restarts in place, remote audio resumes, no "unrecovered" warning in the menu bar panel.
+- [ ] **#103 (Core Audio Tap path):** with Settings › Audio › Capture Method set to Core Audio Tap, record a Zoom/Teams/Meet call → remote audio lands on the system channel; stop → no orphaned aggregate device in Audio MIDI Setup. (The tap is user-selectable in Settings, so it is a standing gate, not a one-off acceptance test. Full #103 / #71 acceptance matrices live in those PRs.)
