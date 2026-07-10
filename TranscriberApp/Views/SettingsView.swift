@@ -379,8 +379,9 @@ struct SettingsView: View {
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
         saveStatus = "Saved"
-        // try? swallows cancellation: if Settings closes first, the nil write
-        // simply never happens.
+        // Fire-and-forget: an unstructured Task is not tied to this view's
+        // lifetime, so closing Settings does not cancel it. The late write is
+        // harmless — it clears @State storage nothing is observing any more.
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             saveStatus = nil

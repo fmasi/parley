@@ -96,10 +96,10 @@ struct RenameDialog: View {
                         .monospacedDigit()
                 }
 
-                if let sample, sample.audioFile != nil {
+                if let sample, let audioFile = sample.audioFile {
                     Button {
                         playSample(
-                            sample.audioFile!,
+                            audioFile,
                             from: sample.start,
                             to: sample.end,
                             isLocal: speakerId.hasPrefix("Local")

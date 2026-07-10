@@ -171,6 +171,10 @@ struct AlertBanner: View {
                 Image(systemName: "xmark.circle.fill")
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.secondary)
+                    // A ~13pt glyph is a tight target for someone dismissing a
+                    // failure notice; widen the hit area, not the artwork.
+                    .frame(minWidth: 20, minHeight: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Dismiss")
@@ -200,24 +204,26 @@ enum PrivacyPane {
 
     private static let security = "x-apple.systempreferences:com.apple.preference.security"
 
-    var settingsURL: URL? {
+    /// Non-optional: every case is a compile-time constant that parses. A nil
+    /// here would be a typo in this file, not a runtime condition worth a
+    /// silent-failure path.
+    var settingsURL: URL {
         switch self {
         case .microphone:
-            return URL(string: "\(Self.security)?Privacy_Microphone")
+            return URL(string: "\(Self.security)?Privacy_Microphone")!
         case .screenRecording:
-            return URL(string: "\(Self.security)?Privacy_ScreenCapture")
+            return URL(string: "\(Self.security)?Privacy_ScreenCapture")!
         case .calendar:
-            return URL(string: "\(Self.security)?Privacy_Calendars")
+            return URL(string: "\(Self.security)?Privacy_Calendars")!
         case .filesAndFolders:
-            return URL(string: "\(Self.security)?Privacy_FilesAndFolders")
+            return URL(string: "\(Self.security)?Privacy_FilesAndFolders")!
         case .notifications:
-            return URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
+            return URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
         }
     }
 
     @MainActor
     func open() {
-        guard let settingsURL else { return }
         NSWorkspace.shared.open(settingsURL)
     }
 }
