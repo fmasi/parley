@@ -230,6 +230,12 @@ public enum SpeakerAssignment {
         // getting wrong output. Both current call sites satisfy this invariant, so neither path
         // triggers in the current codebase — verified this behavior with a standalone experiment
         // (assertionFailure exits with SIGTRAP under -Onone) rather than assuming it.
+        //
+        // The `allSatisfy` scan below is O(segments.count) and runs in EVERY build config, including
+        // release, by design — the .error log is load-bearing for the release-build diagnostic and
+        // can't be skipped. This is negligible today (~10-30 segments per 30-60s chunk during per-chunk
+        // processing) — don't wrap this whole block in `#if DEBUG` to "optimize" it away, since that
+        // would silently disable the release-build log line this check exists for.
         if !segments.allSatisfy({ $0.dominantSpeaker == nil }) {
             Logger.transcription.error("splitAcrossSpeakerBoundaries received already-split segments — contact the maintainer")
             assertionFailure("splitAcrossSpeakerBoundaries must receive raw engine output; do not pass previously-split segments")
@@ -383,19 +389,25 @@ public enum SpeakerAssignment {
             }
             // If EVERY piece trimmed to empty text, `emitted` is empty here — appending it would
             // silently drop this segment from the transcript entirely (no text, no audio-playback
-            // range, no log line), which is strictly worse than the misattribution this whole fix
-            // exists to prevent. Unreachable today for two independent reasons: neither engine emits
-            // empty-text tokens, AND even with synthetic all-whitespace input the grouping loop's
-            // glue rule (line 278) can produce at most ONE all-empty piece — every piece after the
-            // first is opened by a non-glued (i.e. real-content) word, so it can never be all-empty
-            // itself. Still, fall back to the original, unsplit `seg` rather than nothing — the same
-            // fallback the nil/short-words guard above already uses. `seg` here carries no
-            // dominantSpeaker (multiple pieces existed with potentially DIFFERENT speakers and all
-            // were discarded — there's no single evidenced owner left to propagate), so assign()
-            // correctly falls back to its own raw-overlap heuristic for this already-degenerate,
-            // currently-unreachable case. This guarantee relies on `seg.dominantSpeaker` being nil on
-            // entry — true for both current call sites (raw engine output, never previously split) —
-            // so callers must not pass segments that have already been through this function.
+            // range, no log line beyond the generic "Boundary split" debug line above), which is
+            // strictly worse than the misattribution this whole fix exists to prevent. Unreachable
+            // today for two independent reasons: neither engine emits empty-text tokens, AND even with
+            // synthetic all-whitespace input the grouping loop's glue rule (line 278) can produce at
+            // most ONE all-empty piece — every piece after the first is opened by a non-glued (i.e.
+            // real-content) word, so it can never be all-empty itself. Still, fall back to the
+            // original, unsplit `seg` rather than nothing — the same fallback the nil/short-words guard
+            // above already uses. `seg` here carries no dominantSpeaker (multiple pieces existed with
+            // potentially DIFFERENT speakers and all were discarded — there's no single evidenced owner
+            // left to propagate), so assign() correctly falls back to its own raw-overlap heuristic for
+            // this already-degenerate, currently-unreachable case. This guarantee relies on
+            // `seg.dominantSpeaker` being nil on entry — true for both current call sites (raw engine
+            // output, never previously split) — so callers must not pass segments that have already
+            // been through this function.
+            if emitted.isEmpty {
+                Logger.transcription.warning(
+                    "Boundary split: all pieces trimmed to empty — falling back to original segment [\(seg.start, privacy: .public)–\(seg.end, privacy: .public)]"
+                )
+            }
             out.append(contentsOf: emitted.isEmpty ? [seg] : emitted)
         }
 

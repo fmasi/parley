@@ -665,6 +665,23 @@ struct SpeakerBoundarySplitTests {
         #expect(SpeakerAssignment.speechAnalyzerWordTimings(runs: [], trimmedSegmentText: "") == nil)
     }
 
+    @Test func speechAnalyzerWordTimingsReturnsWhitespaceWordsWhenSegmentTextIsWhitespaceOnly() {
+        // Pins an intentional (if surprising) contract detail: when every run is timed AND
+        // trimmedSegmentText is itself "" (whitespace-only segment), the round-trip check ("" == "")
+        // passes, so this returns a non-nil [WordTiming] of whitespace-only entries rather than nil.
+        // Not a bug — splitAcrossSpeakerBoundaries' whitespace-glue rule handles these correctly
+        // downstream (they glue into one piece, `pieces.count == 1`, single-speaker passthrough fires)
+        // — but this test exists so a future reader who finds this surprising doesn't "fix" it into an
+        // early nil-return and accidentally lose that downstream glue-rule coverage. SpeechAnalyzerEngine
+        // is the only current call site and already filters `!trimmed.isEmpty` before ever calling this
+        // function, so this exact input is unreachable in production today.
+        let runs: [(text: String, start: Double?, end: Double?)] = [
+            (text: "  ", start: 0.0, end: 0.5),
+        ]
+        let words = SpeakerAssignment.speechAnalyzerWordTimings(runs: runs, trimmedSegmentText: "")
+        #expect(words?.count == 1)
+    }
+
     // MARK: - Independent code-council review findings (all 3/3 confirmed)
     //
     // These three findings share one root cause: assign() used to re-derive a segment's speaker from
