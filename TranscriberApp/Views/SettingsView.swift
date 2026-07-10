@@ -19,6 +19,7 @@ struct SettingsView: View {
     @Bindable var permissionManager: PermissionManager
     @State private var config: Config
     @State private var saveStatus: String?
+    @State private var statusClearTask: Task<Void, Never>?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
     @State private var archiveUsageBytes: Int = 0
@@ -83,7 +84,16 @@ struct SettingsView: View {
         // Enumerate eagerly, not on the Audio tab's onAppear: with a TabView
         // that would only fire once the user visits Audio, leaving the mic
         // picker empty until then.
+        // Load eagerly, not from the Audio/Storage sections' own lifecycle:
+        // under a TabView those only fire on first visit, so the archive
+        // figure would read a false "0 MiB" and the mic list would be empty
+        // until the user happened onto the Audio tab.
         .onAppear { settingsMicDevices = AudioDeviceEnumerator.availableDevices() }
+        .task {
+            archiveUsageBytes = StorageManager.currentUsageBytes(
+                in: URL(fileURLWithPath: config.recordingDirectory)
+            )
+        }
     }
 
     /// A tab's page: its form sections above the shared Save bar. Every tab
@@ -222,11 +232,6 @@ struct SettingsView: View {
             Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .task {
-                    archiveUsageBytes = StorageManager.currentUsageBytes(
-                        in: URL(fileURLWithPath: config.recordingDirectory)
-                    )
-                }
             Text("When over the limit, the oldest audio is deleted first. Transcripts are never deleted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -412,11 +417,14 @@ struct SettingsView: View {
         saveStatus = summaryEndpointMissing
             ? "Saved — summaries need an endpoint"
             : "Saved"
-        // Fire-and-forget: an unstructured Task is not tied to this view's
-        // lifetime, so closing Settings does not cancel it. The late write is
-        // harmless — it clears @State storage nothing is observing any more.
-        Task { @MainActor in
+        // Restart the 2s window on each save. Cancelling the prior task keeps a
+        // rapid second save from having the first one's timer clear the toast
+        // early. The task isn't tied to the view's lifetime, so a late fire
+        // after Settings closes is harmless — it clears @State nothing observes.
+        statusClearTask?.cancel()
+        statusClearTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
             saveStatus = nil
         }
         triggerDownloadIfNeeded()
