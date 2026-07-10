@@ -301,6 +301,12 @@ struct SettingsView: View {
                         ? "http://127.0.0.1:1234"
                         : "https://api.openai.com/v1"
                 ))
+                if summaryEndpointMissing {
+                    // Recoverable, so orange — see the reserved-red policy.
+                    Label("An endpoint is required, or summaries stay off.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 SecureField("API Key", text: $summaryApiKey)
                 Text("Leave the key empty for local providers.")
                     .font(.caption)
@@ -361,12 +367,23 @@ struct SettingsView: View {
 
     // MARK: - Save
 
+    /// True when the user has asked for summaries but given nowhere to send
+    /// the transcript. The config can't be persisted in that state, so the UI
+    /// must say so rather than report "Saved" over a discarded setting.
+    private var summaryEndpointMissing: Bool {
+        summaryEnabled && trimmedSummaryEndpoint.isEmpty
+    }
+
+    private var trimmedSummaryEndpoint: String {
+        summaryEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func save() {
-        if summaryEnabled && !summaryEndpoint.isEmpty {
+        if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = SummaryConfig(
                 enabled: true,
                 provider: summaryProvider,
-                endpoint: summaryEndpoint,
+                endpoint: trimmedSummaryEndpoint,
                 apiKey: summaryApiKey,
                 model: summaryModel,
                 contextLength: Int(summaryContextLength),
@@ -378,7 +395,11 @@ struct SettingsView: View {
         }
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
-        saveStatus = "Saved"
+        // Don't claim "Saved" for a summary config that was just dropped on
+        // the floor: the toggle would silently be off again on next open.
+        saveStatus = summaryEndpointMissing
+            ? "Saved — summaries need an endpoint"
+            : "Saved"
         // Fire-and-forget: an unstructured Task is not tied to this view's
         // lifetime, so closing Settings does not cancel it. The late write is
         // harmless — it clears @State storage nothing is observing any more.

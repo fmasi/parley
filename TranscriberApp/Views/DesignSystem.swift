@@ -207,6 +207,12 @@ enum PrivacyPane {
     /// Non-optional: every case is a compile-time constant that parses. A nil
     /// here would be a typo in this file, not a runtime condition worth a
     /// silent-failure path.
+    ///
+    /// The `Privacy_*` anchors are undocumented and verified on macOS 15/26.
+    /// Apple has renamed them across releases before. They fail soft — an
+    /// unrecognized anchor opens System Settings at the Privacy & Security
+    /// pane rather than erroring — so a future rename degrades to today's
+    /// generic behaviour, it doesn't break the button.
     var settingsURL: URL {
         switch self {
         case .microphone:
