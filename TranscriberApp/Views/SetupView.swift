@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import TranscriberCore
 
 struct SetupView: View {
@@ -33,101 +34,131 @@ struct SetupView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Parley needs a few permissions to work")
-                .font(.title2)
-                .fontWeight(.semibold)
+            hero
 
-            VStack(alignment: .leading, spacing: 12) {
+            SetupCard(header: "Required to record") {
                 PermissionRow(
-                    icon: "mic.fill",
+                    tile: IconTile(systemImage: "mic.fill", color: .red),
                     name: "Microphone",
                     detail: "Record your voice during meetings",
                     status: permissionManager.microphone,
+                    pane: .microphone,
                     onGrant: { Task { await permissionManager.requestMicrophone() } }
                 )
-
+                Divider()
                 PermissionRow(
-                    icon: "rectangle.inset.filled.and.person.filled",
+                    tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
                     name: "Screen Recording",
                     detail: "Capture system audio from meeting apps",
                     status: permissionManager.screenRecording,
+                    pane: .screenRecording,
                     onGrant: { Task { await permissionManager.requestScreenRecording() } }
                 )
+            }
 
-                Divider()
-
-                Text("Optional")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
+            SetupCard(header: "Optional") {
                 PermissionRow(
-                    icon: "calendar",
+                    tile: IconTile(systemImage: "calendar", color: .orange),
                     name: "Calendar",
                     detail: "Suggest recording name from current meeting",
                     status: permissionManager.calendar,
+                    pane: .calendar,
                     onGrant: { Task { await permissionManager.requestCalendar() } }
                 )
-
+                Divider()
                 PermissionRow(
-                    icon: "bell.fill",
+                    tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
                     name: "Notifications",
                     detail: "Alert you when transcription finishes",
                     status: permissionManager.notifications,
+                    pane: .notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
                 )
+            }
 
-                Divider()
-
-                Text("Storage")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
+            SetupCard(header: "Recordings") {
                 FolderPickerRow(
                     directory: $recordingDirectory,
                     denied: folderCheckDenied
                 )
+            }
 
-                Divider()
-
-                Text("Transcription Engine")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
+            SetupCard(header: "Transcription") {
                 engineRow
             }
 
-            HStack {
-                Spacer()
-                Button(checkingFolder ? "Checking…" : "Continue") {
-                    // Persist the chosen directory before verifying access.
-                    configManager.update { $0.recordingDirectory = recordingDirectory }
-                    checkingFolder = true
-                    folderCheckDenied = false
-                    Task {
-                        let granted = await verifyFolderAccess(recordingDirectory)
-                        checkingFolder = false
-                        if granted {
-                            onReady()
-                        } else {
-                            folderCheckDenied = true
-                        }
+            footer
+        }
+        .padding(28)
+        .frame(width: 460)
+    }
+
+    // MARK: - Sections
+
+    /// The first thing a new user sees: the product promise, not a permission ask.
+    private var hero: some View {
+        VStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 64, height: 64)
+            Text("Welcome to Parley")
+                .font(.title)
+                .fontWeight(.bold)
+            Text("Private, on-device meeting transcription.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 4)
+    }
+
+    private var footer: some View {
+        HStack(alignment: .center, spacing: 12) {
+            // Explain the gate instead of a mutely disabled button; once ready,
+            // restate the promise.
+            Group {
+                if !permissionManager.allRequiredGranted {
+                    Label("Grant the required permissions to continue.", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.orange)
+                } else if !modelReady {
+                    Label("Download the transcription model to continue.", systemImage: "arrow.down.circle")
+                        .foregroundStyle(.orange)
+                } else {
+                    Label("Everything stays on this Mac.", systemImage: "lock.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.footnote)
+
+            Spacer(minLength: 0)
+
+            Button(checkingFolder ? "Checking…" : "Continue") {
+                // Persist the chosen directory before verifying access.
+                configManager.update { $0.recordingDirectory = recordingDirectory }
+                checkingFolder = true
+                folderCheckDenied = false
+                Task {
+                    let granted = await verifyFolderAccess(recordingDirectory)
+                    checkingFolder = false
+                    if granted {
+                        onReady()
+                    } else {
+                        folderCheckDenied = true
                     }
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canContinue)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canContinue)
         }
-        .padding(24)
-        .frame(width: 420)
     }
 
     @ViewBuilder
     private var engineRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
-                Image(systemName: "waveform")
-                    .frame(width: 20)
-                    .foregroundStyle(.secondary)
+                IconTile(systemImage: "waveform", color: .indigo)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Engine").fontWeight(.medium)
@@ -161,7 +192,7 @@ struct SetupView: View {
                         .monospacedDigit()
                         .frame(width: 30, alignment: .trailing)
                 }
-                .padding(.leading, 32)
+                .padding(.leading, 38)
             }
         }
     }
@@ -184,9 +215,12 @@ struct SetupView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             case .failed:
-                Button("Retry") { startDownload() }
-                    .controlSize(.small)
-                    .foregroundStyle(.red)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Button("Retry") { startDownload() }
+                        .controlSize(.small)
+                }
             }
         }
     }
@@ -244,6 +278,30 @@ private enum DownloadState: Equatable {
     case failed(String)
 }
 
+/// A grouped card with a quiet section header — System Settings-adjacent.
+private struct SetupCard<Content: View>: View {
+    let header: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(header)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+            VStack(alignment: .leading, spacing: 10) {
+                content
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.quinary)
+            )
+        }
+    }
+}
+
 /// Shows the recording folder path with a picker button.
 /// Access is verified when the user clicks Continue, not on appear.
 private struct FolderPickerRow: View {
@@ -251,16 +309,12 @@ private struct FolderPickerRow: View {
     let denied: Bool
 
     private var displayPath: String {
-        let expanded = (directory as NSString).expandingTildeInPath
-        let standardized = (expanded as NSString).standardizingPath
-        return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        abbreviatedDisplayPath(directory)
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder.fill")
-                .frame(width: 20)
-                .foregroundStyle(.secondary)
+            IconTile(systemImage: "folder.fill", color: .gray)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Recording Folder").fontWeight(.medium)
@@ -272,29 +326,19 @@ private struct FolderPickerRow: View {
                 if denied {
                     Text("Access denied — grant access in System Settings › Privacy & Security › Files and Folders")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.orange)
                 }
             }
 
             Spacer()
 
             if denied {
-                Button("Open Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-                .controlSize(.small)
+                Button("Open Settings") { PrivacyPane.filesAndFolders.open() }
+                    .controlSize(.small)
             } else {
                 Button("Choose…") {
-                    let panel = NSOpenPanel()
-                    panel.canChooseFiles = false
-                    panel.canChooseDirectories = true
-                    panel.canCreateDirectories = true
-                    panel.prompt = "Select"
-                    panel.message = "Choose where to save recordings"
-                    if panel.runModal() == .OK, let url = panel.url {
-                        directory = url.path
+                    if let path = chooseFolderPath(message: "Choose where to save recordings") {
+                        directory = path
                     }
                 }
                 .controlSize(.small)
@@ -304,17 +348,16 @@ private struct FolderPickerRow: View {
 }
 
 private struct PermissionRow: View {
-    let icon: String
+    let tile: IconTile
     let name: String
     let detail: String
     let status: PermissionStatus
+    let pane: PrivacyPane
     let onGrant: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
-                .frame(width: 20)
-                .foregroundStyle(.secondary)
+            tile
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).fontWeight(.medium)
@@ -337,12 +380,8 @@ private struct PermissionRow: View {
             Button("Grant") { onGrant() }
                 .controlSize(.small)
         case .denied:
-            Button("Open Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .controlSize(.small)
+            Button("Open Settings") { pane.open() }
+                .controlSize(.small)
         }
     }
 }

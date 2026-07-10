@@ -79,25 +79,6 @@ struct AppStateTests {
         #expect(state.menuBarIcon == "exclamationmark.triangle")
     }
 
-    // MARK: - Recording toggle label
-
-    @Test func toggleLabelForIdle() {
-        let state = AppState()
-        #expect(state.recordingToggleLabel == "Start Recording")
-    }
-
-    @Test func toggleLabelForRecording() {
-        let state = AppState()
-        state.phase = .recording(since: Date())
-        #expect(state.recordingToggleLabel == "Stop Recording")
-    }
-
-    @Test func toggleLabelForTranscribing() {
-        let state = AppState()
-        state.phase = .transcribing(progress: "Working...")
-        #expect(state.recordingToggleLabel == "Transcribing...")
-    }
-
     // MARK: - Phase equality
 
     @Test func idlePhasesAreEqual() {

@@ -1,52 +1,66 @@
-# Test Checklist — #103 Phase 2 (Core Audio system-audio tap)
+# Test Checklist — v0.8.x UI Revamp (all 8 screens)
 
-## ⚠️ Must device-test before commit (capture subsystem)
 Build/install this tree first: `python3 scripts/dev.py`
 (Resets TCC — re-grant Screen Recording + Microphone on first launch.)
 
-The new path is **off by default** (SCK stays the default). Enable it in
-**Settings → Recording → System Audio Capture → "Core Audio Tap (captures calls)"**, then start a
-NEW recording. On the first tap recording macOS prompts for **System Audio Recording** — allow it.
-(If it silently captures nothing after a rebuild: `tccutil reset All eu.fmasi.parley` and relaunch.)
+Everything here is a visual/UX pass — the pipeline is untouched. Compare
+against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 
-### Parity — the tap must not regress capturable meetings
-- [ ] With the tap enabled, record a **Zoom/Teams/Meet** call. Remote audio is captured on the system channel (confirm by transcript content).
-- [ ] Dual-stream `.m4a` is stereo (L=mic, R=system); the **R/system channel has the remote party**, not silence.
-- [ ] Echo-dedup still behaves on **speakers** (remote bleed removed; your own speech preserved).
+## Menu bar panel (MenuView — from Pass 1, re-check after rebase)
+- [ ] Panel opens as a 320pt window-style panel, not a text menu.
+- [ ] Idle: green dot, prominent red Start Recording button, hover-highlight on action rows.
+- [ ] Recording: pulsing red dot, live mm:ss timer ticking, Stop button.
+- [ ] Close and reopen the panel *while recording*: the dot fades in and picks up its pulse (no un-animated jump), and the timer shows the true elapsed time, not a restart from 00:00.
+- [ ] Stop recording with the panel open: the dot fades back to solid rather than snapping.
+- [ ] Transcribing: spinner in header, record button disabled.
+- [ ] Warnings/criticals appear as dismissible banners, not disabled menu items.
 
-### ⭐ The win — telephony/VoIP that SCK misses
-- [ ] Answer an **iPhone cellular call on the Mac** (Continuity). With the tap, the **system channel captures the remote party** (the case SCK left at the noise floor). Confirm in the transcript / by listening to the system channel.
-- [ ] Repeat for a **WhatsApp / FaceTime** call.
-- [ ] Run these on **headphones/AirPods** at least once — proves the tap captures the far end from the output graph, not mic bleed.
+## Setup window (SetupView — from Pass 1, re-check after rebase)
+- [ ] Opens with app icon + "Welcome to Parley" + privacy line, grouped cards with icon tiles.
+- [ ] Continue stays disabled with an explanatory footnote until required permissions + model are ready.
+- [ ] Folder Choose… works; denied folder shows orange guidance, not red.
 
-### Output-switch clock continuity (HAL rebuild)
-- [ ] Mid-recording, switch the **output device** (speakers → AirPods, or unplug). System audio keeps recording after a brief gap (the aggregate rebuilds around the new default output). No crash; the mic is never interrupted.
+## Settings window (NEW — tabbed)
+- [ ] Five tabs render with toolbar-style icons: General / Audio / Transcription / Summary / Permissions.
+- [ ] Window resizes sensibly when switching tabs; no clipped content.
+- [ ] General: Recording Folder shows a ~-abbreviated path + Choose… panel (no raw TextField).
+- [ ] Save bar at the bottom of every tab; ⌘S saves; "Saved" appears ~2s; edits persist to config.json only after Save.
+- [ ] Transcription: engine switch to Parakeet when model uncached → "Model will download … when you save"; Save triggers download with progress; failure shows orange (not red).
+- [ ] Permissions tab: granted = green check; not-determined = Grant; denied = Open Settings (deep-links Privacy pane).
+- [ ] Summary: LM Studio provider reveals the Context section; empty fields show "Model default" prompts.
+- [ ] Summary: toggling "Summarize After Transcription" grows/shrinks the window (260 → 460/620pt). Confirm it reads as content revealing itself, not as a glitch.
+- [ ] Check for Updates…: the panel closes before Sparkle's dialog appears (it must not linger behind it).
 
-### Lifecycle / teardown
-- [ ] Stop a tap recording → WAVs finalize, archive to `.m4a`, transcript completes (no orphaned private aggregate device — check Audio MIDI Setup shows nothing leftover; the helper also sweeps orphans on next start).
-- [ ] Toggle back to **Screen Recording (default)** → next recording uses SCK exactly as before (no behavior change on the default path).
-- [ ] Permission-denied case: deny System Audio Recording → start fails with a clear, actionable message (not a silent empty recording).
+## Rename Speakers dialog (NEW — cards)
+- [ ] One card per speaker: label top-left, sample counter + play/next top-right, name field, quoted sample text.
+- [ ] Sample text is readable (secondary, not faint quaternary).
+- [ ] Play/next buttons are comfortably clickable; playback still channel-correct (local=L, remote=R).
 
-### Timeline alignment
-- [ ] In a tap recording with both speakers active, mic and system tracks stay **aligned** in the stereo `.m4a` (no drift / no large leading offset between L and R).
+## Session name dialog
+- [ ] With a calendar meeting in range: field pre-filled + "Suggested from your calendar" caption; typing your own name swaps the caption to the timestamp hint.
+- [ ] Start Recording is the visually primary (filled) button.
 
----
+## Mic switch dialog (during recording)
+- [ ] Switch shows a spinner + "Switching…" while in flight.
+- [ ] A failed switch shows an orange warning label, not red.
 
-## #71 — dual-stream speaker labeling (device-test before commit)
-- [ ] Record a **1-party phone call** (you + one remote) via the tap. Transcript labels are a clean `Local Speaker N` (or your name) + `Remote Speaker 1` — **no bare `Unknown`**, no fragmentation of the remote.
-- [ ] Any leftover uncertain segment reads `Local Unknown` / `Remote Unknown` (side-attributed), never bare `Unknown`.
-- [ ] **Conference room / TV in background** (2+ people on your mic): the collapse does NOT merge them — the diarizer's 2+ count leaves their `Unknown`s as `Local Unknown` rather than folding into one speaker.
-- [ ] Single-stream (non-dual) recording: labels unchanged (no spurious `Local/Remote` prefix).
-- [ ] **Multi-chunk reconcile (#71 part 2):** record a call **longer than the chunk duration** (lower `chunk_duration_minutes` to 10 in config to force it) so it produces 2+ chunks with the remote speaking in both. The remote is labeled the **same** `Remote Speaker 1` across the whole transcript — not `Remote Speaker 1` in chunk 1 and `Remote spk_0` in chunk 2.
+## Critical alert
+- [ ] Sits on the same glass/material as the other dialogs; Dismiss is a prominent filled button; red triangle unchanged.
 
----
+## Cross-cutting
+- [ ] Every "opens further UI" label uses a true ellipsis (…): Settings…, Rename Speakers…, Choose…, Check for Updates…, Switching…
+- [ ] Red appears ONLY for: record/stop affordances, recording timer/dot, critical alerts, destructive rows (Quit is not red), meter clipping.
+- [ ] Dark mode: run the full pass once in dark mode — cards, glass, and meter must all adapt.
+- [ ] Large Text: with System Settings › Accessibility › Display › Larger Text raised, open each Settings tab. Rows grow; the grouped Form should scroll within its fixed tab height, never clip. (Same construction as the pre-revamp 600pt scrolling Form.)
+- [ ] VoiceOver: menu panel rows announce their title only, not the SF Symbol name; the status dot is not announced as an unlabelled element.
 
-## Regression (always)
+## Regression (always — do not trim; these are standing gates, not per-feature tests)
 - [ ] Start recording → stop → transcription completes
 - [ ] Multi-chunk recording merges to a single `.m4a`, plays back with no gaps
 - [ ] Dual-stream `.m4a` is stereo (L=mic, R=system); source WAVs deleted after archival
 - [ ] Rename dialog works; play button plays correct channel per speaker
 - [ ] Summary auto-generates (`-summary.md`) when an LLM endpoint is configured
-- [ ] App survives quit + relaunch (LaunchAgent)
-- [ ] During a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
-- [ ] **#86 (SCK default path)** Route change during a SCK recording (System Audio Capture set to the default, not the tap) → stream restarts in place; remote audio resumes; no "unrecovered" warning.
+- [ ] App survives quit + relaunch (LaunchAgent) — `LaunchAgentManager.uninstall()` is reachable from both MenuView and SetupRequiredPanel, so exercise Quit from each
+- [ ] **Privacy:** during a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
+- [ ] **#86 (SCK default path):** mid-recording output switch (speakers → AirPods) while System Audio Capture is set to Screen Recording → stream restarts in place, remote audio resumes, no "unrecovered" warning in the menu bar panel.
+- [ ] **#103 (Core Audio Tap path):** with Settings › Audio › Capture Method set to Core Audio Tap, record a Zoom/Teams/Meet call → remote audio lands on the system channel; stop → no orphaned aggregate device in Audio MIDI Setup. (The tap is user-selectable in Settings, so it is a standing gate, not a one-off acceptance test. Full #103 / #71 acceptance matrices live in those PRs.)

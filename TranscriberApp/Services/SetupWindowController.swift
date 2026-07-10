@@ -7,10 +7,14 @@ final class SetupWindowController {
     static let shared = SetupWindowController()
     private var window: NSWindow?
 
+    /// `onReady` is `@MainActor` in the type, not merely by convention: both
+    /// call sites mutate `LaunchGate.permissionsReady`, which is
+    /// `@MainActor`-isolated. Making the contract explicit means the compiler
+    /// enforces it rather than the caller remembering.
     func show(
         permissionManager: PermissionManager,
         configManager: ConfigManager,
-        onReady: @escaping () -> Void
+        onReady: @escaping @MainActor () -> Void
     ) {
         window?.close()
 

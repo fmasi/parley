@@ -38,21 +38,27 @@ struct MicSwitchDialog: View {
             )
 
             if let errorMessage {
-                Text(errorMessage)
+                // Recoverable failure — orange per the reserved-red policy.
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 Spacer()
+                if isSwitching {
+                    ProgressView()
+                        .controlSize(.small)
+                }
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
-                Button(buttonLabel) { performSwitch() }
+                Button(isSwitching ? "Switching…" : buttonLabel) { performSwitch() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(isSwitching || selectedDeviceId == currentDeviceId)
             }
         }
-        .padding()
+        .padding(20)
         .frame(width: 380)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
     }

@@ -377,7 +377,7 @@ struct TranscriberApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Transcriber", systemImage: appState.menuBarIcon) {
+        MenuBarExtra("Parley", systemImage: appState.menuBarIcon) {
             if launchGate.permissionsReady {
                 MenuView(
                     appState: appState,
@@ -388,17 +388,12 @@ struct TranscriberApp: App {
                     updater: updaterController.updater
                 )
             } else {
-                Button("Setup required...") {}
-                    .disabled(true)
-                Divider()
-                Button("Quit") {
-                    LaunchAgentManager.uninstall()
-                    NSApplication.shared.terminate(nil)
-                }
-                .keyboardShortcut("q")
+                SetupRequiredPanel(launchGate: launchGate, configManager: configManager)
             }
         }
-        .menuBarExtraStyle(.menu)
+        // .window (not .menu): the panel is the app's face — status header, live
+        // timer, prominent record button. See docs/design/design-system-0.8.x.md.
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView(
@@ -406,5 +401,56 @@ struct TranscriberApp: App {
                 permissionManager: launchGate.permissionManager
             )
         }
+    }
+}
+
+/// Menu bar panel shown before setup is complete. Unlike the old disabled menu
+/// item, it lets the user reopen the setup window if they closed it.
+private struct SetupRequiredPanel: View {
+    let launchGate: LaunchGate
+    let configManager: ConfigManager
+    @Environment(\.dismiss) private var dismissPanel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                StatusDot(color: .orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Parley")
+                        .font(.headline)
+                    Text("Setup required")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 2)
+
+            Text("Grant the required permissions to start recording.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            MenuActionRow(icon: "checklist", title: "Open Setup…") {
+                dismissPanel()
+                SetupWindowController.shared.show(
+                    permissionManager: launchGate.permissionManager,
+                    configManager: configManager
+                ) {
+                    launchGate.permissionsReady = true
+                }
+            }
+
+            Divider()
+
+            MenuActionRow(icon: "power", title: "Quit Parley") {
+                LaunchAgentManager.uninstall()
+                NSApplication.shared.terminate(nil)
+            }
+            .keyboardShortcut("q")
+        }
+        .padding(12)
+        .frame(width: 320)
     }
 }

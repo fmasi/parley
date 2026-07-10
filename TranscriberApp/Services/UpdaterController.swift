@@ -29,13 +29,27 @@ struct CheckForUpdatesView: View {
     @StateObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater
 
+    /// Propagated from the MenuBarExtra content. The old `.menu`-style extra
+    /// closed itself on any click; a `.window` panel does not, so every row
+    /// that opens external UI must dismiss it explicitly — Sparkle's dialog
+    /// would otherwise appear with the panel still hanging open behind it.
+    @Environment(\.dismiss) private var dismissPanel
+
     init(updater: SPUUpdater) {
         self.updater = updater
         self._viewModel = StateObject(wrappedValue: CheckForUpdatesViewModel(updater: updater))
     }
 
     var body: some View {
-        Button("Check for Updates...", action: updater.checkForUpdates)
-            .disabled(!viewModel.canCheckForUpdates)
+        // Styled as a MenuActionRow so it sits seamlessly among the other rows
+        // of the window-style menu bar panel (see Views/DesignSystem.swift).
+        MenuActionRow(
+            icon: "arrow.triangle.2.circlepath",
+            title: "Check for Updates…",
+            isDisabled: !viewModel.canCheckForUpdates
+        ) {
+            dismissPanel()
+            updater.checkForUpdates()
+        }
     }
 }
