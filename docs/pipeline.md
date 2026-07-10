@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — via ScreenCaptureKit running in an XPC service. During recording, audio is written in time-bounded chunks (default: configurable minutes) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
+Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — in an XPC service. System audio comes from ScreenCaptureKit by default, or a Core Audio output process tap (`system_audio_source: core_audio_tap`) that also captures Continuity/VoIP calls ScreenCaptureKit misses. During recording, audio is written in time-bounded chunks (default: configurable minutes) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
 
 ---
 
@@ -12,7 +12,8 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 ┌─────────────────────────────────────────────────────────────────┐
 │  RECORDING (continuous)                                         │
 │                                                                 │
-│  ScreenCaptureKit (XPC)                                         │
+│  System-audio capture (XPC): ScreenCaptureKit (default)         │
+│    or Core Audio tap (system_audio_source=core_audio_tap)       │
 │    ├─ system audio → WavFileWriter → chunk-N.wav                │
 │    └─ mic audio → AudioConverter → WavFileWriter → chunk-N_mic.wav
 │                         │                                       │
@@ -87,7 +88,7 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 
 ### Stage 1 — Audio Capture
 
-**What it does:** ScreenCaptureKit captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. The XPC service (`AudioCaptureHelperXPC` target) runs in-process within the app bundle and is the only process that holds Screen Recording permission.
+**What it does:** the XPC service captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. System audio is captured by ScreenCaptureKit (default) or a Core Audio output process tap (`system_audio_source: core_audio_tap`, `SystemTapSession.swift`), which captures Continuity/VoIP call audio ScreenCaptureKit misses; the mic is captured independently (`MicCaptureSession.swift`). The XPC service (`AudioCaptureHelperXPC` target) runs in-process within the app bundle and is the only process that holds Screen Recording permission.
 
 **Input:** None (live capture). Output: `<baseName>.wav` (system, 48 kHz, auto-detected Float32 or Int16) and `<baseName>_mic.wav` (mic, normalized to 48 kHz mono Int16 via `AudioConverter`).
 

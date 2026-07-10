@@ -38,8 +38,10 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Views/MicSwitchDialog.swift` -- mic device picker for switching microphone mid-recording
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
-- `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol via ScreenCaptureKit
+- `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol; drives system-audio capture via ScreenCaptureKit (default) or the Core Audio tap, plus mic capture
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- SCStreamOutput routing system/mic to WavFileWriters, auto-detects sample format (Float32/Int16) and channel count
+- `AudioCaptureHelper/XPC/SystemTapSession.swift` -- Core Audio output process tap for system audio (#103), selected by `system_audio_source: core_audio_tap`; captures Continuity/VoIP calls ScreenCaptureKit misses
+- `AudioCaptureHelper/XPC/MicCaptureSession.swift` -- microphone capture session feeding the mic WAV stream
 - `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point, shared service instance, connection invalidation handler
 
 ### Shared Protocol (AudioCaptureProtocol target)
@@ -93,7 +95,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - Produces `bin/audio-capture-helper` via `cd audio_capture_helper && bash build.sh`
 
 ## Audio Capture Architecture (critical knowledge)
-- Swift captures TWO WAV files: system audio + microphone (separate streams from ScreenCaptureKit)
+- Swift captures TWO WAV files: system audio + microphone (separate streams)
+- System audio source is selectable via `system_audio_source` (Config): `sck` = ScreenCaptureKit (default), `core_audio_tap` = Core Audio output process tap (#103, a strict superset that also captures Continuity/VoIP calls SCK misses). Mic is captured independently either way.
 - `.audio` output type = system audio only (at 48 kHz, hardcoded)
 - `.microphone` output type = microphone only (at NATIVE device rate, varies: 16kHz, 24kHz, 48kHz)
 - There is NO Apple API to get a pre-mixed stream (verified in SDK headers through macOS 26)
