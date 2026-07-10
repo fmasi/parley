@@ -63,7 +63,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/LaunchAgentManager.swift` -- install/unload macOS LaunchAgent (KeepAlive) for auto-relaunch on crash
 - `TranscriberCore/SegmentDiscovery.swift` -- discover multi-segment audio files from crash recovery (base, -2, -3, ...)
 - `TranscriberCore/SegmentNaming.swift` -- segment filename computation: strip `-N` suffix, append new segment number
-- `TranscriberCore/SpeakerAssignment.swift` -- assigns speaker labels to transcript segments using diarization overlap, with deduplication and VAD-based quality filtering
+- `TranscriberCore/SpeakerAssignment.swift` -- splits ASR segments at word-level diarization speaker-change boundaries (issue #120), then assigns speaker labels using diarization overlap, with deduplication and VAD-based quality filtering
+- `TranscriberCore/WordTiming.swift` -- engine-neutral per-word/run timing (start/end/text), populated by both ASR engines and consumed by SpeakerAssignment's boundary-split logic
 - `TranscriberCore/SpeakerReconciler.swift` -- cross-chunk speaker matching via greedy cosine similarity on embeddings, maps local per-chunk speaker IDs to global namespace
 - `TranscriberCore/TranscriptAssembler.swift` -- assembles labeled segments + metadata into transcript JSON dictionary for file output
 - `TranscriberCore/TranscriptMerger.swift` -- merges processed chunks into a single time-sorted transcript with absolute timestamps and cross-chunk speaker remapping
@@ -106,7 +107,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 384 tests across 38 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
+# 643 tests across 64 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```

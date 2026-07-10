@@ -251,7 +251,10 @@ public enum SpeakerAssignment {
             // false) the same as nil — matters only if a future third engine ever populates `words`
             // with zero entries; neither current engine does (FluidAudio always appends >=1 word
             // before a segment boundary fires; SpeechAnalyzer forces nil on empty, see its round-trip
-            // check).
+            // check). This threshold is right for SPLITTING (need >=2 words to have a boundary to cut
+            // at) but leaves exactly-1-word segments with dominantSpeaker: nil even when that single
+            // word sits in a diarization gap and dominantDiarSpeaker's gap-fallback could resolve it —
+            // tracked as a real, non-regression improvement opportunity in #123.
             guard var words = seg.words, words.count >= 2 else {
                 out.append(seg)
                 continue
