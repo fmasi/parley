@@ -92,13 +92,21 @@ fixes causes, not symptoms.
   prominent; no visual kinship with the rest of the app (no glass, different padding
   scale). Low priority.
 
-## Next steps (after this pass)
-Pass 1 (this branch) redesigns MenuView + SetupView and establishes the shared components
-(`DesignSystem.swift`). Remaining, in proposed order:
-1. **SettingsView** — tabbed layout, path control, copy edit (keep Save semantics, then
-   discuss instant-apply separately).
-2. **RenameDialog** — card-per-speaker layout, larger play targets, readable sample text.
-3. **SessionNameDialog + MicSwitchDialog** — adopt shared rows/buttons, add switch spinner.
-4. **CriticalAlertDialog** — glass, prominent action, shared spacing.
-5. **MicrophonePicker** — align label style with the section-header token.
-6. Sweep: ellipsis characters, Title-Case audit, red-reservation policy everywhere.
+## Status
+Pass 1 redesigned MenuView + SetupView and established the shared components
+(`DesignSystem.swift`). Pass 2 completed the remaining six items:
+1. **SettingsView** — tabbed (General/Audio/Transcription/Summary/Permissions), folder
+   path control, copy edit. Save semantics kept.
+2. **RenameDialog** — card-per-speaker, larger play targets, readable sample text.
+3. **SessionNameDialog + MicSwitchDialog** — calendar-suggestion hint + primary Start;
+   switch spinner + orange errors.
+4. **CriticalAlertDialog** — glass, prominent Dismiss, shared spacing.
+5. **MicrophonePicker** — label aligned to the section-header token.
+6. Sweep done: true ellipsis, Title Case, red-reservation policy verified.
+
+## Deferred (deliberate, needs its own pass)
+- **Settings instant-apply** — replacing the manual Save button touches config-write
+  timing; discuss separately before changing.
+- `silence_detection_enabled` / `silence_timeout_minutes` have **no consumer in the
+  Swift codebase** — the Settings section drives a dead config key. Maintainer call:
+  wire it or remove it (pipeline lane, not this branch's).
