@@ -4,6 +4,10 @@ import TranscriberCore
 struct SessionNameDialog: View {
     @State private var name: String
     @State private var selectedDeviceId: String?
+    /// One-way latch: once the user touches the field the name is theirs, so
+    /// the calendar attribution stays gone rather than flickering back if they
+    /// happen to retype the suggestion exactly.
+    @State private var userHasEdited = false
     @FocusState private var focused: Bool
 
     /// The calendar-suggested name this dialog opened with ("" if none).
@@ -39,10 +43,11 @@ struct SessionNameDialog: View {
                     .textFieldStyle(.roundedBorder)
                     .focused($focused)
                     .onSubmit { start() }
+                    .onChange(of: name) { _, _ in userHasEdited = true }
 
                 // Say where the pre-filled name came from; the hint steps
                 // aside as soon as the user types their own.
-                if !suggestedName.isEmpty && name == suggestedName {
+                if !suggestedName.isEmpty && !userHasEdited {
                     Label("Suggested from your calendar", systemImage: "calendar")
                         .font(.caption)
                         .foregroundStyle(.secondary)

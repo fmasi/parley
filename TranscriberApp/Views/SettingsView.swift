@@ -72,6 +72,10 @@ struct SettingsView: View {
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
         }
         .frame(width: 500)
+        // Enumerate eagerly, not on the Audio tab's onAppear: with a TabView
+        // that would only fire once the user visits Audio, leaving the mic
+        // picker empty until then.
+        .onAppear { settingsMicDevices = AudioDeviceEnumerator.availableDevices() }
     }
 
     /// A tab's page: its form sections above the shared Save bar. Every tab
@@ -170,9 +174,6 @@ struct SettingsView: View {
             Text("Sessions will start with this microphone unless changed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        }
-        .onAppear {
-            settingsMicDevices = AudioDeviceEnumerator.availableDevices()
         }
 
         Section("System Audio") {
@@ -366,7 +367,10 @@ struct SettingsView: View {
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
         saveStatus = "Saved"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        // try? swallows cancellation: if Settings closes first, the nil write
+        // simply never happens.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
             saveStatus = nil
         }
         triggerDownloadIfNeeded()

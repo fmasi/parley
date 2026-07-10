@@ -23,10 +23,13 @@ struct MenuRowLabel: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            // Decorative: the adjacent title already labels the action, and
+            // VoiceOver would otherwise read the raw SF Symbol name.
             Image(systemName: icon)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(isDestructive ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .frame(width: 20)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .foregroundStyle(isDisabled ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
@@ -106,6 +109,9 @@ struct StatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 8, height: 8)
+            // Decorative: the adjacent status text carries the state for
+            // VoiceOver, so the dot must not surface as an unlabelled element.
+            .accessibilityHidden(true)
             // Opacity tracks `dimmed` alone. Folding `pulsing` into the
             // expression made a stopping dot snap back to full brightness:
             // `pulsing` went false before SwiftUI could animate the change.
@@ -193,12 +199,8 @@ func chooseFolderPath(message: String) -> String? {
     return url.path(percentEncoded: false)
 }
 
-/// Standardizes a path and abbreviates the home directory to `~` for display.
-func abbreviatedDisplayPath(_ path: String) -> String {
-    let expanded = (path as NSString).expandingTildeInPath
-    let standardized = (expanded as NSString).standardizingPath
-    return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
-}
+// Path display (`abbreviatedDisplayPath`) lives in TranscriberCore so the test
+// suite can reach its boundary cases.
 
 // Timer formatting (`recordingTimerString`) lives in TranscriberCore so the
 // test suite can reach it.
