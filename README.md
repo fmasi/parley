@@ -89,9 +89,13 @@ The interesting engineering isn't the transcription call; it's everything around
 faithful and private.
 
 - **Dual-stream capture (the core constraint).** macOS exposes *no* API for a pre-mixed mic + system
-  stream — verified through the macOS 26 SDK headers. So the app runs two ScreenCaptureKit streams and
-  treats "local" (mic) and "remote" (system) as first-class. That constraint is *why* reliable speaker
-  separation is possible at all.
+  stream — verified through the macOS 26 SDK headers. So the app runs two independent capture streams —
+  your mic and the system output — and treats "local" (mic) and "remote" (system) as first-class. That
+  constraint is *why* reliable speaker separation is possible at all.
+- **Capturing the calls a screen recorder can't see.** ScreenCaptureKit is the default for system
+  audio, but it misses Continuity (iPhone) calls and some VoIP audio. An optional Core Audio process
+  tap grabs the system output directly, so phone and app calls land in the transcript too — switchable
+  in Settings, off by default.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
   phantom local speaker. A triple-confirmed gate removes it: >50% temporal overlap **and** >70% word
   overlap **and** >0.8 speaker-embedding cosine — all three, or it stays.

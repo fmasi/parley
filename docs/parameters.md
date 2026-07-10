@@ -9,6 +9,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
 | Recording directory | `recording_directory` | `~/Documents/Recordings` | Directory where session WAV files and transcripts are written. |
+| System audio source | `system_audio_source` | `"sck"` | Which mechanism captures system (remote) audio. `"sck"` = ScreenCaptureKit (default). `"core_audio_tap"` = Core Audio output process tap (#103), a strict superset that also captures Continuity/iPhone and VoIP call audio ScreenCaptureKit misses; prompts for System Audio Recording permission on first use and applies to the next recording. |
 | Chunk duration | `chunk_duration_minutes` | `30` | How many minutes of audio per rotating chunk. Enforced minimum of 10 minutes (`validatedChunkDuration`). |
 | Silence detection enabled | `silence_detection_enabled` | `true` | When `true`, recording auto-stops after the silence timeout elapses without speech. |
 | Silence timeout | `silence_timeout_minutes` | `5` | Minutes of silence before auto-stop (requires `silence_detection_enabled`). |

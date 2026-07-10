@@ -89,7 +89,7 @@
     </div>
 
     <p style="text-align:center;margin-top:30px">
-      <img src="assets/menubar.png" alt="Parley menu bar dropdown"
+      <img src="assets/menubar.png" alt="Parley menu bar panel, recording in progress"
            style="width:330px;max-width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:0 14px 44px rgba(0,0,0,.45)">
     </p>
   </header>
@@ -114,13 +114,15 @@
       <div class="card"><h3>Echo / mic-bleed removal</h3><p>Strips the far-end voice that bleeds into your mic so it isn't mistaken for a phantom speaker.</p></div>
       <div class="card"><h3>Crash-safe recording</h3><p>Survives UI and XPC crashes with auto-relaunch, silent re-attach, and multi-segment stitching.</p></div>
       <div class="card"><h3>Open formats</h3><p>JSON, SRT, and TXT with timestamps, speaker labels, confidence scores, and local/remote tags.</p></div>
+      <div class="card"><h3>Local LLM summaries</h3><p>Optional meeting summaries via any OpenAI-compatible or LM Studio endpoint — point it at a local model and even the summary never leaves your Mac.</p></div>
     </div>
   </section>
 
   <section>
     <h2>How it works — the hard parts</h2>
     <ul class="hard">
-      <li><b>Dual-stream capture (the core constraint).</b> macOS exposes no API for a pre-mixed mic + system stream — verified through the macOS 26 SDK. So the app runs two ScreenCaptureKit streams and treats "local" and "remote" as first-class. That's what makes reliable speaker separation possible.</li>
+      <li><b>Dual-stream capture (the core constraint).</b> macOS exposes no API for a pre-mixed mic + system stream — verified through the macOS 26 SDK. So the app runs two independent capture streams — your mic and the system output — and treats "local" and "remote" as first-class. That's what makes reliable speaker separation possible.</li>
+      <li><b>Capturing the calls a screen recorder can't see.</b> ScreenCaptureKit is the default for system audio, but it misses Continuity (iPhone) calls and some VoIP audio. An optional Core Audio process tap grabs the system output directly, so phone and app calls land in the transcript too — switchable in Settings, off by default.</li>
       <li><b>Echo / mic-bleed removal.</b> A triple-confirmed gate removes the far-end voice bleeding into your mic: &gt;50% temporal overlap <b>and</b> &gt;70% word overlap <b>and</b> &gt;0.8 speaker-embedding cosine.</li>
       <li><b>Cross-chunk speaker reconciliation.</b> Audio is chunked and transcribed in parallel; per-chunk speaker IDs are merged into one global identity via greedy cosine matching on embeddings.</li>
       <li><b>Crash-safe by design.</b> Sentinel file + LaunchAgent restart + multi-segment stitching mean a crash mid-meeting costs ~300–800 ms, not your recording.</li>
