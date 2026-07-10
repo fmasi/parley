@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // Shared design-language components for the v0.8.x UI revamp.
 // See docs/design/design-system-0.8.x.md ("Quiet Confidence") for the tokens
@@ -168,6 +169,29 @@ struct AlertBanner: View {
                 .fill(.quinary)
         )
     }
+}
+
+// MARK: - Folder picking
+
+/// The one folder-picker used everywhere the user chooses a recordings
+/// location (Setup, Settings). Returns the chosen path, or nil if cancelled.
+@MainActor
+func chooseFolderPath(message: String) -> String? {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.prompt = "Select"
+    panel.message = message
+    guard panel.runModal() == .OK, let url = panel.url else { return nil }
+    return url.path
+}
+
+/// Standardizes a path and abbreviates the home directory to `~` for display.
+func abbreviatedDisplayPath(_ path: String) -> String {
+    let expanded = (path as NSString).expandingTildeInPath
+    let standardized = (expanded as NSString).standardizingPath
+    return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
 }
 
 // MARK: - Timer formatting

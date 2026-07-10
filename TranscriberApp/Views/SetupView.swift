@@ -305,9 +305,7 @@ private struct FolderPickerRow: View {
     let denied: Bool
 
     private var displayPath: String {
-        let expanded = (directory as NSString).expandingTildeInPath
-        let standardized = (expanded as NSString).standardizingPath
-        return standardized.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        abbreviatedDisplayPath(directory)
     }
 
     var body: some View {
@@ -339,14 +337,8 @@ private struct FolderPickerRow: View {
                 .controlSize(.small)
             } else {
                 Button("Choose…") {
-                    let panel = NSOpenPanel()
-                    panel.canChooseFiles = false
-                    panel.canChooseDirectories = true
-                    panel.canCreateDirectories = true
-                    panel.prompt = "Select"
-                    panel.message = "Choose where to save recordings"
-                    if panel.runModal() == .OK, let url = panel.url {
-                        directory = url.path
+                    if let path = chooseFolderPath(message: "Choose where to save recordings") {
+                        directory = path
                     }
                 }
                 .controlSize(.small)

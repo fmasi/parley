@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
 import TranscriberCore
 
@@ -9,6 +10,10 @@ private enum DownloadState: Equatable {
     case failed(String)
 }
 
+/// Settings, tabbed like a first-party app: General / Audio / Transcription /
+/// Summary / Permissions. Apply semantics are unchanged — edits are local
+/// @State until Save writes the config (instant-apply is a separate, careful
+/// pass; see docs/design/ui-audit-0.8.x.md).
 struct SettingsView: View {
     let configManager: ConfigManager
     @Bindable var permissionManager: PermissionManager
@@ -53,238 +58,324 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
-            Section("Permissions") {
-                PermissionSettingsRow(
-                    name: "Microphone",
-                    detail: "Record your voice during meetings",
-                    status: permissionManager.microphone,
-                    onGrant: { Task { await permissionManager.requestMicrophone() } }
-                )
-                PermissionSettingsRow(
-                    name: "Screen Recording",
-                    detail: "Capture system audio from meeting apps",
-                    status: permissionManager.screenRecording,
-                    onGrant: { Task { await permissionManager.requestScreenRecording() } }
-                )
-                PermissionSettingsRow(
-                    name: "Calendar",
-                    detail: "Suggest recording name from current meeting",
-                    status: permissionManager.calendar,
-                    onGrant: { Task { await permissionManager.requestCalendar() } }
-                )
-                PermissionSettingsRow(
-                    name: "Notifications",
-                    detail: "Alert you when transcription finishes",
-                    status: permissionManager.notifications,
-                    onGrant: { Task { await permissionManager.requestNotifications() } }
-                )
-            }
+        TabView {
+            tabPage(height: 420) { generalSections }
+                .tabItem { Label("General", systemImage: "gearshape") }
+            tabPage(height: 560) { audioSections }
+                .tabItem { Label("Audio", systemImage: "waveform") }
+            tabPage(height: 440) { transcriptionSections }
+                .tabItem { Label("Transcription", systemImage: "text.quote") }
+            tabPage(height: 560) { summarySections }
+                .tabItem { Label("Summary", systemImage: "doc.text") }
+            tabPage(height: 400) { permissionsSections }
+                .tabItem { Label("Permissions", systemImage: "lock.shield") }
+        }
+        .frame(width: 500)
+    }
 
-            Section("Default Microphone") {
-                MicrophonePicker(
-                    selectedDeviceId: $settingsMicId,
-                    devices: settingsMicDevices
-                )
-                Text("Sessions will start with this microphone unless changed.")
-                    .font(.caption)
+    /// A tab's page: its form sections above the shared Save bar. Every tab
+    /// carries the bar so pending edits can be saved from wherever they were
+    /// made.
+    private func tabPage<Content: View>(
+        height: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(spacing: 0) {
+            Form { content() }
+                .formStyle(.grouped)
+            Divider()
+            saveBar
+        }
+        .frame(height: height)
+    }
+
+    private var saveBar: some View {
+        HStack(spacing: 12) {
+            if let status = saveStatus {
+                Text(status)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .transition(.opacity)
             }
-            .onAppear {
-                settingsMicDevices = AudioDeviceEnumerator.availableDevices()
-            }
+            Spacer()
+            Button("Save") { save() }
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(isDownloading)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+    }
 
-            Section("Transcription Engine") {
-                Picker("Engine", selection: $config.engine) {
-                    ForEach(EngineID.availableEngines) { engine in
-                        Text(engine.descriptor.displayName)
-                        .tag(engine)
+    // MARK: - General
+
+    @ViewBuilder
+    private var generalSections: some View {
+        Section("Startup") {
+            Toggle("Launch at Login", isOn: $config.launchOnStartup)
+                .onChange(of: config.launchOnStartup) { _, enabled in
+                    do {
+                        if enabled {
+                            try SMAppService.mainApp.register()
+                        } else {
+                            try SMAppService.mainApp.unregister()
+                        }
+                    } catch {
+                        // Revert on failure
+                        config.launchOnStartup = !enabled
                     }
                 }
-                .onChange(of: config.engine) { _, _ in
-                    downloadTask?.cancel()
-                    downloadTask = nil
-                    downloadState = .idle
-                }
+        }
 
-                if config.engine.descriptor.requiresModelDownload {
-                    engineModelStatus
-                }
-            }
-
-            Section("Model Updates") {
-                if let problem = manifestHealth.problemMessage {
-                    Label(problem, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-                Toggle("Check for model updates online", isOn: $config.modelUpdateCheckEnabled)
-                Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if config.modelUpdateCheckEnabled {
-                    Button("Check now") {
-                        Task { await runUpdateCheck() }
-                    }
-                    .disabled(updateCheckInFlight)
-                    if let status = lastUpdateStatus {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        Section("Recordings") {
+            LabeledContent {
+                Button("Choose…") {
+                    if let path = chooseFolderPath(message: "Choose where to save recordings") {
+                        config.recordingDirectory = path
                     }
                 }
-            }
-
-            Section("Recording") {
-                TextField("Recording Directory", text: $config.recordingDirectory)
-                Picker("Output Format", selection: $config.outputFormat) {
-                    Text("txt").tag("txt")
-                    Text("srt").tag("srt")
-                    Text("json").tag("json")
-                }
-                Picker("System Audio Capture", selection: $config.systemAudioSource) {
-                    Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
-                    Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
-                }
-                if config.systemAudioSource == .coreAudioTap {
-                    Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                .controlSize(.small)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Recording Folder")
+                    Text(abbreviatedDisplayPath(config.recordingDirectory))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
+            Picker("Transcript Format", selection: $config.outputFormat) {
+                Text("Plain Text (.txt)").tag("txt")
+                Text("Subtitles (.srt)").tag("srt")
+                Text("JSON (.json)").tag("json")
+            }
+        }
 
-            Section("Audio Archive") {
-                Picker("Encoding Bitrate", selection: $config.archiveBitrateKbps) {
-                    Text("48 kbps").tag(48)
-                    Text("64 kbps").tag(64)
-                    Text("96 kbps").tag(96)
-                    Text("128 kbps").tag(128)
-                }
+        Section("About") {
+            LabeledContent("Version", value: AppVersion.displayString)
+            LabeledContent("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–")
+        }
+    }
 
-                Stepper(
-                    "Keep last \(config.audioArchiveLimitHours) hours",
-                    value: $config.audioArchiveLimitHours,
-                    in: 1...999
+    // MARK: - Audio
+
+    @ViewBuilder
+    private var audioSections: some View {
+        Section("Microphone") {
+            MicrophonePicker(
+                selectedDeviceId: $settingsMicId,
+                devices: settingsMicDevices
+            )
+            Text("Sessions will start with this microphone unless changed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .onAppear {
+            settingsMicDevices = AudioDeviceEnumerator.availableDevices()
+        }
+
+        Section("System Audio") {
+            Picker("Capture Method", selection: $config.systemAudioSource) {
+                Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
+                Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
+            }
+            if config.systemAudioSource == .coreAudioTap {
+                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        Section("Silence Detection") {
+            Toggle("Enabled", isOn: $config.silenceDetectionEnabled)
+            if config.silenceDetectionEnabled {
+                TextField(
+                    "Timeout (Minutes)",
+                    value: $config.silenceTimeoutMinutes,
+                    format: .number
                 )
+            }
+        }
 
-                let estimatedMiB = config.audioArchiveLimitHours * config.archiveBitrateKbps * 1000 / 8 * 3600 / 1_048_576
-                Text("≈ \(estimatedMiB) MiB at \(config.archiveBitrateKbps) kbps")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                let usageMiB = archiveUsageBytes / 1_048_576
-                let usageHours = config.archiveBitrateKbps > 0
-                    ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
-                    : 0
-                Text("\(usageMiB) MiB used (≈ \(usageHours) hours)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .task {
-                        archiveUsageBytes = StorageManager.currentUsageBytes(
-                            in: URL(fileURLWithPath: config.recordingDirectory)
-                        )
-                    }
+        Section("Audio Archive") {
+            Picker("Archive Quality", selection: $config.archiveBitrateKbps) {
+                Text("Compact (48 kbps)").tag(48)
+                Text("Balanced (64 kbps)").tag(64)
+                Text("High (96 kbps)").tag(96)
+                Text("Maximum (128 kbps)").tag(128)
             }
 
-            Section("Silence Detection") {
-                Toggle("Enabled", isOn: $config.silenceDetectionEnabled)
-                if config.silenceDetectionEnabled {
-                    TextField(
-                        "Timeout (minutes)",
-                        value: $config.silenceTimeoutMinutes,
-                        format: .number
+            Stepper(
+                "Keep last \(config.audioArchiveLimitHours) hours",
+                value: $config.audioArchiveLimitHours,
+                in: 1...999
+            )
+
+            let estimatedMiB = config.audioArchiveLimitHours * config.archiveBitrateKbps * 1000 / 8 * 3600 / 1_048_576
+            let usageMiB = archiveUsageBytes / 1_048_576
+            let usageHours = config.archiveBitrateKbps > 0
+                ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
+                : 0
+            Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .task {
+                    archiveUsageBytes = StorageManager.currentUsageBytes(
+                        in: URL(fileURLWithPath: config.recordingDirectory)
                     )
                 }
-            }
+            Text("When over the limit, the oldest audio is deleted first. Transcripts are never deleted.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
 
-            Section("Startup") {
-                Toggle("Launch at Login", isOn: $config.launchOnStartup)
-                    .onChange(of: config.launchOnStartup) { _, enabled in
-                        do {
-                            if enabled {
-                                try SMAppService.mainApp.register()
-                            } else {
-                                try SMAppService.mainApp.unregister()
-                            }
-                        } catch {
-                            // Revert on failure
-                            config.launchOnStartup = !enabled
-                        }
-                    }
-            }
+    // MARK: - Transcription
 
-            Section("Meeting Summary") {
-                Toggle("Auto-summarize after transcription", isOn: $summaryEnabled)
-                if summaryEnabled {
-                    Picker("Provider", selection: $summaryProvider) {
-                        Text("OpenAI Compatible").tag(SummaryProviderType.openai)
-                        Text("LM Studio").tag(SummaryProviderType.lmstudio)
-                    }
-                    TextField("Endpoint URL", text: $summaryEndpoint)
-                        .textFieldStyle(.roundedBorder)
-                        .help(summaryProvider == .lmstudio
-                            ? "LM Studio server (e.g. http://127.0.0.1:1234)"
-                            : "OpenAI-compatible endpoint (e.g. https://api.openai.com/v1)")
-                    SecureField("API Key", text: $summaryApiKey)
-                        .textFieldStyle(.roundedBorder)
-                        .help("Leave empty for local providers")
-                    TextField("Model", text: $summaryModel)
-                        .textFieldStyle(.roundedBorder)
-                    if summaryProvider == .lmstudio {
-                        TextField("Context Length", text: $summaryContextLength)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Max tokens for context window (leave empty for model default)")
-                        TextField("Context Overhead %", text: $summaryContextOverheadPercent)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Percentage of context reserved for overhead (leave empty for default)")
-                        TextField("Max Output Tokens", text: $summaryMaxOutputTokens)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Maximum tokens for the summary response (leave empty for model default)")
-                    }
+    @ViewBuilder
+    private var transcriptionSections: some View {
+        Section("Engine") {
+            Picker("Engine", selection: $config.engine) {
+                ForEach(EngineID.availableEngines) { engine in
+                    Text(engine.descriptor.displayName)
+                        .tag(engine)
                 }
             }
+            .onChange(of: config.engine) { _, _ in
+                downloadTask?.cancel()
+                downloadTask = nil
+                downloadState = .idle
+            }
 
-            Section("About") {
-                LabeledContent("Version", value: AppVersion.displayString)
-                LabeledContent("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–")
+            if config.engine.descriptor.requiresModelDownload {
+                engineModelStatus
             }
         }
-        .formStyle(.grouped)
-        .frame(width: 450, height: 600)
-        .toolbar {
-            ToolbarItem {
-                if let status = saveStatus {
+
+        Section("Model Updates") {
+            if let problem = manifestHealth.problemMessage {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Toggle("Check for Model Updates Online", isOn: $config.modelUpdateCheckEnabled)
+            Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if config.modelUpdateCheckEnabled {
+                Button("Check Now") {
+                    Task { await runUpdateCheck() }
+                }
+                .disabled(updateCheckInFlight)
+                if let status = lastUpdateStatus {
                     Text(status)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            ToolbarItem {
-                Button("Save") {
-                    if summaryEnabled && !summaryEndpoint.isEmpty {
-                        config.summary = SummaryConfig(
-                            enabled: true,
-                            provider: summaryProvider,
-                            endpoint: summaryEndpoint,
-                            apiKey: summaryApiKey,
-                            model: summaryModel,
-                            contextLength: Int(summaryContextLength),
-                            contextOverheadPercent: Int(summaryContextOverheadPercent),
-                            maxOutputTokens: Int(summaryMaxOutputTokens)
-                        )
-                    } else {
-                        config.summary = nil
-                    }
-                    config.lastMicrophoneDeviceId = settingsMicId
-                    configManager.update { $0 = config }
-                    saveStatus = "Saved"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        saveStatus = nil
-                    }
-                    triggerDownloadIfNeeded()
+        }
+    }
+
+    // MARK: - Summary
+
+    @ViewBuilder
+    private var summarySections: some View {
+        Section("Meeting Summary") {
+            Toggle("Summarize After Transcription", isOn: $summaryEnabled)
+            Text("Sends the finished transcript to a language model you choose — point it at a local server to keep everything on this Mac.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if summaryEnabled {
+            Section("Provider") {
+                Picker("Provider", selection: $summaryProvider) {
+                    Text("OpenAI Compatible").tag(SummaryProviderType.openai)
+                    Text("LM Studio").tag(SummaryProviderType.lmstudio)
                 }
-                .disabled(isDownloading)
+                TextField("Endpoint URL", text: $summaryEndpoint, prompt: Text(
+                    summaryProvider == .lmstudio
+                        ? "http://127.0.0.1:1234"
+                        : "https://api.openai.com/v1"
+                ))
+                SecureField("API Key", text: $summaryApiKey)
+                Text("Leave the key empty for local providers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Model", text: $summaryModel)
+            }
+
+            if summaryProvider == .lmstudio {
+                Section("Context") {
+                    TextField("Context Window (Tokens)", text: $summaryContextLength, prompt: Text("Model default"))
+                    TextField("Reserved Overhead (%)", text: $summaryContextOverheadPercent, prompt: Text("Default"))
+                    TextField("Max Summary (Tokens)", text: $summaryMaxOutputTokens, prompt: Text("Model default"))
+                    Text("How much of the model's context window the transcript may fill, and how long the summary may run. Empty fields use sensible defaults.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+    }
+
+    // MARK: - Permissions
+
+    @ViewBuilder
+    private var permissionsSections: some View {
+        Section("Required to Record") {
+            PermissionSettingsRow(
+                name: "Microphone",
+                detail: "Record your voice during meetings",
+                status: permissionManager.microphone,
+                onGrant: { Task { await permissionManager.requestMicrophone() } }
+            )
+            PermissionSettingsRow(
+                name: "Screen Recording",
+                detail: "Capture system audio from meeting apps",
+                status: permissionManager.screenRecording,
+                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+            )
+        }
+        Section("Optional") {
+            PermissionSettingsRow(
+                name: "Calendar",
+                detail: "Suggest recording name from current meeting",
+                status: permissionManager.calendar,
+                onGrant: { Task { await permissionManager.requestCalendar() } }
+            )
+            PermissionSettingsRow(
+                name: "Notifications",
+                detail: "Alert you when transcription finishes",
+                status: permissionManager.notifications,
+                onGrant: { Task { await permissionManager.requestNotifications() } }
+            )
+        }
+    }
+
+    // MARK: - Save
+
+    private func save() {
+        if summaryEnabled && !summaryEndpoint.isEmpty {
+            config.summary = SummaryConfig(
+                enabled: true,
+                provider: summaryProvider,
+                endpoint: summaryEndpoint,
+                apiKey: summaryApiKey,
+                model: summaryModel,
+                contextLength: Int(summaryContextLength),
+                contextOverheadPercent: Int(summaryContextOverheadPercent),
+                maxOutputTokens: Int(summaryMaxOutputTokens)
+            )
+        } else {
+            config.summary = nil
+        }
+        config.lastMicrophoneDeviceId = settingsMicId
+        configManager.update { $0 = config }
+        saveStatus = "Saved"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            saveStatus = nil
+        }
+        triggerDownloadIfNeeded()
     }
 
     @ViewBuilder
@@ -296,7 +387,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Model will download ~\(config.engine.descriptor.approximateSizeMB)MB when you save")
+                Text("Model will download ~\(config.engine.descriptor.approximateSizeMB) MB when you save")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -316,7 +407,7 @@ struct SettingsView: View {
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(.orange)
         }
     }
 
@@ -375,13 +466,7 @@ private struct PermissionSettingsRow: View {
 
     var body: some View {
         LabeledContent {
-            if status.isGranted {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Button("Grant") { onGrant() }
-                    .controlSize(.small)
-            }
+            statusBadge
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
@@ -389,6 +474,27 @@ private struct PermissionSettingsRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch status {
+        case .authorized:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .notDetermined:
+            Button("Grant") { onGrant() }
+                .controlSize(.small)
+        case .denied:
+            // A fresh request can't re-prompt once denied — send the user to
+            // the only place it can actually be changed.
+            Button("Open Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .controlSize(.small)
         }
     }
 }
