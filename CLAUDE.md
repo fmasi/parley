@@ -97,8 +97,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)
 - System audio source is selectable via `system_audio_source` (Config): `sck` = ScreenCaptureKit (default), `core_audio_tap` = Core Audio output process tap (#103, a strict superset that also captures Continuity/VoIP calls SCK misses). Mic is captured independently either way.
-- `.audio` output type = system audio only (at 48 kHz, hardcoded)
-- `.microphone` output type = microphone only (at NATIVE device rate, varies: 16kHz, 24kHz, 48kHz)
+- SCStream `.audio` output type = system audio only (at 48 kHz, hardcoded). Since #96 the stream registers `.audio` ONLY — `.microphone` is no longer used.
+- Mic is captured independently by `MicCaptureSession` (AVCaptureSession, #96) at NATIVE device rate (varies: 16kHz, 24kHz, 48kHz) and fed to `AudioOutputHandler` via `appendMicSampleBuffer()`
 - There is NO Apple API to get a pre-mixed stream (verified in SDK headers through macOS 26)
 - Handler must be stored to prevent deallocation
 - Must use async/await API, not completion-handler callbacks (callbacks don't deliver frames reliably)

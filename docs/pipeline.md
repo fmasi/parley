@@ -12,10 +12,12 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 ┌─────────────────────────────────────────────────────────────────┐
 │  RECORDING (continuous)                                         │
 │                                                                 │
-│  System-audio capture (XPC): ScreenCaptureKit (default)         │
-│    or Core Audio tap (system_audio_source=core_audio_tap)       │
-│    ├─ system audio → WavFileWriter → chunk-N.wav                │
-│    └─ mic audio → AudioConverter → WavFileWriter → chunk-N_mic.wav
+│  Capture (XPC) — two independent sources:                       │
+│    system audio: ScreenCaptureKit (default) or Core Audio tap   │
+│                  (system_audio_source=core_audio_tap)           │
+│      → WavFileWriter → chunk-N.wav                              │
+│    mic: MicCaptureSession (AVCaptureSession, #96)               │
+│      → AudioConverter → WavFileWriter → chunk-N_mic.wav         │
 │                         │                                       │
 │            ChunkRotator (timer-based)                           │
 │            ├─ calls rotateChunk() on XPC → swaps writers        │
