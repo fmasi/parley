@@ -42,6 +42,7 @@ struct SetupView: View {
                     name: "Microphone",
                     detail: "Record your voice during meetings",
                     status: permissionManager.microphone,
+                    pane: .microphone,
                     onGrant: { Task { await permissionManager.requestMicrophone() } }
                 )
                 Divider()
@@ -50,6 +51,7 @@ struct SetupView: View {
                     name: "Screen Recording",
                     detail: "Capture system audio from meeting apps",
                     status: permissionManager.screenRecording,
+                    pane: .screenRecording,
                     onGrant: { Task { await permissionManager.requestScreenRecording() } }
                 )
             }
@@ -60,6 +62,7 @@ struct SetupView: View {
                     name: "Calendar",
                     detail: "Suggest recording name from current meeting",
                     status: permissionManager.calendar,
+                    pane: .calendar,
                     onGrant: { Task { await permissionManager.requestCalendar() } }
                 )
                 Divider()
@@ -68,6 +71,7 @@ struct SetupView: View {
                     name: "Notifications",
                     detail: "Alert you when transcription finishes",
                     status: permissionManager.notifications,
+                    pane: .notifications,
                     onGrant: { Task { await permissionManager.requestNotifications() } }
                 )
             }
@@ -329,12 +333,8 @@ private struct FolderPickerRow: View {
             Spacer()
 
             if denied {
-                Button("Open Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-                .controlSize(.small)
+                Button("Open Settings") { PrivacyPane.filesAndFolders.open() }
+                    .controlSize(.small)
             } else {
                 Button("Choose…") {
                     if let path = chooseFolderPath(message: "Choose where to save recordings") {
@@ -352,6 +352,7 @@ private struct PermissionRow: View {
     let name: String
     let detail: String
     let status: PermissionStatus
+    let pane: PrivacyPane
     let onGrant: () -> Void
 
     var body: some View {
@@ -379,12 +380,8 @@ private struct PermissionRow: View {
             Button("Grant") { onGrant() }
                 .controlSize(.small)
         case .denied:
-            Button("Open Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .controlSize(.small)
+            Button("Open Settings") { pane.open() }
+                .controlSize(.small)
         }
     }
 }

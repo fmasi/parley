@@ -57,6 +57,15 @@ struct SettingsView: View {
         return false
     }
 
+    /// The Summary tab grows with what it actually shows: one section when
+    /// summaries are off (the common case), plus Provider, plus LM Studio's
+    /// Context fields. A fixed tall frame left ~500pt of empty Form under the
+    /// single toggle every new user sees first.
+    private var summaryTabHeight: CGFloat {
+        guard summaryEnabled else { return 260 }
+        return summaryProvider == .lmstudio ? 620 : 460
+    }
+
     var body: some View {
         TabView {
             tabPage(height: 420) { generalSections }
@@ -65,8 +74,7 @@ struct SettingsView: View {
                 .tabItem { Label("Audio", systemImage: "waveform") }
             tabPage(height: 440) { transcriptionSections }
                 .tabItem { Label("Transcription", systemImage: "text.quote") }
-            // Tallest tab: LM Studio adds a third section of fields.
-            tabPage(height: 620) { summarySections }
+            tabPage(height: summaryTabHeight) { summarySections }
                 .tabItem { Label("Summary", systemImage: "doc.text") }
             tabPage(height: 400) { permissionsSections }
                 .tabItem { Label("Permissions", systemImage: "lock.shield") }
@@ -322,12 +330,14 @@ struct SettingsView: View {
                 name: "Microphone",
                 detail: "Record your voice during meetings",
                 status: permissionManager.microphone,
+                pane: .microphone,
                 onGrant: { Task { await permissionManager.requestMicrophone() } }
             )
             PermissionSettingsRow(
                 name: "Screen Recording",
                 detail: "Capture system audio from meeting apps",
                 status: permissionManager.screenRecording,
+                pane: .screenRecording,
                 onGrant: { Task { await permissionManager.requestScreenRecording() } }
             )
         }
@@ -336,12 +346,14 @@ struct SettingsView: View {
                 name: "Calendar",
                 detail: "Suggest recording name from current meeting",
                 status: permissionManager.calendar,
+                pane: .calendar,
                 onGrant: { Task { await permissionManager.requestCalendar() } }
             )
             PermissionSettingsRow(
                 name: "Notifications",
                 detail: "Alert you when transcription finishes",
                 status: permissionManager.notifications,
+                pane: .notifications,
                 onGrant: { Task { await permissionManager.requestNotifications() } }
             )
         }
@@ -460,6 +472,7 @@ private struct PermissionSettingsRow: View {
     let name: String
     let detail: String
     let status: PermissionStatus
+    let pane: PrivacyPane
     let onGrant: () -> Void
 
     var body: some View {
@@ -487,12 +500,8 @@ private struct PermissionSettingsRow: View {
         case .denied:
             // A fresh request can't re-prompt once denied — send the user to
             // the only place it can actually be changed.
-            Button("Open Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .controlSize(.small)
+            Button("Open Settings") { pane.open() }
+                .controlSize(.small)
         }
     }
 }

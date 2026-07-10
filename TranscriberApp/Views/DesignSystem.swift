@@ -183,6 +183,45 @@ struct AlertBanner: View {
     }
 }
 
+// MARK: - System Settings deep links
+
+/// The exact System Settings pane behind each permission Parley asks for.
+///
+/// The generic `?Privacy` anchor drops the user at the top of Privacy &
+/// Security and leaves them to hunt for the right row. Every case below
+/// except `.notifications` is a subsection of that pane — notifications
+/// live in their own top-level pane, not under Privacy & Security.
+enum PrivacyPane {
+    case microphone
+    case screenRecording
+    case calendar
+    case notifications
+    case filesAndFolders
+
+    private static let security = "x-apple.systempreferences:com.apple.preference.security"
+
+    var settingsURL: URL? {
+        switch self {
+        case .microphone:
+            return URL(string: "\(Self.security)?Privacy_Microphone")
+        case .screenRecording:
+            return URL(string: "\(Self.security)?Privacy_ScreenCapture")
+        case .calendar:
+            return URL(string: "\(Self.security)?Privacy_Calendars")
+        case .filesAndFolders:
+            return URL(string: "\(Self.security)?Privacy_FilesAndFolders")
+        case .notifications:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
+        }
+    }
+
+    @MainActor
+    func open() {
+        guard let settingsURL else { return }
+        NSWorkspace.shared.open(settingsURL)
+    }
+}
+
 // MARK: - Folder picking
 
 /// The one folder-picker used everywhere the user chooses a recordings

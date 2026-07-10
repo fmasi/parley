@@ -162,6 +162,10 @@ struct MenuView: View {
     }
 
     private var statusText: String {
+        // Must guard on criticalError for the same reason statusColor does:
+        // after a crash the phase falls back to .idle, which would otherwise
+        // pair a red dot with "Ready to record". The banner carries the detail.
+        if appState.criticalError != nil { return "Error" }
         switch appState.phase {
         case .idle: return "Ready to record"
         case .recording: return appState.interruptionWarning == nil ? "Recording" : "Recording — interrupted"
