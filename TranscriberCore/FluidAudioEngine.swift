@@ -107,6 +107,9 @@ public actor FluidAudioEngine: TranscriptionEngine {
                     // whole-segment text — `words[*].text` stays the raw PRE-ITN token text. If this
                     // segment IS later split, the resulting piece(s) are reconstructed from those raw
                     // tokens and will NOT carry ITN formatting (documented known limitation, PR #121).
+                    // `words: seg.words` here has no dedicated unit test — this whole block runs inside
+                    // an actor method behind real ASR inference, not directly unit-testable. Tracked in
+                    // #124: if this line silently dropped `words`, all current tests would still pass.
                     return TranscriptSegment(start: seg.start, end: seg.end, text: normalized, language: seg.language, confidence: seg.confidence, words: seg.words)
                 }
                 return seg
