@@ -460,7 +460,7 @@ final class TranscriptionRunner {
         let wanted = (
             threshold: config.diarizationClusteringThreshold,
             maxSpeakers: config.diarizationMaxSpeakers,
-            excludeOverlap: config.diarizationExcludeOverlap ?? true
+            excludeOverlap: config.resolvedDiarizationExcludeOverlap
         )
         // Only rebuild when the settings actually changed — a fresh actor drops its cached
         // OfflineDiarizerManager, so an unconditional rebuild reloads the models every recording.

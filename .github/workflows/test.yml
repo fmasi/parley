@@ -36,6 +36,8 @@ jobs:
   # not needed here) and the fixture ~33 MB, so a warm run costs seconds.
   diarization-guard:
     runs-on: macos-15
+    # Bound it: a hung model/fixture download would otherwise hold a runner until GitHub's 6h limit.
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4

@@ -160,8 +160,13 @@ enum CLIRename {
             return
         }
         player.play()
-        // CLI is synchronous by nature: block for the clip, then move on to the prompt.
-        Thread.sleep(forTimeInterval: min(player.duration, duration) + 0.1)
+        // Run the run loop rather than Thread.sleep: AVAudioPlayer relies on it being serviced for
+        // its internal bookkeeping, and a bare sleep would block silently if playback never started.
+        // Bounded by the clip length, so a player that fails to start cannot hang the CLI.
+        let deadline = Date().addingTimeInterval(min(player.duration, duration) + 0.5)
+        while player.isPlaying, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
         player.stop()
     }
 

@@ -77,12 +77,16 @@ public enum TranscriptMerger {
     ///   - meetingStart: The wall-clock time the meeting began (used to compute
     ///     absolute timestamps from chunk-relative offsets).
     /// - Returns: A `MergeResult` containing all segments sorted by elapsed time.
-    /// True for the Unknown sentinel, with or without a `Local `/`Remote ` source prefix.
+    /// True for the Unknown sentinel, with or without a source prefix.
+    ///
+    /// Suffix-match rather than stripping `"Local "` / `"Remote "` literals: a change to the
+    /// separator or a trailing space would make the strip silently miss, `isUnknown` would return
+    /// false for every Unknown label, and every diarization-failed chunk would trip the remap alarm
+    /// on every real meeting — turning the alarm into noise, which is the failure this guard exists
+    /// to prevent.
     static func isUnknown(_ label: String) -> Bool {
-        let stripped = label
-            .replacingOccurrences(of: "Local ", with: "")
-            .replacingOccurrences(of: "Remote ", with: "")
-        return stripped == SpeakerAssignment.unknownSpeaker
+        label == SpeakerAssignment.unknownSpeaker
+            || label.hasSuffix(SpeakerAssignment.unknownSpeaker)
     }
 
     public static func merge(

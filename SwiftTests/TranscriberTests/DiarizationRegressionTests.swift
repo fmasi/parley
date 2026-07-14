@@ -113,9 +113,31 @@ import Testing
 
     /// The config path must resolve nil to true as well — a default that only holds when constructed
     /// directly is not a default.
+    ///
+    /// This asserts the RESOLVED property that the runner actually consumes. Previously the runner
+    /// wrote `config.diarizationExcludeOverlap ?? true` inline: a regression to `?? false` lives in
+    /// the app target, which this suite cannot reach, so it would have shipped with every test green
+    /// — the exact shape of the original bug. Resolution now lives in Config, where it is testable.
     @Test func configDefaultResolvesToExcludeOverlap() {
         let config = Config.default
-        #expect(config.diarizationExcludeOverlap == nil)
-        #expect((config.diarizationExcludeOverlap ?? true) == true)
+        #expect(config.diarizationExcludeOverlap == nil, "must be unset by default")
+        #expect(config.resolvedDiarizationExcludeOverlap, "an unset flag MUST resolve to true")
+    }
+
+    /// An explicit false is still honoured (it's a documented diagnostic escape hatch, and the app
+    /// logs a warning) — but it must be explicit, never the default.
+    @Test func explicitFalseIsHonoured() {
+        var config = Config.default
+        config.diarizationExcludeOverlap = false
+        #expect(!config.resolvedDiarizationExcludeOverlap)
+    }
+
+    /// The wiring itself: the value Config resolves is the value the diarizer is built with. A
+    /// regression anywhere along that path fails here rather than in a CI job that may be skipped.
+    @Test func configResolutionReachesTheDiarizer() {
+        let diarizer = FluidAudioDiarizer(
+            excludeOverlap: Config.default.resolvedDiarizationExcludeOverlap
+        )
+        #expect(diarizer.excludeOverlapSetting)
     }
 }

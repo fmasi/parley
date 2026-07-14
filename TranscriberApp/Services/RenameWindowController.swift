@@ -15,11 +15,31 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // Close any existing panel
         panel?.close()
 
-        let speakers = Self.parseSpeakers(from: jsonPath)
-        guard !speakers.isEmpty else {
-            onDismiss?()
-            return
+        // parseSpeakers opens an AVAudioFile per chunk to measure durations — O(N) file opens, which
+        // visibly stalls the menu bar before the window appears (worst on a network-mounted or cold
+        // recordings folder). Do it off the main actor, then present.
+        Task { @MainActor in
+            let speakers = await Task.detached(priority: .userInitiated) {
+                Self.parseSpeakers(from: jsonPath)
+            }.value
+            guard !speakers.isEmpty else {
+                Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .private)")
+                let alert = NSAlert()
+                alert.messageText = "No speakers to rename"
+                alert.informativeText =
+                    "Couldn't read any speakers from this file. Make sure it's a Parley transcript "
+                    + "(a .json produced alongside a recording), not session.json or another file."
+                alert.alertStyle = .informational
+                alert.runModal()
+                onDismiss?()
+                return
+            }
+            self.present(jsonPath: jsonPath, speakers: speakers, onDismiss: onDismiss)
         }
+    }
+
+    /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
+    private func present(jsonPath: URL, speakers: [SpeakerEntry], onDismiss: (() -> Void)?) {
 
         self.onDismissCallback = onDismiss
 
@@ -96,7 +116,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - JSON Parsing
 
-    static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
+    nonisolated static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
         guard let data = try? Data(contentsOf: jsonPath) else {
             Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .private)")
             return []

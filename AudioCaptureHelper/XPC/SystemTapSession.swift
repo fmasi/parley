@@ -176,6 +176,19 @@ final class SystemTapSession {
                 "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(Self.deviceNominalRate(output), privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
             )
             anchor = fullRate
+        } else if Self.handsFreeRates.contains(outputRate) {
+            // Degraded output and NO full-rate device to clock off (e.g. a Mac with no built-in
+            // output, headset as the only device). We are about to capture the remote side at the
+            // headset's hands-free rate. Say so at setup rather than leaving it to the watchdog,
+            // which only fires 5+ seconds in.
+            Logger.audio.error(
+                "System tap: output device is at \(outputRate, privacy: .public)Hz (hands-free) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
+            )
+            onEvent?(.rateDrift, .anomaly, [
+                "source": "system-tap",
+                "reason": "degraded output rate, no full-rate anchor available",
+                "outputRate": "\(outputRate)",
+            ])
         }
         guard let outUID = Self.deviceUID(anchor) else {
             throw SystemTapError.noDefaultOutput
@@ -528,46 +541,59 @@ final class SystemTapSession {
     private func checkRateDrift(frames: Int, declaredRate: Double, hostNanos: UInt64) {
         guard declaredRate > 0 else { return }
 
-        // ONE lock acquisition: a teardown landing between two of them would zero driftFrames and
-        // leave a stale `elapsed`, giving ratio 0.0 — a spurious alarm on an intentional stop.
-        let sample: (elapsed: Double, frames: Int)? = stateLock.sync {
-            guard !driftReported else { return nil }
+        // ONE lock acquisition for the WHOLE decision — accumulate, judge, and latch together.
+        //
+        // Splitting this across two `sync` blocks reopens the window it was meant to close: a
+        // teardown landing between them either zeroes driftFrames under a stale `elapsed` (ratio
+        // 0.0 → spurious alarm on an intentional stop), or resets `driftReported = false` only for
+        // this block to set it `true` again — permanently disarming the watchdog for the NEW
+        // aggregate generation. Both bugs were introduced by treating the latch as a separate step;
+        // the state machine has to advance atomically.
+        enum Verdict { case drift(effectiveRate: Double, ratio: Double), healthy, notYet }
+
+        let verdict: Verdict = stateLock.sync {
+            guard !driftReported else { return .notYet }
             if driftFirstHostNanos == 0 {
                 driftFirstHostNanos = hostNanos
-                return nil
+                return .notYet
             }
             driftFrames += frames
-            return (Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000, driftFrames)
-        }
-        // Need a decent window before judging: startup jitter and drift compensation settle out.
-        guard let sample, sample.elapsed >= 5 else { return }
+            let elapsed = Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000
+            // Need a decent window before judging: startup jitter and drift compensation settle out.
+            guard elapsed >= 5 else { return .notYet }
 
-        let elapsed = sample.elapsed
-        let effectiveRate = Double(sample.frames) / elapsed
-        let ratio = effectiveRate / declaredRate
-        // Band must be tight enough to see a 44.1/48 mismatch (ratio 0.919), which the original
-        // 0.9-1.1 window structurally could not.
-        if ratio < 0.95 || ratio > 1.05 {
-            stateLock.sync { driftReported = true }
-            Logger.audio.error(
-                """
-                System tap RATE DRIFT: declared \(declaredRate, privacy: .public)Hz but device is                 delivering ~\(Int(effectiveRate), privacy: .public)Hz (\(Int(ratio * 100), privacy: .public)%).                 The output device changed rate underneath the tap — remote audio is being captured at the                 wrong rate and padded to fit. Output device now reports \(Self.deviceNominalRate(Self.defaultOutputDevice()), privacy: .public)Hz.
-                """
-            )
-            onEvent?(.rateDrift, .anomaly, [
-                "source": "system-tap",
-                "reason": "rate drift — output device changed rate under the tap",
-                "declared": "\(Int(declaredRate))",
-                "actual": "\(Int(effectiveRate))",
-            ])
-        } else {
-            // Healthy: slide the window forward so we keep sampling rather than latching an early
-            // verdict. A rate change later in the meeting must still be caught.
-            stateLock.sync {
-                driftFirstHostNanos = hostNanos
-                driftFrames = 0
+            let effectiveRate = Double(driftFrames) / elapsed
+            let ratio = effectiveRate / declaredRate
+            // Band must be tight enough to see a 44.1/48 mismatch (ratio 0.919), which the original
+            // 0.9-1.1 window structurally could not.
+            if ratio < 0.95 || ratio > 1.05 {
+                driftReported = true
+                return .drift(effectiveRate: effectiveRate, ratio: ratio)
             }
+            // Healthy: slide the window forward so a rate change LATER in the meeting is still
+            // caught, rather than latching an early verdict.
+            driftFirstHostNanos = hostNanos
+            driftFrames = 0
+            return .healthy
         }
+
+        guard case .drift(let effectiveRate, let ratio) = verdict else { return }
+
+        Logger.audio.error(
+            """
+            System tap RATE DRIFT: declared \(declaredRate, privacy: .public)Hz but the device is delivering \
+            ~\(Int(effectiveRate), privacy: .public)Hz (\(Int(ratio * 100), privacy: .public)%). The output \
+            device changed rate underneath the tap — remote audio is being captured at the wrong rate and \
+            padded to fit. Output device now reports \
+            \(Self.deviceNominalRate(Self.defaultOutputDevice()), privacy: .public)Hz.
+            """
+        )
+        onEvent?(.rateDrift, .anomaly, [
+            "source": "system-tap",
+            "reason": "rate drift — output device changed rate under the tap",
+            "declared": "\(Int(declaredRate))",
+            "actual": "\(Int(effectiveRate))",
+        ])
     }
 
     /// An output device running at or above `minimum` Hz, preferring the built-in one.

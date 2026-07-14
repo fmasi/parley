@@ -97,6 +97,12 @@ public struct Config: Codable, Equatable, Sendable {
     /// wrong (the mask marks frames where two SPEAKERS overlap) and it silently destroyed speaker
     /// identity on every multi-party recording for months.
     public var diarizationExcludeOverlap: Bool?
+    /// The value actually handed to the diarizer. Lives here, not as a `??` at the call site, so a
+    /// regression to `false` FAILS A TEST instead of shipping green: the call site is in the app
+    /// target, which the unit suite cannot reach, and the ground-truth AMI guard runs in a separate
+    /// CI job. `false` collapses every speaker into one cluster (AMI ES2004a: 1 speaker, not 4).
+    public var resolvedDiarizationExcludeOverlap: Bool { diarizationExcludeOverlap ?? true }
+
     /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
     /// speaker embeddings are far more sensitive to that than speech intelligibility is.
     public var preserveSourceWAV: Bool?
