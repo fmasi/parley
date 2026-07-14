@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import os
 import TranscriberCore
@@ -8,8 +9,11 @@ enum CLIRename {
         let id: String
         let sampleText: String
         let audioFile: URL?
+        /// Offsets WITHIN `audioFile` (chunk-local), not absolute transcript time.
         let start: Double
         let end: Double
+        /// Which channel of the stereo archive carries this speaker (L = mic, R = system).
+        let isLocal: Bool
     }
 
     static func run(jsonPath: URL) throws {
@@ -70,13 +74,15 @@ enum CLIRename {
                 ) {
                     return SpeakerSample(
                         id: speaker, sampleText: candidate.text,
-                        audioFile: hit.url, start: hit.start, end: hit.end
+                        audioFile: hit.url, start: hit.start, end: hit.end,
+                        isLocal: hit.isLocal
                     )
                 }
             }
             // No playable audio — still let the user rename, using the sample text alone.
             return SpeakerSample(
-                id: speaker, sampleText: best.text, audioFile: nil, start: 0, end: 0
+                id: speaker, sampleText: best.text, audioFile: nil, start: 0, end: 0,
+                isLocal: best.source == "local"
             )
         }
 
@@ -98,7 +104,10 @@ enum CLIRename {
             if let audioFile = sample.audioFile,
                FileManager.default.fileExists(atPath: audioFile.path) {
                 print("Playing audio sample...")
-                playAudioSample(file: audioFile, start: sample.start, duration: sample.end - sample.start)
+                playAudioSample(
+                    file: audioFile, start: sample.start,
+                    duration: sample.end - sample.start, isLocal: sample.isLocal
+                )
             }
 
             print("Enter new name (or press Enter to keep '\(sample.id)'): ", terminator: "")
@@ -126,24 +135,34 @@ enum CLIRename {
         print("Done.")
     }
 
-    private static func playAudioSample(file: URL, start: Double, duration: Double) {
+    /// Play one speaker sample: the RIGHT moment, from the RIGHT channel.
+    ///
+    /// This used to shell out to `afplay`, which has no seek flag — so `start` was accepted and
+    /// then ignored, and every sample played the first ten seconds of the recording, mixing both
+    /// channels of the stereo archive. The user was auditioning the wrong moment, and often the
+    /// wrong people, while the printed sample text showed something else entirely.
+    private static func playAudioSample(file: URL, start: Double, duration: Double, isLocal: Bool) {
         guard duration > 0 else { return }
 
-        // afplay has no seek option — only --time for duration and --rate for speed.
-        // Play from start of file, capped at 10s. Full seek would require AVAudioPlayer.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        process.arguments = [
-            file.path,
-            "--time", String(format: "%.1f", min(duration, 10.0)),
-        ]
-
+        let preview: URL
         do {
-            try process.run()
-            process.waitUntilExit()
+            preview = try SpeakerSamplePreview.makeMonoPreview(
+                of: file, from: start, to: start + duration, isLocal: isLocal
+            )
         } catch {
-            Logger.transcription.error("afplay failed: \(error, privacy: .public)")
+            Logger.transcription.error("Sample preview failed: \(error, privacy: .public)")
+            return
         }
+        defer { try? FileManager.default.removeItem(at: preview) }
+
+        guard let player = try? AVAudioPlayer(contentsOf: preview) else {
+            Logger.transcription.error("Sample preview: AVAudioPlayer init failed")
+            return
+        }
+        player.play()
+        // CLI is synchronous by nature: block for the clip, then move on to the prompt.
+        Thread.sleep(forTimeInterval: min(player.duration, duration) + 0.1)
+        player.stop()
     }
 
     private static func applyRenames(_ mapping: [String: String], jsonPath: URL) {

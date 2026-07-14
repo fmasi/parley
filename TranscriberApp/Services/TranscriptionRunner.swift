@@ -236,10 +236,14 @@ final class TranscriptionRunner {
         let sortedChunks = sessionState.chunks.sorted { $0.index < $1.index }
         // Dual-stream chunks carry `Local/Remote Speaker N` segment labels; the reconciler must
         // reconcile each channel in its own prefixed namespace so its output keys match those labels
-        // (otherwise the remap is inert — the #64/#71 bug). Detect it the same way the tagging does.
-        let chunksAreDualStream = sortedChunks.contains { chunk in
-            chunk.segments.contains { $0.source == "local" }
-        }
+        // (otherwise the remap is inert — the #64/#71 bug).
+        //
+        // Read the flag the WRITER persisted rather than re-deriving it here. Inferring it from
+        // "does any chunk contain a local segment" could disagree with the per-chunk decision that
+        // actually produced the labels — and when they disagreed, the reconciler's keys matched
+        // nothing, the remap silently fell back to the identity, and chunk-local speaker numbering
+        // was laundered into the global namespace.
+        let chunksAreDualStream = sortedChunks.contains(where: \.isDualStream)
         Logger.transcription.info("Reconciling speakers across \(sortedChunks.count) chunks (dual-stream: \(chunksAreDualStream), cosine threshold: 0.65)")
         let speakerMapping = SpeakerReconciler.reconcile(
             chunks: sortedChunks,
@@ -254,25 +258,31 @@ final class TranscriptionRunner {
             meetingStart: sessionState.meetingStart
         )
 
-        // 3. Convert MergedSegments to LabeledSegments for existing assembler
-        var allSegments: [LabeledSegment] = []
-        for chunk in sortedChunks {
-            let chunkOffset = chunk.startTime.timeIntervalSince(sessionState.meetingStart)
-            let chunkMapping = speakerMapping[chunk.index] ?? [:]
-            for seg in chunk.segments {
-                let elapsed = chunkOffset + seg.start
-                let elapsedEnd = chunkOffset + seg.end
-                let globalSpeaker = chunkMapping[seg.speaker] ?? seg.speaker
-                allSegments.append(LabeledSegment(
-                    start: elapsed,
-                    end: elapsedEnd,
-                    speaker: globalSpeaker,
-                    text: seg.text,
-                    source: seg.source,
-                    confidence: seg.qualityScore
-                ))
-            }
+        // 3. Convert MergedSegments to LabeledSegments for the assembler.
+        //
+        // This loop used to be a hand-rolled duplicate of TranscriptMerger.merge — so the merger
+        // shipped nothing while carrying all the tests, and the code that actually produced every
+        // transcript had none. Any fix applied to the tested merger would pass CI and change
+        // nothing at runtime. Consume the merger instead, so the tests guard the real path.
+        for (chunkIndex, labels) in mergeResult.unmappedLabels.sorted(by: { $0.key < $1.key }) {
+            // Never silent: a miss means the reconciler's namespace and the chunk's labels disagree,
+            // so the remap fell back to the identity and this chunk's speaker numbering may be wrong.
+            Logger.transcription.error(
+                "Speaker remap MISS in chunk \(chunkIndex, privacy: .public): labels \(labels.joined(separator: ", "), privacy: .public) are not in the reconciler's mapping. Speaker identity for this chunk may be wrong."
+            )
         }
+
+        var allSegments: [LabeledSegment] = mergeResult.segments.map { seg in
+            LabeledSegment(
+                start: seg.elapsed,
+                end: seg.elapsedEnd,
+                speaker: seg.speaker,
+                text: seg.text,
+                source: seg.source,
+                confidence: seg.qualityScore
+            )
+        }
+
         allSegments.sort { $0.start < $1.start }
 
         // 4. Dual-stream tagging

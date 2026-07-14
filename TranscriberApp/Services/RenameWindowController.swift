@@ -35,7 +35,18 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             jsonPath: jsonPath,
             speakers: speakers,
             onSave: { mapping in
-                Self.applySpeakerRenames(mapping, jsonPath: jsonPath)
+                guard Self.applySpeakerRenames(mapping, jsonPath: jsonPath) else {
+                    // Keep the panel open: the names are still in the fields, so the user can
+                    // retry rather than discovering later that nothing was saved.
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn't save speaker names"
+                    alert.informativeText =
+                        "The transcript could not be written. Check that the recordings folder is "
+                        + "available and has free space, then try again."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
                 Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
                 closePanel()
             },
@@ -86,10 +97,16 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     // MARK: - JSON Parsing
 
     static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
-        guard let data = try? Data(contentsOf: jsonPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let data = try? Data(contentsOf: jsonPath) else {
+            Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .private)")
+            return []
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let segments = json["segments"] as? [[String: Any]]
-        else { return [] }
+        else {
+            Logger.files.error("Rename: \(jsonPath.lastPathComponent, privacy: .private) is not a readable transcript")
+            return []
+        }
 
         // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
         // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that
@@ -174,11 +191,22 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Apply Renames
 
-    static func applySpeakerRenames(_ mapping: [String: String], jsonPath: URL) {
+    /// Apply speaker renames to the transcript on disk.
+    ///
+    /// Returns false (and logs) on failure. The previous version wrote with `try?` and returned
+    /// Void: on a read-only or full volume the user renamed every speaker, hit Save, the panel
+    /// closed, and nothing was written — with no error anywhere. The write is also atomic now,
+    /// because by this point the source WAVs are gone and this JSON is the only textual record of
+    /// the meeting; a kill mid-write would truncate it.
+    @discardableResult
+    static func applySpeakerRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         guard let data = try? Data(contentsOf: jsonPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var segments = json["segments"] as? [[String: Any]]
-        else { return }
+        else {
+            Logger.files.error("Rename: cannot read transcript \(jsonPath.lastPathComponent, privacy: .private)")
+            return false
+        }
 
         for i in segments.indices {
             if let speaker = segments[i]["speaker"] as? String,
@@ -188,10 +216,26 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
         json["segments"] = segments
 
-        if let updatedData = try? JSONSerialization.data(
-            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? updatedData.write(to: jsonPath)
+        // Record the applied names alongside the transcript, as the CLI path already does.
+        var metadata = json["metadata"] as? [String: Any] ?? [:]
+        var names = metadata["speaker_names"] as? [String: String] ?? [:]
+        for (original, renamed) in mapping where original != renamed {
+            names[original] = renamed
+        }
+        if !names.isEmpty {
+            metadata["speaker_names"] = names
+            json["metadata"] = metadata
+        }
+
+        do {
+            let updatedData = try JSONSerialization.data(
+                withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+            )
+            try updatedData.write(to: jsonPath, options: .atomic)
+            return true
+        } catch {
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
