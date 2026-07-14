@@ -29,6 +29,12 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     ///   excludeOverlap = true  -> 4 speakers (correct; healthy cluster sizes 226/170/91/51)
     private let excludeOverlap: Bool
 
+    /// Exposed so a model-free unit test can assert the shipping default. The ground-truth AMI guard
+    /// cannot run in CI (the fixture is git-ignored and the ML models are not downloaded there), so
+    /// without this a revert to `false` would ship with the whole suite green — which is exactly how
+    /// the original bug survived.
+    public nonisolated var excludeOverlapSetting: Bool { excludeOverlap }
+
     public init(clusteringThreshold: Double? = nil, maxSpeakers: Int? = nil, excludeOverlap: Bool = true) {
         self.clusteringThreshold = clusteringThreshold
         self.maxSpeakers = maxSpeakers
@@ -112,6 +118,11 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         // technically overlapping" so the mask would discard most embeddings. That reasoning is
         // wrong -- the mask marks frames where two SPEAKERS overlap, not merely remote speech --
         // and the override caused exactly the collapse it was meant to avoid (see excludeOverlap).
+        if !excludeOverlap {
+            Logger.transcription.warning(
+                "Diarization: excludeOverlap is FALSE — speaker embeddings will blend overlapping voices and are expected to collapse into a single speaker. Measured on a 4-speaker reference meeting: 1 speaker instead of 4. Remove diarization_exclude_overlap from config.json."
+            )
+        }
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
         if let clusteringThreshold {
             config.clustering.threshold = clusteringThreshold

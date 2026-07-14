@@ -60,12 +60,21 @@ public enum SpeakerSampleLocator {
             return .chunkedArchives(audioPaths)
         }
 
-        // All-WAV. Legacy dual stream is exactly [system, mic]; more than two means chunks.
-        guard audioPaths.count <= 2 else { return .chunkedArchives(audioPaths) }
-        return .legacyDualStream(
-            remote: audioPaths.first,
-            local: audioPaths.count > 1 ? audioPaths[1] : nil
-        )
+        // All-WAV. A legacy dual-stream pair is [system.wav, <base>_mic.wav] — capture guarantees
+        // that suffix. Two chunk WAVs (archiving failed for both) look identical by COUNT, and
+        // reading them as [system, mic] would route a local sample to chunk 1's SYSTEM audio: the
+        // user auditions "Local Speaker N" and hears the remote participants, then names them from
+        // it. That is #132's exact harm, and it slips past the isSystemOnly guard in locate()
+        // because that guard only runs on the .chunkedArchives branch. Key off the mic filename,
+        // not the count.
+        let isMicFile = { (url: URL) in url.lastPathComponent.hasSuffix("_mic.wav") }
+        if audioPaths.count == 2, isMicFile(audioPaths[1]) {
+            return .legacyDualStream(remote: audioPaths[0], local: audioPaths[1])
+        }
+        if audioPaths.count == 1, !isMicFile(audioPaths[0]) {
+            return .legacyDualStream(remote: audioPaths[0], local: nil)
+        }
+        return .chunkedArchives(audioPaths)
     }
 
     /// A chunk that fell back to raw WAV carries system audio only — the mic stream is not

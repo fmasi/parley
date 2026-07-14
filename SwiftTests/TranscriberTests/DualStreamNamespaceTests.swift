@@ -165,6 +165,31 @@ import Testing
         #expect(result.unmappedLabels.isEmpty)
     }
 
+    /// M3: "Unknown" carries no embedding BY DESIGN, so the reconciler can never map it and the
+    /// identity fallback is correct for it. Counting it as a miss would fire the alarm on nearly
+    /// every real meeting — and an alarm that cries wolf is worse than none, because this one exists
+    /// to make silent speaker-namespace laundering impossible to miss.
+    @Test func unknownSentinelIsNotAnUnmappedLabel() {
+        let chunks = [chunk(index: 1, speakers: ["Remote Speaker 1", "Remote Unknown", "Unknown"])]
+        let mapping = [1: ["Remote Speaker 1": "Remote Speaker 2"]]
+
+        let result = TranscriptMerger.merge(
+            chunks: chunks, speakerMapping: mapping, meetingStart: Date(timeIntervalSince1970: 0)
+        )
+        #expect(result.unmappedLabels.isEmpty, "Unknown must not trip the remap alarm")
+    }
+
+    /// ...but a genuinely unmapped REAL speaker still must.
+    @Test func realUnmappedSpeakerStillReported() {
+        let chunks = [chunk(index: 1, speakers: ["Speaker 1", "Remote Unknown"])]
+        let mapping = [1: ["Remote Speaker 1": "Remote Speaker 2"]]
+
+        let result = TranscriptMerger.merge(
+            chunks: chunks, speakerMapping: mapping, meetingStart: Date(timeIntervalSince1970: 0)
+        )
+        #expect(result.unmappedLabels[1] == ["Speaker 1"])
+    }
+
     /// Segments must carry their END through the merge — production builds LabeledSegments from it.
     @Test func mergedSegmentsCarryAbsoluteEnd() {
         let chunks = [chunk(index: 1, speakers: ["Remote Speaker 1"])]

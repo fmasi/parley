@@ -112,8 +112,8 @@ import Testing
     }
 
     @Test func classifiesDualWavAsLegacy() {
-        let sys = url("/r/sys.wav")
-        let mic = url("/r/mic.wav")
+        let sys = url("/r/sess.wav")
+        let mic = url("/r/sess_mic.wav")   // capture always writes <base>_mic.wav
         #expect(
             SpeakerSampleLocator.classify(audioPaths: [sys, mic])
                 == .legacyDualStream(remote: sys, local: mic)
@@ -139,8 +139,8 @@ import Testing
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let sys = dir.appendingPathComponent("sys.wav")
-        let mic = dir.appendingPathComponent("mic.wav")
+        let sys = dir.appendingPathComponent("sess.wav")
+        let mic = dir.appendingPathComponent("sess_mic.wav")
         try Data([0]).write(to: sys)
         try Data([0]).write(to: mic)
 
@@ -211,6 +211,31 @@ import Testing
             source: "remote", start: 10, end: 20, layout: layout, chunkDurations: [1800]
         ))
         #expect(!remote.isLocal)
+    }
+
+    /// M2: two chunk WAVs (archiving failed for both) look exactly like a legacy [system, mic] pair
+    /// BY COUNT. Reading them that way routes a local sample to chunk 1's SYSTEM audio — the user
+    /// auditions "Local Speaker N", hears the remote participants, and names them from it. The mic
+    /// filename is the only reliable signal.
+    @Test func twoChunkWavsAreNotALegacyDualStreamPair() {
+        let paths = [url("/r/sess-0.wav"), url("/r/sess-1.wav")]
+        #expect(SpeakerSampleLocator.classify(audioPaths: paths) == .chunkedArchives(paths))
+    }
+
+    @Test func genuineLegacyPairIsRecognisedByMicSuffix() {
+        let sys = url("/r/sess.wav")
+        let mic = url("/r/sess_mic.wav")
+        #expect(
+            SpeakerSampleLocator.classify(audioPaths: [sys, mic])
+                == .legacyDualStream(remote: sys, local: mic)
+        )
+    }
+
+    @Test func singleSystemWavIsLegacySystemOnly() {
+        let sys = url("/r/sess.wav")
+        #expect(
+            SpeakerSampleLocator.classify(audioPaths: [sys]) == .legacyDualStream(remote: sys, local: nil)
+        )
     }
 
     @Test func missingFileYieldsNoLocation() {

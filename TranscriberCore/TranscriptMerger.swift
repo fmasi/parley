@@ -77,6 +77,14 @@ public enum TranscriptMerger {
     ///   - meetingStart: The wall-clock time the meeting began (used to compute
     ///     absolute timestamps from chunk-relative offsets).
     /// - Returns: A `MergeResult` containing all segments sorted by elapsed time.
+    /// True for the Unknown sentinel, with or without a `Local `/`Remote ` source prefix.
+    static func isUnknown(_ label: String) -> Bool {
+        let stripped = label
+            .replacingOccurrences(of: "Local ", with: "")
+            .replacingOccurrences(of: "Remote ", with: "")
+        return stripped == SpeakerAssignment.unknownSpeaker
+    }
+
     public static func merge(
         chunks: [ProcessedChunk],
         speakerMapping: [Int: [String: String]],
@@ -95,7 +103,13 @@ public enum TranscriptMerger {
 
                 // Only a NON-EMPTY mapping can miss: an empty one means the reconciler had nothing
                 // to say about this chunk (seed chunk, or no embeddings), and the identity is right.
-                if !labelMap.isEmpty, labelMap[seg.speaker] == nil {
+                //
+                // The Unknown sentinel is NOT a miss. It carries no embedding by design, so the
+                // reconciler can never key it, and the identity fallback is correct for it. Counting
+                // it would fire the alarm on nearly every real meeting — and an alarm that cries wolf
+                // is worse than no alarm, because this one exists to make silent speaker-namespace
+                // laundering impossible to miss.
+                if !labelMap.isEmpty, labelMap[seg.speaker] == nil, !Self.isUnknown(seg.speaker) {
                     unmapped[chunk.index, default: []].insert(seg.speaker)
                 }
                 let globalSpeaker = labelMap[seg.speaker] ?? seg.speaker

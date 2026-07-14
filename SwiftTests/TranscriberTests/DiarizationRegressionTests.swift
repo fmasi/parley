@@ -75,3 +75,29 @@ import Testing
         )
     }
 }
+
+/// Model-free guards that DO run in CI.
+///
+/// The ground-truth AMI tests above cannot run in CI: the fixture is git-ignored and the ML models
+/// are not downloaded there, so both conditions are false and the suite reports green while
+/// asserting nothing. Without the assertions below, reverting `excludeOverlap` to `false` — the bug
+/// that collapsed every speaker into one for months — would ship with 700+ tests passing.
+///
+/// These take microseconds, need no models, and catch exactly that revert.
+@Suite struct DiarizationDefaultsTests {
+
+    @Test func shippingDefaultExcludesOverlap() {
+        #expect(
+            FluidAudioDiarizer().excludeOverlapSetting,
+            "excludeOverlap MUST default to true. false blends overlapping voices into every embedding and collapses all speakers into one cluster (AMI ES2004a: 1 speaker instead of 4)."
+        )
+    }
+
+    /// The config path must resolve nil to true as well — a default that only holds when constructed
+    /// directly is not a default.
+    @Test func configDefaultResolvesToExcludeOverlap() {
+        let config = Config.default
+        #expect(config.diarizationExcludeOverlap == nil)
+        #expect((config.diarizationExcludeOverlap ?? true) == true)
+    }
+}

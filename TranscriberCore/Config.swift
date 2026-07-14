@@ -86,7 +86,16 @@ public struct Config: Codable, Equatable, Sendable {
     public var diarizationClusteringThreshold: Double?
     /// Upper bound on diarized speakers per stream. nil = unbounded.
     public var diarizationMaxSpeakers: Int?
-    /// Exclude overlapped speech when computing speaker embeddings. Default false (historical).
+    /// Exclude overlapped speech when computing speaker embeddings. **Defaults to TRUE** (nil resolves
+    /// to true at every consumer). Do not set this to false.
+    ///
+    /// Including overlap makes every embedding a blend of whoever was talking, so they all converge
+    /// and the clusterer sees ONE speaker. Measured on AMI ES2004a, a 4-speaker reference meeting:
+    ///     false -> 1 speaker  (639 of 642 embeddings in a single cluster)
+    ///     true  -> 4 speakers (correct)
+    /// The old code forced false on the theory that a mixed mono stream is "all overlap"; that is
+    /// wrong (the mask marks frames where two SPEAKERS overlap) and it silently destroyed speaker
+    /// identity on every multi-party recording for months.
     public var diarizationExcludeOverlap: Bool?
     /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
     /// speaker embeddings are far more sensitive to that than speech intelligibility is.
