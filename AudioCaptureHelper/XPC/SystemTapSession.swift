@@ -72,6 +72,8 @@ final class SystemTapSession {
     /// historical behaviour. The converter normalizes to 48 kHz mono downstream either way; the
     /// point of pinning is that the samples ARRIVE at full rate instead of being lost first.
     private let pinnedSampleRate: Int?
+    /// Capture must not fall below this rate just because the user's headset went hands-free.
+    private let minimumCaptureRate = 48000
 
     /// Rate-drift watchdog. If the device silently changes rate underneath us (Bluetooth A2DP -> HFP
     /// is NOT a device change, so no output-switch listener fires), the IOProc keeps delivering
@@ -148,7 +150,33 @@ final class SystemTapSession {
         guard tap != kAudioObjectUnknown, let uuid else { throw SystemTapError.noTap }
 
         let output = Self.defaultOutputDevice()
-        guard output != kAudioObjectUnknown, let outUID = Self.deviceUID(output) else {
+        guard output != kAudioObjectUnknown, Self.deviceUID(output) != nil else {
+            throw SystemTapError.noDefaultOutput
+        }
+
+        // Choose the device that CLOCKS the capture aggregate.
+        //
+        // The tap is a global PROCESS tap: it carries the source audio at full rate (its own
+        // kAudioTapPropertyFormat reports 48 kHz) no matter what the user is listening on. But the
+        // aggregate is clocked by its main sub-device, and if that is a Bluetooth headset in HFP
+        // call mode the IOProc fires at the headset's 24 kHz cadence — so only half the frames ever
+        // arrive and the writer pads silence to hold the wall clock. Pinning the aggregate's nominal
+        // rate does NOT fix this (measured: it reports 48 kHz and still delivers 24 kHz).
+        //
+        // So when the default output is degraded, clock the aggregate off a full-rate device
+        // instead. The tap still captures everything (it is not bound to a device), it just gets
+        // carried on an undegraded clock. The user keeps listening on their headset; we simply stop
+        // letting their headset's limitations dictate what we record.
+        var anchor = output
+        if Self.deviceNominalRate(output) < Double(minimumCaptureRate),
+           let fullRate = Self.fullRateOutputDevice(minimum: Double(minimumCaptureRate)),
+           fullRate != output {
+            Logger.audio.info(
+                "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(Self.deviceNominalRate(output), privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
+            )
+            anchor = fullRate
+        }
+        guard let outUID = Self.deviceUID(anchor) else {
             throw SystemTapError.noDefaultOutput
         }
 
@@ -551,6 +579,55 @@ final class SystemTapSession {
             driftFirstHostNanos = hostNanos
             driftFrames = 0
         }
+    }
+
+    /// An output device running at or above `minimum` Hz, preferring the built-in one.
+    /// Used to clock the capture aggregate when the user's actual output device is degraded
+    /// (Bluetooth HFP), so a headset's bandwidth limit cannot dictate our recording quality.
+    static func fullRateOutputDevice(minimum: Double) -> AudioObjectID? {
+        var size = UInt32(0)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr, size > 0
+        else { return nil }
+
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        var devices = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr
+        else { return nil }
+
+        var candidate: AudioObjectID?
+        for device in devices where hasOutputStreams(device) && deviceNominalRate(device) >= minimum {
+            if isBuiltIn(device) { return device }   // built-in is the most reliable clock
+            if candidate == nil { candidate = device }
+        }
+        return candidate
+    }
+
+    private static func hasOutputStreams(_ device: AudioObjectID) -> Bool {
+        var size = UInt32(0)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr else { return false }
+        return size > 0
+    }
+
+    private static func isBuiltIn(_ device: AudioObjectID) -> Bool {
+        var transport = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &transport) == noErr
+        else { return false }
+        return transport == kAudioDeviceTransportTypeBuiltIn
     }
 
     /// Current nominal sample rate of a device — diagnostic only. Reveals when the output device
