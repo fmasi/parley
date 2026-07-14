@@ -26,8 +26,24 @@ import Testing
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    private static var canRun: Bool {
-        amiFixture != nil && FluidAudioDiarizer.isDiarizationCached()
+    /// The fixture is the only precondition we cannot satisfy ourselves. Models we CAN fetch —
+    /// see `ensureModels()`.
+    private static var canRun: Bool { amiFixture != nil }
+
+    /// Make the models available, downloading them when explicitly allowed to.
+    ///
+    /// CI sets `PARLEY_FETCH_MODELS=1`, so a missing model DOWNLOADS (~23 MB, ~6s) rather than
+    /// silently skipping the test — and a failed download throws, failing the build. Without that,
+    /// this guard skips in CI and the suite reports green while asserting nothing about speaker
+    /// separation, which is precisely how the excludeOverlap collapse survived for months.
+    ///
+    /// Locally, with no models and no opt-in, we return false and the test no-ops rather than
+    /// pulling 23 MB out from under someone running `swift test`.
+    private static func ensureModels() async throws -> Bool {
+        if FluidAudioDiarizer.isDiarizationCached() { return true }
+        guard ProcessInfo.processInfo.environment["PARLEY_FETCH_MODELS"] == "1" else { return false }
+        try await FluidAudioDiarizer.preDownloadModels()
+        return FluidAudioDiarizer.isDiarizationCached()
     }
 
     /// The regression that matters: 4 real speakers must not collapse into one.
@@ -38,6 +54,7 @@ import Testing
     @Test(.enabled(if: DiarizationRegressionTests.canRun))
     func findsMultipleSpeakersInFourSpeakerMeeting() async throws {
         let fixture = try #require(Self.amiFixture)
+        guard try await Self.ensureModels() else { return }
 
         let diarizer = FluidAudioDiarizer()   // stock config — this is the shipping default
         let result = try await diarizer.diarize(audioPath: fixture, numSpeakers: nil)
@@ -58,6 +75,7 @@ import Testing
     @Test(.enabled(if: DiarizationRegressionTests.canRun))
     func includingOverlapInEmbeddingsCollapsesSpeakers() async throws {
         let fixture = try #require(Self.amiFixture)
+        guard try await Self.ensureModels() else { return }
 
         let broken = FluidAudioDiarizer(excludeOverlap: false)
         let brokenResult = try await broken.diarize(audioPath: fixture, numSpeakers: nil)

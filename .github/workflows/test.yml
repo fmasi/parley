@@ -54,10 +54,11 @@ jobs:
       - name: Fetch AMI reference audio (4-speaker meeting)
         run: bash scripts/fetch-diarization-fixtures.sh
 
-      - name: Download diarization models
-        run: swift run Parley download-models
-
+      # PARLEY_FETCH_MODELS lets the test download the models itself (~23 MB, ~6s cold). We can't
+      # shell out to the app binary here: it's the GUI target, and a headless runner SIGKILLs it.
       - name: Verify the diarizer still separates 4 speakers
+        env:
+          PARLEY_FETCH_MODELS: "1"
         run: |
           swift test --filter DiarizationRegressionTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
