@@ -35,6 +35,23 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// the original bug survived.
     public nonisolated var excludeOverlapSetting: Bool { excludeOverlap }
 
+    /// The exact FluidAudio configuration this diarizer runs with — the single construction
+    /// point, used by `ensureLoaded()` AND by the golden-config snapshot test. Public so the
+    /// test snapshots the REAL config production builds, not a hand-rolled copy of it (a copy
+    /// is how TranscriptMerger shipped six passing tests and zero production bytes). Any change
+    /// to these values — ours or a FluidAudio default moving under a dependency bump — must
+    /// show up as a red diff against the checked-in golden.
+    public nonisolated func makeOfflineConfig() -> OfflineDiarizerConfig {
+        var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
+        if let clusteringThreshold {
+            config.clustering.threshold = clusteringThreshold
+        }
+        if let maxSpeakers {
+            config.clustering.maxSpeakers = maxSpeakers
+        }
+        return config
+    }
+
     public init(clusteringThreshold: Double? = nil, maxSpeakers: Int? = nil, excludeOverlap: Bool = true) {
         self.clusteringThreshold = clusteringThreshold
         self.maxSpeakers = maxSpeakers
@@ -123,13 +140,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
                 "Diarization: excludeOverlap is FALSE — speaker embeddings will blend overlapping voices and are expected to collapse into a single speaker. Measured on a 4-speaker reference meeting: 1 speaker instead of 4. Remove diarization_exclude_overlap from config.json."
             )
         }
-        var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
-        if let clusteringThreshold {
-            config.clustering.threshold = clusteringThreshold
-        }
-        if let maxSpeakers {
-            config.clustering.maxSpeakers = maxSpeakers
-        }
+        let config = makeOfflineConfig()
         Logger.transcription.info(
             "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(self.maxSpeakers.map(String.init) ?? "unset", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
         )

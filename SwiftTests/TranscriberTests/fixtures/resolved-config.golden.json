@@ -1,0 +1,65 @@
+{
+  "app_config_defaults": {
+    "archive_bitrate_kbps": 64,
+    "audio_archive_limit_hours": 15,
+    "calendar_lookahead_minutes": 10,
+    "chunk_duration_minutes": 30,
+    "chunk_processing_qos": "utility",
+    "engine": "<os-resolved: speechAnalyzer on macOS 26+, else fluidAudio>",
+    "launch_on_startup": true,
+    "merge_chunked_audio": true,
+    "model_update_check_enabled": false,
+    "output_format": "txt",
+    "recording_directory": "~/Documents/Recordings",
+    "silence_detection_enabled": true,
+    "silence_timeout_minutes": 5,
+    "suppress_capture_warning": false,
+    "system_audio_source": "sck"
+  },
+  "fluidaudio_offline_diarizer": {
+    "clustering": {
+      "maxSpeakers": null,
+      "minSpeakers": null,
+      "numSpeakers": null,
+      "threshold": 0.6,
+      "warmStartFa": 0.07,
+      "warmStartFb": 0.8
+    },
+    "embedding": {
+      "batchSize": 32,
+      "excludeOverlap": true,
+      "minSegmentDurationSeconds": 1.0,
+      "skipStrategy": "none"
+    },
+    "export": {
+      "embeddingsPath": null
+    },
+    "exposeChunkEmbeddings": false,
+    "postProcessing": {
+      "exclusiveSegments": true,
+      "minGapDurationSeconds": 0.1
+    },
+    "segmentation": {
+      "minDurationOff": 0.0,
+      "minDurationOn": 0.0,
+      "sampleRate": 16000,
+      "speechOffsetThreshold": 0.5,
+      "speechOnsetThreshold": 0.5,
+      "stepRatio": 0.2,
+      "windowDurationSeconds": 10.0
+    },
+    "vbx": {
+      "convergenceTolerance": 0.0001,
+      "maxIterations": 20
+    },
+    "zeroVoteReembed": {
+      "enabled": false,
+      "minDurationSeconds": 0.4
+    }
+  },
+  "resolved": {
+    "chunk_duration_minutes": 30,
+    "chunk_processing_qos": "utility",
+    "diarization_exclude_overlap": true
+  }
+}

@@ -41,7 +41,10 @@ let package = Package(
         .testTarget(
             name: "TranscriberTests",
             dependencies: ["TranscriberCore"],
-            path: "SwiftTests/TranscriberTests"
+            path: "SwiftTests/TranscriberTests",
+            // The golden-config snapshot is read via #filePath (and rewritten by UPDATE_GOLDEN=1),
+            // not through Bundle.module — excluded so SwiftPM doesn't warn about it.
+            exclude: ["fixtures"]
         ),
     ]
 )
