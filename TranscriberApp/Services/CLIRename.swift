@@ -21,10 +21,17 @@ enum CLIRename {
             throw RenameError.invalidJSON
         }
 
+        // `audio_paths` is [chunk0, chunk1, ...] for a chunked recording — not [system, mic].
+        // Resolve each sample onto the chunk that actually contains it (#132).
         let metadata = json["metadata"] as? [String: Any]
-        let audioPaths = metadata?["audio_paths"] as? [String] ?? []
-        let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
-        let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
+        let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
+        let chunkDurations: [TimeInterval] = {
+            if case .chunkedArchives(let chunks) = layout {
+                return SpeakerSampleLocator.durations(of: chunks)
+            }
+            return []
+        }()
 
         // Collect speakers — pick the longest segment per speaker for the best sample
         var candidatesBySpeaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
@@ -43,9 +50,31 @@ enum CLIRename {
         }
 
         let samples: [SpeakerSample] = orderedIds.compactMap { speaker in
-            guard let best = candidatesBySpeaker[speaker]?.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
-            let audioFile = best.source == "local" ? localAudio : remoteAudio
-            return SpeakerSample(id: speaker, sampleText: best.text, audioFile: audioFile, start: best.start, end: best.end)
+            // Prefer the longest segment, but fall back to shorter ones whose audio can actually
+            // be located — otherwise a speaker whose best sample sits in a later chunk gets
+            // silence instead of a voice.
+            guard let ranked = candidatesBySpeaker[speaker]?
+                .sorted(by: { ($0.end - $0.start) > ($1.end - $1.start) }), let best = ranked.first
+            else { return nil }
+
+            for candidate in ranked {
+                if let hit = SpeakerSampleLocator.locate(
+                    source: candidate.source,
+                    start: candidate.start,
+                    end: candidate.end,
+                    layout: layout,
+                    chunkDurations: chunkDurations
+                ) {
+                    return SpeakerSample(
+                        id: speaker, sampleText: candidate.text,
+                        audioFile: hit.url, start: hit.start, end: hit.end
+                    )
+                }
+            }
+            // No playable audio — still let the user rename, using the sample text alone.
+            return SpeakerSample(
+                id: speaker, sampleText: best.text, audioFile: nil, start: 0, end: 0
+            )
         }
 
         guard !samples.isEmpty else {

@@ -91,25 +91,18 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
               let segments = json["segments"] as? [[String: Any]]
         else { return [] }
 
-        // Build source→audio file mapping from metadata
+        // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
+        // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that
+        // actually contains them (#132).
         let metadata = json["metadata"] as? [String: Any]
-        let audioPaths = metadata?["audio_paths"] as? [String] ?? []
-
-        let remoteAudio: URL?
-        let localAudio: URL?
-
-        if audioPaths.count == 1, audioPaths[0].hasSuffix(".m4a") {
-            // Stereo AAC archive: single file serves both sources
-            // AVAudioPlayer plays stereo as-is (L=local, R=remote) — works for sample playback
-            let archivePath = URL(fileURLWithPath: audioPaths[0])
-            let exists = FileManager.default.fileExists(atPath: archivePath.path)
-            remoteAudio = exists ? archivePath : nil
-            localAudio = exists ? archivePath : nil
-        } else {
-            // Legacy dual WAV: first = system (remote), second = mic (local)
-            remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
-            localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
-        }
+        let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
+        let chunkDurations: [TimeInterval] = {
+            if case .chunkedArchives(let chunks) = layout {
+                return SpeakerSampleLocator.durations(of: chunks)
+            }
+            return []
+        }()
 
         struct CandidateSegment {
             let start: Double
@@ -148,21 +141,35 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
         return significantIds.map { speaker in
             let allCandidates = candidates[speaker] ?? []
-            // Pick the longest segments as samples (best chance of audible, identifiable speech)
-            let best = Array(allCandidates.sorted { $0.duration > $1.duration }.prefix(maxSamples))
+            // Prefer the longest segments (best chance of audible, identifiable speech), but only
+            // keep ones that actually resolve to playable audio — a sample whose audio can't be
+            // located is worse than a shorter one that can.
+            let ranked = allCandidates.sorted { $0.duration > $1.duration }
 
-            let samples = best.map { candidate in
-                let audioFile: URL? = {
-                    let file = candidate.source == "local" ? localAudio : remoteAudio
-                    guard let file, FileManager.default.fileExists(atPath: file.path) else { return nil }
-                    return file
-                }()
-                return SpeakerSample(
-                    text: candidate.text,
-                    audioFile: audioFile,
+            var samples: [SpeakerSample] = []
+            for candidate in ranked where samples.count < maxSamples {
+                guard let hit = SpeakerSampleLocator.locate(
+                    source: candidate.source,
                     start: candidate.start,
-                    end: candidate.end
-                )
+                    end: candidate.end,
+                    layout: layout,
+                    chunkDurations: chunkDurations
+                ) else { continue }
+                samples.append(SpeakerSample(
+                    text: candidate.text,
+                    audioFile: hit.url,
+                    start: hit.start,
+                    end: hit.end,
+                    isLocal: hit.isLocal
+                ))
+            }
+
+            // No playable audio at all (e.g. archives deleted by the storage quota): still offer
+            // the speaker for renaming, with the sample text, but no dead play button.
+            if samples.isEmpty {
+                samples = ranked.prefix(maxSamples).map {
+                    SpeakerSample(text: $0.text, audioFile: nil, start: 0, end: 0, isLocal: $0.source == "local")
+                }
             }
 
             return SpeakerEntry(

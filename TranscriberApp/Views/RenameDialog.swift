@@ -5,9 +5,15 @@ import os
 
 struct SpeakerSample {
     let text: String
+    /// Chunk file this sample lives in, already resolved — nil when no playable audio exists.
     let audioFile: URL?
+    /// Offsets WITHIN `audioFile`, not absolute transcript time (#132).
     let start: TimeInterval
     let end: TimeInterval
+    /// Which channel of the stereo archive holds this speaker (L = local/mic, R = remote/system).
+    /// Comes from the segment's `source`, not the display name — renaming a speaker must not
+    /// change which channel we read.
+    let isLocal: Bool
 }
 
 struct SpeakerEntry: Identifiable {
@@ -102,7 +108,7 @@ struct RenameDialog: View {
                             audioFile,
                             from: sample.start,
                             to: sample.end,
-                            isLocal: speakerId.hasPrefix("Local")
+                            isLocal: sample.isLocal
                         )
                     } label: {
                         Image(systemName: "play.circle.fill")
@@ -152,6 +158,7 @@ struct RenameDialog: View {
     }
 
     @State private var stopTimer: Timer?
+    @State private var previousPreview: URL?
 
     private func stopPlayback() {
         audioPlayer?.stop()
@@ -217,9 +224,12 @@ struct RenameDialog: View {
         }
         memcpy(dst, src, Int(stereoBuf.frameLength) * MemoryLayout<Float>.size)
 
-        // Write mono to temp WAV for AVAudioPlayer
-        let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("speaker-preview.wav")
-        try? FileManager.default.removeItem(at: tmpURL)
+        // Write mono to temp WAV for AVAudioPlayer. Unique per play: a fixed filename rewritten
+        // in place races with the player still reading the previous sample.
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speaker-preview-\(UUID().uuidString).wav")
+        previousPreview.map { try? FileManager.default.removeItem(at: $0) }
+        previousPreview = tmpURL
         do {
             let tmpFile = try AVAudioFile(forWriting: tmpURL, settings: monoFormat.settings)
             try tmpFile.write(from: monoBuf)
