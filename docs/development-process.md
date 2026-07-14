@@ -44,18 +44,45 @@ bugs *inside the code written to fix the previous bug*:
 
 Fix the must-list, then push.
 
-## 3. Then CI, and monitor it
+## 3. Then CI, and monitor it — but bound the review loop
 
-Push, open the PR, watch the checks. Resolve anything pertinent — including the review bot's, using
-judgment (it catches real issues but also chases doc staleness).
+Push, open the PR, watch the checks. Resolve what's *pertinent*. The load-bearing word is
+pertinent, because an automated reviewer has a structural bias you must counter:
 
-CI must be able to catch the class of bug you just fixed. If it can't, **that is part of the fix**:
-the `diarization-guard` job exists because the regression tests skipped silently in CI, so the suite
-reported green while asserting nothing about speaker separation.
+**The review bot only ever adds code.** Its incentive is to find something to say, and "find
+something" almost always resolves to "add a guard / handle this edge / distinguish that case."
+It will never tell you to delete a line or that the change is simpler than you made it. Comply
+uncritically and a bug fix grows into defensive sprawl across many rounds — and more lines is
+more surface for the *next* bug, which is the disease, not the cure. With an AI author this is
+acute: the agent will cheerfully generate code for every suggestion.
+
+So apply a filter, the same one you'd apply to your own code:
+
+- **A finding is fixed only if it reduces expected harm more than the code it adds.** "Cheap to
+  fix" is not the bar. Net-negative lines, or a real bug, is the bar.
+- **If a finding cannot be reduced to a test that goes RED without the fix, it is an opinion, not
+  a defect** — and opinions must not cost lines. Reply, don't patch.
+- **The severity should be falling each round.** If round N is finding smaller things than round
+  N-1, the bot is converging — stop when it reaches nitpicks, don't chase it to zero. Endlessly
+  satisfying a reviewer that cannot say "enough" is how a PR never merges.
+
+CI itself must be able to catch the class of bug you just fixed. If it can't, **that is part of
+the fix** — the `diarization-guard` job exists because the regression tests skipped silently in
+CI, so the suite reported green while asserting nothing.
 
 **What CI cannot cover:** anything needing real audio hardware — the capture path, Bluetooth/HFP
-behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac, and
-the measurements belong in the commit message.
+behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,
+and the measurements belong in the commit message.
+
+## 3a. Then a simplification pass — the only step that removes
+
+Nothing above removes code. The council adds findings, the bot adds guards, the author adds
+features. Before merge, run one pass whose *only* permitted output is deletion or consolidation:
+duplicated logic collapsed, dead branches removed, a guard that a type could enforce instead,
+three checks that were really one. If it can't be made smaller, that's a fine answer — but the
+question has to be asked by someone, because no other step in the loop asks it.
+
+Less code is the goal, not a side effect. Every line is a liability the product carries forever.
 
 ## 4. Device-test before merge
 
