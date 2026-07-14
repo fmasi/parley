@@ -273,7 +273,7 @@ struct MenuView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.directoryURL = URL(fileURLWithPath: configManager.config.recordingDirectory)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()  // macOS 14+ replacement for the deprecated ignoringOtherApps: form
         return panel.runModal() == .OK ? panel.url : nil
     }
 
