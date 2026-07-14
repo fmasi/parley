@@ -33,9 +33,11 @@ enum CLIRename {
             return []
         }()
 
-        // Collect speakers — pick the longest segment per speaker for the best sample
-        var candidatesBySpeaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
+        // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
+        // clean speech from crosstalk.
+        var allCandidates: [SpeakerSampleSelector.Candidate] = []
         var orderedIds: [String] = []
+        var seen = Set<String>()
 
         for seg in segments {
             guard let speaker = seg["speaker"] as? String,
@@ -44,18 +46,19 @@ enum CLIRename {
                   let end = seg["end"] as? Double else { continue }
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            if candidatesBySpeaker[speaker] == nil { orderedIds.append(speaker) }
+            if seen.insert(speaker).inserted { orderedIds.append(speaker) }
             let source = seg["source"] as? String ?? "remote"
-            candidatesBySpeaker[speaker, default: []].append((trimmed, start, end, source))
+            allCandidates.append(SpeakerSampleSelector.Candidate(
+                speaker: speaker, start: start, end: end, source: source, text: trimmed
+            ))
         }
 
         let samples: [SpeakerSample] = orderedIds.compactMap { speaker in
-            // Prefer the longest segment, but fall back to shorter ones whose audio can actually
-            // be located — otherwise a speaker whose best sample sits in a later chunk gets
-            // silence instead of a voice.
-            guard let ranked = candidatesBySpeaker[speaker]?
-                .sorted(by: { ($0.end - $0.start) > ($1.end - $1.start) }), let best = ranked.first
-            else { return nil }
+            // Isolated speech first, then longest — the longest segment is very often the one
+            // this speaker was talked over in. Then fall back through the ranking until one
+            // actually resolves to playable audio.
+            let ranked = SpeakerSampleSelector.rank(speaker: speaker, allSegments: allCandidates)
+            guard let best = ranked.first else { return nil }
 
             for candidate in ranked {
                 if let hit = SpeakerSampleLocator.locate(

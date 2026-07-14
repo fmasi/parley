@@ -104,16 +104,10 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             return []
         }()
 
-        struct CandidateSegment {
-            let start: Double
-            let end: Double
-            let source: String
-            let text: String
-            var duration: Double { end - start }
-        }
-
-        // Collect all segments per speaker
-        var candidates: [String: [CandidateSegment]] = [:]
+        // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
+        // clean speech from crosstalk.
+        var allCandidates: [SpeakerSampleSelector.Candidate] = []
+        var segmentCounts: [String: Int] = [:]
         var orderedIds: [String] = []
 
         for seg in segments {
@@ -123,12 +117,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                   let end = seg["end"] as? Double else { continue }
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            if candidates[speaker] == nil {
-                orderedIds.append(speaker)
-                candidates[speaker] = []
-            }
+            if segmentCounts[speaker] == nil { orderedIds.append(speaker) }
+            segmentCounts[speaker, default: 0] += 1
             let source = seg["source"] as? String ?? "remote"
-            candidates[speaker]?.append(CandidateSegment(start: start, end: end, source: source, text: trimmed))
+            allCandidates.append(SpeakerSampleSelector.Candidate(
+                speaker: speaker, start: start, end: end, source: source, text: trimmed
+            ))
         }
 
         let maxSamples = 3
@@ -136,15 +130,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
         // Filter out noise speakers (< minSegments) — they're usually diarization artifacts.
         // Fall back to unfiltered list if filtering would remove all speakers (e.g. short transcripts).
-        let filteredIds = orderedIds.filter { (candidates[$0]?.count ?? 0) >= minSegments }
+        let filteredIds = orderedIds.filter { (segmentCounts[$0] ?? 0) >= minSegments }
         let significantIds = filteredIds.isEmpty ? orderedIds : filteredIds
 
         return significantIds.map { speaker in
-            let allCandidates = candidates[speaker] ?? []
-            // Prefer the longest segments (best chance of audible, identifiable speech), but only
-            // keep ones that actually resolve to playable audio — a sample whose audio can't be
-            // located is worse than a shorter one that can.
-            let ranked = allCandidates.sorted { $0.duration > $1.duration }
+            // Isolated speech first, then longest — a sample exists to let a human recognise ONE
+            // voice, and the longest segment is very often the one they were talked over in.
+            let ranked = SpeakerSampleSelector.rank(speaker: speaker, allSegments: allCandidates)
 
             var samples: [SpeakerSample] = []
             for candidate in ranked where samples.count < maxSamples {
