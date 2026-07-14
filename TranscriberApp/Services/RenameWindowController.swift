@@ -10,18 +10,24 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
     private var onDismissCallback: (() -> Void)?
+    /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
+    /// cannot both reach `present()` and leave an orphaned panel on screen.
+    private var showTask: Task<Void, Never>?
 
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
-        // Close any existing panel
+        // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
+        // cannot both reach present() and orphan a window.
+        showTask?.cancel()
         panel?.close()
 
         // parseSpeakers opens an AVAudioFile per chunk to measure durations — O(N) file opens, which
         // visibly stalls the menu bar before the window appears (worst on a network-mounted or cold
         // recordings folder). Do it off the main actor, then present.
-        Task { @MainActor in
+        showTask = Task { @MainActor in
             let speakers = await Task.detached(priority: .userInitiated) {
                 Self.parseSpeakers(from: jsonPath)
             }.value
+            guard !Task.isCancelled else { return }
             guard !speakers.isEmpty else {
                 Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .private)")
                 let alert = NSAlert()

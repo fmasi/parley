@@ -79,16 +79,12 @@ final class SystemTapSession {
     /// correct duration, corrupt content. Nothing in the pipeline noticed. Compare delivered frames
     /// against elapsed host time and surface it.
     ///
-    /// Scoped to an aggregate GENERATION, not the session. A rebuild (output switch) has a dead
-    /// window of several hundred ms with no frames while the host clock keeps running — that reads
-    /// as a frame deficit and would false-fire on a HEALTHY recording, and because reporting latches,
-    /// the watchdog would then be disarmed for the rest of the meeting. The natural sequence
-    /// (connect AirPods -> join call -> HFP engages) would spend the alarm on the connect and stay
-    /// silent for the real degradation. Reset on every teardown so each generation is judged against
-    /// its own declared rate.
-    private var driftFirstHostNanos: UInt64 = 0
-    private var driftFrames: Int = 0
-    private var driftReported = false
+    /// Rate-drift state machine (extracted + unit-tested in `RateDriftMonitor`). Scoped to an
+    /// aggregate GENERATION, not the session: a rebuild has a dead window with no frames while the
+    /// host clock runs, which reads as a frame deficit — so it must be `reset()` on every teardown,
+    /// or it false-fires on the rebuild and then latches itself off for the rest of the meeting.
+    /// Mutated only under `stateLock`.
+    private var driftMonitor = RateDriftMonitor()
 
     init(deliveryQueue: DispatchQueue, onSamples: @escaping ([Int16], CMTime) -> Void) {
         self.deliveryQueue = deliveryQueue
@@ -351,12 +347,9 @@ final class SystemTapSession {
             // if the new output device differs, e.g. speakers -> AirPods).
             tapFormat = nil
             bytesPerFrame = 0
-            // Reset the drift window with the format, under the same lock: the next generation must
-            // not be judged against frames delivered by the previous one, at the previous rate,
-            // across a dead rebuild window.
-            driftFirstHostNanos = 0
-            driftFrames = 0
-            driftReported = false
+            // Reset the monitor under the same lock: the next generation must not be judged against
+            // frames delivered by the previous one, across a dead rebuild window.
+            driftMonitor.reset()
             return (a, p)
         }
         // Concurrency note (#112): the IOProc block runs on `deliveryQueue`, a different queue from
@@ -541,43 +534,10 @@ final class SystemTapSession {
     private func checkRateDrift(frames: Int, declaredRate: Double, hostNanos: UInt64) {
         guard declaredRate > 0 else { return }
 
-        // ONE lock acquisition for the WHOLE decision — accumulate, judge, and latch together.
-        //
-        // Splitting this across two `sync` blocks reopens the window it was meant to close: a
-        // teardown landing between them either zeroes driftFrames under a stale `elapsed` (ratio
-        // 0.0 → spurious alarm on an intentional stop), or resets `driftReported = false` only for
-        // this block to set it `true` again — permanently disarming the watchdog for the NEW
-        // aggregate generation. Both bugs were introduced by treating the latch as a separate step;
-        // the state machine has to advance atomically.
-        enum Verdict { case drift(effectiveRate: Double, ratio: Double), healthy, notYet }
-
-        let verdict: Verdict = stateLock.sync {
-            guard !driftReported else { return .notYet }
-            driftFrames += frames
-            if driftFirstHostNanos == 0 {
-                // Anchor the window on the FIRST callback and count its frames too — measuring
-                // elapsed from callback 0 while counting frames from callback 1 would under-count
-                // the rate by one buffer.
-                driftFirstHostNanos = hostNanos
-                return .notYet
-            }
-            let elapsed = Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000
-            // Need a decent window before judging: startup jitter and drift compensation settle out.
-            guard elapsed >= 5 else { return .notYet }
-
-            let effectiveRate = Double(driftFrames) / elapsed
-            let ratio = effectiveRate / declaredRate
-            // Band must be tight enough to see a 44.1/48 mismatch (ratio 0.919), which the original
-            // 0.9-1.1 window structurally could not.
-            if ratio < 0.95 || ratio > 1.05 {
-                driftReported = true
-                return .drift(effectiveRate: effectiveRate, ratio: ratio)
-            }
-            // Healthy: slide the window forward so a rate change LATER in the meeting is still
-            // caught, rather than latching an early verdict.
-            driftFirstHostNanos = hostNanos
-            driftFrames = 0
-            return .healthy
+        // ONE lock acquisition for the WHOLE decision — the monitor's accumulate/judge/latch must
+        // advance atomically, or a teardown landing mid-decision reopens the exact race this closes.
+        let verdict = stateLock.sync {
+            driftMonitor.record(frames: frames, declaredRate: declaredRate, hostNanos: hostNanos)
         }
 
         guard case .drift(let effectiveRate, let ratio) = verdict else { return }

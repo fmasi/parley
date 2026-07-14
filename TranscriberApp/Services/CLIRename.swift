@@ -115,10 +115,15 @@ enum CLIRename {
             print()
         }
 
-        // Apply renames if any were made
+        // Apply renames if any were made. Report honestly — a "success" line after a failed write
+        // is the silent-wrong-answer this whole product exists to avoid (the GUI path is atomic +
+        // surfaced for the same reason).
         if !mapping.isEmpty {
-            applyRenames(mapping, jsonPath: jsonPath)
-            print("Speaker names updated in: \(jsonPath.lastPathComponent)")
+            if applyRenames(mapping, jsonPath: jsonPath) {
+                print("Speaker names updated in: \(jsonPath.lastPathComponent)")
+            } else {
+                print("Error: could not write speaker names to \(jsonPath.lastPathComponent). Nothing was saved.")
+            }
         }
 
         // Generate format file
@@ -165,14 +170,15 @@ enum CLIRename {
         player.stop()
     }
 
-    private static func applyRenames(_ mapping: [String: String], jsonPath: URL) {
+    @discardableResult
+    private static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         do {
             let data = try Data(contentsOf: jsonPath)
             guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   var segments = json["segments"] as? [[String: Any]]
             else {
                 Logger.files.error("Failed to parse JSON for rename: \(jsonPath.lastPathComponent, privacy: .private)")
-                return
+                return false
             }
 
             for i in segments.indices {
@@ -191,8 +197,10 @@ enum CLIRename {
                 withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
             )
             try updatedData.write(to: jsonPath, options: .atomic)
+            return true
         } catch {
             Logger.files.error("Failed to apply renames: \(error, privacy: .public)")
+            return false
         }
     }
 
