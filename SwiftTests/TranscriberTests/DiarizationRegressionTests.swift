@@ -1,0 +1,77 @@
+import Foundation
+import Testing
+@testable import TranscriberCore
+
+/// End-to-end diarization quality guard, run against reference audio with known ground truth.
+///
+/// Every prior device test was a 1:1 call. Local and remote are captured on separate channels, so
+/// a two-party call has exactly ONE remote speaker — remote clustering could collapse completely
+/// and the transcript would still look perfect. That blind spot let `embeddingExcludeOverlap: false`
+/// ship: it blended overlapping voices into every embedding, so all speakers merged into one, and
+/// nothing in the suite noticed.
+///
+/// A multi-speaker fixture is the only thing that catches this class of bug. Fetch it with:
+///     bash scripts/fetch-diarization-fixtures.sh
+/// Tests skip cleanly (rather than fail) when the fixture or the ML models are absent, so CI and
+/// fresh checkouts stay green.
+@Suite struct DiarizationRegressionTests {
+
+    /// AMI ES2004a: a scenario meeting from the AMI Meeting Corpus with exactly 4 participants.
+    private static var amiFixture: URL? {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // TranscriberTests
+            .deletingLastPathComponent()   // SwiftTests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("fixtures/diarization/ES2004a.Mix-Headset.wav")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private static var canRun: Bool {
+        amiFixture != nil && FluidAudioDiarizer.isDiarizationCached()
+    }
+
+    /// The regression that matters: 4 real speakers must not collapse into one.
+    ///
+    /// Measured on this exact file:
+    ///   excludeOverlap = false (the shipped bug) -> 1 speaker  (639/642 embeddings in one cluster)
+    ///   excludeOverlap = true  (correct default) -> 4 speakers (cluster sizes 226/170/91/51)
+    @Test(.enabled(if: DiarizationRegressionTests.canRun))
+    func findsMultipleSpeakersInFourSpeakerMeeting() async throws {
+        let fixture = try #require(Self.amiFixture)
+
+        let diarizer = FluidAudioDiarizer()   // stock config — this is the shipping default
+        let result = try await diarizer.diarize(audioPath: fixture, numSpeakers: nil)
+
+        let speakers = Set(result.segments.map(\.speaker))
+        #expect(!result.segments.isEmpty, "diarizer returned no segments")
+
+        // Ground truth is 4. Assert >= 3 rather than == 4: the point of this guard is to catch
+        // catastrophic collapse, not to pin an exact DER that a model update may legitimately move.
+        #expect(
+            speakers.count >= 3,
+            "Expected ~4 speakers in a 4-speaker meeting, got \(speakers.count). A count of 1 means speaker embeddings collapsed — check embeddingExcludeOverlap in FluidAudioDiarizer."
+        )
+    }
+
+    /// Guards the specific misconfiguration that caused the collapse, so nobody reintroduces it
+    /// on the theory that overlap should be included on mixed mono streams.
+    @Test(.enabled(if: DiarizationRegressionTests.canRun))
+    func includingOverlapInEmbeddingsCollapsesSpeakers() async throws {
+        let fixture = try #require(Self.amiFixture)
+
+        let broken = FluidAudioDiarizer(excludeOverlap: false)
+        let brokenResult = try await broken.diarize(audioPath: fixture, numSpeakers: nil)
+        let brokenCount = Set(brokenResult.segments.map(\.speaker)).count
+
+        let correct = FluidAudioDiarizer(excludeOverlap: true)
+        let correctResult = try await correct.diarize(audioPath: fixture, numSpeakers: nil)
+        let correctCount = Set(correctResult.segments.map(\.speaker)).count
+
+        // Documents the failure mode rather than merely asserting the fix: including overlap
+        // strictly loses speakers, because each embedding becomes a blend of the voices present.
+        #expect(
+            correctCount > brokenCount,
+            "excludeOverlap=true should recover speakers that excludeOverlap=false merges (got \(correctCount) vs \(brokenCount))"
+        )
+    }
+}

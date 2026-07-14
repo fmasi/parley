@@ -57,3 +57,6 @@ docs/asr-news/
 
 # Claude Code local config, worktrees, and build junk
 .claude/
+
+# Diarization reference audio (33 MB) — fetch via scripts/fetch-diarization-fixtures.sh
+fixtures/
