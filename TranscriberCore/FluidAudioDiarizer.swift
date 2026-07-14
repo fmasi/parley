@@ -8,7 +8,32 @@ import FluidAudio
 public actor FluidAudioDiarizer: DiarizationProvider {
     private var manager: OfflineDiarizerManager?
 
-    public init() {}
+    /// Euclidean distance threshold for unit-normalized embeddings. LOWER = stricter = more
+    /// speakers kept apart; HIGHER = more merging. nil uses FluidAudio's default (0.6).
+    ///
+    /// Exposed because the default under-clusters real conference calls: on a 5-speaker call
+    /// over compressed Meet audio, one cluster absorbed 28.7 of 51 minutes and a participant
+    /// who genuinely spoke got no cluster at all.
+    private let clusteringThreshold: Double?
+    /// Upper bound on speakers. Helps VBx when the true count is known.
+    private let maxSpeakers: Int?
+
+    /// Whether to EXCLUDE overlapped speech when computing speaker embeddings.
+    ///
+    /// MUST default to true (FluidAudio's own default). Setting it false was catastrophic: an
+    /// embedding computed over a window containing two voices is a blend of both, so with overlap
+    /// included EVERY embedding converges and the clusterer sees a single speaker.
+    ///
+    /// Measured on AMI ES2004a (a 4-speaker reference meeting, clean audio):
+    ///   excludeOverlap = false -> 1 speaker  (639 of 642 embeddings in one cluster)
+    ///   excludeOverlap = true  -> 4 speakers (correct; healthy cluster sizes 226/170/91/51)
+    private let excludeOverlap: Bool
+
+    public init(clusteringThreshold: Double? = nil, maxSpeakers: Int? = nil, excludeOverlap: Bool = true) {
+        self.clusteringThreshold = clusteringThreshold
+        self.maxSpeakers = maxSpeakers
+        self.excludeOverlap = excludeOverlap
+    }
 
     public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
@@ -82,10 +107,21 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading FluidAudio diarization models from cache...")
 
-        // false = include overlap embeddings. On mixed mono streams (Zoom/Teams system audio)
-        // all remote speech is technically "overlapping", so the default true masks most embeddings
-        // and collapses remote speakers into one cluster.
-        let config = OfflineDiarizerConfig(embeddingExcludeOverlap: false)
+        // Exclude overlapped speech from embeddings (FluidAudio's default). The previous code
+        // forced this to false, on the theory that on a mixed mono stream "all remote speech is
+        // technically overlapping" so the mask would discard most embeddings. That reasoning is
+        // wrong -- the mask marks frames where two SPEAKERS overlap, not merely remote speech --
+        // and the override caused exactly the collapse it was meant to avoid (see excludeOverlap).
+        var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
+        if let clusteringThreshold {
+            config.clustering.threshold = clusteringThreshold
+        }
+        if let maxSpeakers {
+            config.clustering.maxSpeakers = maxSpeakers
+        }
+        Logger.transcription.info(
+            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(self.maxSpeakers.map(String.init) ?? "unset", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
+        )
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
 

@@ -28,6 +28,9 @@ final class TranscriptionRunner {
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
+    /// False once a caller injects its own provider (tests, disableDiarization), so config
+    /// changes never clobber an explicitly-set diarizer.
+    private var diarizerIsDefault = true
     private let vadSpeechMap = VadSpeechMap()
 
     private(set) var chunkRotator: ChunkRotator?
@@ -45,6 +48,7 @@ final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
+        applyDiarizerConfig(config)
 
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
@@ -195,7 +199,8 @@ final class TranscriptionRunner {
             let archived = await AudioArchiver.archiveAll(
                 pairs: contributingPairs,
                 outputDirectory: outputDirectory,
-                bitrateKbps: config.archiveBitrateKbps
+                bitrateKbps: config.archiveBitrateKbps,
+                preserveSourceWAV: config.preserveSourceWAV ?? false
             )
             TranscriptAssembler.reconcileAudioPaths(in: jsonPath, to: archived)
             Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
@@ -377,6 +382,7 @@ final class TranscriptionRunner {
             transcriber = try createEngine(for: engineID, config: config)
             lastEngineID = engineID
         }
+        applyDiarizerConfig(config)
 
         guard let transcriber else {
             throw RunnerError.failed("Failed to initialize transcription engine")
@@ -426,10 +432,23 @@ final class TranscriptionRunner {
 
     func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
+        self.diarizerIsDefault = false
     }
 
     func disableDiarization() {
         self.diarizer = nil
+        self.diarizerIsDefault = false
+    }
+
+    /// Rebuild the default diarizer from config so clustering tuning actually reaches FluidAudio.
+    /// The diarizer is constructed at init, before any config exists, so this must run per-job.
+    private func applyDiarizerConfig(_ config: Config) {
+        guard diarizerIsDefault else { return }
+        diarizer = FluidAudioDiarizer(
+            clusteringThreshold: config.diarizationClusteringThreshold,
+            maxSpeakers: config.diarizationMaxSpeakers,
+            excludeOverlap: config.diarizationExcludeOverlap ?? true
+        )
     }
 
     // MARK: - Private

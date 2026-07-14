@@ -177,13 +177,15 @@ final class ChunkProcessor {
                     systemAudio: systemURL,
                     micAudio: micURL,
                     outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps
+                    bitrateKbps: config.archiveBitrateKbps,
+                    preserveSourceWAV: config.preserveSourceWAV ?? false
                 )
             } else {
                 archiveResult = try await AudioArchiver.archiveSystemOnly(
                     systemAudio: systemURL,
                     outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps
+                    bitrateKbps: config.archiveBitrateKbps,
+                    preserveSourceWAV: config.preserveSourceWAV ?? false
                 )
             }
             audioPath = archiveResult.archivePath.lastPathComponent

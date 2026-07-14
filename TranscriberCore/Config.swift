@@ -81,6 +81,16 @@ public struct Config: Codable, Equatable, Sendable {
     public var engine: EngineID
     public var systemAudioSource: SystemAudioSource
     public var vadSpeechThreshold: Double?
+    /// Diarization clustering distance threshold (Euclidean, unit-normalized embeddings).
+    /// LOWER = stricter = keeps speakers apart; HIGHER = merges them. nil = FluidAudio default (0.6).
+    public var diarizationClusteringThreshold: Double?
+    /// Upper bound on diarized speakers per stream. nil = unbounded.
+    public var diarizationMaxSpeakers: Int?
+    /// Exclude overlapped speech when computing speaker embeddings. Default false (historical).
+    public var diarizationExcludeOverlap: Bool?
+    /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
+    /// speaker embeddings are far more sensitive to that than speech intelligibility is.
+    public var preserveSourceWAV: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -125,6 +135,10 @@ public struct Config: Codable, Equatable, Sendable {
         engine: .resolvedDefault,
         systemAudioSource: .screenCaptureKit,
         vadSpeechThreshold: nil,
+        diarizationClusteringThreshold: nil,
+        diarizationMaxSpeakers: nil,
+        diarizationExcludeOverlap: nil,
+        preserveSourceWAV: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -149,6 +163,10 @@ public struct Config: Codable, Equatable, Sendable {
         engine: EngineID = .resolvedDefault,
         systemAudioSource: SystemAudioSource = .screenCaptureKit,
         vadSpeechThreshold: Double? = nil,
+        diarizationClusteringThreshold: Double? = nil,
+        diarizationMaxSpeakers: Int? = nil,
+        diarizationExcludeOverlap: Bool? = nil,
+        preserveSourceWAV: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -171,6 +189,10 @@ public struct Config: Codable, Equatable, Sendable {
         self.engine = engine
         self.systemAudioSource = systemAudioSource
         self.vadSpeechThreshold = vadSpeechThreshold
+        self.diarizationClusteringThreshold = diarizationClusteringThreshold
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
+        self.diarizationExcludeOverlap = diarizationExcludeOverlap
+        self.preserveSourceWAV = preserveSourceWAV
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -195,6 +217,10 @@ public struct Config: Codable, Equatable, Sendable {
         case engine
         case systemAudioSource = "system_audio_source"
         case vadSpeechThreshold = "vad_speech_threshold"
+        case diarizationClusteringThreshold = "diarization_clustering_threshold"
+        case diarizationMaxSpeakers = "diarization_max_speakers"
+        case diarizationExcludeOverlap = "diarization_exclude_overlap"
+        case preserveSourceWAV = "preserve_source_wav"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -220,6 +246,10 @@ public struct Config: Codable, Equatable, Sendable {
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         systemAudioSource = try c.decodeIfPresent(SystemAudioSource.self, forKey: .systemAudioSource) ?? .screenCaptureKit
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
+        diarizationClusteringThreshold = try c.decodeIfPresent(Double.self, forKey: .diarizationClusteringThreshold)
+        diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
+        diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
+        preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
