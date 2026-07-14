@@ -67,9 +67,30 @@ final class SystemTapSession {
     /// Private aggregate UID prefix — also used to sweep orphans from a prior crash on startup.
     private static let aggregateUIDPrefix = "eu.fmasi.parley.system-tap."
 
-    init(deliveryQueue: DispatchQueue, onSamples: @escaping ([Int16], CMTime) -> Void) {
+    /// Rate to pin the capture aggregate to, so the recording does not inherit a degraded output
+    /// device rate (AirPods in HFP call mode drop to 24 kHz). nil = follow the output device, the
+    /// historical behaviour. The converter normalizes to 48 kHz mono downstream either way; the
+    /// point of pinning is that the samples ARRIVE at full rate instead of being lost first.
+    private let pinnedSampleRate: Int?
+
+    /// Rate-drift watchdog. If the device silently changes rate underneath us (Bluetooth A2DP -> HFP
+    /// is NOT a device change, so no output-switch listener fires), the IOProc keeps delivering
+    /// against a stale format: fewer frames arrive than the declared rate implies, the writer pads
+    /// silence to hold the wall clock, and the result is 2x-fast speech interleaved with gaps —
+    /// correct duration, corrupt content. Nothing in the pipeline noticed. Compare delivered frames
+    /// against elapsed host time and surface it.
+    private var driftFirstHostNanos: UInt64 = 0
+    private var driftFrames: Int = 0
+    private var driftReported = false
+
+    init(
+        deliveryQueue: DispatchQueue,
+        onSamples: @escaping ([Int16], CMTime) -> Void,
+        pinnedSampleRate: Int? = 48000
+    ) {
         self.deliveryQueue = deliveryQueue
         self.onSamples = onSamples
+        self.pinnedSampleRate = pinnedSampleRate
     }
 
     // stop() (not just stopDeviceMonitoring) so a partial start() failure — createTap() succeeds but
@@ -151,6 +172,36 @@ final class SystemTapSession {
             throw SystemTapError.aggregateCreateFailed(aggSt)
         }
 
+        // Decouple capture quality from the OUTPUT device's rate.
+        //
+        // We use a global PROCESS tap, so the source audio (Meet/Zoom/Teams) is rendered at full
+        // rate regardless of what the user is listening on. But we read that tap through an
+        // aggregate anchored to the default output device, so the delivered format follows THAT
+        // device — and Bluetooth Classic cannot run A2DP (48 kHz out) and HFP (mic) at once, so the
+        // moment the user's headset mic is engaged the output device drops to 24 kHz and takes our
+        // capture down with it. The remote participants' audio is then permanently recorded at
+        // hands-free quality, even though the high-rate source was available all along.
+        //
+        // Pin the aggregate to the capture rate so the tap's audio is resampled to it rather than
+        // inheriting a degraded device rate. Best-effort: if the HAL refuses, we fall through to
+        // the previous behaviour (read whatever the aggregate reports) and log it.
+        if let pinned = pinnedSampleRate {
+            var rate = Float64(pinned)
+            var rateAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            let setSt = AudioObjectSetPropertyData(
+                agg, &rateAddr, 0, nil, UInt32(MemoryLayout<Float64>.size), &rate)
+            if setSt == noErr {
+                Logger.audio.info("System tap: pinned aggregate rate to \(pinned, privacy: .public)Hz")
+            } else {
+                Logger.audio.warning(
+                    "System tap: could not pin aggregate rate to \(pinned, privacy: .public)Hz (OSStatus \(setSt, privacy: .public)) — capture will follow the output device"
+                )
+            }
+        }
+
         // The format the IOProc actually delivers is the AGGREGATE's input-stream format, which follows
         // the output device's rate — e.g. it drops to 24 kHz when AirPods switch to call/hands-free mode.
         // The tap's own `kAudioTapPropertyFormat` can report a DIFFERENT (higher) rate; trusting it made
@@ -177,6 +228,12 @@ final class SystemTapSession {
         }
         if let aggFmt {
             asbd = aggFmt
+            // Diagnostic: the rate story in one line. `tap` is the source's own rate; `aggregate`
+            // is what we will actually receive. They diverge exactly when the output device is
+            // degraded (AirPods HFP), which is the quality loss we are trying to eliminate.
+            Logger.audio.info(
+                "System tap rates — tap: \(tapFmtOK ? tapFmt.mSampleRate : 0, privacy: .public)Hz, aggregate(delivered): \(aggFmt.mSampleRate, privacy: .public)Hz, output device: \(Self.deviceNominalRate(output), privacy: .public)Hz"
+            )
             if tapFmtOK, tapFmt.mSampleRate != aggFmt.mSampleRate {
                 Logger.audio.warning("System tap: aggregate delivers \(aggFmt.mSampleRate)Hz but tap reports \(tapFmt.mSampleRate)Hz — using aggregate rate (avoids chipmunk)")
             }
@@ -347,6 +404,13 @@ final class SystemTapSession {
         }
         guard !samples.isEmpty else { return }
 
+        // Watchdog: delivered frames vs wall clock. A sustained shortfall means the declared format
+        // no longer matches what the device is really producing.
+        checkRateDrift(frames: frames, declaredRate: format.sampleRate, hostNanos: {
+            let h = inInputTime.pointee.mHostTime
+            return h != 0 ? AudioConvertHostTimeToNanos(h) : AudioConvertHostTimeToNanos(mach_absolute_time())
+        }())
+
         // PTS on the mach host clock — same epoch as the mic's AVCapture sample PTS, so the shared
         // timeline anchor in AudioOutputHandler aligns the two sources. Fall back to "now" if the IO
         // timestamp lacks a valid host time.
@@ -451,6 +515,56 @@ final class SystemTapSession {
         var addr = defaultOutputAddress
         let st = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
         return st == noErr ? id : AudioObjectID(kAudioObjectUnknown)
+    }
+
+    /// Compare frames actually delivered against elapsed wall time. Runs on the audio queue, so it
+    /// does only integer arithmetic. Reports once per session — this is a persistent condition, not
+    /// a transient glitch, and the recording is already compromised by the time we can tell.
+    private func checkRateDrift(frames: Int, declaredRate: Double, hostNanos: UInt64) {
+        guard declaredRate > 0, !driftReported else { return }
+        if driftFirstHostNanos == 0 {
+            driftFirstHostNanos = hostNanos
+            return
+        }
+        driftFrames += frames
+        let elapsed = Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000
+        // Need a decent window before judging: startup jitter and drift compensation settle out.
+        guard elapsed >= 5 else { return }
+
+        let effectiveRate = Double(driftFrames) / elapsed
+        let ratio = effectiveRate / declaredRate
+        if ratio < 0.9 || ratio > 1.1 {
+            driftReported = true
+            Logger.audio.error(
+                """
+                System tap RATE DRIFT: declared \(declaredRate, privacy: .public)Hz but device is                 delivering ~\(Int(effectiveRate), privacy: .public)Hz (\(Int(ratio * 100), privacy: .public)%).                 The output device changed rate underneath the tap — remote audio is being captured at the                 wrong rate and padded to fit. Output device now reports \(Self.deviceNominalRate(Self.defaultOutputDevice()), privacy: .public)Hz.
+                """
+            )
+            onEvent?(.streamStopError, .anomaly, [
+                "source": "system-tap",
+                "reason": "rate drift — output device changed rate under the tap",
+                "declared": "\(Int(declaredRate))",
+                "actual": "\(Int(effectiveRate))",
+            ])
+        } else {
+            // Healthy: reset the window so we keep sampling rather than latching an early verdict.
+            driftFirstHostNanos = hostNanos
+            driftFrames = 0
+        }
+    }
+
+    /// Current nominal sample rate of a device — diagnostic only. Reveals when the output device
+    /// has dropped to a hands-free rate underneath us.
+    static func deviceNominalRate(_ device: AudioObjectID) -> Double {
+        guard device != kAudioObjectUnknown else { return 0 }
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let st = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &rate)
+        return st == noErr ? Double(rate) : 0
     }
 
     private static func deviceUID(_ device: AudioObjectID) -> String? {
