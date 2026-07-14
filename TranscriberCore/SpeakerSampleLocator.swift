@@ -42,29 +42,49 @@ public enum SpeakerSampleLocator {
     public static let defaultMaxSampleDuration: TimeInterval = 15
 
     /// Pure classification — no I/O, so it is directly testable.
+    ///
+    /// A chunked recording lists its chunks in order; a legacy dual-stream recording lists
+    /// exactly [system, mic]. The distinguishing signal must NOT be "every path is .m4a":
+    /// a chunk keeps its raw .wav when AAC archiving fails, and those paths are published
+    /// verbatim, so a mixed list is reachable under the default config. Reading such a list
+    /// as [system, mic] is exactly the #132 hazard, so any list containing an archive is
+    /// treated as chunks.
     public static func classify(audioPaths: [URL]) -> AudioLayout {
         guard !audioPaths.isEmpty else { return .unavailable }
 
-        // Chunked recordings archive each chunk to its own stereo .m4a. The single-file case
-        // (merge_chunked_audio, or a one-chunk recording) is the same layout with one element.
-        if audioPaths.allSatisfy({ $0.pathExtension.lowercased() == "m4a" }) {
+        let isArchive = { (url: URL) in url.pathExtension.lowercased() == "m4a" }
+
+        // Any archive present => this came from the chunked pipeline. A .wav element is a chunk
+        // whose archiving failed (system-only; see `isSystemOnly`), not a mic stream.
+        if audioPaths.contains(where: isArchive) {
             return .chunkedArchives(audioPaths)
         }
 
-        // Legacy dual WAV: [0] = system (remote), [1] = mic (local).
+        // All-WAV. Legacy dual stream is exactly [system, mic]; more than two means chunks.
+        guard audioPaths.count <= 2 else { return .chunkedArchives(audioPaths) }
         return .legacyDualStream(
             remote: audioPaths.first,
             local: audioPaths.count > 1 ? audioPaths[1] : nil
         )
     }
 
+    /// A chunk that fell back to raw WAV carries system audio only — the mic stream is not
+    /// archived — so local samples cannot be played from it.
+    static func isSystemOnly(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() != "m4a"
+    }
+
     /// Read each chunk's duration so absolute time can be mapped onto it.
-    /// Unreadable files contribute 0 and are skipped by `ChunkLocator`.
-    public static func durations(of urls: [URL]) -> [TimeInterval] {
+    /// An unreadable file yields nil, which makes every LATER chunk unresolvable rather than
+    /// silently shifting the timeline (a shifted timeline plays the wrong speaker).
+    public static func durations(of urls: [URL]) -> [TimeInterval?] {
         urls.map { url in
-            guard let file = try? AVAudioFile(forReading: url), file.processingFormat.sampleRate > 0 else {
+            guard let file = try? AVAudioFile(forReading: url),
+                  file.processingFormat.sampleRate > 0,
+                  file.length > 0
+            else {
                 Logger.files.error("SpeakerSampleLocator: cannot read duration of \(url.lastPathComponent, privacy: .private)")
-                return 0
+                return nil
             }
             return Double(file.length) / file.processingFormat.sampleRate
         }
@@ -77,7 +97,7 @@ public enum SpeakerSampleLocator {
         start: TimeInterval,
         end: TimeInterval,
         layout: AudioLayout,
-        chunkDurations: [TimeInterval],
+        chunkDurations: [TimeInterval?],
         maxSampleDuration: TimeInterval = defaultMaxSampleDuration
     ) -> SpeakerSampleLocation? {
         let isLocal = (source == "local")
@@ -94,6 +114,8 @@ public enum SpeakerSampleLocator {
             ), chunks.indices.contains(hit.index) else { return nil }
             let url = chunks[hit.index]
             guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            // A WAV-fallback chunk holds system audio only, so there is no mic channel to play.
+            if isLocal, isSystemOnly(url) { return nil }
             return SpeakerSampleLocation(url: url, start: hit.start, end: hit.end, isLocal: isLocal)
 
         case .legacyDualStream(let remote, let local):

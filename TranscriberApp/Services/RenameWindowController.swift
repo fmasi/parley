@@ -97,7 +97,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         let metadata = json["metadata"] as? [String: Any]
         let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        let chunkDurations: [TimeInterval] = {
+        let chunkDurations: [TimeInterval?] = {
             if case .chunkedArchives(let chunks) = layout {
                 return SpeakerSampleLocator.durations(of: chunks)
             }
