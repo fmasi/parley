@@ -128,6 +128,51 @@ enum SyntheticSpeech {
         }
     }
 
+    /// Mix `sources` into one clip by summing samples (each attenuated to avoid clipping),
+    /// starting each source at its paired offset (seconds). Output length covers the longest
+    /// source. This is how a real mixed mono meeting stream looks to the diarizer: OVERLAPPING
+    /// voices — which concatenation alone can never produce, and which the
+    /// `embeddingExcludeOverlap` collapse needs in order to manifest.
+    static func mix(_ sources: [(url: URL, offset: Double)], to url: URL) throws {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true
+        )!
+        var tracks: [(samples: [Int16], startFrame: Int)] = []
+        for source in sources {
+            let input = try AVAudioFile(
+                forReading: source.url, commonFormat: .pcmFormatInt16, interleaved: true
+            )
+            let frames = AVAudioFrameCount(input.length)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+            try input.read(into: buffer)
+            let samples = Array(UnsafeBufferPointer(
+                start: buffer.int16ChannelData![0], count: Int(buffer.frameLength)
+            ))
+            tracks.append((samples, Int(source.offset * sampleRate)))
+        }
+
+        let totalFrames = tracks.map { $0.startFrame + $0.samples.count }.max() ?? 0
+        let gain = 1.0 / Double(max(tracks.count, 1))
+        var mixed = [Double](repeating: 0, count: totalFrames)
+        for track in tracks {
+            for (i, sample) in track.samples.enumerated() {
+                mixed[track.startFrame + i] += Double(sample) * gain
+            }
+        }
+
+        let output = try AVAudioFile(
+            forWriting: url, settings: format.settings,
+            commonFormat: .pcmFormatInt16, interleaved: true
+        )
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(totalFrames))!
+        buffer.frameLength = AVAudioFrameCount(totalFrames)
+        let data = buffer.int16ChannelData![0]
+        for i in 0..<totalFrames {
+            data[i] = Int16(max(Double(Int16.min), min(Double(Int16.max), mixed[i])))
+        }
+        try output.write(from: buffer)
+    }
+
     // MARK: - Shared fixtures
 
     /// Scripts long enough that each speaker yields a healthy number of embedding windows.
