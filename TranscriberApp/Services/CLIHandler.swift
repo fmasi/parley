@@ -47,6 +47,8 @@ enum CLIHandler {
                     try await handleBenchmark(opts)
                 case .summarize(let opts):
                     try await handleSummarize(opts)
+                case .downloadModels:
+                    try await handleDownloadModels()
                 }
             } catch {
                 fputs("Error: \(error.localizedDescription)\n", stderr)
@@ -158,6 +160,24 @@ enum CLIHandler {
         )
 
         print("Output saved to: \(result.jsonPath.path)")
+    }
+
+    /// Fetch the diarization + VAD models with no UI (~23 MB). Exists so CI can actually RUN the
+    /// ground-truth diarization guard: without the models those tests skip, the suite reports green,
+    /// and a regression that collapses every speaker into one ships unnoticed — which is exactly how
+    /// the original bug survived for months.
+    private static func handleDownloadModels() async throws {
+        if FluidAudioDiarizer.isFullyReady() {
+            print("Diarization + VAD models already present.")
+            return
+        }
+        print("Downloading diarization + VAD models...")
+        try await FluidAudioDiarizer.preDownloadModels()
+        guard FluidAudioDiarizer.isFullyReady() else {
+            fputs("Error: model download completed but models are still not cached\n", stderr)
+            exit(1)
+        }
+        print("Done.")
     }
 
     private static func handleRename(_ jsonPathStr: String) throws {

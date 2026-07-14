@@ -39,6 +39,10 @@ public enum CLICommand {
     case renameGUI(String)
     case benchmark(BenchmarkOptions)
     case summarize(SummarizeOptions)
+    /// Download the diarization + VAD models without a UI. Lets CI (and a headless setup) fetch
+    /// what the ground-truth diarization guard needs — without it those tests silently skip, and a
+    /// regression that collapses every speaker into one would ship with the suite green.
+    case downloadModels
 }
 
 public enum CLIParser {
@@ -76,6 +80,8 @@ public enum CLIParser {
             return .benchmark(parseBenchmark(rest))
         case "summarize":
             return .summarize(try parseSummarize(rest))
+        case "download-models":
+            return .downloadModels
         default:
             throw ParseError.unknownSubcommand(subcommand)
         }

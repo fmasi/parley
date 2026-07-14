@@ -99,7 +99,9 @@ struct TranscriberApp: App {
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
     )
-    private static let cliSubcommands: Set<String> = ["transcribe", "rename", "rename-gui", "benchmark", "summarize"]
+    private static let cliSubcommands: Set<String> = [
+        "transcribe", "rename", "rename-gui", "benchmark", "summarize", "download-models",
+    ]
 
     init() {
         // CLI mode: only enter for known subcommands (not system-injected args)
