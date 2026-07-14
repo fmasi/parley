@@ -30,12 +30,7 @@ enum CLIRename {
         let metadata = json["metadata"] as? [String: Any]
         let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        let chunkDurations: [TimeInterval?] = {
-            if case .chunkedArchives(let chunks) = layout {
-                return SpeakerSampleLocator.durations(of: chunks)
-            }
-            return []
-        }()
+        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
 
         // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
         // clean speech from crosstalk.

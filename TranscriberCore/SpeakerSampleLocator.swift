@@ -99,6 +99,15 @@ public enum SpeakerSampleLocator {
         }
     }
 
+    /// Chunk durations for a layout, read once so a caller can reuse them across many `locate`
+    /// calls. Empty for non-chunked layouts, which carry their own timeline and need no mapping.
+    public static func durations(for layout: AudioLayout) -> [TimeInterval?] {
+        if case .chunkedArchives(let chunks) = layout {
+            return durations(of: chunks)
+        }
+        return []
+    }
+
     /// Resolve one segment. Returns nil when the sample cannot be played, so callers can
     /// disable the control rather than presenting a play button that silently does nothing.
     public static func locate(
