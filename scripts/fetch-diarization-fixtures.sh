@@ -25,7 +25,12 @@ fetch() {
         return
     fi
     echo "==> Fetching $name ..."
-    curl -fL --progress-bar -o "$DIR/$name.part" "$url"
+    if ! curl -fL --progress-bar -o "$DIR/$name.part" "$url"; then
+        rm -f "$DIR/$name.part"
+        echo "error: could not download $name — fixture host unreachable (network?), NOT a code regression." >&2
+        echo "       url: $url" >&2
+        exit 1
+    fi
 
     local actual
     actual="$(shasum -a 256 "$DIR/$name.part" | awk '{print $1}')"

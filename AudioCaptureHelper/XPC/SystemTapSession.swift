@@ -169,26 +169,26 @@ final class SystemTapSession {
         // letting their headset's limitations dictate what we record.
         var anchor = output
         let outputRate = Int(Self.deviceNominalRate(output).rounded())
-        if Self.handsFreeRates.contains(outputRate),
-           let fullRate = Self.fullRateOutputDevice(minimum: 44100),
-           fullRate != output {
-            Logger.audio.info(
-                "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(Self.deviceNominalRate(output), privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
-            )
-            anchor = fullRate
-        } else if Self.handsFreeRates.contains(outputRate) {
-            // Degraded output and NO full-rate device to clock off (e.g. a Mac with no built-in
-            // output, headset as the only device). We are about to capture the remote side at the
-            // headset's hands-free rate. Say so at setup rather than leaving it to the watchdog,
-            // which only fires 5+ seconds in.
-            Logger.audio.error(
-                "System tap: output device is at \(outputRate, privacy: .public)Hz (hands-free) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
-            )
-            onEvent?(.rateDrift, .anomaly, [
-                "source": "system-tap",
-                "reason": "degraded output rate, no full-rate anchor available",
-                "outputRate": "\(outputRate)",
-            ])
+        if Self.handsFreeRates.contains(outputRate) {
+            if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
+                Logger.audio.info(
+                    "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(outputRate, privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
+                )
+                anchor = fullRate
+            } else {
+                // Degraded output and NO full-rate device to clock off (a Mac with no built-in
+                // output, headset as the only device). We are about to capture the remote side at
+                // the headset's hands-free rate. Say so at setup rather than leaving it to the
+                // watchdog, which only fires 5+ seconds in.
+                Logger.audio.error(
+                    "System tap: output device is at \(outputRate, privacy: .public)Hz (hands-free) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
+                )
+                onEvent?(.rateDrift, .anomaly, [
+                    "source": "system-tap",
+                    "reason": "degraded output rate, no full-rate anchor available",
+                    "outputRate": "\(outputRate)",
+                ])
+            }
         }
         guard let outUID = Self.deviceUID(anchor) else {
             throw SystemTapError.noDefaultOutput
@@ -553,11 +553,14 @@ final class SystemTapSession {
 
         let verdict: Verdict = stateLock.sync {
             guard !driftReported else { return .notYet }
+            driftFrames += frames
             if driftFirstHostNanos == 0 {
+                // Anchor the window on the FIRST callback and count its frames too — measuring
+                // elapsed from callback 0 while counting frames from callback 1 would under-count
+                // the rate by one buffer.
                 driftFirstHostNanos = hostNanos
                 return .notYet
             }
-            driftFrames += frames
             let elapsed = Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000
             // Need a decent window before judging: startup jitter and drift compensation settle out.
             guard elapsed >= 5 else { return .notYet }

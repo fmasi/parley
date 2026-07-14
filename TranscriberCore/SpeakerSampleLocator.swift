@@ -131,6 +131,11 @@ public enum SpeakerSampleLocator {
             // Each source has its own mono file on its own timeline — no chunk mapping needed.
             guard let url = isLocal ? local : remote,
                   FileManager.default.fileExists(atPath: url.path) else { return nil }
+            // Duration-check: an out-of-sync legacy transcript (archiving failed mid-stream) could
+            // point past the end of the audio. Return nil so the caller disables the control, rather
+            // than a location that later throws emptyRange and leaves a dead play button.
+            let duration = durations(of: [url]).first ?? nil
+            if let duration, start >= duration { return nil }
             let capped = min(end, start + maxSampleDuration)
             guard capped > start else { return nil }
             return SpeakerSampleLocation(url: url, start: start, end: capped, isLocal: isLocal)
