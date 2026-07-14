@@ -124,7 +124,16 @@ cd audio_capture_helper && bash build.sh
 # Produces bin/audio-capture-helper
 ```
 
+## Development Process
+**Read [docs/development-process.md](docs/development-process.md) before starting work.** In short:
+group related bugs/features into one PR → run a multi-agent **code council over the full diff BEFORE
+pushing to CI** (both councils run so far found real bugs inside the code written to fix the previous
+bug) → then CI, and monitor it → device-test anything touching capture/audio → **decide the version
+deliberately** (PATCH = bug fixes only; MINOR = any new capability, *or* a fix that materially changes
+what the transcripts say) → release, and advance that line's `release/vX.Y.x` branch.
+
 ## Documentation
+- [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
 - [docs/gotchas.md](docs/gotchas.md) -- 48 platform-specific gotchas
