@@ -118,6 +118,9 @@ jobs:
       - name: Verify the diarizer still separates 4 speakers
         env:
           PARLEY_FETCH_MODELS: "1"
+          # A skip is a failure here: with this set, a missing fixture or model FAILS the
+          # ground-truth tests instead of disabling them (see DiarizationRegressionTests).
+          PARLEY_REQUIRE_AMI_FIXTURE: "1"
         run: |
           swift test --filter DiarizationRegressionTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
