@@ -528,20 +528,22 @@ final class SystemTapSession {
     private func checkRateDrift(frames: Int, declaredRate: Double, hostNanos: UInt64) {
         guard declaredRate > 0 else { return }
 
-        let elapsed: Double = stateLock.sync {
-            guard !driftReported else { return -1 }
+        // ONE lock acquisition: a teardown landing between two of them would zero driftFrames and
+        // leave a stale `elapsed`, giving ratio 0.0 — a spurious alarm on an intentional stop.
+        let sample: (elapsed: Double, frames: Int)? = stateLock.sync {
+            guard !driftReported else { return nil }
             if driftFirstHostNanos == 0 {
                 driftFirstHostNanos = hostNanos
-                return -1
+                return nil
             }
             driftFrames += frames
-            return Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000
+            return (Double(hostNanos &- driftFirstHostNanos) / 1_000_000_000, driftFrames)
         }
         // Need a decent window before judging: startup jitter and drift compensation settle out.
-        guard elapsed >= 5 else { return }
+        guard let sample, sample.elapsed >= 5 else { return }
 
-        let observedFrames = stateLock.sync { driftFrames }
-        let effectiveRate = Double(observedFrames) / elapsed
+        let elapsed = sample.elapsed
+        let effectiveRate = Double(sample.frames) / elapsed
         let ratio = effectiveRate / declaredRate
         // Band must be tight enough to see a 44.1/48 mismatch (ratio 0.919), which the original
         // 0.9-1.1 window structurally could not.
@@ -552,7 +554,7 @@ final class SystemTapSession {
                 System tap RATE DRIFT: declared \(declaredRate, privacy: .public)Hz but device is                 delivering ~\(Int(effectiveRate), privacy: .public)Hz (\(Int(ratio * 100), privacy: .public)%).                 The output device changed rate underneath the tap — remote audio is being captured at the                 wrong rate and padded to fit. Output device now reports \(Self.deviceNominalRate(Self.defaultOutputDevice()), privacy: .public)Hz.
                 """
             )
-            onEvent?(.streamStopError, .anomaly, [
+            onEvent?(.rateDrift, .anomaly, [
                 "source": "system-tap",
                 "reason": "rate drift — output device changed rate under the tap",
                 "declared": "\(Int(declaredRate))",

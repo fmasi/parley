@@ -80,6 +80,13 @@ struct RenameDialog: View {
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+        .onDisappear {
+            // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
+            // created, and closing the dialog is the common exit.
+            stopPlayback()
+            previousPreview.map { try? FileManager.default.removeItem(at: $0) }
+            previousPreview = nil
+        }
     }
 
     /// One card per detected speaker: label + sample controls, name field,
@@ -190,6 +197,8 @@ struct RenameDialog: View {
 
         guard let player = try? AVAudioPlayer(contentsOf: preview) else {
             Logger.audio.error("playSample: AVAudioPlayer init failed")
+            try? FileManager.default.removeItem(at: preview)
+            previousPreview = nil
             return
         }
         player.play()
