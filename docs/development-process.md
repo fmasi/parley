@@ -65,18 +65,26 @@ better"*.
 
 ## 5. Decide the version deliberately
 
-Pre-1.0, we use `0.MINOR.PATCH`:
+Pre-1.0, we use `0.MINOR.PATCH`, and the numbers are **cheap signals, not a spec**. The codebase is
+young and moves fast; a rule that bumps MINOR on every behaviour change inflates it until it means
+nothing — and a version number that goes up on everything communicates nothing.
 
 | bump | when |
 |---|---|
-| **PATCH** (`0.8.1` → `0.8.2`) | Bug fixes only. No new capability, no new config or CLI surface, no change a user must be told about. |
-| **MINOR** (`0.8.x` → `0.9.0`) | Any new capability — a feature, a new CLI subcommand, new config keys — **or** a change that materially alters output the user relies on, even if it is "just" a bug fix. |
+| **PATCH** (`0.8.1` → `0.8.2`) | Fixes. **Including fixes that change output** — restoring behaviour to what it should always have been is a fix, not a feature. Also: internal tooling, diagnostic config knobs, tests, docs. |
+| **MINOR** (`0.8.x` → `0.9.0`) | Something **meaningful** shipped: a real capability, a milestone, a change of direction. The kind of thing you'd put in a changelog headline for its own sake. |
 
-That last clause is the one that matters. A bug fix that **changes what the transcripts say** is not a
-patch in spirit, even if it is one in letter. Speaker labels suddenly becoming correct is a change
-users will notice in their records, and the version should tell them something happened.
+**The version number is a weak channel; don't overload it.** When a *fix* materially changes what
+users' transcripts say, the right response is not to spend a minor version on it — it is to say so
+loudly where they will actually see it:
 
-Ask explicitly, per release: *is this a PATCH or a MINOR?* Write the answer down. Don't default.
+- Lead the release notes with the user-visible consequence, in plain words, including what they
+  should do about it ("re-run affected recordings").
+- For a fix that changes the recording pipeline itself, consider Sparkle's
+  `minimumAutoupdateVersion` so the update prompts an explicit **Install** rather than silently
+  swapping the pipeline under someone mid-meeting.
+
+Ask explicitly, per release: *is this meaningful, or is it a fix?* Write the answer down. Don't default.
 
 ## 6. Release
 
