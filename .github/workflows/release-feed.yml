@@ -1,0 +1,40 @@
+name: Release feed integrity
+
+# Guards the PUBLISHED Sparkle auto-update feed (#119, #110). A break here is otherwise silent —
+# every installed client just stops seeing updates. Runs on each release event AND daily, because
+# a release later converted to draft/deleted silently reverts GitHub's "latest" to an older one.
+on:
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # open a tracking issue when the feed is broken
+
+jobs:
+  verify-feed:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the signature verifier
+        run: swift build --product verify-ed-signature
+
+      - name: Verify the published feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-feed.sh
+
+      - name: Open an issue if the feed is broken
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "Sparkle feed integrity FAILED ($(date -u +%F))" \
+            --body "release-feed.yml failed — the auto-update feed may be broken (installed clients could be silently stuck). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label release || true
