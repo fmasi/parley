@@ -61,6 +61,12 @@ public struct LabeledSegment: Sendable {
 
 public enum SpeakerAssignment {
 
+    /// The label used when no speaker can be determined. Deliberately NOT a speaker identity:
+    /// inventing one we don't have is worse than admitting we don't know. It carries no embedding,
+    /// so the reconciler can never map it — which means anything checking for "unmapped" labels must
+    /// exclude it, or it will fire on nearly every real meeting and become noise.
+    public static let unknownSpeaker = "Unknown"
+
     /// Remove zero-duration and consecutively repeated segments.
     public static func deduplicate(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
         var cleaned: [TranscriptSegment] = []

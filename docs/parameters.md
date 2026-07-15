@@ -76,6 +76,24 @@ All summary fields are nested under the `"summary"` key in config.json. The enti
 
 ---
 
+## Diarization
+
+Diarization is performed by `FluidAudioDiarizer` (pyannote segmentation + WeSpeaker embeddings + VBx clustering). All keys below are optional; **the defaults are correct and none of these need to be set.** They exist so a bad recording can be diagnosed without a rebuild.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `diarization_exclude_overlap` | bool | `true` | Exclude overlapped speech when computing speaker embeddings. **Do not set this to `false`.** Including overlap makes each embedding a blend of the voices present, so they all converge and every speaker collapses into one cluster. Measured on AMI ES2004a (4-speaker reference meeting): `false` → **1 speaker**, `true` → **4 speakers**. The app logs a warning if you set it explicitly to `false`. |
+| `diarization_clustering_threshold` | float | `0.6` (FluidAudio) | Euclidean distance threshold for unit-normalized embeddings. **Lower** = stricter = more speakers kept apart; **higher** = more merging. |
+| `diarization_max_speakers` | int | unset | Upper bound on speakers per stream, passed to VBx. Leave unset unless the true count is known. A value of `0` or `1` will collapse every speaker into one. |
+
+## Debugging
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `preserve_source_wav` | bool | `false` | Keep the uncompressed source WAVs after AAC archiving, so diarization/capture can be analysed on the raw audio. **These are large (~5.5 MB/minute per stream) and `StorageManager`'s quota only evicts `.m4a` archives — it will not reclaim them.** Diagnostic use only; turn it off afterwards. |
+
+---
+
 ## Speaker Reconciliation
 
 Speaker reconciliation is performed by `SpeakerReconciler` in `TranscriberCore/SpeakerReconciler.swift`. The cosine similarity threshold is **hardcoded at 0.65** and is not configurable via `config.json`.

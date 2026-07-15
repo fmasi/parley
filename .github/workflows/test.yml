@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: these jobs only read the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-15
@@ -15,6 +19,54 @@ jobs:
       - name: Run Swift tests
         run: |
           swift test --filter TranscriberTests \
+            -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+
+  # Ground-truth diarization guard.
+  #
+  # The `test` job above CANNOT catch a diarization collapse: DiarizationRegressionTests skips
+  # unless BOTH the AMI fixture and the ML models are present, and neither exists in a fresh
+  # checkout. So the suite reports green while asserting nothing about speaker separation — which is
+  # exactly how `embeddingExcludeOverlap: false` (every speaker merged into one) shipped and survived
+  # for months, invisible to every 1:1 device test.
+  #
+  # This job fetches both and runs the guard against AMI ES2004a, a 4-speaker reference meeting.
+  # Both are cached: the models are only ~23 MB (diarization + VAD — the large Parakeet ASR model is
+  # not needed here) and the fixture ~33 MB, so a warm run costs seconds.
+  diarization-guard:
+    runs-on: macos-15
+    # Bound it: a hung model/fixture download would otherwise hold a runner until GitHub's 6h limit.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache diarization models
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/FluidAudio/Models
+          # Keyed on the resolved FluidAudio version: a dependency bump must re-download, because a
+          # model change is exactly the kind of thing that could move diarization quality.
+          key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
+          restore-keys: fluidaudio-models-
+
+      - name: Cache AMI reference audio
+        uses: actions/cache@v4
+        with:
+          path: fixtures/diarization
+          key: ami-es2004a-v1
+
+      - name: Fetch AMI reference audio (4-speaker meeting)
+        run: bash scripts/fetch-diarization-fixtures.sh
+
+      # PARLEY_FETCH_MODELS lets the test download the models itself (~23 MB, ~6s cold). We can't
+      # shell out to the app binary here: it's the GUI target, and a headless runner SIGKILLs it.
+      - name: Verify the diarizer still separates 4 speakers
+        env:
+          PARLEY_FETCH_MODELS: "1"
+        run: |
+          swift test --filter DiarizationRegressionTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/

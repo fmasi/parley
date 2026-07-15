@@ -5,9 +5,15 @@ import os
 
 struct SpeakerSample {
     let text: String
+    /// Chunk file this sample lives in, already resolved — nil when no playable audio exists.
     let audioFile: URL?
+    /// Offsets WITHIN `audioFile`, not absolute transcript time (#132).
     let start: TimeInterval
     let end: TimeInterval
+    /// Which channel of the stereo archive holds this speaker (L = local/mic, R = remote/system).
+    /// Comes from the segment's `source`, not the display name — renaming a speaker must not
+    /// change which channel we read.
+    let isLocal: Bool
 }
 
 struct SpeakerEntry: Identifiable {
@@ -59,8 +65,11 @@ struct RenameDialog: View {
                 Button("Save") {
                     var mapping: [String: String] = [:]
                     for speaker in speakers {
-                        if !speaker.displayName.isEmpty {
-                            mapping[speaker.id] = speaker.displayName
+                        // Trim: a whitespace-only name passed the old !isEmpty check and replaced a
+                        // real speaker label with blanks.
+                        let name = speaker.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !name.isEmpty {
+                            mapping[speaker.id] = name
                         }
                     }
                     onSave(mapping)
@@ -71,6 +80,13 @@ struct RenameDialog: View {
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+        .onDisappear {
+            // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
+            // created, and closing the dialog is the common exit.
+            stopPlayback()
+            previousPreview.map { try? FileManager.default.removeItem(at: $0) }
+            previousPreview = nil
+        }
     }
 
     /// One card per detected speaker: label + sample controls, name field,
@@ -102,7 +118,7 @@ struct RenameDialog: View {
                             audioFile,
                             from: sample.start,
                             to: sample.end,
-                            isLocal: speakerId.hasPrefix("Local")
+                            isLocal: sample.isLocal
                         )
                     } label: {
                         Image(systemName: "play.circle.fill")
@@ -152,106 +168,44 @@ struct RenameDialog: View {
     }
 
     @State private var stopTimer: Timer?
+    @State private var previousPreview: URL?
 
     private func stopPlayback() {
         audioPlayer?.stop()
         stopTimer?.invalidate()
     }
 
-    /// Play a speaker sample from the stereo archive as mono on both speakers.
-    /// Extracts the relevant channel (L=local mic, R=remote system) into a mono buffer
-    /// to eliminate echo from mic bleed of the remote speaker in the L channel.
+    /// Play a speaker sample: the resolved chunk, the resolved offset, the resolved channel.
+    /// Channel extraction (L = local mic, R = remote system) keeps the other party out of the clip.
     private func playSample(_ url: URL, from start: TimeInterval, to end: TimeInterval, isLocal: Bool) {
         stopPlayback()
-        let file: AVAudioFile
+
+        let preview: URL
         do {
-            file = try AVAudioFile(forReading: url)
+            preview = try SpeakerSamplePreview.makeMonoPreview(
+                of: url, from: start, to: end, isLocal: isLocal
+            )
         } catch {
-            Logger.audio.error("playSample: can't open \(url.lastPathComponent): \(error.localizedDescription)")
-            return
-        }
-        let sampleRate = file.processingFormat.sampleRate
-        let channelCount = file.processingFormat.channelCount
-
-        guard channelCount >= 2 else {
-            playDirect(url, from: start, to: end)
+            Logger.audio.error("playSample: \(String(describing: error), privacy: .public)")
             return
         }
 
-        let startFrame = AVAudioFramePosition(start * sampleRate)
-        let endFrame = AVAudioFramePosition(end * sampleRate)
-        let safeStart = min(startFrame, file.length)
-        let safeEnd = min(endFrame, file.length)
-        let frameCount = AVAudioFrameCount(safeEnd - safeStart)
-        guard frameCount > 0 else {
-            Logger.audio.error("playSample: zero frames (start=\(start), end=\(end), fileLength=\(file.length))")
-            return
-        }
+        // Clean up the previous clip only now — removing it earlier could race a player still
+        // reading it.
+        previousPreview.map { try? FileManager.default.removeItem(at: $0) }
+        previousPreview = preview
 
-        // Read the stereo segment using the file's processing format (AVAudioFile handles AAC decode)
-        guard let stereoBuf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
-            Logger.audio.error("playSample: can't allocate stereo buffer")
-            return
-        }
-        file.framePosition = safeStart
-        do {
-            try file.read(into: stereoBuf, frameCount: frameCount)
-        } catch {
-            Logger.audio.error("playSample: read failed: \(error.localizedDescription)")
-            return
-        }
-
-        // Extract single channel into mono buffer
-        let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
-        guard let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameCount) else {
-            Logger.audio.error("playSample: can't allocate mono buffer")
-            return
-        }
-        monoBuf.frameLength = stereoBuf.frameLength
-
-        let channelIndex: Int = isLocal ? 0 : 1
-        guard let src = stereoBuf.floatChannelData?[channelIndex],
-              let dst = monoBuf.floatChannelData?[0] else {
-            Logger.audio.error("playSample: can't get channel data (channels=\(channelCount), index=\(channelIndex))")
-            return
-        }
-        memcpy(dst, src, Int(stereoBuf.frameLength) * MemoryLayout<Float>.size)
-
-        // Write mono to temp WAV for AVAudioPlayer
-        let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("speaker-preview.wav")
-        try? FileManager.default.removeItem(at: tmpURL)
-        do {
-            let tmpFile = try AVAudioFile(forWriting: tmpURL, settings: monoFormat.settings)
-            try tmpFile.write(from: monoBuf)
-        } catch {
-            Logger.audio.error("playSample: temp WAV write failed: \(error.localizedDescription)")
-            return
-        }
-
-        guard let player = try? AVAudioPlayer(contentsOf: tmpURL) else {
-            Logger.audio.error("playSample: AVAudioPlayer init failed for temp WAV")
+        guard let player = try? AVAudioPlayer(contentsOf: preview) else {
+            Logger.audio.error("playSample: AVAudioPlayer init failed")
+            try? FileManager.default.removeItem(at: preview)
+            previousPreview = nil
             return
         }
         player.play()
         audioPlayer = player
-        let duration = Double(frameCount) / sampleRate
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+        stopTimer = Timer.scheduledTimer(withTimeInterval: player.duration, repeats: false) { _ in
             self.audioPlayer?.stop()
         }
     }
 
-    /// Fallback for mono files — play directly with time seek.
-    private func playDirect(_ url: URL, from start: TimeInterval, to end: TimeInterval) {
-        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
-        let safeStart = min(start, player.duration)
-        let safeEnd = min(end, player.duration)
-        let duration = safeEnd - safeStart
-        guard duration > 0 else { return }
-        player.currentTime = safeStart
-        player.play()
-        audioPlayer = player
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
-            self.audioPlayer?.stop()
-        }
-    }
 }

@@ -150,7 +150,7 @@ Notes:
 - `TranscriberCore/FluidAudioDiarizer.swift` — `diarize(audioPath:numSpeakers:)` → `mgr.process()`
 
 Notes:
-- `OfflineDiarizerConfig(embeddingExcludeOverlap: false)` — includes overlap embeddings to avoid collapsing remote speakers into one cluster on mixed Zoom/Teams audio.
+- `OfflineDiarizerConfig(embeddingExcludeOverlap: true)` — **excludes** overlapped speech from speaker embeddings (FluidAudio's default). This previously forced `false`, on the theory that a mixed mono stream is "all overlap" so the mask would discard most embeddings. That reasoning is wrong — the mask marks frames where two *speakers* overlap, not merely remote speech — and the override caused exactly the collapse it was meant to avoid: an embedding computed over a window holding two voices is a blend of both, so every embedding converged and the clusterer saw one speaker. Measured on AMI ES2004a (a 4-speaker reference meeting): `false` → **1 speaker** (639/642 embeddings in one cluster); `true` → **4 speakers**. Overridable via `diarization_exclude_overlap`, but don't.
 - `isDiarizationCached()` checks diarization models only; `isFullyReady()` also checks VAD model.
 
 ### Stage 5 — VAD Speech Map

@@ -10,16 +10,42 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
     private var onDismissCallback: (() -> Void)?
+    /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
+    /// cannot both reach `present()` and leave an orphaned panel on screen.
+    private var showTask: Task<Void, Never>?
 
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
-        // Close any existing panel
+        // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
+        // cannot both reach present() and orphan a window.
+        showTask?.cancel()
         panel?.close()
 
-        let speakers = Self.parseSpeakers(from: jsonPath)
-        guard !speakers.isEmpty else {
-            onDismiss?()
-            return
+        // parseSpeakers opens an AVAudioFile per chunk to measure durations — O(N) file opens, which
+        // visibly stalls the menu bar before the window appears (worst on a network-mounted or cold
+        // recordings folder). Do it off the main actor, then present.
+        showTask = Task { @MainActor in
+            let speakers = await Task.detached(priority: .userInitiated) {
+                Self.parseSpeakers(from: jsonPath)
+            }.value
+            guard !Task.isCancelled else { return }
+            guard !speakers.isEmpty else {
+                Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .private)")
+                let alert = NSAlert()
+                alert.messageText = "No speakers to rename"
+                alert.informativeText =
+                    "Couldn't read any speakers from this file. Make sure it's a Parley transcript "
+                    + "(a .json produced alongside a recording), not session.json or another file."
+                alert.alertStyle = .informational
+                alert.runModal()
+                onDismiss?()
+                return
+            }
+            self.present(jsonPath: jsonPath, speakers: speakers, onDismiss: onDismiss)
         }
+    }
+
+    /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
+    private func present(jsonPath: URL, speakers: [SpeakerEntry], onDismiss: (() -> Void)?) {
 
         self.onDismissCallback = onDismiss
 
@@ -35,7 +61,18 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             jsonPath: jsonPath,
             speakers: speakers,
             onSave: { mapping in
-                Self.applySpeakerRenames(mapping, jsonPath: jsonPath)
+                guard Self.applySpeakerRenames(mapping, jsonPath: jsonPath) else {
+                    // Keep the panel open: the names are still in the fields, so the user can
+                    // retry rather than discovering later that nothing was saved.
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn't save speaker names"
+                    alert.informativeText =
+                        "The transcript could not be written. Check that the recordings folder is "
+                        + "available and has free space, then try again."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
                 Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
                 closePanel()
             },
@@ -85,42 +122,30 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - JSON Parsing
 
-    static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
-        guard let data = try? Data(contentsOf: jsonPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    nonisolated static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
+        guard let data = try? Data(contentsOf: jsonPath) else {
+            Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .private)")
+            return []
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let segments = json["segments"] as? [[String: Any]]
-        else { return [] }
+        else {
+            Logger.files.error("Rename: \(jsonPath.lastPathComponent, privacy: .private) is not a readable transcript")
+            return []
+        }
 
-        // Build source→audio file mapping from metadata
+        // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
+        // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that
+        // actually contains them (#132).
         let metadata = json["metadata"] as? [String: Any]
-        let audioPaths = metadata?["audio_paths"] as? [String] ?? []
+        let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
+        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
 
-        let remoteAudio: URL?
-        let localAudio: URL?
-
-        if audioPaths.count == 1, audioPaths[0].hasSuffix(".m4a") {
-            // Stereo AAC archive: single file serves both sources
-            // AVAudioPlayer plays stereo as-is (L=local, R=remote) — works for sample playback
-            let archivePath = URL(fileURLWithPath: audioPaths[0])
-            let exists = FileManager.default.fileExists(atPath: archivePath.path)
-            remoteAudio = exists ? archivePath : nil
-            localAudio = exists ? archivePath : nil
-        } else {
-            // Legacy dual WAV: first = system (remote), second = mic (local)
-            remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
-            localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
-        }
-
-        struct CandidateSegment {
-            let start: Double
-            let end: Double
-            let source: String
-            let text: String
-            var duration: Double { end - start }
-        }
-
-        // Collect all segments per speaker
-        var candidates: [String: [CandidateSegment]] = [:]
+        // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
+        // clean speech from crosstalk.
+        var allCandidates: [SpeakerSampleSelector.Candidate] = []
+        var segmentCounts: [String: Int] = [:]
         var orderedIds: [String] = []
 
         for seg in segments {
@@ -130,12 +155,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                   let end = seg["end"] as? Double else { continue }
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            if candidates[speaker] == nil {
-                orderedIds.append(speaker)
-                candidates[speaker] = []
-            }
+            if segmentCounts[speaker] == nil { orderedIds.append(speaker) }
+            segmentCounts[speaker, default: 0] += 1
             let source = seg["source"] as? String ?? "remote"
-            candidates[speaker]?.append(CandidateSegment(start: start, end: end, source: source, text: trimmed))
+            allCandidates.append(SpeakerSampleSelector.Candidate(
+                speaker: speaker, start: start, end: end, source: source, text: trimmed
+            ))
         }
 
         let maxSamples = 3
@@ -143,26 +168,38 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
         // Filter out noise speakers (< minSegments) — they're usually diarization artifacts.
         // Fall back to unfiltered list if filtering would remove all speakers (e.g. short transcripts).
-        let filteredIds = orderedIds.filter { (candidates[$0]?.count ?? 0) >= minSegments }
+        let filteredIds = orderedIds.filter { (segmentCounts[$0] ?? 0) >= minSegments }
         let significantIds = filteredIds.isEmpty ? orderedIds : filteredIds
 
         return significantIds.map { speaker in
-            let allCandidates = candidates[speaker] ?? []
-            // Pick the longest segments as samples (best chance of audible, identifiable speech)
-            let best = Array(allCandidates.sorted { $0.duration > $1.duration }.prefix(maxSamples))
+            // Isolated speech first, then longest — a sample exists to let a human recognise ONE
+            // voice, and the longest segment is very often the one they were talked over in.
+            let ranked = SpeakerSampleSelector.rank(speaker: speaker, allSegments: allCandidates)
 
-            let samples = best.map { candidate in
-                let audioFile: URL? = {
-                    let file = candidate.source == "local" ? localAudio : remoteAudio
-                    guard let file, FileManager.default.fileExists(atPath: file.path) else { return nil }
-                    return file
-                }()
-                return SpeakerSample(
-                    text: candidate.text,
-                    audioFile: audioFile,
+            var samples: [SpeakerSample] = []
+            for candidate in ranked where samples.count < maxSamples {
+                guard let hit = SpeakerSampleLocator.locate(
+                    source: candidate.source,
                     start: candidate.start,
-                    end: candidate.end
-                )
+                    end: candidate.end,
+                    layout: layout,
+                    chunkDurations: chunkDurations
+                ) else { continue }
+                samples.append(SpeakerSample(
+                    text: candidate.text,
+                    audioFile: hit.url,
+                    start: hit.start,
+                    end: hit.end,
+                    isLocal: hit.isLocal
+                ))
+            }
+
+            // No playable audio at all (e.g. archives deleted by the storage quota): still offer
+            // the speaker for renaming, with the sample text, but no dead play button.
+            if samples.isEmpty {
+                samples = ranked.prefix(maxSamples).map {
+                    SpeakerSample(text: $0.text, audioFile: nil, start: 0, end: 0, isLocal: $0.source == "local")
+                }
             }
 
             return SpeakerEntry(
@@ -175,11 +212,22 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Apply Renames
 
-    static func applySpeakerRenames(_ mapping: [String: String], jsonPath: URL) {
+    /// Apply speaker renames to the transcript on disk.
+    ///
+    /// Returns false (and logs) on failure. The previous version wrote with `try?` and returned
+    /// Void: on a read-only or full volume the user renamed every speaker, hit Save, the panel
+    /// closed, and nothing was written — with no error anywhere. The write is also atomic now,
+    /// because by this point the source WAVs are gone and this JSON is the only textual record of
+    /// the meeting; a kill mid-write would truncate it.
+    @discardableResult
+    static func applySpeakerRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         guard let data = try? Data(contentsOf: jsonPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var segments = json["segments"] as? [[String: Any]]
-        else { return }
+        else {
+            Logger.files.error("Rename: cannot read transcript \(jsonPath.lastPathComponent, privacy: .private)")
+            return false
+        }
 
         for i in segments.indices {
             if let speaker = segments[i]["speaker"] as? String,
@@ -189,10 +237,26 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
         json["segments"] = segments
 
-        if let updatedData = try? JSONSerialization.data(
-            withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? updatedData.write(to: jsonPath)
+        // Record the applied names alongside the transcript, as the CLI path already does.
+        var metadata = json["metadata"] as? [String: Any] ?? [:]
+        var names = metadata["speaker_names"] as? [String: String] ?? [:]
+        for (original, renamed) in mapping where original != renamed {
+            names[original] = renamed
+        }
+        if !names.isEmpty {
+            metadata["speaker_names"] = names
+            json["metadata"] = metadata
+        }
+
+        do {
+            let updatedData = try JSONSerialization.data(
+                withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
+            )
+            try updatedData.write(to: jsonPath, options: .atomic)
+            return true
+        } catch {
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

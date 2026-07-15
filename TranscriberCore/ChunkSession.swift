@@ -41,6 +41,17 @@ public struct ProcessedChunk: Codable {
     /// Speaker embeddings from the local/mic audio stream (keyed by friendly name). (#64)
     public let localSpeakerDatabase: [String: [Float]]
     public let echoSegmentsRemoved: Int
+    /// Whether a MIC STREAM WAS CAPTURED for this chunk — a property of the recording, not of
+    /// whether the user happened to say anything.
+    ///
+    /// This must not be inferred from "did the mic produce segments". A chunk the user sat through
+    /// in silence yields zero local segments, and inferring from that made the chunk skip source
+    /// prefixing while its siblings kept it. The reconciler then emitted `Remote Speaker N` keys
+    /// that matched nothing in that chunk, its mapping silently fell back to the identity, and its
+    /// chunk-local speaker numbering was laundered into the global namespace — swapping speakers
+    /// for the rest of the meeting with no error anywhere. Persist the capture-time answer instead,
+    /// so the writer and the reader cannot disagree.
+    public let isDualStream: Bool
 
     public init(
         index: Int,
@@ -49,7 +60,8 @@ public struct ProcessedChunk: Codable {
         segments: [Segment],
         speakerDatabase: [String: [Float]],
         localSpeakerDatabase: [String: [Float]] = [:],
-        echoSegmentsRemoved: Int = 0
+        echoSegmentsRemoved: Int = 0,
+        isDualStream: Bool = false
     ) {
         self.index = index
         self.startTime = startTime
@@ -58,6 +70,7 @@ public struct ProcessedChunk: Codable {
         self.speakerDatabase = speakerDatabase
         self.localSpeakerDatabase = localSpeakerDatabase
         self.echoSegmentsRemoved = echoSegmentsRemoved
+        self.isDualStream = isDualStream
     }
 
     // MARK: - Codable
@@ -70,6 +83,7 @@ public struct ProcessedChunk: Codable {
         case speakerDatabase
         case localSpeakerDatabase
         case echoSegmentsRemoved = "echo_segments_removed"
+        case isDualStream = "is_dual_stream"
     }
 
     public init(from decoder: Decoder) throws {
@@ -81,6 +95,13 @@ public struct ProcessedChunk: Codable {
         speakerDatabase = try c.decode([String: [Float]].self, forKey: .speakerDatabase)
         localSpeakerDatabase = try c.decodeIfPresent([String: [Float]].self, forKey: .localSpeakerDatabase) ?? [:]
         echoSegmentsRemoved = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
+        // Legacy session.json predates the flag: fall back to the old inference so an in-flight
+        // recording recovered by a newer build still reconciles the way it was written.
+        if let flag = try c.decodeIfPresent(Bool.self, forKey: .isDualStream) {
+            isDualStream = flag
+        } else {
+            isDualStream = segments.contains { $0.source == "local" }
+        }
     }
 }
 

@@ -104,8 +104,14 @@ final class ChunkProcessor {
 
         // 2. Transcribe mic audio (skip if file missing or empty)
         let micURL = URL(fileURLWithPath: chunk.micPath)
+        // Dual-stream is a property of the CAPTURE, not of whether the user spoke. Deriving it from
+        // `!micResult.segments.isEmpty` meant a chunk the user sat through in silence skipped source
+        // prefixing while its siblings kept it — so the reconciler's `Remote Speaker N` keys matched
+        // nothing there, its mapping fell back to the identity, and its chunk-local numbering was
+        // laundered into the global namespace, swapping speakers for the rest of the meeting.
+        let hasDualStream = FileManager.default.fileExists(atPath: chunk.micPath)
         let micResult: StreamResult
-        if FileManager.default.fileExists(atPath: chunk.micPath) {
+        if hasDualStream {
             micResult = await transcribeStream(
                 audioPath: micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
             )
@@ -115,7 +121,6 @@ final class ChunkProcessor {
 
         // 3. Merge segments
         var allSegments = systemResult.segments + micResult.segments
-        let hasDualStream = !micResult.segments.isEmpty
         if hasDualStream && !allSegments.isEmpty {
             // Resolve within-source Unknowns to the single speaker of that channel BEFORE prefixing,
             // so a 1-party call / your own mic doesn't fragment into `Remote Speaker 1` + `Unknown` (#71).
@@ -177,13 +182,15 @@ final class ChunkProcessor {
                     systemAudio: systemURL,
                     micAudio: micURL,
                     outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps
+                    bitrateKbps: config.archiveBitrateKbps,
+                    preserveSourceWAV: config.preserveSourceWAV ?? false
                 )
             } else {
                 archiveResult = try await AudioArchiver.archiveSystemOnly(
                     systemAudio: systemURL,
                     outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps
+                    bitrateKbps: config.archiveBitrateKbps,
+                    preserveSourceWAV: config.preserveSourceWAV ?? false
                 )
             }
             audioPath = archiveResult.archivePath.lastPathComponent
@@ -209,7 +216,8 @@ final class ChunkProcessor {
             segments: chunkSegments,
             speakerDatabase: speakerDatabase,
             localSpeakerDatabase: localSpeakerDatabase,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsRemoved: echoRemoved,
+            isDualStream: hasDualStream
         )
 
         // 8. Actor-isolated append + persist
@@ -287,9 +295,14 @@ final class ChunkProcessor {
                 )
             } catch {
                 Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
+                // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
+                // is worse than admitting we don't know: with an empty speakerDatabase the
+                // reconciler skips this chunk entirely, so a fabricated "Speaker 1" fuses with the
+                // seed chunk's real Speaker 1 and every voice in this chunk is attributed to that
+                // person. "Unknown" is already handled downstream by tagWithSourcePrefix.
                 labeled = segments.map { seg in
                     LabeledSegment(
-                        start: seg.start, end: seg.end, speaker: "Speaker 1",
+                        start: seg.start, end: seg.end, speaker: "Unknown",
                         text: seg.text.trimmingCharacters(in: .whitespaces),
                         source: "", confidence: seg.confidence, language: seg.language
                     )

@@ -22,6 +22,12 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// The MID-RECORDING system (remote) stream could not be restarted within budget — the remote side
     /// stopped being captured even though the mic kept recording (#86). Severity `.anomaly`.
     case systemAudioUnrecovered
+    /// The output device changed sample rate underneath the tap (Bluetooth A2DP -> HFP is NOT a
+    /// device change, so no output-switch listener fires). The IOProc keeps delivering against a
+    /// stale format: fewer frames arrive than the declared rate implies, the writer pads silence to
+    /// hold the wall clock, and the remote audio comes out 2x-fast with gaps — correct duration,
+    /// corrupt content. The stream is still RUNNING, so this is not a stop error. Severity `.anomaly`.
+    case rateDrift
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.

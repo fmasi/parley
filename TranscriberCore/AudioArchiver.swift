@@ -29,11 +29,15 @@ public enum AudioArchiverError: LocalizedError {
 public enum AudioArchiver {
 
     /// Encode both WAVs to a stereo AAC .m4a and delete the source WAVs on success.
+    /// - Parameter preserveSourceWAV: keep the uncompressed source WAVs after archiving.
+    ///   Diagnostic use: the archive is lossy, and speaker-embedding quality (diarization)
+    ///   appears far more sensitive to that than intelligibility is.
     public static func archive(
         systemAudio: URL,
         micAudio: URL,
         outputDirectory: URL,
-        bitrateKbps: Int
+        bitrateKbps: Int,
+        preserveSourceWAV: Bool = false
     ) async throws -> AudioArchiveResult {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
@@ -83,9 +87,13 @@ public enum AudioArchiver {
             throw error
         }
 
-        // 5. Delete source WAVs.
-        try? FileManager.default.removeItem(at: systemAudio)
-        try? FileManager.default.removeItem(at: micAudio)
+        // 5. Delete source WAVs (unless explicitly preserved for diagnostics).
+        if preserveSourceWAV {
+            Logger.files.info("AudioArchiver: preserving source WAVs (preserve_source_wav)")
+        } else {
+            try? FileManager.default.removeItem(at: systemAudio)
+            try? FileManager.default.removeItem(at: micAudio)
+        }
 
         Logger.files.info("AudioArchiver: done — \(outputURL.lastPathComponent)")
         return AudioArchiveResult(archivePath: outputURL)
@@ -101,7 +109,8 @@ public enum AudioArchiver {
     public static func archiveSystemOnly(
         systemAudio: URL,
         outputDirectory: URL,
-        bitrateKbps: Int
+        bitrateKbps: Int,
+        preserveSourceWAV: Bool = false
     ) async throws -> AudioArchiveResult {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
@@ -141,7 +150,11 @@ public enum AudioArchiver {
             throw error
         }
 
-        try? FileManager.default.removeItem(at: systemAudio)
+        if preserveSourceWAV {
+            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+        } else {
+            try? FileManager.default.removeItem(at: systemAudio)
+        }
 
         Logger.files.info("AudioArchiver: done (system-only) — \(outputURL.lastPathComponent)")
         return AudioArchiveResult(archivePath: outputURL)
@@ -166,7 +179,8 @@ public enum AudioArchiver {
     public static func archiveAll(
         pairs: [SegmentPair],
         outputDirectory: URL,
-        bitrateKbps: Int
+        bitrateKbps: Int,
+        preserveSourceWAV: Bool = false
     ) async -> [URL] {
         var results: [URL] = []
         for pair in pairs {
@@ -177,13 +191,15 @@ public enum AudioArchiver {
                         systemAudio: pair.system,
                         micAudio: mic,
                         outputDirectory: outputDirectory,
-                        bitrateKbps: bitrateKbps
+                        bitrateKbps: bitrateKbps,
+                        preserveSourceWAV: preserveSourceWAV
                     )
                 } else {
                     archived = try await archiveSystemOnly(
                         systemAudio: pair.system,
                         outputDirectory: outputDirectory,
-                        bitrateKbps: bitrateKbps
+                        bitrateKbps: bitrateKbps,
+                        preserveSourceWAV: preserveSourceWAV
                     )
                 }
                 results.append(archived.archivePath)

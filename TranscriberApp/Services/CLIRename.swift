@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import os
 import TranscriberCore
@@ -8,8 +9,11 @@ enum CLIRename {
         let id: String
         let sampleText: String
         let audioFile: URL?
+        /// Offsets WITHIN `audioFile` (chunk-local), not absolute transcript time.
         let start: Double
         let end: Double
+        /// Which channel of the stereo archive carries this speaker (L = mic, R = system).
+        let isLocal: Bool
     }
 
     static func run(jsonPath: URL) throws {
@@ -21,14 +25,18 @@ enum CLIRename {
             throw RenameError.invalidJSON
         }
 
+        // `audio_paths` is [chunk0, chunk1, ...] for a chunked recording — not [system, mic].
+        // Resolve each sample onto the chunk that actually contains it (#132).
         let metadata = json["metadata"] as? [String: Any]
-        let audioPaths = metadata?["audio_paths"] as? [String] ?? []
-        let remoteAudio = audioPaths.first.map { URL(fileURLWithPath: $0) }
-        let localAudio = audioPaths.count > 1 ? URL(fileURLWithPath: audioPaths[1]) : nil
+        let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
+        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
 
-        // Collect speakers — pick the longest segment per speaker for the best sample
-        var candidatesBySpeaker: [String: [(text: String, start: Double, end: Double, source: String)]] = [:]
+        // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
+        // clean speech from crosstalk.
+        var allCandidates: [SpeakerSampleSelector.Candidate] = []
         var orderedIds: [String] = []
+        var seen = Set<String>()
 
         for seg in segments {
             guard let speaker = seg["speaker"] as? String,
@@ -37,15 +45,40 @@ enum CLIRename {
                   let end = seg["end"] as? Double else { continue }
             let trimmed = text.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            if candidatesBySpeaker[speaker] == nil { orderedIds.append(speaker) }
+            if seen.insert(speaker).inserted { orderedIds.append(speaker) }
             let source = seg["source"] as? String ?? "remote"
-            candidatesBySpeaker[speaker, default: []].append((trimmed, start, end, source))
+            allCandidates.append(SpeakerSampleSelector.Candidate(
+                speaker: speaker, start: start, end: end, source: source, text: trimmed
+            ))
         }
 
         let samples: [SpeakerSample] = orderedIds.compactMap { speaker in
-            guard let best = candidatesBySpeaker[speaker]?.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }) else { return nil }
-            let audioFile = best.source == "local" ? localAudio : remoteAudio
-            return SpeakerSample(id: speaker, sampleText: best.text, audioFile: audioFile, start: best.start, end: best.end)
+            // Isolated speech first, then longest — the longest segment is very often the one
+            // this speaker was talked over in. Then fall back through the ranking until one
+            // actually resolves to playable audio.
+            let ranked = SpeakerSampleSelector.rank(speaker: speaker, allSegments: allCandidates)
+            guard let best = ranked.first else { return nil }
+
+            for candidate in ranked {
+                if let hit = SpeakerSampleLocator.locate(
+                    source: candidate.source,
+                    start: candidate.start,
+                    end: candidate.end,
+                    layout: layout,
+                    chunkDurations: chunkDurations
+                ) {
+                    return SpeakerSample(
+                        id: speaker, sampleText: candidate.text,
+                        audioFile: hit.url, start: hit.start, end: hit.end,
+                        isLocal: hit.isLocal
+                    )
+                }
+            }
+            // No playable audio — still let the user rename, using the sample text alone.
+            return SpeakerSample(
+                id: speaker, sampleText: best.text, audioFile: nil, start: 0, end: 0,
+                isLocal: best.source == "local"
+            )
         }
 
         guard !samples.isEmpty else {
@@ -66,7 +99,10 @@ enum CLIRename {
             if let audioFile = sample.audioFile,
                FileManager.default.fileExists(atPath: audioFile.path) {
                 print("Playing audio sample...")
-                playAudioSample(file: audioFile, start: sample.start, duration: sample.end - sample.start)
+                playAudioSample(
+                    file: audioFile, start: sample.start,
+                    duration: sample.end - sample.start, isLocal: sample.isLocal
+                )
             }
 
             print("Enter new name (or press Enter to keep '\(sample.id)'): ", terminator: "")
@@ -79,10 +115,15 @@ enum CLIRename {
             print()
         }
 
-        // Apply renames if any were made
+        // Apply renames if any were made. Report honestly — a "success" line after a failed write
+        // is the silent-wrong-answer this whole product exists to avoid (the GUI path is atomic +
+        // surfaced for the same reason).
         if !mapping.isEmpty {
-            applyRenames(mapping, jsonPath: jsonPath)
-            print("Speaker names updated in: \(jsonPath.lastPathComponent)")
+            if applyRenames(mapping, jsonPath: jsonPath) {
+                print("Speaker names updated in: \(jsonPath.lastPathComponent)")
+            } else {
+                print("Error: could not write speaker names to \(jsonPath.lastPathComponent). Nothing was saved.")
+            }
         }
 
         // Generate format file
@@ -94,34 +135,50 @@ enum CLIRename {
         print("Done.")
     }
 
-    private static func playAudioSample(file: URL, start: Double, duration: Double) {
+    /// Play one speaker sample: the RIGHT moment, from the RIGHT channel.
+    ///
+    /// This used to shell out to `afplay`, which has no seek flag — so `start` was accepted and
+    /// then ignored, and every sample played the first ten seconds of the recording, mixing both
+    /// channels of the stereo archive. The user was auditioning the wrong moment, and often the
+    /// wrong people, while the printed sample text showed something else entirely.
+    private static func playAudioSample(file: URL, start: Double, duration: Double, isLocal: Bool) {
         guard duration > 0 else { return }
 
-        // afplay has no seek option — only --time for duration and --rate for speed.
-        // Play from start of file, capped at 10s. Full seek would require AVAudioPlayer.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        process.arguments = [
-            file.path,
-            "--time", String(format: "%.1f", min(duration, 10.0)),
-        ]
-
+        let preview: URL
         do {
-            try process.run()
-            process.waitUntilExit()
+            preview = try SpeakerSamplePreview.makeMonoPreview(
+                of: file, from: start, to: start + duration, isLocal: isLocal
+            )
         } catch {
-            Logger.transcription.error("afplay failed: \(error, privacy: .public)")
+            Logger.transcription.error("Sample preview failed: \(error, privacy: .public)")
+            return
         }
+        defer { try? FileManager.default.removeItem(at: preview) }
+
+        guard let player = try? AVAudioPlayer(contentsOf: preview) else {
+            Logger.transcription.error("Sample preview: AVAudioPlayer init failed")
+            return
+        }
+        player.play()
+        // Run the run loop rather than Thread.sleep: AVAudioPlayer relies on it being serviced for
+        // its internal bookkeeping, and a bare sleep would block silently if playback never started.
+        // Bounded by the clip length, so a player that fails to start cannot hang the CLI.
+        let deadline = Date().addingTimeInterval(min(player.duration, duration) + 0.5)
+        while player.isPlaying, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+        player.stop()
     }
 
-    private static func applyRenames(_ mapping: [String: String], jsonPath: URL) {
+    @discardableResult
+    private static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         do {
             let data = try Data(contentsOf: jsonPath)
             guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   var segments = json["segments"] as? [[String: Any]]
             else {
                 Logger.files.error("Failed to parse JSON for rename: \(jsonPath.lastPathComponent, privacy: .private)")
-                return
+                return false
             }
 
             for i in segments.indices {
@@ -140,8 +197,10 @@ enum CLIRename {
                 withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
             )
             try updatedData.write(to: jsonPath, options: .atomic)
+            return true
         } catch {
             Logger.files.error("Failed to apply renames: \(error, privacy: .public)")
+            return false
         }
     }
 
