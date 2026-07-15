@@ -128,13 +128,29 @@ import Testing
     }
 
     /// First callback's frames are counted (the off-by-one that under-counted the rate by one buffer).
+    /// Anchors at t=10s (NOT 0 — 0 collided with the old unset sentinel and made this test vacuous),
+    /// judges at t=11s. If the first callback's 48000 frames were dropped, the window would see only
+    /// 48000 frames over 1s = 48k... so to make the assertion bite, the first callback carries the
+    /// frames and the second carries NONE: 48000 frames over 1s is healthy ONLY if the first is counted.
     @Test func firstCallbackFramesAreCounted() {
         var m = RateDriftMonitor(windowSeconds: 1)
-        // Two callbacks: t=0 anchors, t=1s judges. If the first callback's frames were dropped, the
-        // effective rate would be halved and this healthy stream would false-fire.
-        _ = m.record(frames: 48000, declaredRate: rate, hostNanos: nanos(0))
-        let v = m.record(frames: 48000, declaredRate: rate, hostNanos: nanos(1))
+        _ = m.record(frames: 48000, declaredRate: rate, hostNanos: nanos(10))  // anchor + 48000 frames
+        let v = m.record(frames: 0, declaredRate: rate, hostNanos: nanos(11))   // 1s later, no new frames
+        // 48000 frames / 1s = 48k = healthy — but ONLY because the first callback's frames counted.
+        // If they were dropped, 0 frames / 1s = 0 Hz would fire drift.
         if case .drift = v { Issue.record("first callback's frames must count — this stream is healthy") }
+        if case .notYet = v { Issue.record("window should have been judged at t=11s") }
+    }
+
+    /// A host time of 0 is a legitimate timestamp and must anchor the window like any other — the
+    /// old `== 0` sentinel silently swallowed it, which is how the test above went vacuous.
+    @Test func zeroHostTimeStillAnchors() {
+        var m = RateDriftMonitor(windowSeconds: 1)
+        _ = m.record(frames: 48000, declaredRate: rate, hostNanos: 0)            // anchor at 0
+        let v = m.record(frames: 24000, declaredRate: rate, hostNanos: nanos(1)) // half rate over 1s
+        // 72000 frames / 1s? No — window judges frames since anchor: 48000+24000 over 1s... but the
+        // point is it JUDGED (not .notYet), proving hostNanos 0 anchored.
+        #expect(v != .notYet, "hostNanos 0 must anchor the window, not be swallowed as 'unset'")
     }
 
     @Test func zeroDeclaredRateIsIgnored() {

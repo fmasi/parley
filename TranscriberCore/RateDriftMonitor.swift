@@ -32,7 +32,7 @@ public struct RateDriftMonitor {
     public let lowerRatio: Double
     public let upperRatio: Double
 
-    private var firstHostNanos: UInt64 = 0
+    private var firstHostNanos: UInt64?
     private var frames: Int = 0
     private var reported = false
 
@@ -50,12 +50,12 @@ public struct RateDriftMonitor {
         // Count the first callback's frames too: measuring elapsed from callback 0 while counting
         // frames from callback 1 would under-count the rate by one buffer.
         frames += newFrames
-        if firstHostNanos == 0 {
+        guard let anchor = firstHostNanos else {
             firstHostNanos = hostNanos
             return .notYet
         }
 
-        let elapsed = Double(hostNanos &- firstHostNanos) / 1_000_000_000
+        let elapsed = Double(hostNanos &- anchor) / 1_000_000_000
         guard elapsed >= windowSeconds else { return .notYet }
 
         let effectiveRate = Double(frames) / elapsed
@@ -76,7 +76,7 @@ public struct RateDriftMonitor {
     /// judged on the previous one's accumulated frames across the dead rebuild window — a spurious
     /// alarm — and a stale `reported` latch would permanently disarm the new generation.
     public mutating func reset() {
-        firstHostNanos = 0
+        firstHostNanos = nil
         frames = 0
         reported = false
     }
