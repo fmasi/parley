@@ -50,11 +50,12 @@ in the maintainer's login Keychain); everything else is guarded by scripts and C
 
 5. **Publish (guarded):**
    ```bash
-   bash scripts/publish.sh <version>                 # current line (0.9.x) — takes latest
-   bash scripts/publish.sh <version> --line stable   # a 0.8.x maintenance patch — NOT latest
+   bash scripts/publish.sh <version> --line current  # the live 0.9.x line — takes latest
+   bash scripts/publish.sh <version> --line stable    # a 0.8.x maintenance patch — NOT latest
    ```
-   `publish.sh` checks the required artifacts exist, globs any deltas safely, passes an **explicit**
-   `--latest` (never implicit — implicit latest is what broke the feed in #110), and on success runs
+   `--line` is **required** (no default): forgetting it on a 0.8.x patch would silently take
+   "latest" and 404 the 0.9.x feed (#110). `publish.sh` checks the required artifacts exist, globs
+   any deltas safely, passes an **explicit** `--latest`, and on success runs
    `scripts/verify-release-feed.sh` immediately to confirm the published feed is intact.
 
 6. **The feed is watched automatically.** `.github/workflows/release-feed.yml` re-verifies the

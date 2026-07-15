@@ -22,6 +22,12 @@ out="$(run 0.9.0 --line stable --dry-run)"
 grep -q -- '--latest=false' <<<"$out" || { echo "FAIL: stable line is not --latest=false"; echo "$out"; exit 1; }
 echo "  stable line:  PASS"
 
+# --line is required: forgetting it must NOT silently default to latest and hijack the feed.
+if run 0.9.0 --dry-run >/dev/null 2>&1; then
+    echo "FAIL: missing --line was accepted (would default to latest)"; exit 1
+fi
+echo "  missing --line: correctly rejected"
+
 # Missing artifact must fail closed.
 rm "$tmp/release/release-notes/0.9.0.md"
 if run 0.9.0 --line current --dry-run >/dev/null 2>&1; then

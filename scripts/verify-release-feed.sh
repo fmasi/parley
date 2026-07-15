@@ -62,16 +62,23 @@ trap cleanup EXIT
 
 # 1. Fetch + parse.
 curl -fsSL "$FEED_URL" -o "$APPCAST_FILE" || fail "appcast did not resolve (200) at $FEED_URL"
-eval "$(python3 - "$APPCAST_FILE" <<'PY'
+# Read the newest item's fields via `read`, never `eval`: the appcast is parsed here BEFORE its
+# signature is verified (step 5), so a MITM-tampered feed must not be able to inject shell.
+NEWEST_VERSION=""; NEWEST_URL=""; NEWEST_SIG=""
+{
+    IFS= read -r NEWEST_VERSION
+    IFS= read -r NEWEST_URL
+    IFS= read -r NEWEST_SIG
+} < <(python3 - "$APPCAST_FILE" <<'PY'
 import sys, appcast_lib
 it = appcast_lib.newest_item(open(sys.argv[1]).read())
 if it:
-    print("NEWEST_VERSION=%s" % it["version"])
-    print("NEWEST_URL=%s" % it["url"])
-    print("NEWEST_SIG=%s" % (it["ed_signature"] or ""))
+    print(it["version"])
+    print(it["url"])
+    print(it["ed_signature"] or "")
 PY
-)"
-[[ -n "${NEWEST_VERSION:-}" ]] || fail "appcast at $FEED_URL has no items or did not parse"
+) || true
+[[ -n "$NEWEST_VERSION" ]] || fail "appcast at $FEED_URL has no items or did not parse"
 
 # 2. Newest item is the version under test.
 [[ "$NEWEST_VERSION" == "$VERSION" ]] || fail "newest appcast item is $NEWEST_VERSION, expected $VERSION"

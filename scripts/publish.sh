@@ -22,7 +22,7 @@ RELEASE_ROOT="${RELEASE_ROOT:-.}"
 usage() { echo "usage: bash scripts/publish.sh <version> [--line current|stable] [--dry-run]"; }
 
 VERSION=""
-LINE="current"
+LINE=""
 DRY_RUN=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,7 +34,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$VERSION" ]] || { usage >&2; exit 2; }
-case "$LINE" in current|stable) ;; *) echo "error: --line must be 'current' or 'stable'" >&2; exit 2;; esac
+# --line is REQUIRED, never defaulted: defaulting to 'current' would make a forgotten flag on a
+# 0.8.x maintenance release silently take 'latest' and 404 the 0.9.x feed (#110). Force the choice.
+case "$LINE" in
+    current|stable) ;;
+    "") echo "error: --line is required (current|stable). 'current' is the live 0.9.x Sparkle line" >&2
+        echo "       (takes latest); 'stable' is a 0.8.x patch (never latest). See docs/release-checklist.md." >&2
+        exit 2;;
+    *)  echo "error: --line must be 'current' or 'stable' (got '$LINE')" >&2; exit 2;;
+esac
 
 TAG="v$VERSION"
 if [[ "$LINE" == current ]]; then LATEST="true"; else LATEST="false"; fi
