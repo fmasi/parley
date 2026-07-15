@@ -46,7 +46,7 @@ let package = Package(
         .executableTarget(
             name: "VerifyEdSignature",
             dependencies: ["VerifyEdSignatureCore"],
-            path: "Tools/VerifyEdSignature"
+            path: "Sources/VerifyEdSignature"
         ),
         .testTarget(
             name: "TranscriberTests",
