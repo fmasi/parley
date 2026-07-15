@@ -28,7 +28,19 @@ enum TestModels {
         if FluidAudioDiarizer.isDiarizationCached() { return true }
         if mayDownload {
             try await FluidAudioDiarizer.preDownloadModels()  // throws on network failure
-            return FluidAudioDiarizer.isDiarizationCached()
+            if FluidAudioDiarizer.isDiarizationCached() { return true }
+            // preDownloadModels() returned WITHOUT throwing, yet the models are still absent
+            // (partial fetch, or the download's success check diverging from isDiarizationCached()).
+            // On CI that is a failure, not a silent skip: the every-run synthetic/metamorphic
+            // oracles `guard` on this result and would otherwise pass green while asserting nothing,
+            // and — unlike the AMI guard — they have no guardJobCannotSkip meta-test behind them.
+            if onCI {
+                Issue.record(Comment(rawValue:
+                    "Diarization models are still absent after preDownloadModels() succeeded on CI. "
+                    + "A silent skip here is how the speaker-collapse bug survived; check the "
+                    + "FluidAudio model fetch and isDiarizationCached()."))
+            }
+            return false
         }
         if onCI {
             let message =
