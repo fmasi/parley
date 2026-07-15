@@ -14,7 +14,13 @@ import Testing
 ///
 /// All fixtures are synthesized at test time (SyntheticSpeech) — no downloads, no git bytes.
 /// Tolerances are measured, not guessed; see each test.
-@Suite struct DiarizationMetamorphicTests {
+///
+/// `.serialized`: the suite shares one diarizer actor, so every `diarize` call already runs one
+/// at a time; parallel test scheduling would only let another test's call interleave between the
+/// determinism test's two runs, which could break its bit-identical assertion via cross-call
+/// model state. Serializing costs nothing here (the actor is the real bottleneck) and removes
+/// that flake window.
+@Suite(.serialized) struct DiarizationMetamorphicTests {
 
     /// One shared diarizer for the suite: the actor serializes runs, keeping CI memory flat,
     /// and stock config is the shipping default — these oracles guard what users actually run.
