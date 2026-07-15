@@ -32,6 +32,14 @@ class AppcastLibTests(unittest.TestCase):
         self.assertEqual(version_from_filename("Parley-0.10.3.zip"), "0.10.3")
         self.assertIsNone(version_from_filename("not-a-release.zip"))
 
+    def test_odd_version_does_not_crash(self):
+        # A malformed or prerelease version must not crash the parse (defense-in-depth).
+        xml = ('<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>'
+               '<item><sparkle:shortVersionString>0.9.0-rc1</sparkle:shortVersionString>'
+               '<enclosure url="https://x/v0.9.0/Parley-0.9.0.zip" sparkle:edSignature="S" length="1"/>'
+               '</item></channel></rss>')
+        self.assertEqual(newest_item(xml)["version"], "0.9.0-rc1")
+
     def test_empty_channel(self):
         self.assertIsNone(newest_item(
             '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">'

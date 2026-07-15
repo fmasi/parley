@@ -71,7 +71,7 @@ NEWEST_VERSION=""; NEWEST_URL=""; NEWEST_SIG=""
     IFS= read -r NEWEST_SIG
 } < <(python3 - "$APPCAST_FILE" <<'PY'
 import sys, appcast_lib
-it = appcast_lib.newest_item(open(sys.argv[1]).read())
+it = appcast_lib.newest_item(open(sys.argv[1], encoding="utf-8").read())
 if it:
     print(it["version"])
     print(it["url"])
@@ -94,7 +94,7 @@ while IFS= read -r url; do
     [[ -n "$url" ]] || continue
     code="$(curl -sIL -o /dev/null -w '%{http_code}' "$url" || echo 000)"
     [[ "$code" == 200 ]] || fail "enclosure URL not reachable ($code): $url"
-done < <(python3 -c 'import sys, appcast_lib; print("\n".join(appcast_lib.all_enclosure_urls(open(sys.argv[1]).read())))' "$APPCAST_FILE")
+done < <(python3 -c 'import sys, appcast_lib; print("\n".join(appcast_lib.all_enclosure_urls(open(sys.argv[1], encoding="utf-8").read())))' "$APPCAST_FILE")
 
 # 5. Newest enclosure signature validates against the downloaded bytes.
 VERIFY_BIN="${VERIFY_ED_SIGNATURE_BIN:-}"

@@ -10,7 +10,7 @@
 # On a real publish it runs scripts/verify-release-feed.sh immediately after.
 #
 # Usage:
-#   bash scripts/publish.sh <version> [--line current|stable] [--dry-run]
+#   bash scripts/publish.sh <version> --line current|stable [--dry-run]
 # Test seams: RELEASE_ROOT (default '.'), SKIP_GIT_PRECHECKS=1 (skip tag/HEAD/clean-tree checks).
 set -euo pipefail
 
@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR"
 REPO="fmasi/parley"
 RELEASE_ROOT="${RELEASE_ROOT:-.}"
 
-usage() { echo "usage: bash scripts/publish.sh <version> [--line current|stable] [--dry-run]"; }
+usage() { echo "usage: bash scripts/publish.sh <version> --line current|stable [--dry-run]"; }
 
 VERSION=""
 LINE=""

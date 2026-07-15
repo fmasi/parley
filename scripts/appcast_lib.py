@@ -10,7 +10,14 @@ SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 
 
 def _semver(v):
-    return tuple(int(x) for x in v.split("."))
+    # Tolerant: take the leading integer of each dotted part so a stray suffix (e.g. "0.9.0-rc1")
+    # or a malformed component can't crash the whole feed check. Parley ships plain x.y.z tags;
+    # this is defense-in-depth for an integrity tool, not prerelease support.
+    parts = []
+    for component in v.split("."):
+        m = re.match(r"\d+", component)
+        parts.append(int(m.group()) if m else 0)
+    return tuple(parts)
 
 
 def newest_item(appcast_xml):
