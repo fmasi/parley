@@ -45,6 +45,10 @@ class RenderMarkdownTests(unittest.TestCase):
         self.assertEqual(render_markdown("one\n\ntwo"),
                          "<p>one</p>\n<p>two</p>")
 
+    def test_crlf_line_endings_stripped(self):
+        self.assertEqual(render_markdown("# Title\r\n\r\nbody\r"),
+                         "<h1>Title</h1>\n<p>body</p>")
+
     def test_code_span_protects_asterisks(self):
         self.assertEqual(render_markdown("`a*b*c`"),
                          "<p><code>a*b*c</code></p>")

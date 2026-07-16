@@ -50,6 +50,7 @@ disown "$SRV" 2>/dev/null || true   # silence the job-control "Terminated" notic
 ready=0
 for _ in $(seq 1 50); do
     curl -fsS "http://localhost:$PORT/appcast.xml" -o /dev/null 2>/dev/null && { ready=1; break; }
+    sleep 0.1   # curl fails instantly when nothing's listening; space out so the poll can wait ~5s
 done
 [[ "$ready" == 1 ]] || { echo "FAIL: fixture server did not come up"; exit 1; }
 

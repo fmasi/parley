@@ -39,7 +39,8 @@ def _inline(text):
 
 
 def render_markdown(md):
-    lines = md.split("\n")
+    # Normalize CRLF/CR (GitHub web editor / Windows checkout) so headings don't keep a trailing \r.
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks = []
     i, n = 0, len(lines)
     while i < n:
@@ -101,8 +102,12 @@ def main(argv):
     if md.strip() == "":
         sys.stderr.write("error: %s is empty — refusing to render blank release notes\n" % src)
         return 2
-    with open(dst, "w", encoding="utf-8") as f:
-        f.write(render_markdown(md) + "\n")
+    try:
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(render_markdown(md) + "\n")
+    except OSError as e:
+        sys.stderr.write("error: cannot write %s: %s\n" % (dst, e))
+        return 2
     return 0
 
 
