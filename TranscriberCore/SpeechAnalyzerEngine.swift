@@ -31,12 +31,14 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
 
         Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .private) with SpeechAnalyzer")
 
-        let locale: Locale
-        if let lang = language {
-            locale = Locale(identifier: lang)
-        } else {
-            locale = Locale.autoupdatingCurrent
+        // SpeechAnalyzer cannot auto-detect language — it transcribes in whatever locale it's
+        // given. Refuse a missing language rather than defaulting to the system locale, which
+        // silently transcribed non-English audio as English (e.g. Portuguese → gibberish).
+        guard let language, !language.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw SpeechAnalyzerError.languageRequired
         }
+        let localeID = SpeechAnalyzerLocale.resolve(language)
+        let locale = Locale(identifier: localeID)
 
         let transcriber = SpeechTranscriber(
             locale: locale,
@@ -46,6 +48,25 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                 attributeOptions: [.audioTimeRange]
             )
         )
+
+        // The locale must be supported AND its on-device model installed, or transcription returns
+        // empty/garbage. Check + install, surfacing failures (e.g. the ko-KR download SFSpeechError
+        // Code=11) instead of swallowing them.
+        func matches(_ a: Locale, _ b: Locale) -> Bool { a.identifier(.bcp47) == b.identifier(.bcp47) }
+        guard await SpeechTranscriber.supportedLocales.contains(where: { matches($0, locale) }) else {
+            throw SpeechAnalyzerError.localeNotSupported(locale.identifier(.bcp47))
+        }
+        if !(await SpeechTranscriber.installedLocales).contains(where: { matches($0, locale) }) {
+            Logger.transcription.info("SpeechAnalyzer: installing \(locale.identifier(.bcp47), privacy: .public) model...")
+            do {
+                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                    try await request.downloadAndInstall()
+                }
+            } catch {
+                throw SpeechAnalyzerError.assetInstallFailed(locale.identifier(.bcp47), error.localizedDescription)
+            }
+        }
+
         let analyzer = SpeechAnalyzer(modules: [transcriber])
 
         let audioFile = try AVAudioFile(forReading: audioPath)
@@ -101,7 +122,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
                         start: segStart,
                         end: segEnd,
                         text: trimmed,
-                        language: language ?? locale.language.languageCode?.identifier,
+                        language: localeID,
                         words: SpeakerAssignment.speechAnalyzerWordTimings(
                             runs: runsData, trimmedSegmentText: trimmed
                         )
