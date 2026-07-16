@@ -103,8 +103,10 @@ import Testing
         let paddedResult = try await Self.diarizer.diarize(audioPath: padded, numSpeakers: nil)
 
         try #require(!baseResult.segments.isEmpty)
-        #expect(baseResult.segments.count == paddedResult.segments.count,
-                "leading silence must not change segmentation, only shift it")
+        // #require (not #expect): if counts differ, zip would silently truncate to the shorter and
+        // the shift checks below would pass on a partial set — a false green. Stop here instead.
+        try #require(baseResult.segments.count == paddedResult.segments.count,
+                     "leading silence must not change segmentation, only shift it")
         for (unshifted, shifted) in zip(baseResult.segments, paddedResult.segments) {
             #expect(abs(shifted.start - unshifted.start - pad) < 0.25,
                     "segment start must shift by \(pad)s (got \(unshifted.start) -> \(shifted.start))")

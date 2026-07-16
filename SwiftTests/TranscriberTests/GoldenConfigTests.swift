@@ -113,7 +113,10 @@ import Testing
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
             return "\(n)"
         }
-        return quoted("\(value)")
+        // Config leaves are strings/numbers/bools today. A nested dict/array/null would otherwise
+        // be silently stringified into the golden — make it a LOUD, reviewable marker instead, so
+        // a future non-leaf config field forces the snapshot to be taught how to render it.
+        return quoted("<unrepresented \(type(of: value))>")
     }
 
     // MARK: - Mirror -> deterministic JSON
@@ -148,5 +151,11 @@ import Testing
         }
     }
 
-    private static func quoted(_ value: String) -> String { "\"\(value)\"" }
+    private static func quoted(_ value: String) -> String {
+        // Escape backslash and quote so a config value containing them stays valid JSON in the golden.
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
 }
