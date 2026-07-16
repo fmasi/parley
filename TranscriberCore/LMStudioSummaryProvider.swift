@@ -258,12 +258,14 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let entries = json["data"] as? [[String: Any]]
         else { return nil }
-        let modelBasename = model.split(separator: "/").last.map(String.init)
         guard let entry = entries.first(where: { entry in
             guard let id = entry["id"] as? String else { return false }
             if id == model { return true }
-            if let publisher = entry["publisher"] as? String, "\(publisher)/\(id)" == model { return true }
-            return modelBasename == id
+            // config stores "lmstudio-community/gemma-4-26b-a4b-it-mlx"; /api/v0/models splits it
+            // into id + publisher. Match the exact publisher/id — NOT a bare-basename fallback,
+            // which would false-match a same-named model from a different publisher.
+            if let publisher = entry["publisher"] as? String { return "\(publisher)/\(id)" == model }
+            return false
         }) else { return nil }
         let isLoaded = (entry["state"] as? String) == "loaded"
         let loadedContext = isLoaded ? (entry["loaded_context_length"] as? Int) : nil
@@ -282,8 +284,17 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
-        else { return nil }
-        return Self.parseModelState(data, model: model)
+        else {
+            Logger.transcription.info(
+                "LM Studio: /api/v0/models unreachable — can't tell if '\(self.model, privacy: .public)' is loaded, so a context_length will be sent (may reload the model).")
+            return nil
+        }
+        let state = Self.parseModelState(data, model: model)
+        if state == nil {
+            Logger.transcription.info(
+                "LM Studio: '\(self.model, privacy: .public)' not found in /api/v0/models — a context_length will be sent (may reload the model).")
+        }
+        return state
     }
 
     /// Check if output was likely truncated (used all available space).

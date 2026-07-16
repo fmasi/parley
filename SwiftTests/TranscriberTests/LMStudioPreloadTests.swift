@@ -71,6 +71,26 @@ struct LMStudioPreloadTests {
                 == LMStudioSummaryProvider.ModelState(isLoaded: true, loadedContextLength: 262144))
     }
 
+    @Test func loadedWithoutContextLengthRequestsContext() {
+        // A non-standard LM Studio may report state:"loaded" without loaded_context_length. We
+        // must not assume it's big enough — fall back to requesting a context.
+        let json = """
+        {"data":[{"id":"m","state":"loaded"}]}
+        """.data(using: .utf8)!
+        let state = LMStudioSummaryProvider.parseModelState(json, model: "m")
+        #expect(state == LMStudioSummaryProvider.ModelState(isLoaded: true, loadedContextLength: nil))
+        #expect(LMStudioSummaryProvider.contextDecision(state: state, neededContext: 5000, maxContext: 32768)
+                == .request(contextLength: 5000))
+    }
+
+    @Test func doesNotMatchSameNameDifferentPublisher() {
+        // Basename-only matching would wrongly match here; publisher/id matching must not.
+        let json = """
+        {"data":[{"id":"gemma-4-e4b-it","publisher":"someone-else","state":"loaded","loaded_context_length":8192}]}
+        """.data(using: .utf8)!
+        #expect(LMStudioSummaryProvider.parseModelState(json, model: "lmstudio-community/gemma-4-e4b-it") == nil)
+    }
+
     @Test func parseModelStateReturnsNilForAbsentModel() {
         let json = """
         {"data":[{"id":"other","state":"loaded","loaded_context_length":8192}]}
