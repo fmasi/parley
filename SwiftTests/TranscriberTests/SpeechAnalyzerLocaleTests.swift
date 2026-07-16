@@ -27,4 +27,12 @@ struct SpeechAnalyzerLocaleTests {
     @Test func unknownCodePassesThrough() {
         #expect(SpeechAnalyzerLocale.resolve("xx") == "xx")
     }
+
+    @Test func scriptAndRegionSubtagsPreserved() {
+        // The Chinese variants Apple supports (and FluidAudio can't do) must survive intact.
+        #expect(SpeechAnalyzerLocale.resolve("zh-Hant-TW") == "zh-Hant-TW")
+        #expect(SpeechAnalyzerLocale.resolve("zh-Hans-CN") == "zh-Hans-CN")
+        #expect(SpeechAnalyzerLocale.resolve("zh-Hant") == "zh-Hant")
+        #expect(SpeechAnalyzerLocale.resolve("zh_hant_tw") == "zh-Hant-TW")
+    }
 }

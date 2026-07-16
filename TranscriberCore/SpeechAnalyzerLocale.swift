@@ -44,12 +44,17 @@ public enum SpeechAnalyzerLocale {
         let trimmed = language.trimmingCharacters(in: .whitespaces)
         let normalized = trimmed.replacingOccurrences(of: "_", with: "-")
         if normalized.contains("-") {
-            // Already region-qualified — normalize the casing to lang-REGION.
-            let parts = normalized.split(separator: "-")
-            if parts.count >= 2 {
-                return "\(parts[0].lowercased())-\(parts[1].uppercased())"
+            // Already qualified — normalize each subtag by BCP-47 position, preserving script AND
+            // region (e.g. "zh-Hant-TW" must NOT collapse to "zh-HANT" — that breaks zh-TW/zh-HK).
+            let parts = normalized.split(separator: "-").map(String.init)
+            let normalizedParts = parts.enumerated().map { index, part -> String in
+                if index == 0 { return part.lowercased() }                 // language
+                if part.count == 4, part.allSatisfy(\.isLetter) {           // script subtag -> Titlecase
+                    return part.prefix(1).uppercased() + part.dropFirst().lowercased()
+                }
+                return part.uppercased()                                    // region subtag
             }
-            return normalized
+            return normalizedParts.joined(separator: "-")
         }
         return defaultRegion[normalized.lowercased()] ?? normalized
     }
