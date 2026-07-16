@@ -137,14 +137,19 @@ cp "$RELEASE_DIR/$ZIP_NAME" "$UPDATES_DIR/$ZIP_NAME"
 # version ships, this release's zip is no longer a "latest" asset and downloads 404. GitHub's
 # actual per-release asset URLs are versioned (releases/download/<tag>/<file>), so point there.
 #
-# generate_appcast only embeds sparkle:releaseNotesLink if a same-named .html/.md/.txt file
-# already exists next to the archive -- docs/release-checklist.md step 3 says to write it first,
-# but nothing enforces that. Not a hard failure (skipping notes is a valid choice), just a heads-up
-# so a forgotten file doesn't silently ship a blank notes pane with no clue why.
+# generate_appcast only embeds sparkle:releaseNotesLink if a same-named .html file already exists
+# next to the archive. Rather than hand-authoring that HTML (which drifts from the GitHub release
+# body), render it from the single source of truth: release/release-notes/<version>.md. So the
+# in-app Sparkle notes and the GitHub release page are always the same content.
 HTML_NOTES="$UPDATES_DIR/$ZIP_NAME"
 HTML_NOTES="${HTML_NOTES%.zip}.html"
-if [[ ! -f "$HTML_NOTES" ]]; then
-    echo "warning: $HTML_NOTES not found -- Sparkle's update dialog will show no release notes for this version (see docs/release-checklist.md step 3)."
+NOTES_MD="$RELEASE_DIR/release-notes/$VERSION.md"
+if [[ -f "$NOTES_MD" ]]; then
+    echo "==> Rendering Sparkle release notes from $NOTES_MD ..."
+    python3 "$SCRIPT_DIR/scripts/render-release-notes.py" "$NOTES_MD" "$HTML_NOTES"
+elif [[ ! -f "$HTML_NOTES" ]]; then
+    echo "warning: neither $NOTES_MD nor $HTML_NOTES found -- Sparkle's update dialog will show no"
+    echo "         release notes for this version (see docs/release-checklist.md)."
 fi
 
 echo "==> Generating signed appcast (Keychain access may prompt)..."

@@ -1,0 +1,46 @@
+name: Release feed integrity
+
+# Guards the PUBLISHED Sparkle auto-update feed (#119, #110). A break here is otherwise silent —
+# every installed client just stops seeing updates. Runs on each release event AND daily, because
+# a release later converted to draft/deleted silently reverts GitHub's "latest" to an older one.
+on:
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # open a tracking issue when the feed is broken
+
+jobs:
+  verify-feed:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the signature verifier
+        run: swift build --product verify-ed-signature
+
+      - name: Verify the published feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify-release-feed.sh
+
+      - name: Open (or update) an issue if the feed is broken
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Sparkle feed integrity check is failing"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # Dedupe: a multi-day outage must not open one issue per day — comment on the open one.
+          existing="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing ($(date -u +%F)): $run_url"
+          else
+            gh issue create --title "$title" \
+              --body "The published auto-update feed failed verification — installed clients may be silently stuck. Run: $run_url"
+          fi

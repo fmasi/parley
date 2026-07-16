@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "Parley", targets: ["TranscriberApp"]),
         .executable(name: "audio-capture-helper-xpc", targets: ["AudioCaptureHelperXPC"]),
+        .executable(name: "verify-ed-signature", targets: ["VerifyEdSignature"]),
     ],
     dependencies: [
         .package(url: "https://github.com/orchetect/SettingsAccess", from: "2.0.0"),
@@ -38,9 +39,18 @@ let package = Package(
             dependencies: ["AudioCaptureProtocol", "TranscriberCore"],
             path: "AudioCaptureHelper/XPC"
         ),
+        .target(
+            name: "VerifyEdSignatureCore",
+            path: "Sources/VerifyEdSignatureCore"
+        ),
+        .executableTarget(
+            name: "VerifyEdSignature",
+            dependencies: ["VerifyEdSignatureCore"],
+            path: "Sources/VerifyEdSignature"
+        ),
         .testTarget(
             name: "TranscriberTests",
-            dependencies: ["TranscriberCore"],
+            dependencies: ["TranscriberCore", "VerifyEdSignatureCore"],
             path: "SwiftTests/TranscriberTests",
             // The golden-config snapshot is read via #filePath (and rewritten by UPDATE_GOLDEN=1),
             // not through Bundle.module — excluded so SwiftPM doesn't warn about it.
