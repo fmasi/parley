@@ -133,6 +133,23 @@ struct LMStudioSummaryProviderTests {
         }
     }
 
+    // #134: a structured error body must surface the server's real message rather than
+    // being masked as "Summary response contained no content".
+    @Test func parseResponseSurfacesServerErrorBody() throws {
+        let responseJSON = """
+        {"error": {"message": "Model is not loaded", "code": "model_not_loaded"}}
+        """.data(using: .utf8)!
+        do {
+            _ = try LMStudioSummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            let desc = error.errorDescription ?? ""
+            #expect(desc.contains("Model is not loaded"))
+            #expect(desc.contains("model_not_loaded"))
+            #expect(!desc.contains("no content"))
+        }
+    }
+
     @Test func endpointStripsTrailingSlash() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234/",

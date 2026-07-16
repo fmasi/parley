@@ -441,9 +441,7 @@ struct MenuView: View {
                 let config = configManager.config
                 RenameWindowController.shared.show(jsonPath: jsonPath) {
                     // Auto-summarize after rename completes (so summary has real speaker names)
-                    Task.detached(priority: .utility) {
-                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
-                    }
+                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }
             } else {
                 // Fallback: no chunked pipeline (e.g. crash recovery path)
@@ -488,9 +486,7 @@ struct MenuView: View {
                 let jsonPath = result.jsonPath
                 let config = configManager.config
                 RenameWindowController.shared.show(jsonPath: jsonPath) {
-                    Task.detached(priority: .utility) {
-                        await MeetingSummarizer.summarizeIfConfigured(transcriptPath: jsonPath, config: config)
-                    }
+                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }
             }
 
@@ -715,6 +711,25 @@ struct MenuView: View {
     }
 
     private func sendNotification(title: String, body: String) {
+        Self.postNotification(title: title, body: body)
+    }
+
+    /// Run the auto-summary off the main actor and, if it fails, surface the reason as a
+    /// notification instead of failing silently (#134). Static + self-free so it is safe to
+    /// fire from a rename-dialog completion without capturing the view.
+    static func autoSummarize(jsonPath: URL, config: Config) {
+        Task.detached(priority: .utility) {
+            if case .failed(let message) = await MeetingSummarizer.summarizeIfConfigured(
+                transcriptPath: jsonPath, config: config) {
+                postNotification(title: "Summary Failed", body: message)
+            }
+        }
+    }
+
+    /// Post a time-sensitive user notification. `nonisolated` + self-free so it is safe to call
+    /// from a detached (`@Sendable`) task off the main actor — e.g. reporting a failed background
+    /// auto-summary (#134). `UNUserNotificationCenter` is thread-safe, so no main-actor hop is needed.
+    nonisolated static func postNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         Logger.state.debug("Sending notification: \(title, privacy: .public)")
         let content = UNMutableNotificationContent()

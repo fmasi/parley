@@ -147,6 +147,61 @@ struct MeetingSummarizerTests {
         #expect(!FileManager.default.fileExists(atPath: summaryPath.path))
     }
 
+    // MARK: - #134 summarizeIfConfigured outcome reporting
+
+    // A failed summary must be reported (so the caller can notify the user) with the underlying
+    // message — not swallowed silently as it was before #134.
+    @Test func runSummaryReportsFailureWithMessage() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: FailingProvider())
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains("network error"))
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
+    }
+
+    @Test func runSummaryReportsSuccess() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let outcome = await MeetingSummarizer.runSummary(
+            transcriptPath: jsonPath, provider: MockProvider(response: "## Summary\nok"))
+
+        #expect(outcome == .succeeded)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
+    }
+
+    @Test func summarizeIfConfiguredSkipsWhenNotConfigured() async {
+        var config = Config.default
+        config.summary = nil
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
+    }
+
     // MARK: - SummarySegment / SummaryMetadata v0.7.x fields
 
     @Test func summarySegmentDefaultSource() {

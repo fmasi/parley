@@ -317,9 +317,15 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     }
 
     static func parseResponse(_ data: Data) throws -> (String, TokenStats?) {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let output = json["output"] as? [[String: Any]]
-        else {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SummaryError.emptyResponse
+        }
+        // A structured error body carries the real cause — surface it rather than masking it
+        // as `emptyResponse` (#134).
+        if let serverError = SummaryError.from(errorPayload: json) {
+            throw serverError
+        }
+        guard let output = json["output"] as? [[String: Any]] else {
             throw SummaryError.emptyResponse
         }
 

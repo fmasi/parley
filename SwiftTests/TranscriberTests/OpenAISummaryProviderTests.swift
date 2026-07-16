@@ -79,6 +79,70 @@ struct OpenAISummaryProviderTests {
         }
     }
 
+    // #134: an OpenAI-compatible server can return HTTP 200 with a structured error
+    // body (no `choices` key). The real cause must be surfaced, not masked as
+    // "Summary response contained no content".
+    @Test func parseResponseSurfacesServerErrorBody() throws {
+        let responseJSON = """
+        {"error": {"message": "An LM Studio API token is required to access this endpoint", "code": "invalid_api_key"}}
+        """.data(using: .utf8)!
+        do {
+            _ = try OpenAISummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            let desc = error.errorDescription ?? ""
+            #expect(desc.contains("An LM Studio API token is required to access this endpoint"))
+            #expect(desc.contains("invalid_api_key"))
+            #expect(!desc.contains("no content"))
+        }
+    }
+
+    // Some OpenAI-compatible servers return an integer `code`; it must still be surfaced.
+    @Test func parseResponseSurfacesIntegerErrorCode() throws {
+        let responseJSON = """
+        {"error": {"message": "rate limited", "code": 429}}
+        """.data(using: .utf8)!
+        do {
+            _ = try OpenAISummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            let desc = error.errorDescription ?? ""
+            #expect(desc.contains("rate limited"))
+            #expect(desc.contains("429"))
+        }
+    }
+
+    // A bare-string `error` value (no message/code object) must also be surfaced.
+    @Test func parseResponseSurfacesBareStringError() throws {
+        let responseJSON = """
+        {"error": "model not found"}
+        """.data(using: .utf8)!
+        do {
+            _ = try OpenAISummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            #expect((error.errorDescription ?? "").contains("model not found"))
+        }
+    }
+
+    // A benign/empty `error` value on an OTHERWISE-VALID success body must NOT discard the
+    // summary — surface only when the payload actually carries a message or code.
+    @Test func parseResponseIgnoresEmptyErrorStringOnSuccess() throws {
+        let responseJSON = """
+        {"error": "", "choices": [{"message": {"content": "real summary"}}]}
+        """.data(using: .utf8)!
+        let content = try OpenAISummaryProvider.parseResponse(responseJSON)
+        #expect(content == "real summary")
+    }
+
+    @Test func parseResponseIgnoresEmptyErrorObjectOnSuccess() throws {
+        let responseJSON = """
+        {"error": {}, "choices": [{"message": {"content": "real summary"}}]}
+        """.data(using: .utf8)!
+        let content = try OpenAISummaryProvider.parseResponse(responseJSON)
+        #expect(content == "real summary")
+    }
+
     // MARK: - Dual-stream formatting
 
     @Test func formatTranscriptIncludesSourceTagsWhenEnabled() {

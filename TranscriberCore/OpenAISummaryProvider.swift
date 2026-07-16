@@ -5,13 +5,40 @@ public enum SummaryError: LocalizedError {
     case invalidEndpoint(String)
     case requestFailed(String)
     case emptyResponse
+    /// The provider returned a structured error payload (e.g. `{"error": {...}}`) rather than
+    /// a completion. Surfacing the server's own message is what keeps a misconfigured endpoint
+    /// (bad token, unknown model) diagnosable instead of masked as `emptyResponse` (#134).
+    case serverError(message: String, code: String?)
 
     public var errorDescription: String? {
         switch self {
         case .invalidEndpoint(let url): return "Invalid summary endpoint: \(url)"
         case .requestFailed(let msg): return "Summary request failed: \(msg)"
         case .emptyResponse: return "Summary response contained no content"
+        case .serverError(let message, let code):
+            let suffix = code.map { " (\($0))" } ?? ""
+            return "Summary provider error: \(message)\(suffix)"
         }
+    }
+
+    /// Build a `.serverError` from a decoded response body if it carries a provider error payload.
+    /// Handles the OpenAI/`{"error": {"message":..,"code":..}}` shape and a bare `{"error":"msg"}`
+    /// string; the `code` may be a string or an integer. Returns nil when there's no error object,
+    /// so callers fall through to normal completion parsing. Shared by both summary providers (#134).
+    static func from(errorPayload json: [String: Any]) -> SummaryError? {
+        guard let error = json["error"] else { return nil }
+        if let dict = error as? [String: Any] {
+            let message = (dict["message"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let code = (dict["code"] as? String) ?? (dict["code"] as? Int).map(String.init)
+            // Only a payload that actually carries a message or code is a real error — otherwise
+            // fall through so a benign/empty `error` on a success body isn't misread as a failure.
+            guard message != nil || code != nil else { return nil }
+            return .serverError(message: message ?? "Unknown provider error", code: code)
+        }
+        if let message = error as? String, !message.isEmpty {
+            return .serverError(message: message, code: nil)
+        }
+        return nil
     }
 }
 
@@ -165,8 +192,15 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
     }
 
     static func parseResponse(_ data: Data) throws -> String {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SummaryError.emptyResponse
+        }
+        // A structured error body (HTTP 200 or otherwise) carries the real cause — surface it
+        // rather than masking it as `emptyResponse` (#134).
+        if let serverError = SummaryError.from(errorPayload: json) {
+            throw serverError
+        }
+        guard let choices = json["choices"] as? [[String: Any]],
               let first = choices.first,
               let message = first["message"] as? [String: Any],
               let content = message["content"] as? String

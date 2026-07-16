@@ -1,6 +1,14 @@
 import Foundation
 import os
 
+/// Result of an attempted auto-summary, so the caller can decide whether to surface a failure
+/// to the user instead of it failing silently (#134).
+public enum SummaryOutcome: Equatable, Sendable {
+    case skipped                 // summary not configured / disabled
+    case succeeded
+    case failed(String)          // localized description of the failure
+}
+
 public enum MeetingSummarizer {
 
     /// Summarize a transcript JSON file and write a `-summary.md` alongside it.
@@ -28,21 +36,33 @@ public enum MeetingSummarizer {
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
     }
 
-    /// Convenience: create provider from config + summarize. Logs errors, never throws.
+    /// Convenience: create provider from config + summarize. Never throws; returns a
+    /// `SummaryOutcome` so the caller can notify the user on failure rather than the summary
+    /// failing silently (#134).
     public static func summarizeIfConfigured(
         transcriptPath: URL,
         config: Config
-    ) async {
+    ) async -> SummaryOutcome {
         guard let summary = config.summary, summary.enabled, !summary.endpoint.isEmpty else {
-            return
+            return .skipped
         }
+        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary))
+    }
 
-        let provider: any SummaryProvider = Self.createProvider(from: summary)
-
+    /// Run a summary with an explicit provider, translating success/failure into a `SummaryOutcome`.
+    /// Logs the failure (preserving prior behavior) and reports it upward for user notification.
+    static func runSummary(
+        transcriptPath: URL,
+        provider: any SummaryProvider
+    ) async -> SummaryOutcome {
         do {
             try await summarize(transcriptPath: transcriptPath, provider: provider)
+            return .succeeded
         } catch {
-            Logger.transcription.error("Summary generation failed: \(error.localizedDescription)")
+            // Log public: the message is a provider/HTTP error (e.g. "model failed to load"), never
+            // the API key — and a `<private>` log makes these failures undiagnosable (#134).
+            Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
+            return .failed(error.localizedDescription)
         }
     }
 
