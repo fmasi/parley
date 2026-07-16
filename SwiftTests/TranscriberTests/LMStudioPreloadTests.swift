@@ -60,6 +60,17 @@ struct LMStudioPreloadTests {
                 == LMStudioSummaryProvider.ModelState(isLoaded: false, loadedContextLength: nil))
     }
 
+    @Test func matchesPublisherPrefixedConfigModel() {
+        // config.json carries "lmstudio-community/gemma-4-26b-a4b-it-mlx"; /api/v0/models reports
+        // id "gemma-4-26b-a4b-it-mlx" + publisher "lmstudio-community" separately. Must still match,
+        // or the provider thinks the model is unloaded and forces the reload this fix exists to avoid.
+        let json = """
+        {"data":[{"id":"gemma-4-26b-a4b-it-mlx","publisher":"lmstudio-community","state":"loaded","loaded_context_length":262144}]}
+        """.data(using: .utf8)!
+        #expect(LMStudioSummaryProvider.parseModelState(json, model: "lmstudio-community/gemma-4-26b-a4b-it-mlx")
+                == LMStudioSummaryProvider.ModelState(isLoaded: true, loadedContextLength: 262144))
+    }
+
     @Test func parseModelStateReturnsNilForAbsentModel() {
         let json = """
         {"data":[{"id":"other","state":"loaded","loaded_context_length":8192}]}

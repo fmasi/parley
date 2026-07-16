@@ -248,11 +248,23 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     }
 
     /// Parse `/api/v0/models` for one model's state. Returns nil if the model isn't listed.
+    ///
+    /// `/api/v0/models` reports `id` and `publisher` separately (e.g. id `gemma-4-26b-a4b-it-mlx`,
+    /// publisher `lmstudio-community`), while config.json may store the combined
+    /// `lmstudio-community/gemma-4-26b-a4b-it-mlx`. Match on the bare id, the `publisher/id` form,
+    /// or the config value's basename — otherwise the provider mistakes a loaded model for unloaded
+    /// and forces the reload this whole fix exists to avoid.
     static func parseModelState(_ data: Data, model: String) -> ModelState? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let entries = json["data"] as? [[String: Any]],
-              let entry = entries.first(where: { ($0["id"] as? String) == model })
+              let entries = json["data"] as? [[String: Any]]
         else { return nil }
+        let modelBasename = model.split(separator: "/").last.map(String.init)
+        guard let entry = entries.first(where: { entry in
+            guard let id = entry["id"] as? String else { return false }
+            if id == model { return true }
+            if let publisher = entry["publisher"] as? String, "\(publisher)/\(id)" == model { return true }
+            return modelBasename == id
+        }) else { return nil }
         let isLoaded = (entry["state"] as? String) == "loaded"
         let loadedContext = isLoaded ? (entry["loaded_context_length"] as? Int) : nil
         return ModelState(isLoaded: isLoaded, loadedContextLength: loadedContext)
