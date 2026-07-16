@@ -35,7 +35,11 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         // Calibrate on first encounter with this model
         await calibrateIfNeeded()
 
-        let (request, inputChars, resolvedContextLength) = try await buildRequest(segments: segments, metadata: metadata)
+        // #133: check whether the model is already loaded (and big enough) BEFORE building the
+        // request, so we can avoid sending context_length and forcing a reload that OOMs.
+        let loadedState = await fetchLoadedState()
+        let (request, inputChars, resolvedContextLength) = try await buildRequest(
+            segments: segments, metadata: metadata, loadedState: loadedState)
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
@@ -136,7 +140,15 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     static let defaultOverheadPercent = 10
 
     /// Returns (request, totalInputChars, resolvedContextLength).
-    func buildRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> (URLRequest, Int, Int) {
+    ///
+    /// `loadedState`: the target model's current load state (from `/api/v0/models`). When the model
+    /// is already loaded with enough context, `context_length` is omitted so LM Studio uses the
+    /// loaded instance as-is instead of reloading it (#133). `nil` (unknown) keeps the old behavior.
+    func buildRequest(
+        segments: [SummarySegment],
+        metadata: SummaryMetadata,
+        loadedState: ModelState? = nil
+    ) async throws -> (URLRequest, Int, Int) {
         let baseURL = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
         guard let url = URL(string: baseURL + "/api/v1/chat") else {
             throw SummaryError.invalidEndpoint(endpoint)
@@ -172,7 +184,6 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         let estimatedInputTokens = rawEstimate + (rawEstimate * overheadPercent / 100)
         let neededContext = estimatedInputTokens + outputBuffer
         let maxContext = contextLength ?? 32768
-        let resolvedContext = min(neededContext, maxContext)
 
         if neededContext > maxContext {
             Logger.transcription.warning(
@@ -180,21 +191,87 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
             )
         }
 
-        Logger.transcription.info(
-            "LM Studio context: ~\(estimatedInputTokens) input tokens estimated, requesting \(resolvedContext) context_length (cap: \(maxContext))"
-        )
-
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "input": userMessage,
             "system_prompt": prompt,
-            "temperature": 0.3,
-            "context_length": resolvedContext
+            "temperature": 0.3
         ]
+
+        // #133: only send context_length when the model actually needs a (re)load. Sending it when
+        // the model is already loaded forces LM Studio to reload — which OOMs on a busy machine.
+        let resolvedContext: Int
+        switch Self.contextDecision(state: loadedState, neededContext: neededContext, maxContext: maxContext) {
+        case .useLoadedAsIs:
+            resolvedContext = loadedState?.loadedContextLength ?? maxContext
+            Logger.transcription.info(
+                "LM Studio: '\(self.model, privacy: .public)' already loaded with \(resolvedContext) context (need ~\(neededContext)) — using as-is, no reload."
+            )
+        case .request(let ctx):
+            resolvedContext = ctx
+            body["context_length"] = ctx
+            Logger.transcription.info(
+                "LM Studio: requesting \(ctx) context_length for '\(self.model, privacy: .public)' (need ~\(neededContext), cap \(maxContext))."
+            )
+        }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let totalInputChars = userMessage.count + prompt.count
         return (request, totalInputChars, resolvedContext)
+    }
+
+    // MARK: - Model load state (#133)
+
+    /// The target model's current load state in LM Studio, from `/api/v0/models`.
+    public struct ModelState: Equatable, Sendable {
+        public let isLoaded: Bool
+        public let loadedContextLength: Int?
+        public init(isLoaded: Bool, loadedContextLength: Int?) {
+            self.isLoaded = isLoaded
+            self.loadedContextLength = loadedContextLength
+        }
+    }
+
+    enum ContextDecision: Equatable {
+        case useLoadedAsIs               // model already loaded big enough — send no context_length
+        case request(contextLength: Int) // needs a (re)load at this context
+    }
+
+    /// Use the loaded model as-is only when it is loaded AND its context is at least what we need;
+    /// otherwise request a context (capped at max). `nil` state (couldn't check) falls back to
+    /// requesting a context — the pre-#133 behavior, so a down models endpoint never blocks a summary.
+    static func contextDecision(state: ModelState?, neededContext: Int, maxContext: Int) -> ContextDecision {
+        if let state, state.isLoaded, let loaded = state.loadedContextLength, loaded >= neededContext {
+            return .useLoadedAsIs
+        }
+        return .request(contextLength: min(neededContext, maxContext))
+    }
+
+    /// Parse `/api/v0/models` for one model's state. Returns nil if the model isn't listed.
+    static func parseModelState(_ data: Data, model: String) -> ModelState? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = json["data"] as? [[String: Any]],
+              let entry = entries.first(where: { ($0["id"] as? String) == model })
+        else { return nil }
+        let isLoaded = (entry["state"] as? String) == "loaded"
+        let loadedContext = isLoaded ? (entry["loaded_context_length"] as? Int) : nil
+        return ModelState(isLoaded: isLoaded, loadedContextLength: loadedContext)
+    }
+
+    /// Query LM Studio for the target model's load state. Any failure (endpoint down, auth, timeout)
+    /// returns nil, which `contextDecision` treats as "request a context" — never blocks the summary.
+    func fetchLoadedState() async -> ModelState? {
+        let baseURL = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
+        guard let url = URL(string: baseURL + "/api/v0/models") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
+        else { return nil }
+        return Self.parseModelState(data, model: model)
     }
 
     /// Check if output was likely truncated (used all available space).
