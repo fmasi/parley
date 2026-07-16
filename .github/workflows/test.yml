@@ -16,20 +16,73 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # SyntheticDiarizationTests (and the metamorphic suite) need the diarization models
+      # (~23 MB). The fixture itself is synthesized at test time with `say`, so the models are
+      # the ONLY external dependency — cached, they cost nothing; cold, ~6s.
+      - name: Cache diarization models
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/FluidAudio/Models
+          key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
+          restore-keys: fluidaudio-models-
+
       - name: Run Swift tests
+        env:
+          # Let model-needing tests download for themselves. On CI a missing model is a test
+          # FAILURE, never a silent skip (see SwiftTests/TranscriberTests/Support/TestModels.swift).
+          PARLEY_FETCH_MODELS: "1"
         run: |
           swift test --filter TranscriberTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 
+  # Red-first gate: the PR's changed tests must FAIL at the merge base and PASS at HEAD.
+  #
+  # A regression test that is green BEFORE the fix it claims to guard proves nothing — it guards
+  # dead code (TranscriptMerger: 6 passing tests, zero production bytes shipped), asserts nothing,
+  # or silently skips (the AMI diarization guard in CI). This job checks out the merge base,
+  # overlays only the PR's changed test files, and requires them to be RED there and GREEN at
+  # HEAD. Tests-only PRs and files marked 'RED-FIRST-EXEMPT: <reason>' pass trivially — see the
+  # comment block in scripts/verify-regression-tests.sh for the full semantics.
+  red-first:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the gate diffs against, and checks out, the merge base
+
+      - name: Cache diarization models
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/FluidAudio/Models
+          key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
+          restore-keys: fluidaudio-models-
+
+      - name: Changed tests must be RED at the merge base, GREEN at HEAD
+        env:
+          # Gated suites may include model-needing tests; without this they would fail at HEAD
+          # for the wrong reason (missing models, not a missing fix).
+          PARLEY_FETCH_MODELS: "1"
+        run: |
+          BASE=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          bash scripts/verify-regression-tests.sh "$BASE"
+
   # Ground-truth diarization guard.
   #
-  # The `test` job above CANNOT catch a diarization collapse: DiarizationRegressionTests skips
-  # unless BOTH the AMI fixture and the ML models are present, and neither exists in a fresh
-  # checkout. So the suite reports green while asserting nothing about speaker separation — which is
-  # exactly how `embeddingExcludeOverlap: false` (every speaker merged into one) shipped and survived
-  # for months, invisible to every 1:1 device test.
+  # The DEFAULT speaker-separation oracle is SyntheticDiarizationTests in the `test` job above:
+  # its fixture is synthesized with `say` at test time, so it runs on every CI run with no fetch
+  # step. This job is the stronger, labeled-ground-truth oracle on real overlapping conversation —
+  # the AMI fixture is 33 MB and git-ignored, which is why it needs its own job. Keep both: the
+  # synthetic guard catches a collapse everywhere, this one also catches quality regressions that
+  # clean single-voice TTS audio cannot exercise (overlap, crosstalk, far-field mics).
+  #
+  # `embeddingExcludeOverlap: false` (every speaker merged into one) shipped and survived for
+  # months precisely because no CI job asserted anything about speaker separation, and every
+  # device test was a 1:1 call where the channel split does the diarizer's job for it.
   #
   # This job fetches both and runs the guard against AMI ES2004a, a 4-speaker reference meeting.
   # Both are cached: the models are only ~23 MB (diarization + VAD — the large Parakeet ASR model is
@@ -65,6 +118,9 @@ jobs:
       - name: Verify the diarizer still separates 4 speakers
         env:
           PARLEY_FETCH_MODELS: "1"
+          # A skip is a failure here: with this set, a missing fixture or model FAILS the
+          # ground-truth tests instead of disabling them (see DiarizationRegressionTests).
+          PARLEY_REQUIRE_AMI_FIXTURE: "1"
         run: |
           swift test --filter DiarizationRegressionTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \

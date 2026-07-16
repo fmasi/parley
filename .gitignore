@@ -59,4 +59,4 @@ docs/asr-news/
 .claude/
 
 # Diarization reference audio (33 MB) — fetch via scripts/fetch-diarization-fixtures.sh
-fixtures/
+/fixtures/

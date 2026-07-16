@@ -10,10 +10,17 @@ import Testing
 /// ship: it blended overlapping voices into every embedding, so all speakers merged into one, and
 /// nothing in the suite noticed.
 ///
-/// A multi-speaker fixture is the only thing that catches this class of bug. Fetch it with:
+/// A multi-speaker fixture with realistic conversational overlap is the only thing that catches
+/// this class of bug — measured: synthetic TTS fixtures (SyntheticDiarizationTests) cannot
+/// reproduce the excludeOverlap collapse at any overlap level. Fetch the fixture with:
 ///     bash scripts/fetch-diarization-fixtures.sh
-/// Tests skip cleanly (rather than fail) when the fixture or the ML models are absent, so CI and
-/// fresh checkouts stay green.
+///
+/// Skip semantics (#137, item 4 — a skip must never hide a missing assertion):
+///   - The CI diarization-guard job sets PARLEY_REQUIRE_AMI_FIXTURE=1: there, a missing fixture
+///     or model is a test FAILURE, and `guardJobCannotSkip()` additionally proves the
+///     ground-truth tests' preconditions hold, so they cannot have been silently disabled.
+///   - Locally without the fixture, tests skip via `.enabled(if:)` — visible in test output,
+///     and harmless because CI cannot take that path.
 @Suite struct DiarizationRegressionTests {
 
     /// AMI ES2004a: a scenario meeting from the AMI Meeting Corpus with exactly 4 participants.
@@ -26,24 +33,28 @@ import Testing
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// The fixture is the only precondition we cannot satisfy ourselves. Models we CAN fetch —
-    /// see `ensureModels()`.
-    private static var canRun: Bool { amiFixture != nil }
+    /// Set by the CI diarization-guard job, which fetches the fixture first: with it set, the
+    /// ground-truth tests RUN and fail loudly on a missing fixture instead of being disabled.
+    private static var fixtureRequired: Bool {
+        ProcessInfo.processInfo.environment["PARLEY_REQUIRE_AMI_FIXTURE"] == "1"
+    }
 
-    /// Make the models available, downloading them when explicitly allowed to.
+    private static var canRun: Bool { amiFixture != nil || fixtureRequired }
+
+    /// Meta-test: the guard job must be UNABLE to skip the ground-truth assertions.
     ///
-    /// CI sets `PARLEY_FETCH_MODELS=1`, so a missing model DOWNLOADS (~23 MB, ~6s) rather than
-    /// silently skipping the test — and a failed download throws, failing the build. Without that,
-    /// this guard skips in CI and the suite reports green while asserting nothing about speaker
-    /// separation, which is precisely how the excludeOverlap collapse survived for months.
-    ///
-    /// Locally, with no models and no opt-in, we return false and the test no-ops rather than
-    /// pulling 23 MB out from under someone running `swift test`.
-    private static func ensureModels() async throws -> Bool {
-        if FluidAudioDiarizer.isDiarizationCached() { return true }
-        guard ProcessInfo.processInfo.environment["PARLEY_FETCH_MODELS"] == "1" else { return false }
-        try await FluidAudioDiarizer.preDownloadModels()
-        return FluidAudioDiarizer.isDiarizationCached()
+    /// Rather than counting executed tests (test ordering is not guaranteed, so a counter check
+    /// can race), this asserts the preconditions that decide whether they run: with the fixture
+    /// required, the fixture must exist and the models must be obtainable. If this passes, the
+    /// two ground-truth tests are enabled and their `#require`s succeed — they cannot have
+    /// silently no-opped. This is the test that was missing when the guard skipped in CI for
+    /// months while the suite reported green.
+    @Test func guardJobCannotSkip() async throws {
+        guard Self.fixtureRequired else { return }  // meaningful only on the guard job
+        #expect(Self.amiFixture != nil,
+                "PARLEY_REQUIRE_AMI_FIXTURE=1 but the AMI fixture is missing — did scripts/fetch-diarization-fixtures.sh run?")
+        let modelsReady = try await TestModels.ensureDiarization()
+        #expect(modelsReady, "PARLEY_REQUIRE_AMI_FIXTURE=1 but diarization models are unavailable")
     }
 
     /// The regression that matters: 4 real speakers must not collapse into one.
@@ -53,8 +64,8 @@ import Testing
     ///   excludeOverlap = true  (correct default) -> 4 speakers (cluster sizes 226/170/91/51)
     @Test(.enabled(if: DiarizationRegressionTests.canRun))
     func findsMultipleSpeakersInFourSpeakerMeeting() async throws {
-        let fixture = try #require(Self.amiFixture)
-        guard try await Self.ensureModels() else { return }
+        let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
+        guard try await TestModels.ensureDiarization() else { return }
 
         let diarizer = FluidAudioDiarizer()   // stock config — this is the shipping default
         let result = try await diarizer.diarize(audioPath: fixture, numSpeakers: nil)
@@ -74,8 +85,8 @@ import Testing
     /// on the theory that overlap should be included on mixed mono streams.
     @Test(.enabled(if: DiarizationRegressionTests.canRun))
     func includingOverlapInEmbeddingsCollapsesSpeakers() async throws {
-        let fixture = try #require(Self.amiFixture)
-        guard try await Self.ensureModels() else { return }
+        let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
+        guard try await TestModels.ensureDiarization() else { return }
 
         let broken = FluidAudioDiarizer(excludeOverlap: false)
         let brokenResult = try await broken.diarize(audioPath: fixture, numSpeakers: nil)
