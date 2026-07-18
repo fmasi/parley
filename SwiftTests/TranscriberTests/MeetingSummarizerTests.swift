@@ -24,6 +24,7 @@ struct MeetingSummarizerTests {
         }
     }
 
+
     @Test func summarizeWritesMarkdownFile() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
@@ -199,6 +200,29 @@ struct MeetingSummarizerTests {
 
         #expect(outcome == .succeeded)
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
+    }
+
+    // A non-SummaryError (file read/write) must not leak the transcript/session filename into the
+    // user-visible message — it reports a generic, actionable message instead. The detail stays in
+    // the (local) log. Here the transcript is missing, so parseTranscript's read throws a CocoaError
+    // whose description embeds the filename.
+    @Test func runSummaryGivesGenericMessageForFileError() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Deliberately NOT created — the sensitive name must not reach the user-visible message.
+        let jsonPath = dir.appendingPathComponent("Q3-Revenue-Review.json")
+
+        let outcome = await MeetingSummarizer.runSummary(
+            transcriptPath: jsonPath, provider: MockProvider(response: "ok"))
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(!message.contains("Q3-Revenue-Review"))
     }
 
     // Integration: an enabled config flows through createProvider(from:) into runSummary and a

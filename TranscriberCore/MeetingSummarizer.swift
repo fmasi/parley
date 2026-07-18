@@ -64,7 +64,7 @@ public enum MeetingSummarizer {
             // latter can surface as a notification during a screen-shared meeting (#134 review).
             Logger.transcription.error("Summary generation failed: invalid summary endpoint")
             return .failed("Invalid summary endpoint — check your provider settings")
-        } catch {
+        } catch let error as SummaryError {
             // Public so provider/HTTP failures (e.g. "model failed to load") are diagnosable instead
             // of `<private>` (#134). This forwards the provider's own error text — the server message
             // for `serverError`, the HTTP response body for `requestFailed` — to both the log and the
@@ -74,6 +74,13 @@ public enum MeetingSummarizer {
             // sanitized in the branch above.
             Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
             return .failed(error.localizedDescription)
+        } catch {
+            // A non-SummaryError here is a file read/write failure (transcript unreadable, summary
+            // write failed). CocoaError's description embeds the transcript/session filename, which
+            // would surface in the notification (visible during a screen-share) — so keep the detail
+            // in the local log and give the user a generic, actionable message (#134 review).
+            Logger.transcription.error("Summary generation failed: \(error.localizedDescription)")
+            return .failed("Couldn't read the transcript or write the summary — check disk space and permissions")
         }
     }
 
