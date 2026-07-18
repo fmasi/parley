@@ -150,6 +150,29 @@ struct LMStudioSummaryProviderTests {
         }
     }
 
+    // A bare-string `error` must surface on the LM Studio path too (its fallthrough is `output`,
+    // not `choices`, so it's a distinct code path from the OpenAI provider).
+    @Test func parseResponseSurfacesBareStringError() throws {
+        let responseJSON = """
+        {"error": "model not found"}
+        """.data(using: .utf8)!
+        do {
+            _ = try LMStudioSummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            #expect((error.errorDescription ?? "").contains("model not found"))
+        }
+    }
+
+    // A benign/empty `error` on an otherwise-valid response must NOT discard the summary.
+    @Test func parseResponseIgnoresEmptyErrorOnSuccess() throws {
+        let responseJSON = """
+        {"error": "", "output": [{"type": "message", "content": "real summary"}]}
+        """.data(using: .utf8)!
+        let (content, _) = try LMStudioSummaryProvider.parseResponse(responseJSON)
+        #expect(content == "real summary")
+    }
+
     @Test func endpointStripsTrailingSlash() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234/",

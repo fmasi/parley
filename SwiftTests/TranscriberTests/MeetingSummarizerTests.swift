@@ -17,6 +17,13 @@ struct MeetingSummarizerTests {
         }
     }
 
+    private struct InvalidEndpointProvider: SummaryProvider {
+        let endpoint: String
+        func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+            throw SummaryError.invalidEndpoint(endpoint)
+        }
+    }
+
     @Test func summarizeWritesMarkdownFile() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
@@ -208,6 +215,32 @@ struct MeetingSummarizerTests {
         let outcome = await MeetingSummarizer.summarizeIfConfigured(
             transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
         #expect(outcome == .skipped)
+    }
+
+    // The endpoint URL can carry a token in some proxies (e.g. Cloudflare AI Gateway); the
+    // user-visible failure message (shown as a notification, possibly during a screen-share) must
+    // NOT echo it.
+    @Test func runSummaryReportsInvalidEndpointWithSanitisedMessage() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let provider = InvalidEndpointProvider(endpoint: "https://gateway.example/v1/secret-token-123/openai")
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: provider)
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(!message.contains("secret-token-123"))
     }
 
     @Test func summarizeIfConfiguredSkipsWhenEndpointEmpty() async {
