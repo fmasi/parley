@@ -255,6 +255,11 @@ struct TranscriberApp: App {
             do {
                 let config = ConfigManager.shared.config
                 let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
+                // Captured so the rename dialog + auto-summary can fire after the shared
+                // teardown below — mirrors MenuView.stopRecording, whose success branch is the only
+                // other place a recovered transcript reaches this wiring (#135 minor: relaunch
+                // recovery previously left the user with no rename prompt and no summary).
+                var recoveredJsonPath: URL?
                 if let result = try await ChunkedSessionRecovery.recover(
                     outputDirectory: outputDir, sessionId: sessionId, config: config,
                     transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner
@@ -262,11 +267,17 @@ struct TranscriberApp: App {
                     appState.lastJsonPath = result.jsonPath.path
                     appState.lastTranscriptPath = result.jsonPath.path
                     Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
+                    recoveredJsonPath = result.jsonPath
                 } else {
                     Logger.state.info("Chunked session had nothing to recover — discarding")
                 }
                 RecordingSentinel.delete()
                 appState.phase = .idle
+                if let jsonPath = recoveredJsonPath {
+                    RenameWindowController.shared.show(jsonPath: jsonPath) {
+                        MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                    }
+                }
             } catch {
                 Logger.state.error("Chunked session recovery failed: \(error, privacy: .public)")
                 appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
