@@ -60,3 +60,6 @@ docs/asr-news/
 
 # Diarization reference audio (33 MB) — fetch via scripts/fetch-diarization-fixtures.sh
 /fixtures/
+
+# subagent-driven-development orchestration scratch
+.superpowers/
