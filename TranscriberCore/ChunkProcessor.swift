@@ -1,6 +1,5 @@
 import Foundation
 import os
-import TranscriberCore
 
 /// Processes finalized chunks in the background: transcribe both streams,
 /// diarize, VAD, speaker assignment, archive to AAC, and persist to session.json.
@@ -11,7 +10,7 @@ import TranscriberCore
 /// awaiting tasks touches the main actor. Immutable dependencies are `nonisolated let` so the
 /// off-actor work can read them without hopping back to the main actor.
 @MainActor
-final class ChunkProcessor {
+public final class ChunkProcessor {
     private nonisolated let config: Config
     private nonisolated let outputDirectory: URL
     private nonisolated let transcriber: any TranscriptionEngine
@@ -40,7 +39,7 @@ final class ChunkProcessor {
         }
     }
 
-    init(
+    public init(
         config: Config,
         outputDirectory: URL,
         sessionState: SessionState,
@@ -61,7 +60,7 @@ final class ChunkProcessor {
     }
 
     /// Process a finalized chunk in the background (non-blocking).
-    func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
+    public func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
         let priority = taskPriority
         let task = Task(priority: priority) {
             await self.processChunkAsync(chunk)
@@ -69,14 +68,17 @@ final class ChunkProcessor {
         inFlightTasks.append(task)
     }
 
-    /// Process the final chunk synchronously (called at end-of-recording).
-    /// `nonisolated` so the heavy work runs off the main actor even when awaited from `@MainActor`.
-    nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
+    /// Process a chunk synchronously (inline `await`, no `inFlightTasks` enqueue). Called once at
+    /// end-of-recording for the final chunk, and once per orphan chunk during crash recovery
+    /// (`ChunkedSessionRecovery`, which awaits each orphan in turn rather than firing them
+    /// concurrently). `nonisolated` so the heavy work (ASR, diarization, AAC encoding) runs off the
+    /// main actor even when awaited from `@MainActor`.
+    public nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
         await processChunkAsync(chunk)
     }
 
     /// Wait for all background chunk processing to complete before merging.
-    func awaitAllProcessed() async {
+    public func awaitAllProcessed() async {
         for task in inFlightTasks {
             await task.value
         }
@@ -84,7 +86,7 @@ final class ChunkProcessor {
     }
 
     /// Actor-isolated access to current session state.
-    func getSessionState() async -> SessionState {
+    public func getSessionState() async -> SessionState {
         await stateStore.getSessionState()
     }
 

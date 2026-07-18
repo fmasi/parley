@@ -444,49 +444,92 @@ struct MenuView: View {
                     MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }
             } else {
-                // Fallback: no chunked pipeline (e.g. crash recovery path)
-                let systemAudio: URL
-                let micAudio: URL?
-                if let sentinel, sentinel.segment > 1 {
-                    // #7: point discovery at the 0-indexed base so SegmentDiscovery's gap-tolerant
-                    // 0-indexed mode reclaims every segment (-0, -1, …). The stripped base would use
-                    // legacy mode and drop the -0 orphan, referencing a non-existent <root>.wav.
-                    let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
-                    let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                    systemAudio = dir.appendingPathComponent(origBase + "-0.wav")
-                    micAudio = dir.appendingPathComponent(origBase + "-0_mic.wav")
+                // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
+                // re-attached to a still-recording XPC service — Flow A never calls
+                // setupChunkedPipeline). A chunked session's session.json is rewritten after every
+                // completed chunk, so check for one to rehydrate FIRST — it survives independently
+                // of whichever single WAV AudioArchiver has since archived-and-deleted. Only fall
+                // back to the legacy stat-based single-file `run()` when there's no chunked session
+                // to recover (#135).
+                let sessionOutputDir: URL
+                let sessionId: String
+                if let sentinel {
+                    sessionOutputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+                    sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
                 } else {
-                    systemAudio = paths.systemAudio
-                    micAudio = paths.micAudio
+                    sessionOutputDir = paths.systemAudio.deletingLastPathComponent()
+                    sessionId = stripSegmentSuffix(paths.systemAudio.path)
                 }
 
-                // #95/council F6: the recovery path also drains diagnostics, flushes the
-                // anomaly-gated <sessionId>.diag.jsonl, and stamps capture_provenance (incl.
-                // recovered=true) — previously only the chunked branch did this.
-                let outputDir = systemAudio.deletingLastPathComponent()
-                let sessionId = systemAudio.deletingPathExtension().lastPathComponent
-                let provenance = await captureClient.finalizeSessionDiagnostics(
-                    sessionId: sessionId,
-                    engine: configManager.config.engine.rawValue,
-                    recordingDirectory: outputDir
-                )
+                let result: TranscriptionResult?
+                if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId) {
+                    let config = configManager.config
+                    let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
+                    // Drain capture diagnostics and stamp the always-present provenance into the
+                    // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
+                    // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+                    let provenance = await captureClient.finalizeSessionDiagnostics(
+                        sessionId: sessionId,
+                        engine: config.engine.rawValue,
+                        recordingDirectory: sessionOutputDir
+                    )
+                    result = try await ChunkedSessionRecovery.recover(
+                        outputDirectory: sessionOutputDir, sessionId: sessionId, config: config,
+                        transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                        provenance: provenance
+                    )
+                } else {
+                    // Genuine single-file input (non-chunked recording / legacy path).
+                    let systemAudio: URL
+                    let micAudio: URL?
+                    if let sentinel, sentinel.segment > 1 {
+                        // #7: point discovery at the 0-indexed base so SegmentDiscovery's gap-tolerant
+                        // 0-indexed mode reclaims every segment (-0, -1, …). The stripped base would use
+                        // legacy mode and drop the -0 orphan, referencing a non-existent <root>.wav.
+                        let origBase = stripSegmentSuffix(sentinel.systemAudioPath)
+                        let dir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+                        systemAudio = dir.appendingPathComponent(origBase + "-0.wav")
+                        micAudio = dir.appendingPathComponent(origBase + "-0_mic.wav")
+                    } else {
+                        systemAudio = paths.systemAudio
+                        micAudio = paths.micAudio
+                    }
 
-                let result = try await transcriptionRunner.run(
-                    systemAudio: systemAudio,
-                    micAudio: micAudio,
-                    outputDirectory: outputDir,
-                    config: configManager.config,
-                    provenance: provenance
-                )
+                    // #95/council F6: the recovery path also drains diagnostics, flushes the
+                    // anomaly-gated <sessionId>.diag.jsonl, and stamps capture_provenance (incl.
+                    // recovered=true) — previously only the chunked branch did this.
+                    let outputDir = systemAudio.deletingLastPathComponent()
+                    let sid = systemAudio.deletingPathExtension().lastPathComponent
+                    let provenance = await captureClient.finalizeSessionDiagnostics(
+                        sessionId: sid,
+                        engine: configManager.config.engine.rawValue,
+                        recordingDirectory: outputDir
+                    )
 
-                appState.lastJsonPath = result.jsonPath.path
-                appState.lastTranscriptPath = result.jsonPath.path
-                appState.phase = .idle
-                sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
-                let jsonPath = result.jsonPath
-                let config = configManager.config
-                RenameWindowController.shared.show(jsonPath: jsonPath) {
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                    result = try await transcriptionRunner.run(
+                        systemAudio: systemAudio,
+                        micAudio: micAudio,
+                        outputDirectory: outputDir,
+                        config: configManager.config,
+                        provenance: provenance
+                    )
+                }
+
+                if let result {
+                    appState.lastJsonPath = result.jsonPath.path
+                    appState.lastTranscriptPath = result.jsonPath.path
+                    appState.phase = .idle
+                    sendNotification(title: "Transcription Complete", body: result.jsonPath.lastPathComponent)
+                    let jsonPath = result.jsonPath
+                    let config = configManager.config
+                    RenameWindowController.shared.show(jsonPath: jsonPath) {
+                        MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                    }
+                } else {
+                    // Chunked recovery found nothing to salvage (e.g. session.json existed but had
+                    // no chunks and no orphan WAVs) — nothing to notify or rename.
+                    Logger.state.info("Chunked session recovery found nothing to salvage")
+                    appState.phase = .idle
                 }
             }
 
@@ -581,14 +624,20 @@ struct MenuView: View {
             newSentinel.chunkIndex = plan.recoveryIndex
             Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .private)); recovery continues at \(baseName, privacy: .private)")
         } else {
-            // No live pipeline (app-relaunch re-attach): keep segment-based naming; the stop-path
-            // fallback uses 0-indexed gap-tolerant discovery to reclaim every segment.
-            let seg = sentinel.segment + 1
-            baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
+            // collision-free index, so derive one directly. #135: name the restart capture in the
+            // chunk-index namespace, never the legacy segment counter — the two namespaces can
+            // collide. safeRestartChunkIndex owns the collision guard (see CrashRecoveryPlanner).
+            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
+            baseName = "\(sessionId)-\(idx)"
             newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
             )
+            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+            newSentinel.chunkIndex = idx
         }
 
         do {

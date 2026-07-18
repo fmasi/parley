@@ -1,17 +1,23 @@
 import Foundation
 import os
-import TranscriberCore
 
 @MainActor
-final class ChunkRotator {
-    struct FinalizedChunk {
-        let index: Int
-        let systemPath: String
-        let micPath: String
-        let startTime: Date
+public final class ChunkRotator {
+    public struct FinalizedChunk {
+        public let index: Int
+        public let systemPath: String
+        public let micPath: String
+        public let startTime: Date
+
+        public init(index: Int, systemPath: String, micPath: String, startTime: Date) {
+            self.index = index
+            self.systemPath = systemPath
+            self.micPath = micPath
+            self.startTime = startTime
+        }
     }
 
-    private let captureClient: AudioCaptureClient
+    private let captureClient: any ChunkRotationClient
     private let outputDirectory: String
     private let sessionBaseName: String
     private let chunkDuration: TimeInterval
@@ -20,8 +26,8 @@ final class ChunkRotator {
     private var currentChunkStartTime: Date
     private let onChunkFinalized: @MainActor (FinalizedChunk) -> Void
 
-    init(
-        captureClient: AudioCaptureClient,
+    public init(
+        captureClient: any ChunkRotationClient,
         outputDirectory: String,
         sessionBaseName: String,
         chunkDurationMinutes: Int,
@@ -37,10 +43,10 @@ final class ChunkRotator {
     }
 
     /// The base name for the current chunk's WAV files.
-    var currentBaseName: String { "\(sessionBaseName)-\(currentChunkIndex)" }
+    public var currentBaseName: String { "\(sessionBaseName)-\(currentChunkIndex)" }
 
     /// Info about the current (in-progress) chunk for final processing.
-    var currentChunkInfo: (index: Int, startTime: Date) {
+    public var currentChunkInfo: (index: Int, startTime: Date) {
         (index: currentChunkIndex, startTime: currentChunkStartTime)
     }
 
@@ -50,7 +56,7 @@ final class ChunkRotator {
     /// (using `currentBaseName` / `currentChunkInfo`) BEFORE calling this — once it returns, the
     /// index has advanced (#92).
     @discardableResult
-    func recoverFromCrash(now: Date = Date()) -> ChunkRecoveryPlan {
+    public func recoverFromCrash(now: Date = Date()) -> ChunkRecoveryPlan {
         let plan = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
         currentChunkIndex = plan.recoveryIndex
         currentChunkStartTime = now
@@ -59,7 +65,7 @@ final class ChunkRotator {
     }
 
     /// Start the rotation timer.
-    func start() {
+    public func start() {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .private)")
         timer = Timer.scheduledTimer(withTimeInterval: chunkDuration, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -69,7 +75,7 @@ final class ChunkRotator {
     }
 
     /// Stop the timer. Does NOT finalize the current chunk.
-    func stop() {
+    public func stop() {
         timer?.invalidate()
         timer = nil
         Logger.audio.info("ChunkRotator stopped at chunk \(self.currentChunkIndex, privacy: .public)")

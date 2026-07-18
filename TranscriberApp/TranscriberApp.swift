@@ -136,8 +136,9 @@ struct TranscriberApp: App {
         // Crash recovery: check sentinel before anything else
         let client = captureClient
         let state = appState
+        let runner = transcriptionRunner
         Task { @MainActor in
-            await Self.recoverIfNeeded(captureClient: client, appState: state)
+            await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
         }
 
         Task.detached(priority: .background) {
@@ -214,7 +215,8 @@ struct TranscriberApp: App {
     @MainActor
     private static func recoverIfNeeded(
         captureClient: AudioCaptureClient,
-        appState: AppState
+        appState: AppState,
+        transcriptionRunner: TranscriptionRunner
     ) async {
         guard let sentinel = RecordingSentinel.read() else { return }
 
@@ -239,7 +241,66 @@ struct TranscriberApp: App {
             return
         }
 
-        // Flow B: XPC is dead — check for partial audio files
+        // Flow B: XPC is dead. A chunked session's session.json is rewritten after every
+        // completed chunk, so it survives independently of whichever single WAV
+        // AudioArchiver has since deleted — check for a recoverable chunked session FIRST,
+        // before the stat-based single-file check below (which stats a WAV that a chunked
+        // recording archives-and-deletes at the first rotation, so it would always read 0
+        // bytes and wrongly conclude "no usable audio files") (#135).
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: outputDir, sessionId: sessionId) {
+            Logger.state.info("Recoverable chunked session found — rehydrating (Flow B, chunked)")
+            appState.phase = .transcribing(progress: "Recovering…")
+            do {
+                let config = ConfigManager.shared.config
+                let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
+                // Captured so the rename dialog + auto-summary can fire after the shared
+                // teardown below — mirrors MenuView.stopRecording, whose success branch is the only
+                // other place a recovered transcript reaches this wiring (#135 minor: relaunch
+                // recovery previously left the user with no rename prompt and no summary).
+                var recoveredJsonPath: URL?
+                // Drain capture diagnostics and stamp the always-present provenance into the
+                // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
+                // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+                let provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionId,
+                    engine: config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
+                if let result = try await ChunkedSessionRecovery.recover(
+                    outputDirectory: outputDir, sessionId: sessionId, config: config,
+                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                    provenance: provenance
+                ) {
+                    appState.lastJsonPath = result.jsonPath.path
+                    appState.lastTranscriptPath = result.jsonPath.path
+                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
+                    recoveredJsonPath = result.jsonPath
+                } else {
+                    Logger.state.info("Chunked session had nothing to recover — discarding")
+                }
+                RecordingSentinel.delete()
+                appState.phase = .idle
+                if let jsonPath = recoveredJsonPath {
+                    RenameWindowController.shared.show(jsonPath: jsonPath) {
+                        MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                    }
+                }
+            } catch {
+                Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
+                appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
+                RecordingSentinel.delete()
+                appState.phase = .idle
+                CriticalAlertController.shared.show(
+                    title: "Recovery Failed",
+                    message: "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
+                )
+            }
+            return
+        }
+
+        // Flow B (legacy, non-chunked/single-file): check for partial audio files
         let sysSize = (try? FileManager.default.attributesOfItem(
             atPath: sentinel.systemAudioPath
         )[.size] as? Int) ?? 0
@@ -249,12 +310,20 @@ struct TranscriberApp: App {
 
             let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
             let seg = sentinel.segment + 1
-            let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            // #135: name the restart capture in the chunk-index namespace, never the legacy segment
+            // counter — the two namespaces can collide. safeRestartChunkIndex owns the collision
+            // guard (see CrashRecoveryPlanner).
+            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
+            let baseName = "\(sessionId)-\(idx)"
 
-            let newSentinel = sentinel.incrementedSegment(
+            var newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
             )
+            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+            newSentinel.chunkIndex = idx
 
             do {
                 try await captureClient.start(
@@ -307,13 +376,20 @@ struct TranscriberApp: App {
                 guard let sentinel = RecordingSentinel.read() else { return }
 
                 let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                let seg = sentinel.segment + 1
-                let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+                // #135: name the restart capture in the chunk-index namespace, never the legacy
+                // segment counter — the two namespaces can collide. safeRestartChunkIndex owns the
+                // collision guard (see CrashRecoveryPlanner).
+                let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+                let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
+                let baseName = "\(sessionId)-\(idx)"
 
-                let newSentinel = sentinel.incrementedSegment(
+                var newSentinel = sentinel.incrementedSegment(
                     systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                     micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
                 )
+                // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+                // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+                newSentinel.chunkIndex = idx
 
                 do {
                     try await captureClient.start(

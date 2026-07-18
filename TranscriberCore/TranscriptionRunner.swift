@@ -1,19 +1,22 @@
 import Foundation
 import os
-import TranscriberCore
 
-struct TranscriptionResult {
-    let jsonPath: URL
+public struct TranscriptionResult {
+    public let jsonPath: URL
+
+    public init(jsonPath: URL) {
+        self.jsonPath = jsonPath
+    }
 }
 
 @MainActor
-final class TranscriptionRunner {
-    enum RunnerError: LocalizedError {
+public final class TranscriptionRunner {
+    public enum RunnerError: LocalizedError {
         case engineNotReady(String)
         case engineUnavailable(String)
         case failed(String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .engineNotReady(let name):
                 return "Engine '\(name)' is not ready. It may need to download a model first."
@@ -36,13 +39,15 @@ final class TranscriptionRunner {
     private var diarizerSettings: (threshold: Double?, maxSpeakers: Int?, excludeOverlap: Bool)?
     private let vadSpeechMap = VadSpeechMap()
 
-    private(set) var chunkRotator: ChunkRotator?
-    private(set) var chunkProcessor: ChunkProcessor?
+    public private(set) var chunkRotator: ChunkRotator?
+    public private(set) var chunkProcessor: ChunkProcessor?
 
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
 
-    func run(
+    public init() {}
+
+    public func run(
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
@@ -78,14 +83,24 @@ final class TranscriptionRunner {
         repairSegmentHeaders(segments)
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
-        var localSpeakerDb: [String: [Float]] = [:]
-        var remoteSpeakerDb: [String: [Float]] = [:]
         // Captured from a single-segment embedding (length == dim) before any accumulation,
         // so EchoDeduplicator can pool multi-segment embeddings without inferring the dim.
         var embeddingDim = 0
         // #93: every segment that actually contributed audio, so each (not just the base pair)
         // is archived to its own AAC and reflected in the transcript's audio_paths.
         var contributingPairs: [AudioArchiver.SegmentPair] = []
+        // Each per-segment WAV starts at its own file-relative t=0 (#135 H2): segment 2's
+        // "minute 2" is not the same instant as segment 1's "minute 2". Collected here, per
+        // segment, so a cumulative offset can be added to every timestamp below before merge —
+        // segment 0 keeps offset 0, so single-file behaviour is unchanged.
+        var perSegmentSystem: [[LabeledSegment]] = []
+        var perSegmentMic: [[LabeledSegment]] = []
+        // Each segment is diarized independently, so segment 1's "Speaker 1" and segment 2's
+        // "Speaker 1" are unrelated raw labels (#135 H3). Kept per-segment (never merged with
+        // `existing + new` — that concatenated two different people's embeddings under one key)
+        // so `reconcileRecoverySegments` can reconcile them into one global namespace below.
+        var perSegmentRemoteDb: [[String: [Float]]] = []
+        var perSegmentLocalDb: [[String: [Float]]] = []
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -100,14 +115,16 @@ final class TranscriptionRunner {
                 audioSource: .system,
                 config: config
             )
-            allSegments.append(contentsOf: systemResult.segments)
+            perSegmentSystem.append(systemResult.segments)
             if embeddingDim == 0 {
                 embeddingDim = systemResult.speakerDatabase.values.first(where: { !$0.isEmpty })?.count ?? 0
             }
-            remoteSpeakerDb.merge(systemResult.speakerDatabase) { existing, new in existing + new }
+            perSegmentRemoteDb.append(systemResult.speakerDatabase)
             audioPaths.append(segmentPair.system)
 
             var segmentMic: URL?
+            var micSegments: [LabeledSegment] = []
+            var micSpeakerDb: [String: [Float]] = [:]
             if isDualStream {
                 let micPath = segmentPair.mic
                 if FileManager.default.fileExists(atPath: micPath.path) {
@@ -119,12 +136,14 @@ final class TranscriptionRunner {
                         audioSource: .microphone,
                         config: config
                     )
-                    allSegments.append(contentsOf: micResult.segments)
-                    localSpeakerDb.merge(micResult.speakerDatabase) { existing, new in existing + new }
+                    micSegments = micResult.segments
+                    micSpeakerDb = micResult.speakerDatabase
                     audioPaths.append(micPath)
                     segmentMic = micPath
                 }
             }
+            perSegmentMic.append(micSegments)
+            perSegmentLocalDb.append(micSpeakerDb)
 
             // #93: record this segment for archival if it carried real audio (system payload
             // past the WAV header, or a mic file existed). Skips header-only orphans.
@@ -132,6 +151,92 @@ final class TranscriptionRunner {
             if sysSize > wavHeaderSize || segmentMic != nil {
                 contributingPairs.append(AudioArchiver.SegmentPair(system: segmentPair.system, mic: segmentMic))
             }
+        }
+
+        // Reconcile each channel's per-segment speaker labels into one global namespace (#135
+        // H3), reusing SpeakerReconciler's cosine matching exactly as finalize() does across
+        // chunks — never a hand-rolled comparator. Each channel is its own namespace (mirrors
+        // how finalize() reconciles Local/Remote separately for dual-stream): a mic speaker never
+        // merges with a system speaker even if their embeddings happen to be similar.
+        let remoteMapping = Self.reconcileRecoverySegments(databases: perSegmentRemoteDb, threshold: 0.65)
+        let localMapping = isDualStream
+            ? Self.reconcileRecoverySegments(databases: perSegmentLocalDb, threshold: 0.65)
+            : [:]
+
+        // Global speaker databases keyed by the RECONCILED label, built from the per-segment
+        // databases above — one representative embedding per global speaker (the first segment
+        // it appears in), never the old `existing + new` concatenation of two different people's
+        // vectors under a shared per-segment label.
+        var remoteSpeakerDb: [String: [Float]] = [:]
+        for (index, db) in perSegmentRemoteDb.enumerated() {
+            for (localLabel, embedding) in db {
+                let globalLabel = remoteMapping["\(index):\(localLabel)"] ?? localLabel
+                if remoteSpeakerDb[globalLabel] == nil {
+                    remoteSpeakerDb[globalLabel] = embedding
+                }
+            }
+        }
+        var localSpeakerDb: [String: [Float]] = [:]
+        for (index, db) in perSegmentLocalDb.enumerated() {
+            for (localLabel, embedding) in db {
+                let globalLabel = localMapping["\(index):\(localLabel)"] ?? localLabel
+                if localSpeakerDb[globalLabel] == nil {
+                    localSpeakerDb[globalLabel] = embedding
+                }
+            }
+        }
+
+        // Each segment's physical duration: prefer the actual WAV length on disk (accurate even
+        // when ASR/VAD trims trailing silence from the transcript) — falling back to that
+        // segment's own transcript max `end` only when the WAV can't be read (corrupt/missing
+        // even after header repair above), since some duration beats leaving later segments
+        // un-offset entirely. When BOTH are unavailable (unreadable WAV *and* the engine returned
+        // no segments, e.g. a silent chunk) fall back to the configured chunk length rather than
+        // 0: a zero would give the next segment this segment's own offset — collapsing timestamps
+        // across the boundary, exactly what no offset logic would do — whereas the chunk length
+        // keeps offsets monotonic (over-shooting a truncated final chunk is harmless; collapsing
+        // is not).
+        let chunkLengthFallback = Double(config.validatedChunkDuration) * 60
+        let segmentDurations: [Double] = zip(segments, zip(perSegmentSystem, perSegmentMic)).map { pair, streams in
+            let (system, mic) = streams
+            if let physical = SpeakerSampleLocator.durations(of: [pair.system]).first.flatMap({ $0 }) {
+                return physical
+            }
+            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .private); falling back to transcript end (then configured chunk length) for the offset of the next segment")
+            return (system + mic).map(\.end).max() ?? chunkLengthFallback
+        }
+        let segmentOffsets = Self.segmentStartOffsets(durations: segmentDurations)
+
+        for (index, offset) in segmentOffsets.enumerated() {
+            var systemSegs = perSegmentSystem[index]
+            var micSegs = perSegmentMic[index]
+            // Relabel with the globally-reconciled speaker (#135 H3) before merging segments
+            // across segments — otherwise segment 1's "Speaker 1" and segment 2's "Speaker 1"
+            // (unrelated people, both diarized locally as "Speaker 1") would collide in the
+            // merged transcript. A label with no mapping entry (e.g. "Unknown", which carries no
+            // embedding) is left as-is.
+            for i in systemSegs.indices {
+                if let global = remoteMapping["\(index):\(systemSegs[i].speaker)"] {
+                    systemSegs[i].speaker = global
+                }
+            }
+            for i in micSegs.indices {
+                if let global = localMapping["\(index):\(micSegs[i].speaker)"] {
+                    micSegs[i].speaker = global
+                }
+            }
+            if offset > 0 {
+                for i in systemSegs.indices {
+                    systemSegs[i].start += offset
+                    systemSegs[i].end += offset
+                }
+                for i in micSegs.indices {
+                    micSegs[i].start += offset
+                    micSegs[i].end += offset
+                }
+            }
+            allSegments.append(contentsOf: systemSegs)
+            allSegments.append(contentsOf: micSegs)
         }
 
         if isDualStream && !allSegments.isEmpty {
@@ -227,7 +332,7 @@ final class TranscriptionRunner {
     }
 
     /// Finalize a chunked recording session: reconcile speakers, merge chunks, write transcript.
-    func finalize(
+    public func finalize(
         sessionState: SessionState,
         outputDirectory: URL,
         config: Config
@@ -382,13 +487,13 @@ final class TranscriptionRunner {
 
     // MARK: - Chunked Pipeline
 
-    /// Set up chunked recording pipeline.
-    func setupChunkedPipeline(
-        captureClient: AudioCaptureClient,
-        outputDirectory: URL,
-        sessionBaseName: String,
-        config: Config
-    ) throws {
+    /// Ensures the cached transcription engine + diarizer for `config` are ready — creating or
+    /// rebuilding them as needed. This is the single source of truth for how the chunked pipeline
+    /// picks its engine/diarizer from `config` (mirrors what `setupChunkedPipeline` used to do
+    /// inline); crash recovery (`ChunkedSessionRecovery`) calls this too, so a recovered session is
+    /// transcribed with the exact same engine construction as a live recording — never a second,
+    /// diverging init path (#135).
+    public func prepareEngine(config: Config) throws -> (transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?) {
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
             Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
@@ -400,11 +505,22 @@ final class TranscriptionRunner {
         guard let transcriber else {
             throw RunnerError.failed("Failed to initialize transcription engine")
         }
+        return (transcriber, diarizer)
+    }
+
+    /// Set up chunked recording pipeline.
+    public func setupChunkedPipeline(
+        captureClient: any ChunkRotationClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config
+    ) throws {
+        let (transcriber, diarizer) = try prepareEngine(config: config)
 
         let sessionState = SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
-            engine: engineID.rawValue,
+            engine: config.engine.rawValue,
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )
@@ -430,25 +546,25 @@ final class TranscriptionRunner {
         self.chunkRotator = rotator
     }
 
-    func startChunkRotation() {
+    public func startChunkRotation() {
         chunkRotator?.start()
     }
 
-    func stopChunkRotation() {
+    public func stopChunkRotation() {
         chunkRotator?.stop()
     }
 
-    func teardownChunkedPipeline() {
+    public func teardownChunkedPipeline() {
         chunkRotator = nil
         chunkProcessor = nil
     }
 
-    func setDiarizer(_ provider: any DiarizationProvider) {
+    public func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
         self.diarizerIsDefault = false
     }
 
-    func disableDiarization() {
+    public func disableDiarization() {
         self.diarizer = nil
         self.diarizerIsDefault = false
     }
@@ -477,6 +593,60 @@ final class TranscriptionRunner {
             excludeOverlap: wanted.excludeOverlap
         )
         diarizerSettings = wanted
+    }
+
+    /// Cumulative start offset for each segment in a multi-segment recovery/CLI run, given each
+    /// segment's own physical duration in seconds. Segment 0 always starts at offset 0 (so a
+    /// single-segment run is unaffected); segment k's offset is the sum of every prior segment's
+    /// duration — turning each segment's file-relative timestamps into absolute ones once added
+    /// to that segment's own `start`/`end` (#135 H2).
+    public nonisolated static func segmentStartOffsets(durations: [Double]) -> [Double] {
+        var acc = 0.0
+        return durations.map { d in
+            defer { acc += d }
+            return acc
+        }
+    }
+
+    /// Reconcile ONE channel's per-segment speaker databases (each segment diarized
+    /// independently, so a raw label like "Speaker 1" in segment 0 and "Speaker 1" in segment 1
+    /// are unrelated — they may be the same person or two different people) into a single global
+    /// namespace, via `SpeakerReconciler`'s cosine-similarity matching (not a hand-rolled
+    /// comparator — reuses the exact same greedy-match logic `finalize()` uses across chunks).
+    ///
+    /// `databases[i]` is segment `i`'s speaker database (friendly label → embedding). Each segment
+    /// is wrapped in a throwaway `ProcessedChunk` (index = segment index) purely so
+    /// `SpeakerReconciler.reconcile` — whose public API is chunk-shaped — can run its per-chunk
+    /// greedy matching over them in recording order; no other `ProcessedChunk` field is read by
+    /// the single-namespace (`isDualStream: false`) reconciliation path this uses.
+    ///
+    /// - Returns: `["<segmentIndex>:<localLabel>": "<globalLabel>"]` — namespaced by segment so
+    ///   the same raw label reused across segments never collides in the output.
+    public nonisolated static func reconcileRecoverySegments(
+        databases: [[String: [Float]]],
+        threshold: Double
+    ) -> [String: String] {
+        let stubChunks = databases.enumerated().map { index, db in
+            ProcessedChunk(
+                index: index,
+                startTime: Date(timeIntervalSince1970: 0),
+                audioPath: "",
+                segments: [],
+                speakerDatabase: db
+            )
+        }
+        let perChunkMapping = SpeakerReconciler.reconcile(
+            chunks: stubChunks,
+            isDualStream: false,
+            threshold: Float(threshold)
+        )
+        var flattened: [String: String] = [:]
+        for (segmentIndex, mapping) in perChunkMapping {
+            for (localLabel, globalLabel) in mapping {
+                flattened["\(segmentIndex):\(localLabel)"] = globalLabel
+            }
+        }
+        return flattened
     }
 
     // MARK: - Private
