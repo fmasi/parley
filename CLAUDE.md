@@ -86,7 +86,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SummaryProvider.swift` -- protocol for LLM summary providers + SummarySegment/SummaryMetadata types
 - `TranscriberCore/OpenAISummaryProvider.swift` -- OpenAI-compatible chat completions provider via /v1/chat/completions (covers OpenAI, Claude proxy, Ollama, LM Studio OpenAI mode)
 - `TranscriberCore/LMStudioSummaryProvider.swift` -- LM Studio native REST API v1 provider via /api/v1/chat with per-request context_length, token stats, and self-correcting retry on context overflow
-- `TranscriberCore/MeetingSummarizer.swift` -- orchestrator: reads transcript JSON, selects provider from config, calls provider, writes -summary.md; createProvider(from:) factory for both provider types
+- `TranscriberCore/MeetingSummarizer.swift` -- orchestrator: reads transcript JSON, selects provider from config, calls provider, writes -summary.md; createProvider(from:) factory for both provider types; summarizeIfConfigured returns a SummaryOutcome (skipped/succeeded/failed) so callers can surface failures instead of them being silent (#134)
 - `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/Library/Application Support/Parley/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
 - `TranscriberCore/EchoDeduplicator.swift` -- triple-confirmed echo dedup: removes local segments that are mic bleed of remote speakers (temporal overlap >50% + word overlap >70% + speaker embedding cosine >0.8)
 

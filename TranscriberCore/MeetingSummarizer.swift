@@ -59,9 +59,16 @@ public enum MeetingSummarizer {
             try await summarize(transcriptPath: transcriptPath, provider: provider)
             return .succeeded
         } catch {
-            // Log public: the message is a provider/HTTP error (e.g. "model failed to load"), never
-            // the API key — and a `<private>` log makes these failures undiagnosable (#134).
-            Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
+            // Log public so provider/HTTP failures (e.g. "model failed to load") are diagnosable
+            // instead of `<private>` (#134). `invalidEndpoint` is the one case whose description
+            // embeds the raw endpoint URL — which can carry a token in some proxies (e.g. Cloudflare
+            // AI Gateway) — so keep that one out of the public log.
+            switch error {
+            case SummaryError.invalidEndpoint:
+                Logger.transcription.error("Summary generation failed: invalid summary endpoint")
+            default:
+                Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
+            }
             return .failed(error.localizedDescription)
         }
     }

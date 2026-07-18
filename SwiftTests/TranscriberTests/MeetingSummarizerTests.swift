@@ -202,6 +202,22 @@ struct MeetingSummarizerTests {
         #expect(outcome == .skipped)
     }
 
+    @Test func summarizeIfConfiguredSkipsWhenDisabled() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: false, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
+    }
+
+    @Test func summarizeIfConfiguredSkipsWhenEndpointEmpty() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: true, endpoint: "", apiKey: "", model: "m")
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
+    }
+
     // MARK: - SummarySegment / SummaryMetadata v0.7.x fields
 
     @Test func summarySegmentDefaultSource() {
