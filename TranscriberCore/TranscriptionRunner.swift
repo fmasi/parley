@@ -387,13 +387,13 @@ public final class TranscriptionRunner {
 
     // MARK: - Chunked Pipeline
 
-    /// Set up chunked recording pipeline.
-    public func setupChunkedPipeline(
-        captureClient: any ChunkRotationClient,
-        outputDirectory: URL,
-        sessionBaseName: String,
-        config: Config
-    ) throws {
+    /// Ensures the cached transcription engine + diarizer for `config` are ready — creating or
+    /// rebuilding them as needed. This is the single source of truth for how the chunked pipeline
+    /// picks its engine/diarizer from `config` (mirrors what `setupChunkedPipeline` used to do
+    /// inline); crash recovery (`ChunkedSessionRecovery`) calls this too, so a recovered session is
+    /// transcribed with the exact same engine construction as a live recording — never a second,
+    /// diverging init path (#135).
+    public func prepareEngine(config: Config) throws -> (transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?) {
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
             Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
@@ -405,11 +405,22 @@ public final class TranscriptionRunner {
         guard let transcriber else {
             throw RunnerError.failed("Failed to initialize transcription engine")
         }
+        return (transcriber, diarizer)
+    }
+
+    /// Set up chunked recording pipeline.
+    public func setupChunkedPipeline(
+        captureClient: any ChunkRotationClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config
+    ) throws {
+        let (transcriber, diarizer) = try prepareEngine(config: config)
 
         let sessionState = SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
-            engine: engineID.rawValue,
+            engine: config.engine.rawValue,
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )

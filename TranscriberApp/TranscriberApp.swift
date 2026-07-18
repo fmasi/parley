@@ -136,8 +136,9 @@ struct TranscriberApp: App {
         // Crash recovery: check sentinel before anything else
         let client = captureClient
         let state = appState
+        let runner = transcriptionRunner
         Task { @MainActor in
-            await Self.recoverIfNeeded(captureClient: client, appState: state)
+            await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
         }
 
         Task.detached(priority: .background) {
@@ -214,7 +215,8 @@ struct TranscriberApp: App {
     @MainActor
     private static func recoverIfNeeded(
         captureClient: AudioCaptureClient,
-        appState: AppState
+        appState: AppState,
+        transcriptionRunner: TranscriptionRunner
     ) async {
         guard let sentinel = RecordingSentinel.read() else { return }
 
@@ -239,7 +241,46 @@ struct TranscriberApp: App {
             return
         }
 
-        // Flow B: XPC is dead — check for partial audio files
+        // Flow B: XPC is dead. A chunked session's session.json is rewritten after every
+        // completed chunk, so it survives independently of whichever single WAV
+        // AudioArchiver has since deleted — check for a recoverable chunked session FIRST,
+        // before the stat-based single-file check below (which stats a WAV that a chunked
+        // recording archives-and-deletes at the first rotation, so it would always read 0
+        // bytes and wrongly conclude "no usable audio files") (#135).
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: outputDir, sessionId: sessionId) {
+            Logger.state.info("Recoverable chunked session found — rehydrating (Flow B, chunked)")
+            appState.phase = .transcribing(progress: "Recovering…")
+            do {
+                let config = ConfigManager.shared.config
+                let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
+                if let result = try await ChunkedSessionRecovery.recover(
+                    outputDirectory: outputDir, sessionId: sessionId, config: config,
+                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner
+                ) {
+                    appState.lastJsonPath = result.jsonPath.path
+                    appState.lastTranscriptPath = result.jsonPath.path
+                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
+                } else {
+                    Logger.state.info("Chunked session had nothing to recover — discarding")
+                }
+                RecordingSentinel.delete()
+                appState.phase = .idle
+            } catch {
+                Logger.state.error("Chunked session recovery failed: \(error, privacy: .public)")
+                appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
+                RecordingSentinel.delete()
+                appState.phase = .idle
+                CriticalAlertController.shared.show(
+                    title: "Recovery Failed",
+                    message: "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
+                )
+            }
+            return
+        }
+
+        // Flow B (legacy, non-chunked/single-file): check for partial audio files
         let sysSize = (try? FileManager.default.attributesOfItem(
             atPath: sentinel.systemAudioPath
         )[.size] as? Int) ?? 0
