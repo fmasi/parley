@@ -201,6 +201,21 @@ struct MeetingSummarizerTests {
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
     }
 
+    // Integration: an enabled config flows through createProvider(from:) into runSummary and a
+    // failure is reported as .failed (not swallowed). Guards against a createProvider regression
+    // that the provider-injected runSummary tests wouldn't catch.
+    @Test func summarizeIfConfiguredReportsFailureWhenProviderFails() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: true, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        // Nonexistent transcript → parseTranscript throws → runSummary returns .failed (no network).
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/no-such-file-\(UUID().uuidString).json"), config: config)
+        guard case .failed = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+    }
+
     @Test func summarizeIfConfiguredSkipsWhenNotConfigured() async {
         var config = Config.default
         config.summary = nil

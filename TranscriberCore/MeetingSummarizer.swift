@@ -66,7 +66,12 @@ public enum MeetingSummarizer {
             return .failed("Invalid summary endpoint — check your provider settings")
         } catch {
             // Public so provider/HTTP failures (e.g. "model failed to load") are diagnosable instead
-            // of `<private>` (#134).
+            // of `<private>` (#134). This forwards the provider's own error text — the server message
+            // for `serverError`, the HTTP response body for `requestFailed` — to both the log and the
+            // notification. That assumes providers don't echo the bearer token in their error bodies,
+            // which holds for the standard providers (OpenAI / LM Studio / Ollama). The one case that
+            // embeds the configured endpoint URL (which *can* carry a token) — `invalidEndpoint` — is
+            // sanitized in the branch above.
             Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
             return .failed(error.localizedDescription)
         }
