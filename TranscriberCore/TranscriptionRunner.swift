@@ -190,14 +190,20 @@ public final class TranscriptionRunner {
         // when ASR/VAD trims trailing silence from the transcript) — falling back to that
         // segment's own transcript max `end` only when the WAV can't be read (corrupt/missing
         // even after header repair above), since some duration beats leaving later segments
-        // un-offset entirely.
+        // un-offset entirely. When BOTH are unavailable (unreadable WAV *and* the engine returned
+        // no segments, e.g. a silent chunk) fall back to the configured chunk length rather than
+        // 0: a zero would give the next segment this segment's own offset — collapsing timestamps
+        // across the boundary, exactly what no offset logic would do — whereas the chunk length
+        // keeps offsets monotonic (over-shooting a truncated final chunk is harmless; collapsing
+        // is not).
+        let chunkLengthFallback = Double(config.validatedChunkDuration) * 60
         let segmentDurations: [Double] = zip(segments, zip(perSegmentSystem, perSegmentMic)).map { pair, streams in
             let (system, mic) = streams
             if let physical = SpeakerSampleLocator.durations(of: [pair.system]).first.flatMap({ $0 }) {
                 return physical
             }
-            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .private); falling back to transcript end for the offset of the next segment")
-            return (system + mic).map(\.end).max() ?? 0
+            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .private); falling back to transcript end (then configured chunk length) for the offset of the next segment")
+            return (system + mic).map(\.end).max() ?? chunkLengthFallback
         }
         let segmentOffsets = Self.segmentStartOffsets(durations: segmentDurations)
 

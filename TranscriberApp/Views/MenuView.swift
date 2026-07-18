@@ -627,14 +627,9 @@ struct MenuView: View {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
             // chunk-index namespace, never the legacy segment counter — the two namespaces can
-            // collide (a restart numbered like a completed chunk gets silently dropped by recovery,
-            // or worse, numbered like the in-progress chunk and truncates its WAV on create). Floor
-            // at sentinel.chunkIndex + 1 defensively in case session.json is corrupt/unreadable.
+            // collide. safeRestartChunkIndex owns the collision guard (see CrashRecoveryPlanner).
             let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = max(
-                CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
-                sentinel.chunkIndex + 1
-            )
+            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
             baseName = "\(sessionId)-\(idx)"
             newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,

@@ -311,15 +311,10 @@ struct TranscriberApp: App {
             let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
             let seg = sentinel.segment + 1
             // #135: name the restart capture in the chunk-index namespace, never the legacy segment
-            // counter — the two namespaces can collide (a restart numbered like a completed chunk
-            // gets silently dropped by recovery, or worse, numbered like the in-progress chunk and
-            // truncates its WAV on create). Floor at sentinel.chunkIndex + 1 defensively in case
-            // session.json is corrupt/unreadable and nextFreeChunkIndex under-reports.
+            // counter — the two namespaces can collide. safeRestartChunkIndex owns the collision
+            // guard (see CrashRecoveryPlanner).
             let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = max(
-                CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
-                sentinel.chunkIndex + 1
-            )
+            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
             let baseName = "\(sessionId)-\(idx)"
 
             var newSentinel = sentinel.incrementedSegment(
@@ -382,15 +377,10 @@ struct TranscriberApp: App {
 
                 let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
                 // #135: name the restart capture in the chunk-index namespace, never the legacy
-                // segment counter — the two namespaces can collide (a restart numbered like a
-                // completed chunk gets silently dropped by recovery, or worse, numbered like the
-                // in-progress chunk and truncates its WAV on create). Floor at
-                // sentinel.chunkIndex + 1 defensively in case session.json is corrupt/unreadable.
+                // segment counter — the two namespaces can collide. safeRestartChunkIndex owns the
+                // collision guard (see CrashRecoveryPlanner).
                 let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-                let idx = max(
-                    CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
-                    sentinel.chunkIndex + 1
-                )
+                let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
                 let baseName = "\(sessionId)-\(idx)"
 
                 var newSentinel = sentinel.incrementedSegment(

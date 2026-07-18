@@ -138,4 +138,41 @@ struct CrashRecoveryPlannerTests {
 
         #expect(CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: dir, sessionId: "m") == 3)
     }
+
+    // MARK: - safeRestartChunkIndex (#135/#154 — the single restart-collision guard shared by
+    // every restart site; must floor at sentinel.chunkIndex + 1 so a corrupt/unreadable
+    // session.json can never hand back an index that overwrites the in-progress chunk).
+
+    // Nothing on disk (session.json corrupt/absent → nextFreeChunkIndex under-reports to 0): the
+    // sentinel.chunkIndex + 1 floor must win so the restart never reuses a live index.
+    @Test func safeRestartFloorsAtSentinelIndexWhenDiskUnderReports() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("m-7.wav").path,
+            micAudioPath: dir.appendingPathComponent("m-7_mic.wav").path,
+            chunkIndex: 7
+        )
+
+        #expect(CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: dir) == 8)
+    }
+
+    // On-disk chunks reach further than the sentinel's own index: the disk scan must win so the
+    // restart lands beyond every chunk already written.
+    @Test func safeRestartUsesDiskScanWhenItExceedsSentinelIndex() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-5.wav"), seconds: 1)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("m-1.wav").path,
+            micAudioPath: dir.appendingPathComponent("m-1_mic.wav").path,
+            chunkIndex: 1
+        )
+
+        #expect(CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: dir) == 6)
+    }
 }

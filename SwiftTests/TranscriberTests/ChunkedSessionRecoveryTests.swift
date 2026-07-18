@@ -24,7 +24,10 @@ struct FakeDiarizer: DiarizationProvider {
     func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         DiarizationResult(
             segments: [DiarizedSegment(start: 0, end: 5, speaker: "S1")],
-            speakerDatabase: ["S1": [0, 0, 0]]
+            // Non-degenerate embedding: an all-zero vector has ‖v‖ = 0, so SpeakerReconciler's
+            // cosine matching would divide by zero and propagate NaN into the reconciled speaker
+            // database when these segments are merged across chunks.
+            speakerDatabase: ["S1": [1, 0, 0]]
         )
     }
 }
@@ -145,6 +148,7 @@ struct ChunkedSessionRecoveryTests {
             transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
         )
 
-        #expect(result != nil)
+        let unwrapped = try #require(result)
+        #expect(FileManager.default.fileExists(atPath: unwrapped.jsonPath.path))
     }
 }

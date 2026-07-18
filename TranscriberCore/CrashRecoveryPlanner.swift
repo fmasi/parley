@@ -44,4 +44,19 @@ public enum CrashRecoveryPlanner {
         guard let maxIndex = (completed + onDisk).max() else { return 0 }
         return maxIndex + 1
     }
+
+    /// The chunk index a restart-capture WAV must use so it never collides with any index this
+    /// session already owns. Floors `nextFreeChunkIndex` at `sentinel.chunkIndex + 1` so a
+    /// corrupt/unreadable `session.json` — which makes `nextFreeChunkIndex` under-report — can
+    /// never hand back an index that drops the restart file as "already completed" or truncates
+    /// the in-progress chunk's WAV on create (#135). This is the single collision guard shared by
+    /// every restart site (crash-relaunch Flow B, XPC-crash restart, Flow A re-attach); call it,
+    /// never re-derive the `max(nextFreeChunkIndex, chunkIndex + 1)` formula inline.
+    public static func safeRestartChunkIndex(sentinel: RecordingSentinel, outputDirectory: URL) -> Int {
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        return max(
+            nextFreeChunkIndex(outputDirectory: outputDirectory, sessionId: sessionId),
+            sentinel.chunkIndex + 1
+        )
+    }
 }
