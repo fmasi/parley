@@ -5,8 +5,14 @@ import os
 ///
 /// Both modes are **gap-tolerant**: every matching segment present on disk is included even
 /// when the index sequence has a hole (e.g. `-0` and `-2` with no `-1`). Crash recovery can
-/// skip an index, and silently truncating at the first gap drops real recorded audio (#84) —
-/// timestamps are absolute, so a missing middle segment is harmless to the merge.
+/// skip an index, and silently truncating at the first gap drops real recorded audio (#84).
+///
+/// Timestamps returned here are **file-relative**, not absolute: each per-segment WAV starts at
+/// its own t=0. `TranscriptionRunner.run()` turns them into absolute timestamps by adding each
+/// segment's cumulative start offset (the sum of prior segments' physical durations) before
+/// merging (#135 H2). A missing middle segment is still stitched in (this discovery step never
+/// drops it), but its own duration is unknown — so every offset from that point on is short by
+/// exactly the missing segment's length, shifting later segments earlier than they really are.
 ///
 /// **Legacy mode** (default): Given the base system audio path (e.g. `meeting.wav`), the base
 /// pair is always returned first (regardless of whether it exists on disk), followed by every
@@ -77,8 +83,9 @@ public func discoverSegments(
     }
 
     // Surface gaps in the discovered index sequence. Discovery is gap-tolerant (a missing middle
-    // segment is harmless given absolute timestamps), but a hole is worth recording during a
-    // crash-recovery investigation (#89).
+    // segment does not truncate the stitch), but its unknown duration shifts every later
+    // segment's offset (#135 H2) — a hole is worth recording during a crash-recovery
+    // investigation (#89).
     if let lo = indices.first, let hi = indices.last {
         let present = Set(indices)
         let missing = (lo...hi).filter { !present.contains($0) }

@@ -91,6 +91,12 @@ public final class TranscriptionRunner {
         // #93: every segment that actually contributed audio, so each (not just the base pair)
         // is archived to its own AAC and reflected in the transcript's audio_paths.
         var contributingPairs: [AudioArchiver.SegmentPair] = []
+        // Each per-segment WAV starts at its own file-relative t=0 (#135 H2): segment 2's
+        // "minute 2" is not the same instant as segment 1's "minute 2". Collected here, per
+        // segment, so a cumulative offset can be added to every timestamp below before merge —
+        // segment 0 keeps offset 0, so single-file behaviour is unchanged.
+        var perSegmentSystem: [[LabeledSegment]] = []
+        var perSegmentMic: [[LabeledSegment]] = []
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -105,7 +111,7 @@ public final class TranscriptionRunner {
                 audioSource: .system,
                 config: config
             )
-            allSegments.append(contentsOf: systemResult.segments)
+            perSegmentSystem.append(systemResult.segments)
             if embeddingDim == 0 {
                 embeddingDim = systemResult.speakerDatabase.values.first(where: { !$0.isEmpty })?.count ?? 0
             }
@@ -113,6 +119,7 @@ public final class TranscriptionRunner {
             audioPaths.append(segmentPair.system)
 
             var segmentMic: URL?
+            var micSegments: [LabeledSegment] = []
             if isDualStream {
                 let micPath = segmentPair.mic
                 if FileManager.default.fileExists(atPath: micPath.path) {
@@ -124,12 +131,13 @@ public final class TranscriptionRunner {
                         audioSource: .microphone,
                         config: config
                     )
-                    allSegments.append(contentsOf: micResult.segments)
+                    micSegments = micResult.segments
                     localSpeakerDb.merge(micResult.speakerDatabase) { existing, new in existing + new }
                     audioPaths.append(micPath)
                     segmentMic = micPath
                 }
             }
+            perSegmentMic.append(micSegments)
 
             // #93: record this segment for archival if it carried real audio (system payload
             // past the WAV header, or a mic file existed). Skips header-only orphans.
@@ -137,6 +145,38 @@ public final class TranscriptionRunner {
             if sysSize > wavHeaderSize || segmentMic != nil {
                 contributingPairs.append(AudioArchiver.SegmentPair(system: segmentPair.system, mic: segmentMic))
             }
+        }
+
+        // Each segment's physical duration: prefer the actual WAV length on disk (accurate even
+        // when ASR/VAD trims trailing silence from the transcript) — falling back to that
+        // segment's own transcript max `end` only when the WAV can't be read (corrupt/missing
+        // even after header repair above), since some duration beats leaving later segments
+        // un-offset entirely.
+        let segmentDurations: [Double] = zip(segments, zip(perSegmentSystem, perSegmentMic)).map { pair, streams in
+            let (system, mic) = streams
+            if let physical = SpeakerSampleLocator.durations(of: [pair.system]).first.flatMap({ $0 }) {
+                return physical
+            }
+            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .private); falling back to transcript end for the offset of the next segment")
+            return (system + mic).map(\.end).max() ?? 0
+        }
+        let segmentOffsets = Self.segmentStartOffsets(durations: segmentDurations)
+
+        for (index, offset) in segmentOffsets.enumerated() {
+            var systemSegs = perSegmentSystem[index]
+            var micSegs = perSegmentMic[index]
+            if offset > 0 {
+                for i in systemSegs.indices {
+                    systemSegs[i].start += offset
+                    systemSegs[i].end += offset
+                }
+                for i in micSegs.indices {
+                    micSegs[i].start += offset
+                    micSegs[i].end += offset
+                }
+            }
+            allSegments.append(contentsOf: systemSegs)
+            allSegments.append(contentsOf: micSegs)
         }
 
         if isDualStream && !allSegments.isEmpty {
@@ -493,6 +533,19 @@ public final class TranscriptionRunner {
             excludeOverlap: wanted.excludeOverlap
         )
         diarizerSettings = wanted
+    }
+
+    /// Cumulative start offset for each segment in a multi-segment recovery/CLI run, given each
+    /// segment's own physical duration in seconds. Segment 0 always starts at offset 0 (so a
+    /// single-segment run is unaffected); segment k's offset is the sum of every prior segment's
+    /// duration — turning each segment's file-relative timestamps into absolute ones once added
+    /// to that segment's own `start`/`end` (#135 H2).
+    public nonisolated static func segmentStartOffsets(durations: [Double]) -> [Double] {
+        var acc = 0.0
+        return durations.map { d in
+            defer { acc += d }
+            return acc
+        }
     }
 
     // MARK: - Private

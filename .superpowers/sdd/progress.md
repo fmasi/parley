@@ -7,7 +7,7 @@ Branch: fix/crash-recovery-135 (worktree crash-recovery-135), base = origin/main
 - Task 2: CrashRecoveryPlanner (pure) — DONE (see task-2-report.md)
 - Task 3: ChunkedSessionRecovery + real pipeline tests — DONE (see task-3-report.md)
 - Task 4: wire relaunch + stop — DONE (see task-4-report.md)
-- Task 5: run() offsets (H2) — pending
+- Task 5: run() offsets (H2) — DONE (see task-5-report.md)
 - Task 6: run() reconcile (H3) — pending
 - Task 7: council + CI + device test — pending
 
@@ -23,3 +23,7 @@ Task 3: complete (commits 062ef9b + fix fea67b7, review clean; SPEC ✅ QUALITY 
   Bug caught+fixed by review: system-only orphan misclassified as dual-stream (RED-first fix fea67b7).
   Important (pre-existing, filed as follow-up issue, NOT a #135 blocker): mixed dual/single-stream chunk → un-reconciled speaker labels.
 Task 4: complete (see task-4-report.md). App-level wiring only, no new unit test (needs real engines + capture — verified by Task 7's device test). Reused the exact engine/diarizer construction via one new `TranscriptionRunner.prepareEngine(config:)` factored out of `setupChunkedPipeline`'s inline logic (behavior-neutral extraction). `recoverIfNeeded` (Flow B) now checks `CrashRecoveryPlanner.isChunkedSessionRecoverable` before the stat-based single-file check and routes through `ChunkedSessionRecovery.recover`; `MenuView.stopRecording`'s no-live-pipeline fallback does the same before falling back to legacy `run()`. Full suite: 763 tests, 0 regressions (unchanged count — no unit-testable surface added by this task per the plan).
+Task 4: complete (commit d84560b, review clean; SPEC ✅ QUALITY approved). 763 tests. App wiring; engine reuse via TranscriptionRunner.prepareEngine; untouchable paths unchanged; device-tested in Task 7.
+  Minor (pre-existing, non-blocking): no explicit UI lock during "Recovering…" phase (theoretical Start race; same as ordinary transcribing phase).
+Task 5: complete (see task-5-report.md). Added pure `nonisolated static func segmentStartOffsets(durations:)` on `TranscriptionRunner`, RED-first (compile error) then GREEN (3 tests). Applied inside `run()`: segments now transcribe into per-segment arrays, physical WAV duration (via existing `SpeakerSampleLocator.durations(of:)`) drives the offsets, transcript max-end is the fallback when a WAV is unreadable. Fixed the false "timestamps are absolute" doc claims in `SegmentDiscovery.swift` (both occurrences). Full suite: 766 tests, +3 from baseline, 0 regressions.
+  Concern (for final review): the transcript-max-end fallback path is not directly unit-tested (would need a segment whose WAV read fails after repair); primary physical-duration path is covered by the 3 helper tests + full-suite regression.
