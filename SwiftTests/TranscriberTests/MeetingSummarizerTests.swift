@@ -17,6 +17,14 @@ struct MeetingSummarizerTests {
         }
     }
 
+    private struct InvalidEndpointProvider: SummaryProvider {
+        let endpoint: String
+        func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+            throw SummaryError.invalidEndpoint(endpoint)
+        }
+    }
+
+
     @Test func summarizeWritesMarkdownFile() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
@@ -145,6 +153,141 @@ struct MeetingSummarizerTests {
 
         let summaryPath = dir.appendingPathComponent("test-summary.md")
         #expect(!FileManager.default.fileExists(atPath: summaryPath.path))
+    }
+
+    // MARK: - #134 summarizeIfConfigured outcome reporting
+
+    // A failed summary must be reported (so the caller can notify the user) with the underlying
+    // message — not swallowed silently as it was before #134.
+    @Test func runSummaryReportsFailureWithMessage() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: FailingProvider())
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(message.contains("network error"))
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
+    }
+
+    @Test func runSummaryReportsSuccess() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let outcome = await MeetingSummarizer.runSummary(
+            transcriptPath: jsonPath, provider: MockProvider(response: "## Summary\nok"))
+
+        #expect(outcome == .succeeded)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
+    }
+
+    // A non-SummaryError (file read/write) must not leak the transcript/session filename into the
+    // user-visible message — it reports a generic, actionable message instead. The detail stays in
+    // the (local) log. Here the transcript is missing, so parseTranscript's read throws a CocoaError
+    // whose description embeds the filename.
+    @Test func runSummaryGivesGenericMessageForFileError() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Deliberately NOT created — the sensitive name must not reach the user-visible message.
+        let jsonPath = dir.appendingPathComponent("Q3-Revenue-Review.json")
+
+        let outcome = await MeetingSummarizer.runSummary(
+            transcriptPath: jsonPath, provider: MockProvider(response: "ok"))
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(!message.contains("Q3-Revenue-Review"))
+    }
+
+    // Integration: an enabled config flows through createProvider(from:) into runSummary and a
+    // failure is reported as .failed (not swallowed). Guards against a createProvider regression
+    // that the provider-injected runSummary tests wouldn't catch.
+    @Test func summarizeIfConfiguredReportsFailureWhenProviderFails() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: true, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        // Nonexistent transcript → parseTranscript throws → runSummary returns .failed (no network).
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/no-such-file-\(UUID().uuidString).json"), config: config)
+        guard case .failed = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+    }
+
+    @Test func summarizeIfConfiguredSkipsWhenNotConfigured() async {
+        var config = Config.default
+        config.summary = nil
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
+    }
+
+    @Test func summarizeIfConfiguredSkipsWhenDisabled() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: false, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
+    }
+
+    // The endpoint URL can carry a token in some proxies (e.g. Cloudflare AI Gateway); the
+    // user-visible failure message (shown as a notification, possibly during a screen-share) must
+    // NOT echo it.
+    @Test func runSummaryReportsInvalidEndpointWithSanitisedMessage() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("summarizer-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transcript: [String: Any] = [
+            "metadata": ["dual_stream": false] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"] as [String: Any]]
+        ]
+        let jsonPath = dir.appendingPathComponent("test.json")
+        try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
+
+        let provider = InvalidEndpointProvider(endpoint: "https://gateway.example/v1/secret-token-123/openai")
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: provider)
+
+        guard case .failed(let message) = outcome else {
+            Issue.record("expected .failed, got \(outcome)")
+            return
+        }
+        #expect(!message.contains("secret-token-123"))
+    }
+
+    @Test func summarizeIfConfiguredSkipsWhenEndpointEmpty() async {
+        var config = Config.default
+        config.summary = SummaryConfig(enabled: true, endpoint: "", apiKey: "", model: "m")
+        let outcome = await MeetingSummarizer.summarizeIfConfigured(
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+        #expect(outcome == .skipped)
     }
 
     // MARK: - SummarySegment / SummaryMetadata v0.7.x fields

@@ -1,7 +1,19 @@
-# Test Checklist — v0.8.x UI Revamp (all 8 screens)
+# Test Checklist
 
 Build/install this tree first: `python3 scripts/dev.py`
 (Resets TCC — re-grant Screen Recording + Microphone on first launch.)
+
+## Summary-failure visibility (#134 — this branch)
+A failed auto-summary used to fail silently, and a misconfigured endpoint reported
+the misleading "Summary response contained no content". Both are fixed here.
+- [ ] **Broken config surfaces the real error.** In Settings → Summary, enable summaries with a wrong API key (or a model the server doesn't have). Record a short session and finish the rename. A **"Summary Failed"** notification appears whose body is the server's *actual* message (e.g. the auth/model error), **not** "Summary response contained no content".
+- [ ] **Working config is silent + writes the file.** Fix the config to a healthy endpoint/model, record again: no failure notification, and a `…-summary.md` lands next to the transcript.
+- [ ] **LM Studio native path.** With provider = LM Studio and the target model unloaded/oversized, a failure notification shows the real reason rather than a generic empty-content message.
+
+---
+
+# Test Checklist — v0.8.x UI Revamp (all 8 screens)
+_(Stale: belongs to the UI-revamp track, not this branch. Left intact — maintainer to prune.)_
 
 Everything here is a visual/UX pass — the pipeline is untouched. Compare
 against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.

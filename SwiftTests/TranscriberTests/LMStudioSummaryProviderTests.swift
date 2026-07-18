@@ -133,6 +133,46 @@ struct LMStudioSummaryProviderTests {
         }
     }
 
+    // #134: a structured error body must surface the server's real message rather than
+    // being masked as "Summary response contained no content".
+    @Test func parseResponseSurfacesServerErrorBody() throws {
+        let responseJSON = """
+        {"error": {"message": "Model is not loaded", "code": "model_not_loaded"}}
+        """.data(using: .utf8)!
+        do {
+            _ = try LMStudioSummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            let desc = error.errorDescription ?? ""
+            #expect(desc.contains("Model is not loaded"))
+            #expect(desc.contains("model_not_loaded"))
+            #expect(!desc.contains("no content"))
+        }
+    }
+
+    // A bare-string `error` must surface on the LM Studio path too (its fallthrough is `output`,
+    // not `choices`, so it's a distinct code path from the OpenAI provider).
+    @Test func parseResponseSurfacesBareStringError() throws {
+        let responseJSON = """
+        {"error": "model not found"}
+        """.data(using: .utf8)!
+        do {
+            _ = try LMStudioSummaryProvider.parseResponse(responseJSON)
+            Issue.record("expected parseResponse to throw on an error body")
+        } catch let error as SummaryError {
+            #expect((error.errorDescription ?? "").contains("model not found"))
+        }
+    }
+
+    // A benign/empty `error` on an otherwise-valid response must NOT discard the summary.
+    @Test func parseResponseIgnoresEmptyErrorOnSuccess() throws {
+        let responseJSON = """
+        {"error": "", "output": [{"type": "message", "content": "real summary"}]}
+        """.data(using: .utf8)!
+        let (content, _) = try LMStudioSummaryProvider.parseResponse(responseJSON)
+        #expect(content == "real summary")
+    }
+
     @Test func endpointStripsTrailingSlash() async throws {
         let provider = LMStudioSummaryProvider(
             endpoint: "http://127.0.0.1:1234/",

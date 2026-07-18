@@ -1,6 +1,14 @@
 import Foundation
 import os
 
+/// Result of an attempted auto-summary, so the caller can decide whether to surface a failure
+/// to the user instead of it failing silently (#134).
+public enum SummaryOutcome: Equatable, Sendable {
+    case skipped                 // summary not configured / disabled
+    case succeeded
+    case failed(String)          // localized description of the failure
+}
+
 public enum MeetingSummarizer {
 
     /// Summarize a transcript JSON file and write a `-summary.md` alongside it.
@@ -28,21 +36,51 @@ public enum MeetingSummarizer {
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
     }
 
-    /// Convenience: create provider from config + summarize. Logs errors, never throws.
+    /// Convenience: create provider from config + summarize. Never throws; returns a
+    /// `SummaryOutcome` so the caller can notify the user on failure rather than the summary
+    /// failing silently (#134).
     public static func summarizeIfConfigured(
         transcriptPath: URL,
         config: Config
-    ) async {
+    ) async -> SummaryOutcome {
         guard let summary = config.summary, summary.enabled, !summary.endpoint.isEmpty else {
-            return
+            return .skipped
         }
+        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary))
+    }
 
-        let provider: any SummaryProvider = Self.createProvider(from: summary)
-
+    /// Run a summary with an explicit provider, translating success/failure into a `SummaryOutcome`.
+    /// Logs the failure (preserving prior behavior) and reports it upward for user notification.
+    static func runSummary(
+        transcriptPath: URL,
+        provider: any SummaryProvider
+    ) async -> SummaryOutcome {
         do {
             try await summarize(transcriptPath: transcriptPath, provider: provider)
+            return .succeeded
+        } catch SummaryError.invalidEndpoint {
+            // The endpoint URL can carry a token in some proxies (e.g. Cloudflare AI Gateway), so its
+            // raw value must reach neither the public log nor the user-visible failure message — the
+            // latter can surface as a notification during a screen-shared meeting (#134 review).
+            Logger.transcription.error("Summary generation failed: invalid summary endpoint")
+            return .failed("Invalid summary endpoint — check your provider settings")
+        } catch let error as SummaryError {
+            // Public so provider/HTTP failures (e.g. "model failed to load") are diagnosable instead
+            // of `<private>` (#134). This forwards the provider's own error text — the server message
+            // for `serverError`, the HTTP response body for `requestFailed` — to both the log and the
+            // notification. That assumes providers don't echo the bearer token in their error bodies,
+            // which holds for the standard providers (OpenAI / LM Studio / Ollama). The one case that
+            // embeds the configured endpoint URL (which *can* carry a token) — `invalidEndpoint` — is
+            // sanitized in the branch above.
+            Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
+            return .failed(error.localizedDescription)
         } catch {
+            // A non-SummaryError here is a file read/write failure (transcript unreadable, summary
+            // write failed). CocoaError's description embeds the transcript/session filename, which
+            // would surface in the notification (visible during a screen-share) — so keep the detail
+            // in the local log and give the user a generic, actionable message (#134 review).
             Logger.transcription.error("Summary generation failed: \(error.localizedDescription)")
+            return .failed("Couldn't read the transcript or write the summary — check disk space and permissions")
         }
     }
 
