@@ -367,6 +367,11 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
     }
 }
 
+/// `rotateChunk(outputDirectory:newBaseName:)` already matches `ChunkRotationClient`'s signature —
+/// this conformance is the seam that lets `ChunkRotator` (now in TranscriberCore) hold an
+/// `any ChunkRotationClient` instead of the concrete XPC client (#135 prep).
+extension AudioCaptureClient: ChunkRotationClient {}
+
 enum CaptureError: LocalizedError {
     case notConnected
     case startFailed(String)

@@ -1,19 +1,22 @@
 import Foundation
 import os
-import TranscriberCore
 
-struct TranscriptionResult {
-    let jsonPath: URL
+public struct TranscriptionResult {
+    public let jsonPath: URL
+
+    public init(jsonPath: URL) {
+        self.jsonPath = jsonPath
+    }
 }
 
 @MainActor
-final class TranscriptionRunner {
-    enum RunnerError: LocalizedError {
+public final class TranscriptionRunner {
+    public enum RunnerError: LocalizedError {
         case engineNotReady(String)
         case engineUnavailable(String)
         case failed(String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .engineNotReady(let name):
                 return "Engine '\(name)' is not ready. It may need to download a model first."
@@ -36,13 +39,15 @@ final class TranscriptionRunner {
     private var diarizerSettings: (threshold: Double?, maxSpeakers: Int?, excludeOverlap: Bool)?
     private let vadSpeechMap = VadSpeechMap()
 
-    private(set) var chunkRotator: ChunkRotator?
-    private(set) var chunkProcessor: ChunkProcessor?
+    public private(set) var chunkRotator: ChunkRotator?
+    public private(set) var chunkProcessor: ChunkProcessor?
 
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
 
-    func run(
+    public init() {}
+
+    public func run(
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
@@ -227,7 +232,7 @@ final class TranscriptionRunner {
     }
 
     /// Finalize a chunked recording session: reconcile speakers, merge chunks, write transcript.
-    func finalize(
+    public func finalize(
         sessionState: SessionState,
         outputDirectory: URL,
         config: Config
@@ -383,8 +388,8 @@ final class TranscriptionRunner {
     // MARK: - Chunked Pipeline
 
     /// Set up chunked recording pipeline.
-    func setupChunkedPipeline(
-        captureClient: AudioCaptureClient,
+    public func setupChunkedPipeline(
+        captureClient: any ChunkRotationClient,
         outputDirectory: URL,
         sessionBaseName: String,
         config: Config
@@ -430,25 +435,25 @@ final class TranscriptionRunner {
         self.chunkRotator = rotator
     }
 
-    func startChunkRotation() {
+    public func startChunkRotation() {
         chunkRotator?.start()
     }
 
-    func stopChunkRotation() {
+    public func stopChunkRotation() {
         chunkRotator?.stop()
     }
 
-    func teardownChunkedPipeline() {
+    public func teardownChunkedPipeline() {
         chunkRotator = nil
         chunkProcessor = nil
     }
 
-    func setDiarizer(_ provider: any DiarizationProvider) {
+    public func setDiarizer(_ provider: any DiarizationProvider) {
         self.diarizer = provider
         self.diarizerIsDefault = false
     }
 
-    func disableDiarization() {
+    public func disableDiarization() {
         self.diarizer = nil
         self.diarizerIsDefault = false
     }
