@@ -22,10 +22,14 @@ public enum ChunkedSessionRecovery {
             let start = (try? sysURL.resourceValues(forKeys: [.creationDateKey]).creationDate)
                 ?? baseState.meetingStart.addingTimeInterval(Double(orphan.index) * Double(baseState.chunkDurationMinutes) * 60)
             let micURL = outputDirectory.appendingPathComponent(orphan.baseName + "_mic.wav")
-            let hasMic = FileManager.default.fileExists(atPath: micURL.path)
+            // Always pass the real mic path, even when it doesn't exist. `ChunkProcessor` decides
+            // dual-stream via `FileManager.fileExists(atPath: chunk.micPath)` — pointing micPath at
+            // the system WAV instead (as this used to do) makes that check lie for a system-only
+            // orphan, misclassifying it as dual-stream and transcribing its system audio a second
+            // time as the "local" channel (#135).
             await processor.processLastChunk(ChunkRotator.FinalizedChunk(
                 index: orphan.index, systemPath: sysURL.path,
-                micPath: hasMic ? micURL.path : sysURL.path, startTime: start))
+                micPath: micURL.path, startTime: start))
         }
         await processor.awaitAllProcessed()
         let state = await processor.getSessionState()

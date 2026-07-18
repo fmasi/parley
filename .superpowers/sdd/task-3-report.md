@@ -114,3 +114,77 @@ git commit -m "feat(recovery): rehydrate session.json + re-ingest orphans + fina
 - No other concerns. Full suite green, no regressions, no test-only methods added to
   production types (`FakeEngine`/`FakeDiarizer` are pure protocol conformances with no
   production-type changes).
+
+## Fix (#135 follow-up): system-only orphan misclassified as dual-stream
+
+Closes the concern flagged above. Re-read `ChunkProcessor.swift:111` first to confirm the
+mechanism: `let hasDualStream = FileManager.default.fileExists(atPath: chunk.micPath)` —
+confirmed, dual-stream detection is a pure `fileExists` check on `chunk.micPath`, exactly as
+assumed. No BLOCKED condition; proceeded.
+
+### RED evidence
+
+Added `recoversSystemOnlyOrphanAsSingleStream` to `ChunkedSessionRecoveryTests.swift`:
+writes `session.json` with `chunkIndices: [0]` (one prior completed chunk) via
+`RecoveryFixtures.writeSessionJSON`, and only `m-1.wav` on disk (no `m-1_mic.wav`) via
+`RecoveryFixtures.writeFakeWav` — a genuine system-only orphan at index 1. Calls
+`ChunkedSessionRecovery.recover(... sessionId: "m", ...)` with the same `FakeEngine`/
+`FakeDiarizer` doubles the other two tests use, `#require`s the result, reads
+`result.jsonPath` with `JSONSerialization`, and asserts `metadata["dual_stream"] as? Bool
+== false`. Ran against the pre-fix code:
+
+```
+swift test --filter TranscriberTests <full flag set> --filter recoversSystemOnlyOrphanAsSingleStream
+```
+
+```
+Test recoversSystemOnlyOrphanAsSingleStream() recorded an issue at
+ChunkedSessionRecoveryTests.swift:87:9: Expectation failed: (dualStream → true) == false
+Test recoversSystemOnlyOrphanAsSingleStream() failed after 0.238 seconds with 1 issue.
+```
+
+RED for the right reason — `dualStream` came out `true`, matching the predicted bug
+mechanism exactly: `micPath: hasMic ? micURL.path : sysURL.path` pointed the mic path at the
+existing system WAV, `ChunkProcessor`'s `fileExists` check on that path returned true, the
+orphan chunk was processed as dual-stream (system audio transcribed a second time as
+"local"), and `TranscriptionRunner.finalize`'s `allSegments.contains { $0.source == "local"
+}` then set `dual_stream: true` in the output JSON.
+
+### Fix applied
+
+`TranscriberCore/ChunkedSessionRecovery.swift`: removed the `hasMic` computation and the
+`hasMic ? micURL.path : sysURL.path` ternary; now always `micPath: micURL.path` (the real,
+possibly-nonexistent mic path). When absent, `ChunkProcessor`'s `fileExists` check correctly
+returns false → single-stream.
+
+### GREEN evidence
+
+`--filter ChunkedSessionRecoveryTests` — all 3 pass:
+`recoversSystemOnlyOrphanAsSingleStream`, `recoversTranscriptFromSessionJSONWhenBaseWavDeleted`,
+`returnsNilWhenNothingToRecover`.
+
+### Full suite
+
+```
+swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+```
+
+```
+Test run with 763 tests in 83 suites passed after 4.145 seconds.
+```
+
+Baseline (this task's original run) was 762 tests; +1 for the new regression test, 0
+regressions.
+
+### Covering test files
+
+- `SwiftTests/TranscriberTests/ChunkedSessionRecoveryTests.swift` (new test:
+  `recoversSystemOnlyOrphanAsSingleStream`; existing 2 tests re-verified green)
+- `SwiftTests/TranscriberTests/RecoveryFixtures.swift` (unchanged, reused as-is)
+
+### Commit
+
+New commit (not amended): `fix(recovery): system-only orphan must not be misclassified as
+dual-stream (#135)`.

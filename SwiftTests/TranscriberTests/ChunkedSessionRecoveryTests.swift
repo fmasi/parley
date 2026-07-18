@@ -58,6 +58,35 @@ struct ChunkedSessionRecoveryTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("session.json").path))
     }
 
+    /// #135: a system-only orphan (no `<base>_mic.wav`) must not be misclassified as dual-stream.
+    /// `ChunkProcessor` decides dual-stream via `FileManager.fileExists(atPath: chunk.micPath)`
+    /// (ChunkProcessor.swift:111) — if recovery points `micPath` at the system WAV (which exists)
+    /// instead of the real, absent mic WAV, that check lies and the chunk gets treated as
+    /// dual-stream, with its system audio transcribed and diarized a second time as the "local"
+    /// channel and echo-deduped against itself.
+    @Test func recoversSystemOnlyOrphanAsSingleStream() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeSessionJSON(
+            dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0]
+        )
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-1.wav"), seconds: 1)
+        // Deliberately no m-1_mic.wav — this orphan is system-audio-only.
+
+        let result = try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
+        )
+
+        let unwrapped = try #require(result)
+        let data = try Data(contentsOf: unwrapped.jsonPath)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        let dualStream = try #require(metadata["dual_stream"] as? Bool)
+        #expect(dualStream == false)
+    }
+
     @Test func returnsNilWhenNothingToRecover() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
