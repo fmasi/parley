@@ -8,7 +8,7 @@ Branch: fix/crash-recovery-135 (worktree crash-recovery-135), base = origin/main
 - Task 3: ChunkedSessionRecovery + real pipeline tests — DONE (see task-3-report.md)
 - Task 4: wire relaunch + stop — DONE (see task-4-report.md)
 - Task 5: run() offsets (H2) — DONE (see task-5-report.md)
-- Task 6: run() reconcile (H3) — pending
+- Task 6: run() reconcile (H3) — DONE (see task-6-report.md)
 - Task 7: council + CI + device test — pending
 
 ## Results
@@ -27,3 +27,7 @@ Task 4: complete (commit d84560b, review clean; SPEC ✅ QUALITY approved). 763 
   Minor (pre-existing, non-blocking): no explicit UI lock during "Recovering…" phase (theoretical Start race; same as ordinary transcribing phase).
 Task 5: complete (see task-5-report.md). Added pure `nonisolated static func segmentStartOffsets(durations:)` on `TranscriptionRunner`, RED-first (compile error) then GREEN (3 tests). Applied inside `run()`: segments now transcribe into per-segment arrays, physical WAV duration (via existing `SpeakerSampleLocator.durations(of:)`) drives the offsets, transcript max-end is the fallback when a WAV is unreadable. Fixed the false "timestamps are absolute" doc claims in `SegmentDiscovery.swift` (both occurrences). Full suite: 766 tests, +3 from baseline, 0 regressions.
   Concern (for final review): the transcript-max-end fallback path is not directly unit-tested (would need a segment whose WAV read fails after repair); primary physical-duration path is covered by the 3 helper tests + full-suite regression.
+Task 5: complete (commit 2ec1e5b, review clean; SPEC ✅ QUALITY approved). 766 tests. Cumulative offsets via SpeakerSampleLocator.durations; alignment + single-file invariance verified.
+  Minor (self-flagged): transcript-max-end fallback branch untested (hard to construct).
+Task 6: complete (see task-6-report.md). Added pure `nonisolated static func reconcileRecoverySegments(databases:threshold:)` on `TranscriptionRunner`, RED-first (compile error) then GREEN (2 tests: distinct speakers stay distinct, matching voiceprint collapses to one). Reuses `SpeakerReconciler.reconcile` via throwaway per-segment `ProcessedChunk` stubs — no hand-rolled cosine matcher. Replaced the naive `existing + new` DB merges in `run()` with per-segment `perSegmentRemoteDb`/`perSegmentLocalDb`, reconciled per-channel, then relabeled every segment's speaker field before merge. Full suite: 768 tests, +2 from baseline, 0 regressions.
+  Concern (for final review): `run()`'s live relabeling wiring itself has no dedicated unit test (needs real engines, same as Tasks 4/5 — deferred to Task 7 device test); rebuilt global speaker DBs use first-seen embedding per global label, not the reconciler's internal EMA reference.

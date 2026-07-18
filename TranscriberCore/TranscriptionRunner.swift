@@ -83,8 +83,6 @@ public final class TranscriptionRunner {
         repairSegmentHeaders(segments)
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
-        var localSpeakerDb: [String: [Float]] = [:]
-        var remoteSpeakerDb: [String: [Float]] = [:]
         // Captured from a single-segment embedding (length == dim) before any accumulation,
         // so EchoDeduplicator can pool multi-segment embeddings without inferring the dim.
         var embeddingDim = 0
@@ -97,6 +95,12 @@ public final class TranscriptionRunner {
         // segment 0 keeps offset 0, so single-file behaviour is unchanged.
         var perSegmentSystem: [[LabeledSegment]] = []
         var perSegmentMic: [[LabeledSegment]] = []
+        // Each segment is diarized independently, so segment 1's "Speaker 1" and segment 2's
+        // "Speaker 1" are unrelated raw labels (#135 H3). Kept per-segment (never merged with
+        // `existing + new` — that concatenated two different people's embeddings under one key)
+        // so `reconcileRecoverySegments` can reconcile them into one global namespace below.
+        var perSegmentRemoteDb: [[String: [Float]]] = []
+        var perSegmentLocalDb: [[String: [Float]]] = []
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -115,11 +119,12 @@ public final class TranscriptionRunner {
             if embeddingDim == 0 {
                 embeddingDim = systemResult.speakerDatabase.values.first(where: { !$0.isEmpty })?.count ?? 0
             }
-            remoteSpeakerDb.merge(systemResult.speakerDatabase) { existing, new in existing + new }
+            perSegmentRemoteDb.append(systemResult.speakerDatabase)
             audioPaths.append(segmentPair.system)
 
             var segmentMic: URL?
             var micSegments: [LabeledSegment] = []
+            var micSpeakerDb: [String: [Float]] = [:]
             if isDualStream {
                 let micPath = segmentPair.mic
                 if FileManager.default.fileExists(atPath: micPath.path) {
@@ -132,18 +137,52 @@ public final class TranscriptionRunner {
                         config: config
                     )
                     micSegments = micResult.segments
-                    localSpeakerDb.merge(micResult.speakerDatabase) { existing, new in existing + new }
+                    micSpeakerDb = micResult.speakerDatabase
                     audioPaths.append(micPath)
                     segmentMic = micPath
                 }
             }
             perSegmentMic.append(micSegments)
+            perSegmentLocalDb.append(micSpeakerDb)
 
             // #93: record this segment for archival if it carried real audio (system payload
             // past the WAV header, or a mic file existed). Skips header-only orphans.
             let sysSize = (try? FileManager.default.attributesOfItem(atPath: segmentPair.system.path)[.size] as? Int) ?? 0
             if sysSize > wavHeaderSize || segmentMic != nil {
                 contributingPairs.append(AudioArchiver.SegmentPair(system: segmentPair.system, mic: segmentMic))
+            }
+        }
+
+        // Reconcile each channel's per-segment speaker labels into one global namespace (#135
+        // H3), reusing SpeakerReconciler's cosine matching exactly as finalize() does across
+        // chunks — never a hand-rolled comparator. Each channel is its own namespace (mirrors
+        // how finalize() reconciles Local/Remote separately for dual-stream): a mic speaker never
+        // merges with a system speaker even if their embeddings happen to be similar.
+        let remoteMapping = Self.reconcileRecoverySegments(databases: perSegmentRemoteDb, threshold: 0.65)
+        let localMapping = isDualStream
+            ? Self.reconcileRecoverySegments(databases: perSegmentLocalDb, threshold: 0.65)
+            : [:]
+
+        // Global speaker databases keyed by the RECONCILED label, built from the per-segment
+        // databases above — one representative embedding per global speaker (the first segment
+        // it appears in), never the old `existing + new` concatenation of two different people's
+        // vectors under a shared per-segment label.
+        var remoteSpeakerDb: [String: [Float]] = [:]
+        for (index, db) in perSegmentRemoteDb.enumerated() {
+            for (localLabel, embedding) in db {
+                let globalLabel = remoteMapping["\(index):\(localLabel)"] ?? localLabel
+                if remoteSpeakerDb[globalLabel] == nil {
+                    remoteSpeakerDb[globalLabel] = embedding
+                }
+            }
+        }
+        var localSpeakerDb: [String: [Float]] = [:]
+        for (index, db) in perSegmentLocalDb.enumerated() {
+            for (localLabel, embedding) in db {
+                let globalLabel = localMapping["\(index):\(localLabel)"] ?? localLabel
+                if localSpeakerDb[globalLabel] == nil {
+                    localSpeakerDb[globalLabel] = embedding
+                }
             }
         }
 
@@ -165,6 +204,21 @@ public final class TranscriptionRunner {
         for (index, offset) in segmentOffsets.enumerated() {
             var systemSegs = perSegmentSystem[index]
             var micSegs = perSegmentMic[index]
+            // Relabel with the globally-reconciled speaker (#135 H3) before merging segments
+            // across segments — otherwise segment 1's "Speaker 1" and segment 2's "Speaker 1"
+            // (unrelated people, both diarized locally as "Speaker 1") would collide in the
+            // merged transcript. A label with no mapping entry (e.g. "Unknown", which carries no
+            // embedding) is left as-is.
+            for i in systemSegs.indices {
+                if let global = remoteMapping["\(index):\(systemSegs[i].speaker)"] {
+                    systemSegs[i].speaker = global
+                }
+            }
+            for i in micSegs.indices {
+                if let global = localMapping["\(index):\(micSegs[i].speaker)"] {
+                    micSegs[i].speaker = global
+                }
+            }
             if offset > 0 {
                 for i in systemSegs.indices {
                     systemSegs[i].start += offset
@@ -546,6 +600,47 @@ public final class TranscriptionRunner {
             defer { acc += d }
             return acc
         }
+    }
+
+    /// Reconcile ONE channel's per-segment speaker databases (each segment diarized
+    /// independently, so a raw label like "Speaker 1" in segment 0 and "Speaker 1" in segment 1
+    /// are unrelated — they may be the same person or two different people) into a single global
+    /// namespace, via `SpeakerReconciler`'s cosine-similarity matching (not a hand-rolled
+    /// comparator — reuses the exact same greedy-match logic `finalize()` uses across chunks).
+    ///
+    /// `databases[i]` is segment `i`'s speaker database (friendly label → embedding). Each segment
+    /// is wrapped in a throwaway `ProcessedChunk` (index = segment index) purely so
+    /// `SpeakerReconciler.reconcile` — whose public API is chunk-shaped — can run its per-chunk
+    /// greedy matching over them in recording order; no other `ProcessedChunk` field is read by
+    /// the single-namespace (`isDualStream: false`) reconciliation path this uses.
+    ///
+    /// - Returns: `["<segmentIndex>:<localLabel>": "<globalLabel>"]` — namespaced by segment so
+    ///   the same raw label reused across segments never collides in the output.
+    public nonisolated static func reconcileRecoverySegments(
+        databases: [[String: [Float]]],
+        threshold: Double
+    ) -> [String: String] {
+        let stubChunks = databases.enumerated().map { index, db in
+            ProcessedChunk(
+                index: index,
+                startTime: Date(timeIntervalSince1970: 0),
+                audioPath: "",
+                segments: [],
+                speakerDatabase: db
+            )
+        }
+        let perChunkMapping = SpeakerReconciler.reconcile(
+            chunks: stubChunks,
+            isDualStream: false,
+            threshold: Float(threshold)
+        )
+        var flattened: [String: String] = [:]
+        for (segmentIndex, mapping) in perChunkMapping {
+            for (localLabel, globalLabel) in mapping {
+                flattened["\(segmentIndex):\(localLabel)"] = globalLabel
+            }
+        }
+        return flattened
     }
 
     // MARK: - Private
