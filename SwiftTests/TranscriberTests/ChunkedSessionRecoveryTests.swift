@@ -98,4 +98,53 @@ struct ChunkedSessionRecoveryTests {
 
         #expect(result == nil)
     }
+
+    /// Finding 1 (#154): a recovered session must still carry `capture_provenance` in its transcript
+    /// metadata. `finalize` reads it off `sessionState.provenance`, which is always nil for a
+    /// synthesized/rehydrated session unless `recover` threads a caller-supplied provenance onto it.
+    @Test func stampsProvenanceOntoRecoveredTranscript() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeSessionJSON(
+            dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0, 1]
+        )
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2_mic.wav"), seconds: 1)
+
+        let provenance = CaptureProvenance(
+            engine: "fluidAudio", systemFormat: "48000/1", micFormat: "48000/1", micDevice: "Test Mic",
+            routeChanges: 0, retries: 0, recovered: true, anomalyCount: 0
+        )
+
+        let result = try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner(),
+            provenance: provenance
+        )
+
+        let unwrapped = try #require(result)
+        let data = try Data(contentsOf: unwrapped.jsonPath)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        let stamped = try #require(metadata["capture_provenance"] as? [String: Any])
+        #expect(stamped["recovered"] as? Bool == true)
+        #expect(stamped["mic_device"] as? String == "Test Mic")
+    }
+
+    /// Finding 7 (#154): no session.json at all — the entire session is one orphan WAV. Exercises the
+    /// synthesized-baseState branch (as opposed to the session.json-plus-one-orphan branches above).
+    @Test func recoversFromOrphanOnlyWhenNoSessionJSON() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-0.wav"), seconds: 1)
+
+        let result = try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
+        )
+
+        #expect(result != nil)
+    }
 }

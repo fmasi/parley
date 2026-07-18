@@ -8,12 +8,28 @@ import Foundation
 public enum ChunkedSessionRecovery {
     public static func recover(outputDirectory: URL, sessionId: String, config: Config,
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
-                        runner: TranscriptionRunner) async throws -> TranscriptionResult? {
-        let baseState = SessionState.read(directory: outputDirectory)
-            ?? SessionState(sessionId: sessionId, meetingStart: Date(), engine: config.engine.rawValue,
-                            chunkDurationMinutes: config.validatedChunkDuration, chunks: [])
-        let completed = Set(baseState.chunks.map(\.index))
-        let orphans = CrashRecoveryPlanner.orphanChunks(outputDirectory: outputDirectory, sessionId: sessionId, completedIndices: completed)
+                        runner: TranscriptionRunner, provenance: CaptureProvenance? = nil) async throws -> TranscriptionResult? {
+        let existingState = SessionState.read(directory: outputDirectory)
+        // `orphanChunks` only needs completed indices, not the whole baseState, so it's computed
+        // before baseState — the all-orphan fallback below needs the orphan list to derive
+        // meetingStart.
+        let orphans = CrashRecoveryPlanner.orphanChunks(
+            outputDirectory: outputDirectory, sessionId: sessionId,
+            completedIndices: Set(existingState?.chunks.map(\.index) ?? [])
+        )
+        let baseState = existingState ?? {
+            // No session.json at all — every chunk is an orphan. Derive meetingStart from the
+            // earliest orphan WAV's filesystem creation date rather than defaulting to `Date()`
+            // (recovery time), which would stamp the transcript with a start time that's
+            // potentially much later than when the meeting actually began.
+            let earliestOrphanCreation = orphans.compactMap {
+                try? outputDirectory.appendingPathComponent($0.baseName + ".wav")
+                    .resourceValues(forKeys: [.creationDateKey]).creationDate
+            }.min()
+            return SessionState(sessionId: sessionId, meetingStart: earliestOrphanCreation ?? Date(),
+                                engine: config.engine.rawValue,
+                                chunkDurationMinutes: config.validatedChunkDuration, chunks: [])
+        }()
         guard !baseState.chunks.isEmpty || !orphans.isEmpty else { return nil }
         let processor = ChunkProcessor(config: config, outputDirectory: outputDirectory,
                                        sessionState: baseState, transcriber: transcriber, diarizer: diarizer)
@@ -31,9 +47,14 @@ public enum ChunkedSessionRecovery {
                 index: orphan.index, systemPath: sysURL.path,
                 micPath: micURL.path, startTime: start))
         }
+        // Defensive no-op on this sequential path: `processLastChunk` above is awaited inline per
+        // orphan, and `inFlightTasks` is only ever populated by the fire-and-forget `processChunk`
+        // (used by the live rotation path, not recovery). Kept as belt-and-suspenders in case this
+        // method's contract changes to enqueue background work.
         await processor.awaitAllProcessed()
-        let state = await processor.getSessionState()
+        var state = await processor.getSessionState()
         guard !state.chunks.isEmpty else { return nil }
+        if let provenance { state.provenance = provenance }
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
     }
 }

@@ -465,9 +465,18 @@ struct MenuView: View {
                 if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId) {
                     let config = configManager.config
                     let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
+                    // Drain capture diagnostics and stamp the always-present provenance into the
+                    // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
+                    // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+                    let provenance = await captureClient.finalizeSessionDiagnostics(
+                        sessionId: sessionId,
+                        engine: config.engine.rawValue,
+                        recordingDirectory: sessionOutputDir
+                    )
                     result = try await ChunkedSessionRecovery.recover(
                         outputDirectory: sessionOutputDir, sessionId: sessionId, config: config,
-                        transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner
+                        transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                        provenance: provenance
                     )
                 } else {
                     // Genuine single-file input (non-chunked recording / legacy path).
@@ -631,6 +640,9 @@ struct MenuView: View {
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
             )
+            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+            newSentinel.chunkIndex = idx
         }
 
         do {

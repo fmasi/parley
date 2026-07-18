@@ -68,8 +68,11 @@ public final class ChunkProcessor {
         inFlightTasks.append(task)
     }
 
-    /// Process the final chunk synchronously (called at end-of-recording).
-    /// `nonisolated` so the heavy work runs off the main actor even when awaited from `@MainActor`.
+    /// Process a chunk synchronously (inline `await`, no `inFlightTasks` enqueue). Called once at
+    /// end-of-recording for the final chunk, and once per orphan chunk during crash recovery
+    /// (`ChunkedSessionRecovery`, which awaits each orphan in turn rather than firing them
+    /// concurrently). `nonisolated` so the heavy work (ASR, diarization, AAC encoding) runs off the
+    /// main actor even when awaited from `@MainActor`.
     public nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
         await processChunkAsync(chunk)
     }

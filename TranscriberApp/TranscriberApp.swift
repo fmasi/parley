@@ -260,9 +260,18 @@ struct TranscriberApp: App {
                 // other place a recovered transcript reaches this wiring (#135 minor: relaunch
                 // recovery previously left the user with no rename prompt and no summary).
                 var recoveredJsonPath: URL?
+                // Drain capture diagnostics and stamp the always-present provenance into the
+                // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
+                // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+                let provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionId,
+                    engine: config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
                 if let result = try await ChunkedSessionRecovery.recover(
                     outputDirectory: outputDir, sessionId: sessionId, config: config,
-                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner
+                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                    provenance: provenance
                 ) {
                     appState.lastJsonPath = result.jsonPath.path
                     appState.lastTranscriptPath = result.jsonPath.path
@@ -279,7 +288,7 @@ struct TranscriberApp: App {
                     }
                 }
             } catch {
-                Logger.state.error("Chunked session recovery failed: \(error, privacy: .public)")
+                Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
                 appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
                 RecordingSentinel.delete()
                 appState.phase = .idle
@@ -313,10 +322,13 @@ struct TranscriberApp: App {
             )
             let baseName = "\(sessionId)-\(idx)"
 
-            let newSentinel = sentinel.incrementedSegment(
+            var newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
             )
+            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+            newSentinel.chunkIndex = idx
 
             do {
                 try await captureClient.start(
@@ -381,10 +393,13 @@ struct TranscriberApp: App {
                 )
                 let baseName = "\(sessionId)-\(idx)"
 
-                let newSentinel = sentinel.incrementedSegment(
+                var newSentinel = sentinel.incrementedSegment(
                     systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                     micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
                 )
+                // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+                // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+                newSentinel.chunkIndex = idx
 
                 do {
                     try await captureClient.start(
