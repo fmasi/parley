@@ -3,7 +3,19 @@
 Build/install this tree first: `python3 scripts/dev.py`
 (Resets TCC — re-grant Screen Recording + Microphone on first launch.)
 
-## Summary-failure visibility (#134 — this branch)
+## Crash-recovery rehydration (#135 — this branch)
+Crashing a long recording used to silently discard the whole session. Recovery now reads
+`session.json`, re-ingests the un-archived orphan chunk(s), and finalizes. Use a short chunk
+duration (Settings → set chunk minutes low, e.g. 1) so a few-minute recording rotates several chunks.
+- [ ] **Single-fault relaunch recovery (the core fix).** Record past ≥2 chunk rotations, then **force-quit Parley** (⌥⌘Esc → Force Quit) so the audio helper dies too. Relaunch. Expect: a **complete transcript** covering *all* chunks including the in-progress one — NOT "No usable audio files", not just the last few minutes. Rename dialog + auto-summary prompt appear (Deliverable C). `session.json` is gone afterward.
+- [ ] **Timestamps monotonic (H2).** In the recovered transcript, timestamps increase across chunk boundaries — no two chunks' minute-2 lines interleaved; SRT (if enabled) is monotonic.
+- [ ] **Speakers not split/merged wrongly (H3).** With ≥2 speakers across different chunks, the same person keeps one label across chunks and two different people aren't collapsed into one.
+- [ ] **Double-fault (app crash → reattach → helper crash).** Record ≥2 chunks; force-quit the app but immediately relaunch WHILE the helper is still capturing (Flow A re-attach — you'll see "Recording…" resume); then kill the helper (`pkill -9 audio-capture-helper-xpc`) to force a restart; keep talking; Stop. Expect: the transcript includes the post-restart audio too (no silently dropped segment). *Note (reviewer edge): the fix keys off the system WAV; a mic-only orphan is a contrived case not covered.*
+- [ ] **Normal (no-crash) recording still fine.** A clean record→stop produces the same transcript quality as before (regression check on the relocated pipeline).
+
+---
+
+## Summary-failure visibility (#134 — shipped, kept for reference)
 A failed auto-summary used to fail silently, and a misconfigured endpoint reported
 the misleading "Summary response contained no content". Both are fixed here.
 - [ ] **Broken config surfaces the real error.** In Settings → Summary, enable summaries with a wrong API key (or a model the server doesn't have). Record a short session and finish the rename. A **"Summary Failed"** notification appears whose body is the server's *actual* message (e.g. the auth/model error), **not** "Summary response contained no content".
