@@ -615,10 +615,18 @@ struct MenuView: View {
             newSentinel.chunkIndex = plan.recoveryIndex
             Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphanBase, privacy: .private)); recovery continues at \(baseName, privacy: .private)")
         } else {
-            // No live pipeline (app-relaunch re-attach): keep segment-based naming; the stop-path
-            // fallback uses 0-indexed gap-tolerant discovery to reclaim every segment.
-            let seg = sentinel.segment + 1
-            baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
+            // collision-free index, so derive one directly. #135: name the restart capture in the
+            // chunk-index namespace, never the legacy segment counter — the two namespaces can
+            // collide (a restart numbered like a completed chunk gets silently dropped by recovery,
+            // or worse, numbered like the in-progress chunk and truncates its WAV on create). Floor
+            // at sentinel.chunkIndex + 1 defensively in case session.json is corrupt/unreadable.
+            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+            let idx = max(
+                CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
+                sentinel.chunkIndex + 1
+            )
+            baseName = "\(sessionId)-\(idx)"
             newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
                 micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path

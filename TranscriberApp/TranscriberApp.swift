@@ -290,7 +290,17 @@ struct TranscriberApp: App {
 
             let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
             let seg = sentinel.segment + 1
-            let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+            // #135: name the restart capture in the chunk-index namespace, never the legacy segment
+            // counter — the two namespaces can collide (a restart numbered like a completed chunk
+            // gets silently dropped by recovery, or worse, numbered like the in-progress chunk and
+            // truncates its WAV on create). Floor at sentinel.chunkIndex + 1 defensively in case
+            // session.json is corrupt/unreadable and nextFreeChunkIndex under-reports.
+            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+            let idx = max(
+                CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
+                sentinel.chunkIndex + 1
+            )
+            let baseName = "\(sessionId)-\(idx)"
 
             let newSentinel = sentinel.incrementedSegment(
                 systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
@@ -348,8 +358,17 @@ struct TranscriberApp: App {
                 guard let sentinel = RecordingSentinel.read() else { return }
 
                 let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                let seg = sentinel.segment + 1
-                let baseName = segmentBaseName(originalPath: sentinel.systemAudioPath, segment: seg)
+                // #135: name the restart capture in the chunk-index namespace, never the legacy
+                // segment counter — the two namespaces can collide (a restart numbered like a
+                // completed chunk gets silently dropped by recovery, or worse, numbered like the
+                // in-progress chunk and truncates its WAV on create). Floor at
+                // sentinel.chunkIndex + 1 defensively in case session.json is corrupt/unreadable.
+                let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+                let idx = max(
+                    CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: outputDir, sessionId: sessionId),
+                    sentinel.chunkIndex + 1
+                )
+                let baseName = "\(sessionId)-\(idx)"
 
                 let newSentinel = sentinel.incrementedSegment(
                     systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
