@@ -65,6 +65,20 @@ struct CrashRecoveryPlannerTests {
         #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
     }
 
+    // The first-rotation crash (#135): the recording died before `AudioArchiver` finished the
+    // first chunk, so only `<sessionId>-0.wav` exists and there is NO `session.json`. This is the
+    // primary path the whole feature guards — recoverability must still be true from the orphan
+    // WAV alone. Covered end-to-end by `ChunkedSessionRecoveryTests`; asserted here directly on
+    // the predicate that gates whether recovery runs at all.
+    @Test func recoverableFromOrphanOnlyWhenNoSessionJSON() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-0.wav"), seconds: 1)
+
+        #expect(CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+    }
+
     // MARK: - nextFreeChunkIndex (#135 — restart naming must never collide with the chunk
     // namespace: a restart named with a colliding index either gets dropped as "already
     // completed" or, worse, truncates the in-progress chunk's WAV on create).
