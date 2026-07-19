@@ -381,7 +381,7 @@ struct MenuView: View {
 
     static func sendCriticalNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .public)")
+        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .private)")
 
         // Floating panel — impossible to miss, no entitlement needed
         CriticalAlertController.shared.show(title: title, message: body) {

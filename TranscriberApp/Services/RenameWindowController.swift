@@ -29,7 +29,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             }.value
             guard !Task.isCancelled else { return }
             guard !speakers.isEmpty else {
-                Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .private)")
+                Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .sensitive)")
                 let alert = NSAlert()
                 alert.messageText = "No speakers to rename"
                 alert.informativeText =
@@ -131,10 +131,10 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             )
             return collected.map { SpeakerEntry(id: $0.id, displayName: $0.id, samples: $0.samples) }
         } catch TranscriptRenamer.RenameError.cannotRead {
-            Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .private)")
+            Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .sensitive)")
             return []
         } catch {
-            Logger.files.error("Rename: \(jsonPath.lastPathComponent, privacy: .private) is not a readable transcript")
+            Logger.files.error("Rename: \(jsonPath.lastPathComponent, privacy: .sensitive) is not a readable transcript")
             return []
         }
     }
