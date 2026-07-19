@@ -14,8 +14,7 @@ public enum AudioSourceResolverError: LocalizedError {
     }
 }
 
-/// Detects the audio source format for a recording and provides
-/// channel-separated streams to the pipeline.
+/// Splits a stereo AAC archive into separate mono WAV streams for the pipeline.
 ///
 /// Channel convention for stereo AAC:
 /// - Left channel = local microphone (the user)

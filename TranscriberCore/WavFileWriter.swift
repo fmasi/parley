@@ -161,12 +161,12 @@ public final class WavFileWriter {
         h += "RIFF".data(using: .ascii)!;  h += Self.le32(36 + dataSize)
         h += "WAVE".data(using: .ascii)!
         h += "fmt ".data(using: .ascii)!;  h += Self.le32(16)
-        h += le16(1);  h += le16(channels)
+        h += Self.le16(1);  h += Self.le16(channels)
         h += Self.le32(sampleRate);  h += Self.le32(byteRate)
-        h += le16(blockAlign);  h += le16(16)
+        h += Self.le16(blockAlign);  h += Self.le16(16)
         h += "data".data(using: .ascii)!;  h += Self.le32(dataSize)
         fileHandle.write(h)
     }
 
-    private func le16(_ v: UInt16) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 2) }
+    private static func le16(_ v: UInt16) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 2) }
 }

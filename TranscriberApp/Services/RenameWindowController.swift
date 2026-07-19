@@ -263,12 +263,25 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     // MARK: - Generate Format File
 
     nonisolated static func generateFormatFile(jsonPath: URL) {
-        // writeFormatFile already reads output_format and no-ops for json/missing/unknown, so
-        // there is no need to pre-read the format or guard here (mirrors CLIRename).
+        let format = Self.readOutputFormat(from: jsonPath) ?? "json"
+        guard format == "srt" || format == "txt" else { return }
+
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+            let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
+            if FileManager.default.fileExists(atPath: outputPath.path) {
+                Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .private)")
+            }
         } catch {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
+    }
+
+    private nonisolated static func readOutputFormat(from jsonPath: URL) -> String? {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = json["metadata"] as? [String: Any]
+        else { return nil }
+        return metadata["output_format"] as? String
     }
 }
