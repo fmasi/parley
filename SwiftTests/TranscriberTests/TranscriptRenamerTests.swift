@@ -105,6 +105,26 @@ struct TranscriptRenamerTests {
         ])
     }
 
+    /// The faithful cross-session #162 scenario: a FRESH process opens a transcript that already
+    /// carries speaker_names from an earlier rename session. The pre-existing name must survive.
+    @Test func renameMergesIntoSpeakerNamesAlreadyOnDisk() throws {
+        let url = try writeTranscript(
+            segments: [
+                seg("Alice", "hello", start: 0, end: 2),
+                seg("Remote Speaker 2", "hi there", start: 3, end: 5),
+            ],
+            metadata: ["speaker_names": ["Remote Speaker 1": "Alice"]]
+        )
+
+        #expect(TranscriptRenamer.applyRenames(["Remote Speaker 2": "Bob"], jsonPath: url))
+
+        let json = try readJSON(url)
+        #expect(speakerNames(of: json) == [
+            "Remote Speaker 1": "Alice",
+            "Remote Speaker 2": "Bob",
+        ])
+    }
+
     @Test func identityRenamesAreNotRecorded() throws {
         let url = try writeTranscript(segments: [
             seg("Remote Speaker 1", "hello", start: 0, end: 2),
@@ -155,7 +175,9 @@ struct TranscriptRenamerTests {
         #expect(collected[0].samples.first?.text == "this is the much longer clean sample")
     }
 
-    @Test func collectRespectsMaxSamplesPerSpeaker() throws {
+    /// With no audio_paths this exercises the text-only fallback's `prefix` cap only — the
+    /// primary resolved-audio cap needs a real audio fixture and is not covered here.
+    @Test func collectRespectsMaxSamplesInTextOnlyFallback() throws {
         let url = try writeTranscript(segments: [
             seg("Remote Speaker 1", "one", start: 0, end: 1),
             seg("Remote Speaker 1", "two", start: 2, end: 3),
@@ -168,6 +190,42 @@ struct TranscriptRenamerTests {
 
         #expect(collected.count == 1)
         #expect(collected[0].samples.count == 1)
+    }
+
+    /// Channel wiring: `isLocal` must come from the segment's `source`, never the display name —
+    /// renaming a speaker must not change which channel of the stereo archive we read.
+    @Test func collectWiresIsLocalFromSegmentSource() throws {
+        let url = try writeTranscript(segments: [
+            seg("Local Speaker 1", "me talking", start: 0, end: 2, source: "local"),
+            seg("Remote Speaker 1", "them talking", start: 3, end: 5, source: "remote"),
+        ])
+
+        let collected = try TranscriptRenamer.collectSpeakerSamples(
+            from: url, maxSamplesPerSpeaker: 1
+        )
+
+        #expect(collected.map(\.id) == ["Local Speaker 1", "Remote Speaker 1"])
+        #expect(collected[0].samples.first?.isLocal == true)
+        #expect(collected[1].samples.first?.isLocal == false)
+    }
+
+    /// Preserved edge: a speaker whose segments are all zero/negative duration cannot be ranked
+    /// (`rank` filters `duration > 0`), so it yields an entry with an EMPTY samples array — the
+    /// CLI drops it, the GUI lists it sample-less. Pinned so a refactor doesn't silently change it.
+    @Test func collectYieldsEmptySamplesForZeroDurationSpeaker() throws {
+        let url = try writeTranscript(segments: [
+            seg("Remote Speaker 1", "degenerate", start: 5, end: 5),
+            seg("Remote Speaker 1", "backwards", start: 4, end: 3),
+            seg("Remote Speaker 2", "normal speech", start: 6, end: 8),
+        ])
+
+        let collected = try TranscriptRenamer.collectSpeakerSamples(
+            from: url, maxSamplesPerSpeaker: 3
+        )
+
+        #expect(collected.map(\.id) == ["Remote Speaker 1", "Remote Speaker 2"])
+        #expect(collected[0].samples.isEmpty)
+        #expect(!collected[1].samples.isEmpty)
     }
 
     @Test func collectFiltersSpeakersBelowMinSegments() throws {

@@ -16,7 +16,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service, crash detection via `onServiceCrash` callback, `isCapturing()` ping for recovery
-- `TranscriberApp/Services/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
 - `TranscriberApp/Services/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
@@ -74,6 +73,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TranscriptMerger.swift` -- merges processed chunks into a single time-sorted transcript with absolute timestamps and cross-chunk speaker remapping
 - `TranscriberCore/TranscriptRenamer.swift` -- shared speaker-rename logic (SpeakerSample struct, per-speaker sample collection, rename application that merges into metadata.speaker_names — #162) used by both CLIRename and the GUI rename dialog
 - `TranscriberCore/TranscriptWriter.swift` -- formats and writes transcripts in multiple formats (JSON, TXT, SRT) with timestamp formatting
+- `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberCore/VadSpeechMap.swift` -- wraps FluidAudio VadManager to produce SpeechRegion map with probabilities for quality filtering
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
 - `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams

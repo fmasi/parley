@@ -30,7 +30,7 @@ public struct SpeakerSample: Sendable {
 public enum TranscriptRenamer {
 
     /// One renameable speaker: its transcript ID plus the samples to audition it by.
-    public struct SpeakerSamples: Sendable {
+    public struct RenameableSpeaker: Sendable {
         public let id: String  // "Local Speaker 1", "Remote Speaker 1", etc.
         public let samples: [SpeakerSample]
 
@@ -62,11 +62,14 @@ public enum TranscriptRenamer {
     /// A speaker whose samples cannot be resolved to playable audio (e.g. archives deleted
     /// by the storage quota) still gets text-only samples (`audioFile == nil`), so it stays
     /// renameable without offering a dead play button.
+    ///
+    /// A speaker whose segments are all zero/negative-duration yields an empty-samples entry —
+    /// the CLI drops it, the GUI lists it sample-less (preserved behaviour).
     public static func collectSpeakerSamples(
         from jsonPath: URL,
         maxSamplesPerSpeaker: Int,
         minSegmentsPerSpeaker: Int = 1
-    ) throws -> [SpeakerSamples] {
+    ) throws -> [RenameableSpeaker] {
         guard let data = try? Data(contentsOf: jsonPath) else {
             throw RenameError.cannotRead
         }
@@ -140,7 +143,7 @@ public enum TranscriptRenamer {
                 }
             }
 
-            return SpeakerSamples(id: speaker, samples: samples)
+            return RenameableSpeaker(id: speaker, samples: samples)
         }
     }
 
@@ -155,6 +158,12 @@ public enum TranscriptRenamer {
     /// the silent-wrong-answer this product exists to avoid. The write is atomic, because by
     /// this point the source WAVs may be gone and this JSON is the only textual record of the
     /// meeting; a kill mid-write would truncate it.
+    ///
+    /// Keying trap (latent, benign today): `speaker_names` is keyed by whatever label was
+    /// current at rename time (original → renamed), so re-renaming an already-renamed speaker
+    /// accumulates entries and can leave a stale original → intermediate key. Nothing in the
+    /// codebase reads `speaker_names` back — it is write-only — but if a reader is ever added,
+    /// resolve chains (or prune superseded keys) first.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         guard let data = try? Data(contentsOf: jsonPath),
