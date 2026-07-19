@@ -16,6 +16,12 @@ struct SummaryPromptBuilderTests {
         #expect(msg.contains("Dual-Stream Audio Context"))
     }
 
+    // formatDate is locale/timezone-dependent so exact matching is fragile; a non-empty smoke
+    // test still catches a complete breakage (e.g. a wrong formatter style returning "").
+    @Test func formatDateProducesNonEmptyOutput() {
+        #expect(!SummaryPromptBuilder.formatDate(Date(timeIntervalSince1970: 0)).isEmpty)
+    }
+
     // MARK: - formatDuration (both branches: h == 0 and h > 0)
 
     @Test func formatDurationCoversSubMinuteAndHours() {
@@ -39,6 +45,7 @@ struct SummaryPromptBuilderTests {
         let msg = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
 
         #expect(msg.contains("Meeting: standup"))
+        #expect(msg.contains("Date: "))   // value is locale/timezone-dependent; assert the label
         #expect(msg.contains("Duration: 1h 2m"))
         #expect(msg.contains("Participants: Alice, Bob"))
         #expect(msg.contains("--- TRANSCRIPT ---"))
