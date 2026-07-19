@@ -40,7 +40,7 @@ Remove the manual steps around a recorded meeting.
 Parley as a context source your agents can query — the part no cloud note-taker can safely offer.
 
 - **Agent-queryable transcripts** — an MCP interface over your own meeting history, fully on-device
-- **Wider capture** — iPhone / Continuity / WhatsApp call audio
+- **Wider capture** — iPhone Mirroring and app-call (e.g. WhatsApp) audio, extending the Core Audio tap that already captures Continuity calls
 - **Provable provenance** — tamper-evident transcripts; an auditable guarantee that a recording never
   left the machine
 
@@ -49,7 +49,7 @@ Parley as a context source your agents can query — the part no cloud note-take
 ## Always true
 - **Private by construction** — no account, no upload, no telemetry
 - **Open source** (AGPL-3.0) on **open models**
-- **Easy to trust and install** — signed, and distributed via Homebrew
+- **Easy to trust and install** — signed, with Homebrew distribution planned
 
 *Curious where a specific feature sits? The [issues](https://github.com/fmasi/parley/issues) are
 grouped under the epics above.*
