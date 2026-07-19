@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import TranscriberCore
 
+// RED-FIRST-EXEMPT: this file's only change in this PR is the removal of the parseCommitDistance
+// tests alongside deleting that dead (test-only) method. No regression test is added — the
+// remaining tests are unchanged characterization of existing behaviour, green at the parent.
 struct AppVersionTests {
 
     // -- parseCommitHash --
@@ -29,23 +32,6 @@ struct AppVersionTests {
     @Test func parseCommitHashFromHashOnlyDirty() {
         let hash = AppVersion.parseCommitHash(from: "a3f9c12-dirty")
         #expect(hash == "a3f9c12")
-    }
-
-    // -- parseCommitDistance --
-
-    @Test func parseCommitDistanceFromFullDescribe() {
-        let distance = AppVersion.parseCommitDistance(from: "v0.6.1-12-ga3f9c12")
-        #expect(distance == 12)
-    }
-
-    @Test func parseCommitDistanceFromTagOnly() {
-        let distance = AppVersion.parseCommitDistance(from: "v0.7.0")
-        #expect(distance == 0)
-    }
-
-    @Test func parseCommitDistanceFromHashOnly() {
-        let distance = AppVersion.parseCommitDistance(from: "a3f9c12")
-        #expect(distance == nil)
     }
 
     // -- displayString --
