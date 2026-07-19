@@ -67,6 +67,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SegmentDiscovery.swift` -- discover multi-segment audio files from crash recovery (base, -2, -3, ...)
 - `TranscriberCore/SegmentNaming.swift` -- segment filename computation: strip `-N` suffix, append new segment number
 - `TranscriberCore/SpeakerAssignment.swift` -- splits ASR segments at word-level diarization speaker-change boundaries (issue #120), then assigns speaker labels using diarization overlap, with deduplication and VAD-based quality filtering
+- `TranscriberCore/StreamLabeling.swift` -- shared per-stream speaker labeling (withDiarization + singleSpeaker) used by both ChunkProcessor and TranscriptionRunner, so the labeling logic lives once
 - `TranscriberCore/WordTiming.swift` -- engine-neutral per-word/run timing (start/end/text), populated by both ASR engines and consumed by SpeakerAssignment's boundary-split logic
 - `TranscriberCore/SpeakerReconciler.swift` -- cross-chunk speaker matching via greedy cosine similarity on embeddings, maps local per-chunk speaker IDs to global namespace
 - `TranscriberCore/TranscriptAssembler.swift` -- assembles labeled segments + metadata into transcript JSON dictionary for file output

@@ -298,7 +298,7 @@ public final class ChunkProcessor {
                 // reconciler skips this chunk entirely, so a fabricated "Speaker 1" fuses with the
                 // seed chunk's real Speaker 1 and every voice in this chunk is attributed to that
                 // person. "Unknown" is already handled downstream by tagWithSourcePrefix.
-                labeled = StreamLabeling.singleSpeaker(segments, speaker: "Unknown")
+                labeled = StreamLabeling.singleSpeaker(segments, speaker: SpeakerAssignment.unknownSpeaker)
             }
         } else {
             labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
