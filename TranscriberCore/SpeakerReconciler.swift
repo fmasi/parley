@@ -42,6 +42,13 @@ public enum SpeakerReconciler {
     ///     speaker (they are different channels — acoustic bleed can make their embeddings similar),
     ///     and the prefixed keys actually match `seg.speaker`, so `TranscriptMerger`'s remap applies —
     ///     fixing the previously-inert cross-chunk reconciliation for dual-stream (#64/#71).
+    ///
+    ///     The KEY prefix follows each chunk's own `isDualStream`, because `ChunkProcessor` prefixes
+    ///     labels PER CHUNK: a single-stream chunk inside a dual-stream session (e.g. a crash-recovered
+    ///     chunk whose mic WAV is missing) carries raw `Speaker N` labels, so its mapping keys must be
+    ///     unprefixed too or the remap misses and that chunk's speaker stays un-reconciled (#153). Its
+    ///     system channel is still the same remote channel, so it reconciles into — and its mapping
+    ///     VALUES stay in — the `Remote ` global namespace.
     ///   - threshold: Minimum cosine similarity to consider two embeddings a match (default 0.65).
     /// - Returns: `[chunkIndex: [speakerLabel: globalSpeakerLabel]]`, keyed to match `seg.speaker`.
     public static func reconcile(
@@ -63,7 +70,11 @@ public enum SpeakerReconciler {
             result[idx, default: [:]].merge(mapping) { existing, _ in existing }
         }
         for (idx, mapping) in reconcileNamespace(
-            chunks: chunks, database: \.speakerDatabase, prefix: "Remote ", threshold: threshold
+            chunks: chunks, database: \.speakerDatabase, prefix: "Remote ",
+            // Key per chunk: a single-stream chunk's segments carry UNPREFIXED labels (the writer
+            // prefixes per chunk), so its keys must be unprefixed for the remap to hit (#153).
+            keyPrefix: { $0.isDualStream ? "Remote " : "" },
+            threshold: threshold
         ) {
             result[idx, default: [:]].merge(mapping) { existing, _ in existing }
         }
@@ -73,10 +84,15 @@ public enum SpeakerReconciler {
     /// Greedy cross-chunk cosine reconciliation over ONE channel's per-chunk database. Output labels
     /// are `prefix`-tagged so they match the segment labels (`prefix` is `""` for single-stream). New
     /// global IDs are `prefix`-tagged too, so a local `spk_0` and a remote `spk_0` never collide.
+    ///
+    /// `keyPrefix` overrides the KEY prefix per chunk (defaults to `prefix`): mapping keys must match
+    /// the labels that chunk's segments ACTUALLY carry, which `ChunkProcessor` decided per chunk —
+    /// while mapping values stay `prefix`-tagged, since the global namespace is per CHANNEL (#153).
     private static func reconcileNamespace(
         chunks: [ProcessedChunk],
         database: KeyPath<ProcessedChunk, [String: [Float]]>,
         prefix: String,
+        keyPrefix: ((ProcessedChunk) -> String)? = nil,
         threshold: Float
     ) -> [Int: [String: String]] {
 
@@ -87,12 +103,13 @@ public enum SpeakerReconciler {
         for chunk in chunks {
             let db = chunk[keyPath: database]
             if db.isEmpty { continue }   // this channel had no identified speakers in this chunk
+            let chunkKeyPrefix = keyPrefix?(chunk) ?? prefix
             var mapping: [String: String] = [:]
 
             if referenceEmbeddings.isEmpty {
                 // First non-empty chunk for this channel: identity mapping, seed references.
                 for (localID, embedding) in db {
-                    mapping[prefix + localID] = prefix + localID
+                    mapping[chunkKeyPrefix + localID] = prefix + localID
                     referenceEmbeddings[localID] = embedding
                     // Keep nextGlobalIndex above every index already in use. Production labels are
                     // "Speaker N" (space-separated), so the old "_"-split never parsed them and the
@@ -121,7 +138,7 @@ public enum SpeakerReconciler {
                 guard !assignedLocals.contains(candidate.localID),
                       !assignedGlobals.contains(candidate.globalID) else { continue }
 
-                mapping[prefix + candidate.localID] = prefix + candidate.globalID
+                mapping[chunkKeyPrefix + candidate.localID] = prefix + candidate.globalID
                 assignedLocals.insert(candidate.localID)
                 assignedGlobals.insert(candidate.globalID)
 
@@ -133,22 +150,22 @@ public enum SpeakerReconciler {
                 }
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(prefix + candidate.localID, privacy: .private) → \(prefix + candidate.globalID, privacy: .private) (sim=\(candidate.similarity, privacy: .public))"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) remap \(chunkKeyPrefix + candidate.localID, privacy: .private) → \(prefix + candidate.globalID, privacy: .private) (sim=\(candidate.similarity, privacy: .public))"
                 )
             }
 
-            for (localID, embedding) in db where mapping[prefix + localID] == nil {
+            for (localID, embedding) in db where mapping[chunkKeyPrefix + localID] == nil {
                 // Mint a human-friendly global label that CONTINUES the seed chunk's "Speaker N"
                 // numbering rather than a raw internal "spk_N" that would surface verbatim in the
                 // transcript (#113). nextGlobalIndex is held above every index seen so far, so this
                 // never collides with an existing global label in this channel's namespace.
                 let newGlobalID = "Speaker \(nextGlobalIndex)"
                 nextGlobalIndex += 1
-                mapping[prefix + localID] = prefix + newGlobalID
+                mapping[chunkKeyPrefix + localID] = prefix + newGlobalID
                 referenceEmbeddings[newGlobalID] = embedding
 
                 Logger.transcription.debug(
-                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(prefix + localID, privacy: .private) → \(prefix + newGlobalID, privacy: .private)"
+                    "SpeakerReconciler: chunk \(chunk.index, privacy: .public) new speaker \(chunkKeyPrefix + localID, privacy: .private) → \(prefix + newGlobalID, privacy: .private)"
                 )
             }
 
