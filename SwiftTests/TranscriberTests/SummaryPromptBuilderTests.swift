@@ -13,8 +13,16 @@ struct SummaryPromptBuilderTests {
     @Test func systemMessageWithDualStreamAppendsTheHint() {
         let msg = SummaryPromptBuilder.systemMessage(dualStream: true)
         #expect(msg == SummaryPromptBuilder.systemPrompt + SummaryPromptBuilder.dualStreamHint)
-        #expect(msg.hasPrefix(SummaryPromptBuilder.systemPrompt))
         #expect(msg.contains("Dual-Stream Audio Context"))
+    }
+
+    // MARK: - formatDuration (both branches: h == 0 and h > 0)
+
+    @Test func formatDurationCoversSubMinuteAndHours() {
+        #expect(SummaryPromptBuilder.formatDuration(0) == "0m")      // zero
+        #expect(SummaryPromptBuilder.formatDuration(30) == "0m")     // sub-minute rounds to 0m
+        #expect(SummaryPromptBuilder.formatDuration(90) == "1m")     // h == 0 branch
+        #expect(SummaryPromptBuilder.formatDuration(3720) == "1h 2m") // h > 0 branch
     }
 
     // MARK: - userMessage
