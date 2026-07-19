@@ -64,7 +64,7 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
 - **On-device speaker diarization** — automatic who-said-what (pyannote + WeSpeaker + VBx), with a
   quality score on every segment.
 - **Two transcription engines** — FluidAudio (Parakeet — fastest, 25 EU languages) or Apple
-  SpeechAnalyzer (macOS 26+, no download). Swap them in Settings.
+  SpeechAnalyzer (macOS 26+; downloads a per-language model on first use). Swap them in Settings.
 - **Echo / mic-bleed removal** — strips the far-end voice that bleeds into your mic on speakers, so it
   doesn't show up as a phantom speaker.
 - **Crash-safe recording** — survives UI and XPC crashes with auto-relaunch, silent re-attach, and
@@ -134,7 +134,8 @@ For the full design — XPC architecture, ScreenCaptureKit constraints, the pipe
 ## Transcription engines
 
 Two ASR engines, switchable in Settings: **FluidAudio (Parakeet)** — ~500 MB model, 25 European
-languages, macOS 15+ — and **Apple SpeechAnalyzer** — no download, system languages, macOS 26+.
+languages, macOS 15+ — and **Apple SpeechAnalyzer** — system languages, downloaded per language on
+first use, macOS 26+.
 Engine choice is measured, not assumed: FluidAudio leads on European languages, Apple SpeechAnalyzer is
 the reliable path for Japanese, Korean and Chinese. FluidAudio also adds inverse text normalization
 ("two hundred" → "200") and per-segment confidence scores.
