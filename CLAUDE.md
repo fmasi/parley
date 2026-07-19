@@ -15,10 +15,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### SwiftUI App (TranscriberApp target)
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
-- `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service, crash detection via `onServiceCrash` callback, `isCapturing()` ping for recovery
+- `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service, crash detection via `onServiceCrash` callback, `isCapturing()` ping for recovery; conforms to Core's `RecordingCaptureClient` seam
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
-- `TranscriberApp/Services/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
-- `TranscriberApp/Services/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
 - `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, benchmark) to their handlers
 - `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: prompts per speaker and plays samples; collection + rename application live in TranscriptRenamer (TranscriberCore)
 - `TranscriberApp/Services/MicSwitchWindowController.swift` -- opens mic switch dialog as floating NSPanel during recording
@@ -27,7 +25,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
 - `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter)
 - `TranscriberApp/Services/UpdaterController.swift` -- hosts `CheckForUpdatesViewModel` + `CheckForUpdatesView`, driving the "Check for Updates..." menu item via `SPUUpdater.canCheckForUpdates` KVO
-- `TranscriberApp/Views/MenuView.swift` -- window-style menu bar panel (status header, live timer, record button, action rows)
+- `TranscriberApp/Views/MenuView.swift` -- window-style menu bar panel (status header, live timer, record button, action rows); presentation only — recording lifecycle + crash recovery delegate to Core's `RecordingCoordinator`
 - `TranscriberApp/Views/DesignSystem.swift` -- shared "Quiet Confidence" components (MenuActionRow, IconTile, StatusDot, AlertBanner, folder-picker helpers); see docs/design/design-system-0.8.x.md
 - `TranscriberApp/Views/SettingsView.swift` -- tabbed settings window (General/Audio/Transcription/Summary/Permissions), manual Save semantics; triggers eager model download on Save when engine requires it
 - `TranscriberApp/Views/SetupView.swift` -- permission + engine setup window (shown at first launch or when model not cached); gates Continue on permissions AND model download
@@ -49,7 +47,13 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### Shared Logic (TranscriberCore target)
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle -> recording -> transcribing -> idle, `interruptionWarning` for crash recovery UI
 - `TranscriberCore/AudioConverter.swift` -- converts arbitrary PCM audio buffers to fixed 48kHz mono Int16 via AVAudioConverter, auto-detects source format changes (e.g. mic switch)
+- `TranscriberCore/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
+- `TranscriberCore/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
+- `TranscriberCore/ChunkRotationClient.swift` -- protocol seam: the one capability ChunkRotator needs from the XPC audio client
 - `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, and atomic JSON persistence
+- `TranscriberCore/RecordingCaptureClient.swift` -- protocol seam (refines ChunkRotationClient) for everything RecordingCoordinator needs from the XPC capture client, plus the AudioPaths stop-result type; lets orchestration be tested with a fake
+- `TranscriberCore/RecordingCoordinator.swift` -- recording lifecycle + crash-recovery orchestration (start/stop, XPC-crash retry/restart, abandoned-session salvage), moved out of MenuView (#139 PR-6) so it is unit-testable; app-side UI effects (notifications, rename dialog) are injected closures
+- `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization; owns the chunked pipeline (setup/teardown, finalize)
 - `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, benchmark, summarize) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `summary: SummaryConfig`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/Library/Application Support/Parley/config.json`
