@@ -174,7 +174,7 @@ final class AudioCaptureClient {
             let url = recordingDirectory.appendingPathComponent("\(sessionId).diag.jsonl")
             do {
                 try diagnostics.jsonlData().write(to: url, options: .atomic)
-                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .private) (\(self.diagnostics.events.count) events)")
+                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(self.diagnostics.events.count) events)")
             } catch {
                 Logger.files.error("Failed to flush diagnostics: \(error, privacy: .public)")
             }
@@ -352,7 +352,7 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
 
     func micDeviceChanged(to deviceId: String?) {
         Task { @MainActor [weak client] in
-            Logger.audio.info("Mic device auto-switched to: \(deviceId ?? "default", privacy: .public)")
+            Logger.audio.info("Mic device auto-switched to: \(deviceId ?? "default", privacy: .private)")
             client?.onMicDeviceChanged?(deviceId)
         }
     }

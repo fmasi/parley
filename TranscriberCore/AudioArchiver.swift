@@ -42,7 +42,7 @@ public enum AudioArchiver {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
 
-        Logger.files.info("AudioArchiver: starting archive '\(baseName, privacy: .private)'")
+        Logger.files.info("AudioArchiver: starting archive '\(baseName, privacy: .sensitive)'")
 
         // 1. Open both WAVs (no bulk load — files are streamed in blocks).
         let micFile: AVAudioFile
@@ -115,7 +115,7 @@ public enum AudioArchiver {
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
 
-        Logger.files.info("AudioArchiver: starting system-only archive '\(baseName, privacy: .private)'")
+        Logger.files.info("AudioArchiver: starting system-only archive '\(baseName, privacy: .sensitive)'")
 
         let sysFile: AVAudioFile
         do {
@@ -204,7 +204,7 @@ public enum AudioArchiver {
                 }
                 results.append(archived.archivePath)
             } catch {
-                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .private)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")
+                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .sensitive)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")
                 results.append(pair.system)
             }
         }

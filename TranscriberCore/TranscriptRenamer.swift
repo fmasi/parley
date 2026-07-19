@@ -170,7 +170,7 @@ public enum TranscriptRenamer {
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var segments = json["segments"] as? [[String: Any]]
         else {
-            Logger.files.error("Rename: cannot read transcript \(jsonPath.lastPathComponent, privacy: .private)")
+            Logger.files.error("Rename: cannot read transcript \(jsonPath.lastPathComponent, privacy: .sensitive)")
             return false
         }
 
@@ -199,7 +199,7 @@ public enum TranscriptRenamer {
             try updatedData.write(to: jsonPath, options: .atomic)
             return true
         } catch {
-            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

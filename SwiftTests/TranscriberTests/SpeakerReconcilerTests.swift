@@ -175,7 +175,8 @@ struct SpeakerReconcilerTests {
             index: 0, startTime: Date(), audioPath: "/tmp/chunk0.wav",
             segments: [],
             speakerDatabase: ["Speaker 1": remoteEmb],
-            localSpeakerDatabase: ["Speaker 1": localEmb]
+            localSpeakerDatabase: ["Speaker 1": localEmb],
+            isDualStream: true
         )
 
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk], isDualStream: true)
@@ -194,7 +195,8 @@ struct SpeakerReconcilerTests {
             index: 0, startTime: Date(), audioPath: "/tmp/chunk0.wav",
             segments: [],
             speakerDatabase: ["Speaker 1": remoteEmb],
-            localSpeakerDatabase: ["Speaker 1": localEmb]
+            localSpeakerDatabase: ["Speaker 1": localEmb],
+            isDualStream: true
         )
         // chunk1 probes: remote-axis on the system channel, local-axis on the mic channel.
         var remoteProbe = [Float](repeating: 0, count: 256); remoteProbe[1] = 1.0
@@ -203,7 +205,8 @@ struct SpeakerReconcilerTests {
             index: 1, startTime: Date(), audioPath: "/tmp/chunk1.wav",
             segments: [],
             speakerDatabase: ["Speaker 1": remoteProbe],
-            localSpeakerDatabase: ["Speaker 1": localProbe]
+            localSpeakerDatabase: ["Speaker 1": localProbe],
+            isDualStream: true
         )
 
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], isDualStream: true, threshold: 0.65)
@@ -219,11 +222,13 @@ struct SpeakerReconcilerTests {
         let localEmb = { () -> [Float] in var e = [Float](repeating: 0, count: 256); e[0] = 1.0; return e }()
         let chunk0 = ProcessedChunk(
             index: 0, startTime: Date(), audioPath: "a.wav", segments: [],
-            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb]
+            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb],
+            isDualStream: true
         )
         let chunk1 = ProcessedChunk(
             index: 1, startTime: Date(), audioPath: "b.wav", segments: [],
-            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb]
+            speakerDatabase: ["Speaker 1": emb], localSpeakerDatabase: ["Speaker 1": localEmb],
+            isDualStream: true
         )
         let mapping = SpeakerReconciler.reconcile(chunks: [chunk0, chunk1], isDualStream: true, threshold: 0.65)
         #expect(mapping[0]?["Remote Speaker 1"] == "Remote Speaker 1")
@@ -245,5 +250,32 @@ struct SpeakerReconcilerTests {
         for i in 0..<4 {
             #expect(mapping[i]?["spk_0"] == "spk_0")
         }
+    }
+
+    // #153: a dual-stream session with a single-stream (mic-less) final chunk — e.g. a
+    // crash-recovered chunk whose mic WAV is missing. That chunk's segments carry RAW "Speaker N"
+    // labels (ChunkProcessor prefixes per chunk), so its reconciler key must be unprefixed or the
+    // remap misses and the speaker stays un-reconciled. Same voice across both chunks must
+    // reconcile to one global Remote identity.
+    @Test func singleStreamChunkInDualStreamSessionReconcilesToGlobalIdentity() {
+        var emb = [Float](repeating: 0, count: 256); emb[0] = 1.0
+
+        let dualChunk = ProcessedChunk(
+            index: 0, startTime: Date(), audioPath: "/tmp/c0.wav",
+            segments: [], speakerDatabase: ["Speaker 1": emb], isDualStream: true
+        )
+        let micLessChunk = ProcessedChunk(
+            index: 1, startTime: Date(), audioPath: "/tmp/c1.wav",
+            segments: [], speakerDatabase: ["Speaker 1": emb], isDualStream: false
+        )
+
+        let mapping = SpeakerReconciler.reconcile(chunks: [dualChunk, micLessChunk], isDualStream: true)
+
+        // The mic-less chunk's RAW label reconciles into the global Remote identity (remap HITS).
+        #expect(mapping[1]?["Speaker 1"] == "Remote Speaker 1")
+        // Its key is NOT the prefixed form, which would miss against the raw segment labels.
+        #expect(mapping[1]?["Remote Speaker 1"] == nil)
+        // The dual chunk seeds the Remote namespace with its prefixed label as identity.
+        #expect(mapping[0]?["Remote Speaker 1"] == "Remote Speaker 1")
     }
 }

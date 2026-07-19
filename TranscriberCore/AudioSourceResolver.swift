@@ -93,7 +93,7 @@ public enum AudioSourceResolver {
         localWriter.finalize()
         remoteWriter.finalize()
 
-        Logger.files.info("Split stereo AAC into L=\(localPath.lastPathComponent, privacy: .private), R=\(remotePath.lastPathComponent, privacy: .private)")
+        Logger.files.info("Split stereo AAC into L=\(localPath.lastPathComponent, privacy: .sensitive), R=\(remotePath.lastPathComponent, privacy: .sensitive)")
         return (local: localPath, remote: remotePath)
     }
 }

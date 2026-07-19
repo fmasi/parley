@@ -202,7 +202,7 @@ public final class TranscriptionRunner {
             if let physical = SpeakerSampleLocator.durations(of: [pair.system]).first.flatMap({ $0 }) {
                 return physical
             }
-            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .private); falling back to transcript end (then configured chunk length) for the offset of the next segment")
+            Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .sensitive); falling back to transcript end (then configured chunk length) for the offset of the next segment")
             return (system + mic).map(\.end).max() ?? chunkLengthFallback
         }
         let segmentOffsets = Self.segmentStartOffsets(durations: segmentDurations)
@@ -326,7 +326,7 @@ public final class TranscriptionRunner {
         }
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .private)")
+        Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
@@ -376,7 +376,7 @@ public final class TranscriptionRunner {
             // Never silent: a miss means the reconciler's namespace and the chunk's labels disagree,
             // so the remap fell back to the identity and this chunk's speaker numbering may be wrong.
             Logger.transcription.error(
-                "Speaker remap MISS in chunk \(chunkIndex, privacy: .public): labels \(labels.joined(separator: ", "), privacy: .public) are not in the reconciler's mapping. Speaker identity for this chunk may be wrong."
+                "Speaker remap MISS in chunk \(chunkIndex, privacy: .public): labels \(labels.joined(separator: ", "), privacy: .private) are not in the reconciler's mapping. Speaker identity for this chunk may be wrong."
             )
         }
 
@@ -416,7 +416,7 @@ public final class TranscriptionRunner {
                 )
                 audioPaths = [concatResult.outputPath]
                 Logger.files.info(
-                    "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .private) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
+                    "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .sensitive) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
@@ -480,7 +480,7 @@ public final class TranscriptionRunner {
         SessionState.delete(directory: outputDirectory)
 
         let elapsed = ContinuousClock.now - startTime
-        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .private)")
+        Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
     }
@@ -691,7 +691,7 @@ public final class TranscriptionRunner {
             return StreamResult(segments: [], speakerDatabase: [:])
         }
 
-        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .private) (\(fileSize) bytes)")
+        Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .sensitive) (\(fileSize) bytes)")
 
         let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
 

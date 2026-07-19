@@ -14,6 +14,8 @@ struct MenuView: View {
     let configManager: ConfigManager
     let calendarService: CalendarService
     let updater: SPUUpdater
+    /// Read for the ongoing notifications-off signal (#150); refreshed on panel open.
+    let permissionManager: PermissionManager
     @State private var selectedMicId: String?
     /// Owns the recording lifecycle + crash recovery (moved out of this view, #139 PR-6).
     /// `@State`-held so it has exactly the lifetime the old `@State` counters had.
@@ -27,7 +29,8 @@ struct MenuView: View {
         transcriptionRunner: TranscriptionRunner,
         configManager: ConfigManager,
         calendarService: CalendarService,
-        updater: SPUUpdater
+        updater: SPUUpdater,
+        permissionManager: PermissionManager
     ) {
         self.appState = appState
         self.captureClient = captureClient
@@ -35,6 +38,7 @@ struct MenuView: View {
         self.configManager = configManager
         self.calendarService = calendarService
         self.updater = updater
+        self.permissionManager = permissionManager
         self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
         // The coordinator owns orchestration; the app-target UI side effects it needs
         // (notifications, the critical panel, the rename dialog + auto-summary) are injected here.
@@ -65,6 +69,10 @@ struct MenuView: View {
             if appState.criticalError != nil || appState.interruptionWarning != nil
                 || appState.truncatedErrorMessage != nil {
                 alertBanners
+            }
+
+            if permissionManager.notificationWarning.shouldWarn {
+                notificationWarningRow
             }
 
             recordButton
@@ -136,6 +144,10 @@ struct MenuView: View {
         }
         .padding(12)
         .frame(width: 320)
+        // Re-check on every panel open so the warning tracks System Settings changes
+        // made mid-session (#150). Notifications only — the full checkAll() would also
+        // hit screen-recording/calendar APIs on every open for no benefit here.
+        .task { await permissionManager.refreshNotifications() }
     }
 
     // MARK: - Panel sections
@@ -208,6 +220,48 @@ struct MenuView: View {
                 Logger.state.debug("User dismissed error")
                 appState.errorMessage = nil
             }
+        }
+    }
+
+    /// Persistent, quiet "notifications are off" signal (#150). Deliberately NOT
+    /// dismissible: the disabled state is ongoing, so the row simply stays until
+    /// notifications are back on — a dismissed banner would recreate the silent
+    /// failure this exists to prevent. Kept calmer than AlertBanner (secondary text,
+    /// bell icon) because it is advisory, not an incident.
+    private var notificationWarningRow: some View {
+        let warning = permissionManager.notificationWarning
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "bell.slash.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+            Text(warning.message ?? "")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(warning.actionTitle ?? "") {
+                handleNotificationWarningAction(warning)
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.quinary)
+        )
+    }
+
+    private func handleNotificationWarningAction(_ warning: NotificationWarning) {
+        switch warning {
+        case .none:
+            break
+        case .canRequest:
+            // Never denied — the system prompt can still be shown directly.
+            Task { await permissionManager.requestNotifications() }
+        case .openSettings:
+            // Once denied, macOS won't re-prompt: the only path is System Settings.
+            dismissPanel()
+            PrivacyPane.notifications.open()
         }
     }
 
@@ -381,7 +435,7 @@ struct MenuView: View {
 
     static func sendCriticalNotification(title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .public)")
+        Logger.state.error("CRITICAL: \(title, privacy: .public) — \(body, privacy: .private)")
 
         // Floating panel — impossible to miss, no entitlement needed
         CriticalAlertController.shared.show(title: title, message: body) {

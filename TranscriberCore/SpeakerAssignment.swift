@@ -444,7 +444,7 @@ public enum SpeakerAssignment {
             }
         )
 
-        Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .public)")
+        Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .private)")
 
         return transcriptSegments.map { seg in
             let bestSpeaker: String
@@ -538,7 +538,7 @@ public enum SpeakerAssignment {
             }
         )
 
-        Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .public)")
+        Logger.transcription.debug("Speaker map: \(speakerMap.count) speakers — \(speakerMap, privacy: .private)")
 
         var results: [LabeledSegment] = []
 

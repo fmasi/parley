@@ -230,7 +230,7 @@ enum CLIHandler {
             contextLength: contextLength
         )
         let provider = MeetingSummarizer.createProvider(from: summaryConfig)
-        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: endpoint)
 
         let baseName = jsonPath.deletingPathExtension().lastPathComponent
         let summaryPath = jsonPath.deletingLastPathComponent().appendingPathComponent(baseName + "-summary.md")

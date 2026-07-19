@@ -153,10 +153,10 @@ struct TranscriberApp: App {
                 Logger.transcription.info("Manifest verify: OK")
             } else {
                 if !result.missing.isEmpty {
-                    Logger.transcription.warning("Manifest verify: missing \(result.missing.count) file(s) — \(result.missing.prefix(3).joined(separator: ", "), privacy: .public)…")
+                    Logger.transcription.warning("Manifest verify: missing \(result.missing.count) file(s) — \(result.missing.prefix(3).joined(separator: ", "), privacy: .sensitive)…")
                 }
                 if !result.corrupt.isEmpty {
-                    Logger.transcription.error("Manifest verify: \(result.corrupt.count) file(s) corrupt — \(result.corrupt.prefix(3).joined(separator: ", "), privacy: .public)…")
+                    Logger.transcription.error("Manifest verify: \(result.corrupt.count) file(s) corrupt — \(result.corrupt.prefix(3).joined(separator: ", "), privacy: .sensitive)…")
                 }
             }
             // Surface the result to the UI layer (Settings shows it; a notification alerts now).
@@ -220,7 +220,7 @@ struct TranscriberApp: App {
     ) async {
         guard let sentinel = RecordingSentinel.read() else { return }
 
-        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .private), segment: \(sentinel.segment))")
+        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
 
         // Check if sentinel is stale (from before last boot)
         let bootTime = ProcessInfo.processInfo.systemUptime
@@ -275,7 +275,7 @@ struct TranscriberApp: App {
                 ) {
                     appState.lastJsonPath = result.jsonPath.path
                     appState.lastTranscriptPath = result.jsonPath.path
-                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
+                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
                     recoveredJsonPath = result.jsonPath
                 } else {
                     Logger.state.info("Chunked session had nothing to recover — discarding")
@@ -463,7 +463,8 @@ struct TranscriberApp: App {
                     transcriptionRunner: transcriptionRunner,
                     configManager: configManager,
                     calendarService: calendarService,
-                    updater: updaterController.updater
+                    updater: updaterController.updater,
+                    permissionManager: launchGate.permissionManager
                 )
             } else {
                 SetupRequiredPanel(launchGate: launchGate, configManager: configManager)

@@ -175,7 +175,7 @@ public struct SessionState: Codable {
         // Rename (atomic on same volume)
         _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
 
-        Logger.state.debug("SessionState written — id: \(state.sessionId, privacy: .private), chunks: \(state.chunks.count)")
+        Logger.state.debug("SessionState written — id: \(state.sessionId, privacy: .sensitive), chunks: \(state.chunks.count)")
     }
 
     /// Read session state from disk. Returns nil if file is missing or corrupt.
@@ -185,10 +185,10 @@ public struct SessionState: Codable {
             return nil
         }
         guard let state = try? makeDecoder().decode(SessionState.self, from: data) else {
-            Logger.state.warning("SessionState at \(url.path, privacy: .private) is corrupt — ignoring")
+            Logger.state.warning("SessionState at \(url.path, privacy: .sensitive) is corrupt — ignoring")
             return nil
         }
-        Logger.state.debug("SessionState read — id: \(state.sessionId, privacy: .private), chunks: \(state.chunks.count)")
+        Logger.state.debug("SessionState read — id: \(state.sessionId, privacy: .sensitive), chunks: \(state.chunks.count)")
         return state
     }
 
