@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import TranscriberCore
 
+// RED-FIRST-EXEMPT: this file's only change in this PR is the removal of the parseCommitDistance
+// tests alongside deleting that dead (test-only) method. No regression test is added — the
+// remaining tests are unchanged characterization of existing behaviour, green at the parent.
 struct AppVersionTests {
 
     // -- parseCommitHash --
