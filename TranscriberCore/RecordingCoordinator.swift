@@ -123,6 +123,36 @@ public final class RecordingCoordinator {
         return (stoppedPaths.systemAudio, stoppedPaths.micAudio)
     }
 
+    /// Pure target selection for re-ingesting the orphaned in-progress chunk after a live XPC
+    /// crash: the chunk's WAV paths come from the rotator's LIVE base name — NOT the sentinel path,
+    /// which is written at session start, goes stale after the first rotation, and would re-enqueue
+    /// the already-processed chunk while the true orphan's audio is silently dropped (#92).
+    nonisolated static func orphanChunk(
+        index: Int, startTime: Date, liveBaseName: String, outputDir: URL
+    ) -> ChunkRotator.FinalizedChunk {
+        ChunkRotator.FinalizedChunk(
+            index: index,
+            systemPath: outputDir.appendingPathComponent(liveBaseName + ".wav").path,
+            micPath: outputDir.appendingPathComponent(liveBaseName + "_mic.wav").path,
+            startTime: startTime
+        )
+    }
+
+    /// Pure restart naming for the live-pipeline crash branch: the restart capture is named by the
+    /// rotator's recovery plan, and the sentinel advances one segment with the plan's chunk index
+    /// stamped directly (#154 finding 6 — never left to a later disk scan).
+    nonisolated static func liveRestartPlan(
+        sentinel: RecordingSentinel, recoveryPlan: ChunkRecoveryPlan, outputDir: URL
+    ) -> (baseName: String, newSentinel: RecordingSentinel) {
+        let baseName = recoveryPlan.recoveryBaseName
+        var newSentinel = sentinel.incrementedSegment(
+            systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
+            micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
+        )
+        newSentinel.chunkIndex = recoveryPlan.recoveryIndex
+        return (baseName, newSentinel)
+    }
+
     // MARK: - Recording lifecycle
 
     public func startRecording(sessionName: String, microphoneDeviceId: String?) async {
@@ -135,6 +165,10 @@ public final class RecordingCoordinator {
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
             .appendingPathComponent(naming.dayDir)
 
+        // `[weak self]` replaces MenuView's old strong struct-copy capture: the coordinator retains
+        // the capture client, so a strong capture here would cycle coordinator → captureClient →
+        // closure → coordinator. If the coordinator were ever gone when one fires, the on-disk
+        // sentinel launch recovery (TranscriberApp.recoverIfNeeded) is the backstop.
         captureClient.onServiceCrash = { [weak self] in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
@@ -390,12 +424,9 @@ public final class RecordingCoordinator {
            let processor = transcriptionRunner.chunkProcessor {
             let orphan = reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
             let plan = rotator.recoverFromCrash()
-            baseName = plan.recoveryBaseName
-            newSentinel = sentinel.incrementedSegment(
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-            )
-            newSentinel.chunkIndex = plan.recoveryIndex
+            let restart = Self.liveRestartPlan(sentinel: sentinel, recoveryPlan: plan, outputDir: outputDir)
+            baseName = restart.baseName
+            newSentinel = restart.newSentinel
             Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphan.baseName, privacy: .private)); recovery continues at \(baseName, privacy: .private)")
         } else {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
@@ -469,7 +500,16 @@ public final class RecordingCoordinator {
         }
 
         await processor.awaitAllProcessed()
-        var sessionState = await processor.getSessionState()
+        let sessionState = await processor.getSessionState()
+        await salvageAbandonedSession(sessionState: sessionState, outputDir: outputDir)
+    }
+
+    /// The salvage decision + execution half of `finalizeAbandonedSession`, split out verbatim
+    /// behind an internal seam: the `!chunks.isEmpty` guard, provenance stamping, and the
+    /// teardown-on-empty path are unit-testable with a crafted `SessionState` — the wrapper above
+    /// requires a live `chunkProcessor`, which tests don't have.
+    func salvageAbandonedSession(sessionState: SessionState, outputDir: URL) async {
+        var sessionState = sessionState
         guard !sessionState.chunks.isEmpty else {
             transcriptionRunner.teardownChunkedPipeline()
             return
@@ -510,11 +550,9 @@ public final class RecordingCoordinator {
     ) -> (index: Int, baseName: String) {
         let orphan = rotator.currentChunkInfo
         let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
-        processor.processChunk(ChunkRotator.FinalizedChunk(
-            index: orphan.index,
-            systemPath: outputDir.appendingPathComponent(orphanBase + ".wav").path,
-            micPath: outputDir.appendingPathComponent(orphanBase + "_mic.wav").path,
-            startTime: orphan.startTime
+        processor.processChunk(Self.orphanChunk(
+            index: orphan.index, startTime: orphan.startTime,
+            liveBaseName: orphanBase, outputDir: outputDir
         ))
         return (orphan.index, orphanBase)
     }
