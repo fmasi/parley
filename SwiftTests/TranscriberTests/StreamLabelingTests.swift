@@ -71,7 +71,7 @@ struct StreamLabelingTests {
             speakerDatabase: ["S1": [1, 0], "S2": [0, 1]]
         )
 
-        let (_, db) = StreamLabeling.withDiarization(
+        let (labeled, db) = StreamLabeling.withDiarization(
             segments: [
                 TranscriptSegment(start: 0, end: 3, text: "a", language: nil),
                 TranscriptSegment(start: 3, end: 6, text: "b", language: nil),
@@ -79,6 +79,8 @@ struct StreamLabelingTests {
             diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
         )
 
+        // The segment labels and the database keys must agree — the documented invariant.
+        #expect(labeled.map(\.speaker) == ["Speaker 1", "Speaker 2"])
         #expect(db["Speaker 1"] == [1, 0])
         #expect(db["Speaker 2"] == [0, 1])
         #expect(db["S1"] == nil)
@@ -86,9 +88,11 @@ struct StreamLabelingTests {
     }
 
     // Proves withDiarization actually forwards speechMap/threshold to assign() rather than
-    // ignoring them: for the same low-quality diarized segment, a nil speechMap bypasses VAD
-    // quality gating (keeps "Speaker 1"), while a non-nil speechMap runs the gate and a quality
-    // below the default 0.3 threshold demotes the segment to "Unknown".
+    // ignoring them. Same diarized segment both ways; only speechMap changes:
+    //  - nil speechMap → VAD/quality gating is bypassed entirely → keeps "Speaker 1".
+    //  - non-nil speechMap with HIGH speech overlap (0.95 ≥ the 0.5 threshold) passes the speech
+    //    check, so the low quality score (0.1 < the default 0.3 threshold) becomes the deciding
+    //    factor and demotes the segment to "Unknown". (Both conditions are load-bearing.)
     @Test func withDiarizationForwardsSpeechMap() {
         let segs = [TranscriptSegment(start: 0, end: 5, text: "hello", language: nil)]
         let result = DiarizationResult(
