@@ -24,7 +24,7 @@ public final class WavFileWriter {
         FileManager.default.createFile(atPath: path, contents: nil)
         fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
-        Logger.files.debug("WAV writer created: \(path, privacy: .private)")
+        Logger.files.debug("WAV writer created: \(path, privacy: .sensitive)")
     }
 
     public func setSampleRate(_ rate: UInt32) {
@@ -65,7 +65,7 @@ public final class WavFileWriter {
     private func clampedData(_ bytes: Data) -> Data? {
         guard dataByteCount < Self.maxDataBytes else {
             if !overflowWarned {
-                Logger.audio.warning("WAV 4 GB limit reached, dropping samples: \(self.path, privacy: .private)")
+                Logger.audio.warning("WAV 4 GB limit reached, dropping samples: \(self.path, privacy: .sensitive)")
                 overflowWarned = true
             }
             return nil
@@ -73,7 +73,7 @@ public final class WavFileWriter {
         let remaining = Self.maxDataBytes - dataByteCount
         if bytes.count > remaining {
             if !overflowWarned {
-                Logger.audio.warning("WAV 4 GB limit reached, truncating final write: \(self.path, privacy: .private)")
+                Logger.audio.warning("WAV 4 GB limit reached, truncating final write: \(self.path, privacy: .sensitive)")
                 overflowWarned = true
             }
             return bytes.prefix(Int(remaining))
@@ -104,7 +104,7 @@ public final class WavFileWriter {
         guard !firstWriteLogged else { return }
         firstWriteLogged = true
         let rate = sampleRate > 0 ? sampleRate : 16000
-        Logger.files.info("WAV first write — sampleRate: \(rate), channels: \(self.channelCount), path: \(self.path, privacy: .private)")
+        Logger.files.info("WAV first write — sampleRate: \(rate), channels: \(self.channelCount), path: \(self.path, privacy: .sensitive)")
     }
 
     public func finalize() {
@@ -112,7 +112,7 @@ public final class WavFileWriter {
         flushHeader()                       // runs while `finalized` is still false
         fileHandle.closeFile()
         finalized = true
-        Logger.files.info("WAV finalized: \(self.path, privacy: .private), size: \(self.dataByteCount) bytes")
+        Logger.files.info("WAV finalized: \(self.path, privacy: .sensitive), size: \(self.dataByteCount) bytes")
     }
 
     /// Repair a WAV whose header underreports its payload — the signature of a
@@ -144,10 +144,10 @@ public final class WavFileWriter {
             try handle.write(contentsOf: le32(36 + actualDataSize))   // RIFF chunk size
             try handle.seek(toOffset: 40)
             try handle.write(contentsOf: le32(actualDataSize))        // data chunk size
-            Logger.files.info("WAV header repaired: \(path, privacy: .private), data size \(declaredDataSize) → \(actualDataSize) bytes")
+            Logger.files.info("WAV header repaired: \(path, privacy: .sensitive), data size \(declaredDataSize) → \(actualDataSize) bytes")
             return true
         } catch {
-            Logger.files.error("WAV header repair failed: \(path, privacy: .private): \(error, privacy: .public)")
+            Logger.files.error("WAV header repair failed: \(path, privacy: .sensitive): \(error, privacy: .public)")
             return false
         }
     }

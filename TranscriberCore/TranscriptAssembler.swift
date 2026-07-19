@@ -79,7 +79,7 @@ public enum TranscriptAssembler {
             options: [.prettyPrinted, .sortedKeys]
         )
         try data.write(to: path, options: .atomic)
-        Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .private)")
+        Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .sensitive)")
     }
 
     /// Rewrite a transcript JSON's `audio_paths` / `audio_files` to reference every audio source
@@ -99,6 +99,6 @@ public enum TranscriptAssembler {
             withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
         ) else { return }
         try? updated.write(to: jsonPath, options: .atomic)
-        Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .private) → \(paths.count) source(s)")
+        Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .sensitive) → \(paths.count) source(s)")
     }
 }

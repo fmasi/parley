@@ -483,3 +483,13 @@ Options:
   --model <name>               Model name
   --context-length <n>         Context window size in tokens (LM Studio only)
 ```
+
+## Log privacy conventions
+
+Apple's unified logging treats `privacy: .public` interpolations as visible in Console.app, readable via `log show` by other local users, and persisted in `sysdiagnose` tarballs. For a courtroom-grade, airgapped artifact, log call sites follow these conventions (#53):
+
+- **Speaker names / rename mappings / transcript text → `.private`** — redacted as `<private>` for third-party log readers, still visible in a dev `log stream` with the debug profile. Names become PII once a user renames a speaker.
+- **Audio file paths / recording-directory paths / session base names / filenames → `.sensitive`** — stronger redaction; these leak the recording-directory layout and session naming.
+- **Operational values → `.public`** — counts, byte sizes, durations, chunk indices, booleans, similarity scores/thresholds, format names, and error *categories* stay public so logs remain debuggable. (`error` objects are kept public; audit any that may embed a path.)
+
+Rule of thumb per interpolation: is the value a *name* (→ `.private`), a *path/filename* (→ `.sensitive`), or a *count/status* (→ `.public`)?

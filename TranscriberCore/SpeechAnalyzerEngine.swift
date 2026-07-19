@@ -29,7 +29,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
     public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
         let startTime = ContinuousClock.now
 
-        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .private) with SpeechAnalyzer")
+        Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .sensitive) with SpeechAnalyzer")
 
         // SpeechAnalyzer cannot auto-detect language — it transcribes in whatever locale it's
         // given. Refuse a missing language rather than defaulting to the system locale, which

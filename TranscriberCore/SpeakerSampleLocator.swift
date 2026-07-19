@@ -92,7 +92,7 @@ public enum SpeakerSampleLocator {
                   file.processingFormat.sampleRate > 0,
                   file.length > 0
             else {
-                Logger.files.error("SpeakerSampleLocator: cannot read duration of \(url.lastPathComponent, privacy: .private)")
+                Logger.files.error("SpeakerSampleLocator: cannot read duration of \(url.lastPathComponent, privacy: .sensitive)")
                 return nil
             }
             return Double(file.length) / file.processingFormat.sampleRate

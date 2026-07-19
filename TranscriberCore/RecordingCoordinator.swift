@@ -156,7 +156,7 @@ public final class RecordingCoordinator {
     // MARK: - Recording lifecycle
 
     public func startRecording(sessionName: String, microphoneDeviceId: String?) async {
-        Logger.state.info("Recording started — session: \(sessionName, privacy: .private)")
+        Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
 
         let config = configManager.config
@@ -427,7 +427,7 @@ public final class RecordingCoordinator {
             let restart = Self.liveRestartPlan(sentinel: sentinel, recoveryPlan: plan, outputDir: outputDir)
             baseName = restart.baseName
             newSentinel = restart.newSentinel
-            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphan.baseName, privacy: .private)); recovery continues at \(baseName, privacy: .private)")
+            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphan.baseName, privacy: .sensitive)); recovery continues at \(baseName, privacy: .sensitive)")
         } else {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
@@ -524,7 +524,7 @@ public final class RecordingCoordinator {
         ) {
             appState.lastJsonPath = result.jsonPath.path
             appState.lastTranscriptPath = result.jsonPath.path
-            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .private)")
+            Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
         }
         transcriptionRunner.teardownChunkedPipeline()
     }
