@@ -19,11 +19,6 @@ public struct TranscribeOptions {
     public let splitMode: SplitMode
 }
 
-public struct BenchmarkOptions {
-    public let transcriptionOnly: Bool
-    public let diarizationOnly: Bool
-}
-
 public struct SummarizeOptions {
     public let input: String
     public let provider: String?
@@ -37,7 +32,6 @@ public enum CLICommand {
     case transcribe(TranscribeOptions)
     case rename(String)
     case renameGUI(String)
-    case benchmark(BenchmarkOptions)
     case summarize(SummarizeOptions)
     /// Download the diarization + VAD models without a UI. Lets CI (and a headless setup) fetch
     /// what the ground-truth diarization guard needs — without it those tests silently skip, and a
@@ -55,7 +49,7 @@ public enum CLIParser {
 
         public var errorDescription: String? {
             switch self {
-            case .missingSubcommand: return "Usage: Parley <transcribe|rename|benchmark|summarize>"
+            case .missingSubcommand: return "Usage: Parley <transcribe|rename|summarize>"
             case .unknownSubcommand(let cmd): return "Unknown subcommand: \(cmd)"
             case .missingRequiredArg(let arg): return "Missing required argument: \(arg)"
             case .conflictingFlags(let msg): return "Conflicting flags: \(msg)"
@@ -76,8 +70,6 @@ public enum CLIParser {
             return .rename(try parseRename(rest))
         case "rename-gui":
             return .renameGUI(try parseRename(rest))
-        case "benchmark":
-            return .benchmark(parseBenchmark(rest))
         case "summarize":
             return .summarize(try parseSummarize(rest))
         case "download-models":
@@ -161,13 +153,6 @@ public enum CLIParser {
         }
         guard let input else { throw ParseError.missingRequiredArg("-i") }
         return input
-    }
-
-    private static func parseBenchmark(_ args: [String]) -> BenchmarkOptions {
-        BenchmarkOptions(
-            transcriptionOnly: args.contains("--transcription-only"),
-            diarizationOnly: args.contains("--diarization-only")
-        )
     }
 
     private static func parseSummarize(_ args: [String]) throws -> SummarizeOptions {

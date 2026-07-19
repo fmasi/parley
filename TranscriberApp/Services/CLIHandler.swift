@@ -43,8 +43,6 @@ enum CLIHandler {
                     try handleRename(path)
                 case .renameGUI:
                     break  // handled above, before semaphore
-                case .benchmark(let opts):
-                    try await handleBenchmark(opts)
                 case .summarize(let opts):
                     try await handleSummarize(opts)
                 case .downloadModels:
@@ -203,18 +201,6 @@ enum CLIHandler {
         }
     }
 
-    private static func handleBenchmark(_ opts: BenchmarkOptions) async throws {
-        let benchmarkDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/Parley/benchmark")
-
-        guard FileManager.default.fileExists(atPath: benchmarkDir.path) else {
-            throw CLIError.noBenchmarkFiles
-        }
-
-        print("Benchmark running from: \(benchmarkDir.path)")
-        print("(Benchmark execution to be fully implemented)")
-    }
-
     private static func handleSummarize(_ opts: SummarizeOptions) async throws {
         let jsonPath = URL(fileURLWithPath: opts.input)
         guard FileManager.default.fileExists(atPath: jsonPath.path) else {
@@ -294,10 +280,6 @@ enum CLIHandler {
           rename-gui  Rename speakers with the GUI dialog
             -i <file>        Input JSON transcript (required)
 
-          benchmark   Run performance benchmark
-            --transcription-only   Only benchmark transcription
-            --diarization-only     Only benchmark diarization
-
           summarize   Generate meeting summary from transcript
             -i <file>        Input JSON transcript (required)
             --provider <type> Provider: openai, lmstudio (default: from config)
@@ -311,13 +293,11 @@ enum CLIHandler {
 
     enum CLIError: LocalizedError {
         case fileNotFound(String)
-        case noBenchmarkFiles
         case missingConfig(String)
 
         var errorDescription: String? {
             switch self {
             case .fileNotFound(let path): return "File not found: \(path)"
-            case .noBenchmarkFiles: return "No benchmark files found in ~/Library/Application Support/Parley/benchmark/"
             case .missingConfig(let what): return "Missing configuration: \(what)"
             }
         }

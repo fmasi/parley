@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import TranscriberCore
 
+// RED-FIRST-EXEMPT: this file's only change in this PR is the removal of the parseBenchmark test
+// alongside deleting the benchmark subcommand. No regression test is added — the remaining tests
+// are unchanged characterization of existing behaviour, green at the parent.
 struct CLIHandlerTests {
 
     @Test func parseTranscribeMinimal() throws {
@@ -49,17 +52,6 @@ struct CLIHandlerTests {
             return
         }
         #expect(path == "transcript.json")
-    }
-
-    @Test func parseBenchmark() throws {
-        let args = ["Parley", "benchmark", "--transcription-only"]
-        let cmd = try CLIParser.parse(args)
-        guard case .benchmark(let opts) = cmd else {
-            Issue.record("Expected benchmark command")
-            return
-        }
-        #expect(opts.transcriptionOnly == true)
-        #expect(opts.diarizationOnly == false)
     }
 
     @Test func parseNoSubcommandReturnsNil() throws {
