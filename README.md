@@ -115,7 +115,8 @@ faithful and private.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
   phantom local speaker. A triple-confirmed gate removes it: >50% temporal overlap **and** >70% word
   overlap **and** >0.8 speaker-embedding cosine — all three, or it stays. Across 7 real recordings that
-  gate removed the phantom speaker with zero false positives, 22% better than the heuristic it replaced.
+  gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129 segments), with zero
+  false positives.
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
@@ -151,8 +152,11 @@ Measured on an M5 Pro (release build) with the bundled harness (`tools/engine-be
 | **Full pipeline** | transcription + diarization | **~62×** |
 
 Because chunks are processed in the background during the meeting, the number you actually feel is the
-last row: at ~62× real-time end-to-end, the final chunk (≤30 min) finishes in well under a minute after
-you stop, whatever the meeting's length.
+last row: at ~62× real-time end-to-end, the final chunk (≤30 min by default; the chunk length is
+configurable) finishes in well under a minute after you stop, whatever the meeting's length.
+
+Apple SpeechAnalyzer isn't in this table — it needs a per-language model and errored on this clip in
+this run, so it should be benchmarked separately per system language.
 
 ## Output
 

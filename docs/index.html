@@ -136,7 +136,7 @@
     <ul class="hard">
       <li><b>Dual-stream capture (the core constraint).</b> macOS exposes no API for a pre-mixed mic + system stream — verified through the macOS 26 SDK. So the app runs two independent capture streams — your mic and the system output — and treats "local" and "remote" as first-class. That's what makes reliable speaker separation possible.</li>
       <li><b>Capturing the calls a screen recorder can't see.</b> ScreenCaptureKit is the default for system audio, but it misses Continuity (iPhone) calls and some VoIP audio. An optional Core Audio process tap grabs the system output directly, so phone and app calls land in the transcript too — switchable in Settings, off by default.</li>
-      <li><b>Echo / mic-bleed removal.</b> A triple-confirmed gate removes the far-end voice bleeding into your mic: &gt;50% temporal overlap <b>and</b> &gt;70% word overlap <b>and</b> &gt;0.8 speaker-embedding cosine. Across 7 real recordings it removed the phantom speaker with zero false positives, 22% better than the heuristic it replaced.</li>
+      <li><b>Echo / mic-bleed removal.</b> A triple-confirmed gate removes the far-end voice bleeding into your mic: &gt;50% temporal overlap <b>and</b> &gt;70% word overlap <b>and</b> &gt;0.8 speaker-embedding cosine. Across 7 real recordings it caught 22% more far-end bleed than the heuristic it replaced (158 vs 129 segments), with zero false positives.</li>
       <li><b>Cross-chunk speaker reconciliation.</b> Audio is chunked and transcribed in parallel; per-chunk speaker IDs are merged into one global identity via greedy cosine matching on embeddings.</li>
       <li><b>Crash-safe by design.</b> Sentinel file + LaunchAgent restart + multi-segment stitching mean a crash mid-meeting costs ~300–800 ms, not your recording.</li>
       <li><b>Chunked over streaming — a deliberate accuracy call.</b> Streaming ASR and diarization trade accuracy for low latency. Parley processes complete chunks in the background instead, so transcript and speaker labels come out as good as a full offline run, and only the final chunk waits for you to stop.</li>
@@ -154,7 +154,7 @@
       <tr><td>Speaker diarization</td><td>pyannote + WeSpeaker + VBx</td><td>~111×</td></tr>
       <tr><td><b>Full pipeline</b></td><td>transcription + diarization</td><td><b>~62×</b></td></tr>
     </table>
-    <p class="muted" style="margin-top:14px">Chunks process in the background during the meeting, so the number you actually feel is the last row: at ~62× end-to-end, the final chunk (≤30 min) finishes in well under a minute after you stop, whatever the meeting's length.</p>
+    <p class="muted" style="margin-top:14px">Chunks process in the background during the meeting, so the number you actually feel is the last row: at ~62× end-to-end, the final chunk (≤30 min by default, configurable) finishes in well under a minute after you stop, whatever the meeting's length. Apple SpeechAnalyzer isn't benchmarked here — it needs a per-language model and errored on this clip.</p>
   </section>
 
   <section>
