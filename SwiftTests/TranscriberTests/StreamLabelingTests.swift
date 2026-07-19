@@ -59,4 +59,52 @@ struct StreamLabelingTests {
         #expect(speakerDatabase["Speaker 1"] == [1, 0, 0])
         #expect(speakerDatabase["S1"] == nil)
     }
+
+    // Two diarizer speakers: the database keys must remap in insertion order (S1→Speaker 1,
+    // S2→Speaker 2) and agree with the labels — the invariant documented on withDiarization.
+    @Test func withDiarizationRemapsAllSpeakersInInsertionOrder() {
+        let result = DiarizationResult(
+            segments: [
+                DiarizedSegment(start: 0, end: 3, speaker: "S1"),
+                DiarizedSegment(start: 3, end: 6, speaker: "S2"),
+            ],
+            speakerDatabase: ["S1": [1, 0], "S2": [0, 1]]
+        )
+
+        let (_, db) = StreamLabeling.withDiarization(
+            segments: [
+                TranscriptSegment(start: 0, end: 3, text: "a", language: nil),
+                TranscriptSegment(start: 3, end: 6, text: "b", language: nil),
+            ],
+            diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
+        )
+
+        #expect(db["Speaker 1"] == [1, 0])
+        #expect(db["Speaker 2"] == [0, 1])
+        #expect(db["S1"] == nil)
+        #expect(db["S2"] == nil)
+    }
+
+    // Proves withDiarization actually forwards speechMap/threshold to assign() rather than
+    // ignoring them: for the same low-quality diarized segment, a nil speechMap bypasses VAD
+    // quality gating (keeps "Speaker 1"), while a non-nil speechMap runs the gate and a quality
+    // below the default 0.3 threshold demotes the segment to "Unknown".
+    @Test func withDiarizationForwardsSpeechMap() {
+        let segs = [TranscriptSegment(start: 0, end: 5, text: "hello", language: nil)]
+        let result = DiarizationResult(
+            segments: [DiarizedSegment(start: 0, end: 5, speaker: "SPEAKER_00", qualityScore: 0.1)],
+            speakerDatabase: ["SPEAKER_00": [1, 0, 0]]
+        )
+
+        let (nilMap, _) = StreamLabeling.withDiarization(
+            segments: segs, diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
+        )
+        let (withMap, _) = StreamLabeling.withDiarization(
+            segments: segs, diarizationResult: result,
+            speechMap: [SpeechRegion(start: 0, end: 5, probability: 0.95)], vadSpeechThreshold: 0.5
+        )
+
+        #expect(nilMap.first?.speaker == "Speaker 1")
+        #expect(withMap.first?.speaker == "Unknown")
+    }
 }

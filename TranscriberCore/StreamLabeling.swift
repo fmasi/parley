@@ -23,6 +23,11 @@ enum StreamLabeling {
             speechMap: speechMap,
             vadSpeechThreshold: vadSpeechThreshold
         )
+        // INVARIANT: `assign()` and `buildSpeakerMap()` both derive the raw→friendly speaker map
+        // from `diarizationResult.segments` in insertion order. The keys in `speakerDatabase` must
+        // agree with the "Speaker N" labels in `labeled` — if either function's iteration order
+        // ever changes independently, the DB keys would silently mismatch the segment labels,
+        // breaking echo dedup and the cross-chunk reconciler. Keep their ordering logic in sync.
         let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
         let speakerDatabase = SpeakerAssignment.remapDatabaseKeys(diarizationResult.speakerDatabase, using: dbKeyMap)
         return (labeled, speakerDatabase)
