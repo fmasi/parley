@@ -31,23 +31,6 @@ struct AppVersionTests {
         #expect(hash == "a3f9c12")
     }
 
-    // -- parseCommitDistance --
-
-    @Test func parseCommitDistanceFromFullDescribe() {
-        let distance = AppVersion.parseCommitDistance(from: "v0.6.1-12-ga3f9c12")
-        #expect(distance == 12)
-    }
-
-    @Test func parseCommitDistanceFromTagOnly() {
-        let distance = AppVersion.parseCommitDistance(from: "v0.7.0")
-        #expect(distance == 0)
-    }
-
-    @Test func parseCommitDistanceFromHashOnly() {
-        let distance = AppVersion.parseCommitDistance(from: "a3f9c12")
-        #expect(distance == nil)
-    }
-
     // -- displayString --
 
     @Test func displayStringWithHashAndVersion() {

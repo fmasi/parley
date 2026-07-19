@@ -31,8 +31,8 @@ public final class TranscriptionRunner {
     private var transcriber: (any TranscriptionEngine)?
     private var lastEngineID: EngineID?
     private var diarizer: (any DiarizationProvider)? = FluidAudioDiarizer()
-    /// False once a caller injects its own provider (tests, disableDiarization), so config
-    /// changes never clobber an explicitly-set diarizer.
+    /// False once `disableDiarization()` turns diarization off, so config changes never clobber
+    /// that explicit choice.
     private var diarizerIsDefault = true
     /// The settings the current default diarizer was built with. Rebuilding it on every job would
     /// discard the actor's cached OfflineDiarizerManager and reload the ML models each recording.
@@ -557,11 +557,6 @@ public final class TranscriptionRunner {
     public func teardownChunkedPipeline() {
         chunkRotator = nil
         chunkProcessor = nil
-    }
-
-    public func setDiarizer(_ provider: any DiarizationProvider) {
-        self.diarizer = provider
-        self.diarizerIsDefault = false
     }
 
     public func disableDiarization() {

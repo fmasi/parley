@@ -44,24 +44,6 @@ public enum AppVersion {
         return nil
     }
 
-    /// Extract commit distance from tag.
-    /// "v0.6.1-12-ga3f9c12" -> 12
-    /// "v0.7.0" -> 0 (on tag)
-    /// "a3f9c12" -> nil (no tag)
-    static func parseCommitDistance(from description: String) -> Int? {
-        let parts = description.split(separator: "-")
-        // Exactly on a tag: "v0.7.0"
-        if parts.count == 1 && parts[0].contains(".") {
-            return 0
-        }
-        // "v0.6.1-12-ga3f9c12[-dirty]"
-        if parts.count >= 3,
-           let distance = Int(parts[parts.count >= 4 && parts.last == "dirty" ? parts.count - 3 : parts.count - 2]) {
-            return distance
-        }
-        return nil
-    }
-
     /// Format display string from version and git description.
     static func formatDisplay(version: String, gitDescription: String) -> String {
         if gitDescription == "unknown" { return version }
