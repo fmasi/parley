@@ -93,6 +93,10 @@ struct SettingsView: View {
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )
+            // #150: refresh notification status on open so the Permissions tab (and
+            // its notifications-off hint) reflects System Settings changes made after
+            // launch, not the state captured at the last checkAll().
+            await permissionManager.refreshNotifications()
         }
     }
 
@@ -367,6 +371,17 @@ struct SettingsView: View {
                 pane: .notifications,
                 onGrant: { Task { await permissionManager.requestNotifications() } }
             )
+            if permissionManager.notificationWarning.shouldWarn {
+                // #150: notifications off means every "Recording Failed" / "Summary
+                // Failed" alert silently vanishes — say so where the row lives.
+                // Recoverable, so orange — see the reserved-red policy.
+                Label(
+                    "Alerts like \u{201C}Recording Failed\u{201D} and \u{201C}Summary Failed\u{201D} won't be delivered while notifications are off.",
+                    systemImage: "bell.slash.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
         }
     }
 

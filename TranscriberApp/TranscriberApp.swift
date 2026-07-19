@@ -463,7 +463,8 @@ struct TranscriberApp: App {
                     transcriptionRunner: transcriptionRunner,
                     configManager: configManager,
                     calendarService: calendarService,
-                    updater: updaterController.updater
+                    updater: updaterController.updater,
+                    permissionManager: launchGate.permissionManager
                 )
             } else {
                 SetupRequiredPanel(launchGate: launchGate, configManager: configManager)
