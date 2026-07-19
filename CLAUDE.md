@@ -21,7 +21,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
 - `TranscriberApp/Services/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
 - `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, benchmark) to their handlers
-- `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: parses transcript JSON, collects speaker samples, prompts for new names
+- `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: prompts per speaker and plays samples; collection + rename application live in TranscriptRenamer (TranscriberCore)
 - `TranscriberApp/Services/MicSwitchWindowController.swift` -- opens mic switch dialog as floating NSPanel during recording
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
@@ -72,6 +72,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeakerReconciler.swift` -- cross-chunk speaker matching via greedy cosine similarity on embeddings, maps local per-chunk speaker IDs to global namespace
 - `TranscriberCore/TranscriptAssembler.swift` -- assembles labeled segments + metadata into transcript JSON dictionary for file output
 - `TranscriberCore/TranscriptMerger.swift` -- merges processed chunks into a single time-sorted transcript with absolute timestamps and cross-chunk speaker remapping
+- `TranscriberCore/TranscriptRenamer.swift` -- shared speaker-rename logic (SpeakerSample struct, per-speaker sample collection, rename application that merges into metadata.speaker_names — #162) used by both CLIRename and the GUI rename dialog
 - `TranscriberCore/TranscriptWriter.swift` -- formats and writes transcripts in multiple formats (JSON, TXT, SRT) with timestamp formatting
 - `TranscriberCore/VadSpeechMap.swift` -- wraps FluidAudio VadManager to produce SpeechRegion map with probabilities for quality filtering
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
