@@ -60,9 +60,10 @@ struct StreamLabelingTests {
         #expect(speakerDatabase["S1"] == nil)
     }
 
-    // Two diarizer speakers: the database keys must remap in insertion order (S1→Speaker 1,
-    // S2→Speaker 2) and agree with the labels — the invariant documented on withDiarization.
-    @Test func withDiarizationRemapsAllSpeakersInInsertionOrder() {
+    // Two diarizer speakers: the database keys must remap in the order the speakers first appear
+    // in `diarizationResult.segments` — the array, not Dictionary insertion order (S1→Speaker 1,
+    // S2→Speaker 2) — and agree with the labels (the invariant documented on withDiarization).
+    @Test func withDiarizationRemapsAllSpeakersInSegmentOrder() {
         let result = DiarizationResult(
             segments: [
                 DiarizedSegment(start: 0, end: 3, speaker: "S1"),
@@ -87,12 +88,27 @@ struct StreamLabelingTests {
         #expect(db["S2"] == nil)
     }
 
+    // Empty diarization (no speakers at all): withDiarization must return an empty database and
+    // not crash on the empty remap — the withDiarization analogue of singleSpeaker's empty test.
+    @Test func withDiarizationOnEmptyDiarizationReturnsEmptyDatabase() {
+        let (_, db) = StreamLabeling.withDiarization(
+            segments: [TranscriptSegment(start: 0, end: 1, text: "x", language: nil)],
+            diarizationResult: DiarizationResult(segments: [], speakerDatabase: [:]),
+            speechMap: nil,
+            vadSpeechThreshold: 0.5
+        )
+        #expect(db.isEmpty)
+    }
+
     // Proves withDiarization actually forwards speechMap/threshold to assign() rather than
     // ignoring them. Same diarized segment both ways; only speechMap changes:
     //  - nil speechMap → VAD/quality gating is bypassed entirely → keeps "Speaker 1".
     //  - non-nil speechMap with HIGH speech overlap (0.95 ≥ the 0.5 threshold) passes the speech
-    //    check, so the low quality score (0.1 < the default 0.3 threshold) becomes the deciding
-    //    factor and demotes the segment to "Unknown". (Both conditions are load-bearing.)
+    //    check, so the low quality score becomes the deciding factor and demotes the segment to
+    //    "Unknown". The quality cutoff is assign()'s default qualityScoreThreshold (0.3, and
+    //    0.1 < 0.3) — this test deliberately pins assign()'s real gating contract; if that default
+    //    ever changes, update the qualityScore here to stay clearly below it. (Both the speech
+    //    overlap and the sub-threshold quality are load-bearing.)
     @Test func withDiarizationForwardsSpeechMap() {
         let segs = [TranscriptSegment(start: 0, end: 5, text: "hello", language: nil)]
         let result = DiarizationResult(
