@@ -90,6 +90,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/AudioArchiver.swift` -- converts dual WAV (system+mic) to stereo AAC archive (L=mic, R=system) via AVAssetWriter, deletes source WAVs on success
 - `TranscriberCore/StorageManager.swift` -- enforces audio archive storage quota in hours, deletes oldest .m4a files first, never deletes transcripts
 - `TranscriberCore/SummaryProvider.swift` -- protocol for LLM summary providers + SummarySegment/SummaryMetadata types
+- `TranscriberCore/SummaryDisclosure.swift` -- #138 disclosure stamp: whether a transcript's contents were transmitted off-machine (summary endpoint host only, on-device vs remote); airgapped by default, updated when a summary runs
 - `TranscriberCore/SummaryPromptBuilder.swift` -- shared prompt + transcript/date/duration formatting (systemMessage + userMessage) used by both summary providers, so the prompt lives once
 - `TranscriberCore/OpenAISummaryProvider.swift` -- OpenAI-compatible chat completions provider via /v1/chat/completions (covers OpenAI, Claude proxy, Ollama, LM Studio OpenAI mode)
 - `TranscriberCore/LMStudioSummaryProvider.swift` -- LM Studio native REST API v1 provider via /api/v1/chat with per-request context_length, token stats, and self-correcting retry on context overflow
