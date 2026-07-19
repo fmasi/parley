@@ -161,21 +161,8 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
 
-        let transcript = OpenAISummaryProvider.formatTranscript(segments, includeSource: metadata.dualStream)
-        let userMessage = """
-        Meeting: \(metadata.sessionName)
-        Date: \(Self.formatDate(metadata.date))
-        Duration: \(Self.formatDuration(metadata.durationSeconds))
-        Participants: \(metadata.speakers.joined(separator: ", "))
-
-        --- TRANSCRIPT ---
-        \(transcript)
-        """
-
-        var prompt = OpenAISummaryProvider.systemPrompt
-        if metadata.dualStream {
-            prompt += OpenAISummaryProvider.dualStreamHint
-        }
+        let userMessage = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
+        let prompt = SummaryPromptBuilder.systemMessage(dualStream: metadata.dualStream)
 
         // Estimate tokens needed and auto-size context window (uses calibrated ratio if available)
         let cache = TokenRatioCache.shared
@@ -345,19 +332,5 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         return (content, stats)
-    }
-
-    private static func formatDate(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .long
-        f.timeStyle = .short
-        return f.string(from: date)
-    }
-
-    private static func formatDuration(_ seconds: Double) -> String {
-        let h = Int(seconds) / 3600
-        let m = (Int(seconds) % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
     }
 }

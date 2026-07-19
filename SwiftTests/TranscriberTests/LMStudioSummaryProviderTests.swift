@@ -33,7 +33,7 @@ struct LMStudioSummaryProviderTests {
         let ctx = body["context_length"] as! Int
         #expect(ctx > 0)
         #expect(ctx <= 24000)
-        #expect(body["system_prompt"] as? String == OpenAISummaryProvider.systemPrompt)
+        #expect(body["system_prompt"] as? String == SummaryPromptBuilder.systemPrompt)
 
         let input = body["input"] as! String
         #expect(input.contains("Alice: We need to ship by Friday"))

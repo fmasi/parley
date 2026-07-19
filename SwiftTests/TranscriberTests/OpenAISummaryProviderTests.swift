@@ -9,7 +9,7 @@ struct OpenAISummaryProviderTests {
             SummarySegment(start: 0, end: 5.2, speaker: "Alice", text: "Hello everyone"),
             SummarySegment(start: 5.5, end: 12.0, speaker: "Bob", text: "Hi Alice, let's get started"),
         ]
-        let formatted = OpenAISummaryProvider.formatTranscript(segments)
+        let formatted = SummaryPromptBuilder.formatTranscript(segments)
         #expect(formatted.contains("[00:00:00] Alice: Hello everyone"))
         #expect(formatted.contains("[00:00:05] Bob: Hi Alice, let's get started"))
     }
@@ -150,7 +150,7 @@ struct OpenAISummaryProviderTests {
             SummarySegment(start: 0, end: 5, speaker: "Alice", text: "Hello", source: "local"),
             SummarySegment(start: 5, end: 10, speaker: "Bob", text: "Hi there", source: "remote"),
         ]
-        let formatted = OpenAISummaryProvider.formatTranscript(segments, includeSource: true)
+        let formatted = SummaryPromptBuilder.formatTranscript(segments, includeSource: true)
         #expect(formatted.contains("Alice (local): Hello"))
         #expect(formatted.contains("Bob (remote): Hi there"))
     }
@@ -160,7 +160,7 @@ struct OpenAISummaryProviderTests {
             SummarySegment(start: 0, end: 5, speaker: "Alice", text: "Hello", source: "local"),
             SummarySegment(start: 5, end: 10, speaker: "Bob", text: "Hi there", source: "remote"),
         ]
-        let formatted = OpenAISummaryProvider.formatTranscript(segments)
+        let formatted = SummaryPromptBuilder.formatTranscript(segments)
         #expect(!formatted.contains("(local)"))
         #expect(!formatted.contains("(remote)"))
         #expect(formatted.contains("Alice: Hello"))
@@ -168,13 +168,13 @@ struct OpenAISummaryProviderTests {
     }
 
     @Test func dualStreamHintIsNonEmpty() {
-        #expect(!OpenAISummaryProvider.dualStreamHint.isEmpty)
+        #expect(!SummaryPromptBuilder.dualStreamHint.isEmpty)
     }
 
     // MARK: - System prompt structure (skimmable, action-first template)
 
     @Test func systemPromptHasActionFirstSections() {
-        let p = OpenAISummaryProvider.systemPrompt
+        let p = SummaryPromptBuilder.systemPrompt
         // The revised template leads with a metadata-bearing Summary, then the
         // actionable record, then supporting discussion.
         for section in ["### Summary", "### Decisions", "### Action Items", "### Discussion", "### Open Questions"] {
@@ -186,7 +186,7 @@ struct OpenAISummaryProviderTests {
     }
 
     @Test func systemPromptOrdersDecisionsBeforeDiscussion() {
-        let p = OpenAISummaryProvider.systemPrompt
+        let p = SummaryPromptBuilder.systemPrompt
         guard let summary = p.range(of: "### Summary"),
               let decisions = p.range(of: "### Decisions"),
               let actions = p.range(of: "### Action Items"),
@@ -199,7 +199,7 @@ struct OpenAISummaryProviderTests {
     }
 
     @Test func systemPromptEnforcesOwnerLedActionItems() {
-        let p = OpenAISummaryProvider.systemPrompt
+        let p = SummaryPromptBuilder.systemPrompt
         // Owner-first checklist shape, and no manufactured "no date" placeholder.
         #expect(p.contains("<Owner>"))
         #expect(!p.contains("no date"))
@@ -207,7 +207,7 @@ struct OpenAISummaryProviderTests {
 
     @Test func systemPromptRestrictsDecisionsToExplicit() {
         // Curb the model's tendency to log discussion/intent as a "decision".
-        #expect(OpenAISummaryProvider.systemPrompt.contains("explicit"))
+        #expect(SummaryPromptBuilder.systemPrompt.contains("explicit"))
     }
 
     // MARK: - Retry policy (#50)
