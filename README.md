@@ -14,10 +14,11 @@
 🤝 **Sister project:** [**mailrag**](https://github.com/fmasi/mailrag) — private, self-hosted email RAG. Two halves of one idea: a private, open context stack your AI agents can draw on.
 
 > **What it buys you.** Meeting transcription that's *private by construction* — every byte stays on
-> your Mac, on open models, with nothing phoning home. The default engine transcribes 17 minutes of
-> audio in **~7 seconds (146× real-time)** on the Apple Neural Engine, separates "you" from "them"
-> with **dual-stream capture**, labels who-said-what with **on-device diarization**, and survives an
-> app or service crash mid-recording with **zero data loss**.
+> your Mac, on open models, with nothing phoning home. It transcribes and labels speakers chunk by
+> chunk in the background *as you record*, so when you stop, only the last chunk is left: a 3-hour
+> meeting is ready about as fast as a 30-minute one. On an M5 Pro that runs at **~140× real-time for
+> transcription and ~110× for diarization** on the Neural Engine and GPU. It separates "you" from
+> "them" with **dual-stream capture** and survives a crash mid-recording with **zero data loss**.
 
 <p align="center">
   <img src="docs/assets/menubar.png" width="360" alt="Parley menu bar panel, recording in progress">
@@ -39,6 +40,21 @@ is one private context source, for calls and meetings. [mailrag](https://github.
 another, for email — different domain, different machinery (vector-DB retrieval). They don't talk to
 each other; my agents know about both and reach for whatever fits. The point was never a single app —
 it's a private, open stack of context I own.
+
+## Why it's built this way
+
+Meetings are sensitive. Most of what gets said in them shouldn't be uploaded to anyone's servers, and
+for confidential work that rules out every cloud notetaker. So I built the opposite, around a few hard
+requirements:
+
+- **On-device and airgap-capable.** The one that matters most. Nothing leaves your Mac, ever.
+- **Open-source and free.** Read the code, trust the code. Donations welcome. :)
+- **Crash-resilient.** It shouldn't fall over in the meeting you most needed it for.
+- **Tamper-proof.** Signed transcripts and summaries you can actually trust (on the roadmap).
+- **Agent-queryable.** Your own AI agents can search the record over MCP, kept on your machine (also coming).
+
+Put together, that's a private, verifiable record of what was actually said, that you and your agents
+can rely on. Parley covers meetings, mailrag covers email. By humans. For agents.
 
 ## What it does
 
@@ -98,27 +114,49 @@ faithful and private.
   in Settings, off by default.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
   phantom local speaker. A triple-confirmed gate removes it: >50% temporal overlap **and** >70% word
-  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays.
+  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays. Across 7 real recordings that
+  gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129 segments), with zero
+  false positives.
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
   or XPC crash mid-meeting costs ~300–800 ms, not your recording. WAV files sync to disk every 0.5 s.
-- **Fully on-device ML.** Parakeet ASR + pyannote/WeSpeaker/VBx diarization + VAD, all running on the
-  Apple Neural Engine.
+- **Chunked over streaming — a deliberate accuracy call.** Streaming ASR and diarization trade accuracy
+  for low latency. Parley processes complete chunks in the background instead, so transcript and speaker
+  labels come out as good as a full offline run, and only the final chunk waits for you to stop.
+- **On-device ML across the Neural Engine and GPU.** Parakeet ASR and Silero VAD run on the Neural
+  Engine (`.cpuAndNeuralEngine`); pyannote/WeSpeaker/VBx diarization runs through CoreML's `.all`,
+  spread across the Neural Engine and GPU.
 
 For the full design — XPC architecture, ScreenCaptureKit constraints, the pipeline — see
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Transcription engines
 
-| Engine | Speed (17 min audio) | Download | Languages | macOS |
-|---|---|---|---|---|
-| **FluidAudio** (Parakeet) | ~7 s (146× real-time) | ~500 MB | 25 EU languages | 15.0+ |
-| **Apple SpeechAnalyzer** | ~10 s (102× real-time) | none | system languages | 26.0+ |
+Two ASR engines, switchable in Settings: **FluidAudio (Parakeet)** — ~500 MB model, 25 European
+languages, macOS 15+ — and **Apple SpeechAnalyzer** — no download, system languages, macOS 26+.
+Engine choice is measured, not assumed: FluidAudio leads on European languages, Apple SpeechAnalyzer is
+the reliable path for Japanese, Korean and Chinese. FluidAudio also adds inverse text normalization
+("two hundred" → "200") and per-segment confidence scores.
 
-FluidAudio adds inverse text normalization ("two hundred" → "200"), speaker diarization, and
-per-segment confidence scores. Speed figures are from the bundled benchmark harness
-(`tools/engine-benchmark`) on Apple Silicon.
+## Speed
+
+Measured on an M5 Pro (release build) with the bundled harness (`tools/engine-benchmark`), on a
+4-minute AMI clip:
+
+| Stage | Engine | Real-time factor |
+|---|---|---|
+| Transcription | **FluidAudio (Parakeet, ANE)** | **~142×** |
+| Transcription | WhisperKit (large-v3-turbo), for contrast | ~2.5× |
+| Speaker diarization | pyannote + WeSpeaker + VBx | **~111×** |
+| **Full pipeline** | transcription + diarization | **~62×** |
+
+Because chunks are processed in the background during the meeting, the number you actually feel is the
+last row: at ~62× real-time end-to-end, the final chunk (≤30 min by default; the chunk length is
+configurable) finishes in well under a minute after you stop, whatever the meeting's length.
+
+Apple SpeechAnalyzer isn't in this table — it needs a per-language model and errored on this clip in
+this run, so it should be benchmarked separately per system language.
 
 ## Output
 
