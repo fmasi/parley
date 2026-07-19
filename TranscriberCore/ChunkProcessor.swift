@@ -283,18 +283,14 @@ public final class ChunkProcessor {
                 let diarizationResult = try await diarizedResult
                 let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
-                labeled = SpeakerAssignment.assign(
-                    transcriptSegments: segments,
-                    diarizationSegments: diarizationResult.segments,
+                let result = StreamLabeling.withDiarization(
+                    segments: segments,
+                    diarizationResult: diarizationResult,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
                 )
-                // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
-                // so they match the speaker labels in segments (used by echo dedup)
-                let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
-                speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
-                    diarizationResult.speakerDatabase, using: dbKeyMap
-                )
+                labeled = result.labeled
+                speakerDatabase = result.speakerDatabase
             } catch {
                 Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
                 // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
@@ -302,22 +298,10 @@ public final class ChunkProcessor {
                 // reconciler skips this chunk entirely, so a fabricated "Speaker 1" fuses with the
                 // seed chunk's real Speaker 1 and every voice in this chunk is attributed to that
                 // person. "Unknown" is already handled downstream by tagWithSourcePrefix.
-                labeled = segments.map { seg in
-                    LabeledSegment(
-                        start: seg.start, end: seg.end, speaker: "Unknown",
-                        text: seg.text.trimmingCharacters(in: .whitespaces),
-                        source: "", confidence: seg.confidence, language: seg.language
-                    )
-                }
+                labeled = StreamLabeling.singleSpeaker(segments, speaker: "Unknown")
             }
         } else {
-            labeled = segments.map { seg in
-                LabeledSegment(
-                    start: seg.start, end: seg.end, speaker: "Speaker 1",
-                    text: seg.text.trimmingCharacters(in: .whitespaces),
-                    source: "", confidence: seg.confidence, language: seg.language
-                )
-            }
+            labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
         }
 
         for i in labeled.indices {

@@ -708,33 +708,19 @@ public final class TranscriptionRunner {
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
             let diarizationResult = try await diarizedResult
-            let diarizedSegments = diarizationResult.segments
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
-            labeled = SpeakerAssignment.assign(
-                transcriptSegments: segments,
-                diarizationSegments: diarizedSegments,
+            let result = StreamLabeling.withDiarization(
+                segments: segments,
+                diarizationResult: diarizationResult,
                 speechMap: speechMap,
                 vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
             )
-            // Remap DB keys from raw IDs ("S2") to friendly names ("Speaker 1")
-            let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizedSegments)
-            speakerDatabase = SpeakerAssignment.remapDatabaseKeys(
-                diarizationResult.speakerDatabase, using: dbKeyMap
-            )
+            labeled = result.labeled
+            speakerDatabase = result.speakerDatabase
         } else {
-            labeled = segments.map { seg in
-                LabeledSegment(
-                    start: seg.start,
-                    end: seg.end,
-                    speaker: "Speaker 1",
-                    text: seg.text.trimmingCharacters(in: .whitespaces),
-                    source: "",
-                    confidence: seg.confidence,
-                    language: seg.language
-                )
-            }
+            labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
         }
 
         for i in labeled.indices {
