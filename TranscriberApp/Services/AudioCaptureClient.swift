@@ -3,10 +3,8 @@ import AudioCaptureProtocol
 import TranscriberCore
 import os
 
-struct AudioPaths {
-    let systemAudio: URL
-    let micAudio: URL
-}
+// AudioPaths moved to TranscriberCore (RecordingCaptureClient.swift) so RecordingCoordinator
+// can consume stop() results without importing this XPC client.
 
 @MainActor
 final class AudioCaptureClient {
@@ -367,10 +365,12 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
     }
 }
 
-/// `rotateChunk(outputDirectory:newBaseName:)` already matches `ChunkRotationClient`'s signature —
-/// this conformance is the seam that lets `ChunkRotator` (now in TranscriberCore) hold an
-/// `any ChunkRotationClient` instead of the concrete XPC client (#135 prep).
-extension AudioCaptureClient: ChunkRotationClient {}
+/// Every `RecordingCaptureClient` member (including `ChunkRotationClient`'s
+/// `rotateChunk(outputDirectory:newBaseName:)`) already exists on this class with the exact
+/// protocol signatures — this conformance is the seam that lets `RecordingCoordinator` and
+/// `ChunkRotator` (both in TranscriberCore) hold the protocol instead of the concrete XPC
+/// client (#135 prep, #139 PR-6).
+extension AudioCaptureClient: RecordingCaptureClient {}
 
 enum CaptureError: LocalizedError {
     case notConnected
