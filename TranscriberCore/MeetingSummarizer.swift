@@ -12,9 +12,12 @@ public enum SummaryOutcome: Equatable, Sendable {
 public enum MeetingSummarizer {
 
     /// Summarize a transcript JSON file and write a `-summary.md` alongside it.
+    /// `endpoint` is the configured summary endpoint, used only to stamp the transcript's
+    /// disclosure block (#138) — its host is recorded, never the full URL or any token.
     public static func summarize(
         transcriptPath: URL,
-        provider: any SummaryProvider
+        provider: any SummaryProvider,
+        endpoint: String
     ) async throws {
         let (segments, metadata) = try parseTranscript(at: transcriptPath)
 
@@ -33,7 +36,23 @@ public enum MeetingSummarizer {
             .appendingPathComponent(baseName + "-summary.md")
         try stamped.write(to: summaryPath, atomically: true, encoding: .utf8)
 
+        // #138: the content was sent to `endpoint` to produce this summary — update the
+        // transcript's disclosure from its airgapped default so the artifact testifies to it.
+        try Self.stampDisclosure(.generated(endpoint: endpoint), into: transcriptPath)
+
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
+    }
+
+    /// Rewrite the transcript JSON's `metadata.disclosure` block in place (#138), preserving all
+    /// other keys. Atomic. A transcript with no readable metadata is left unchanged.
+    static func stampDisclosure(_ disclosure: SummaryDisclosure, into transcriptPath: URL) throws {
+        let data = try Data(contentsOf: transcriptPath)
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        var metadata = (json["metadata"] as? [String: Any]) ?? [:]
+        metadata["disclosure"] = disclosure.asMetadataDictionary()
+        json["metadata"] = metadata
+        let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try out.write(to: transcriptPath, options: .atomic)
     }
 
     /// Convenience: create provider from config + summarize. Never throws; returns a
@@ -46,17 +65,18 @@ public enum MeetingSummarizer {
         guard let summary = config.summary, summary.enabled, !summary.endpoint.isEmpty else {
             return .skipped
         }
-        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary))
+        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary), endpoint: summary.endpoint)
     }
 
     /// Run a summary with an explicit provider, translating success/failure into a `SummaryOutcome`.
     /// Logs the failure (preserving prior behavior) and reports it upward for user notification.
     static func runSummary(
         transcriptPath: URL,
-        provider: any SummaryProvider
+        provider: any SummaryProvider,
+        endpoint: String
     ) async -> SummaryOutcome {
         do {
-            try await summarize(transcriptPath: transcriptPath, provider: provider)
+            try await summarize(transcriptPath: transcriptPath, provider: provider, endpoint: endpoint)
             return .succeeded
         } catch SummaryError.invalidEndpoint {
             // The endpoint URL can carry a token in some proxies (e.g. Cloudflare AI Gateway), so its

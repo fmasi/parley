@@ -50,7 +50,8 @@ struct MeetingSummarizerTests {
         let provider = MockProvider(response: "## Executive Summary\nA productive meeting.")
         try await MeetingSummarizer.summarize(
             transcriptPath: jsonPath,
-            provider: provider
+            provider: provider,
+            endpoint: "http://localhost:1234"
         )
 
         let summaryPath = dir.appendingPathComponent("meeting-2026-summary.md")
@@ -76,7 +77,7 @@ struct MeetingSummarizerTests {
         try jsonData.write(to: jsonPath)
 
         let provider = MockProvider(response: "### Summary\nA productive meeting.")
-        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         let summaryPath = dir.appendingPathComponent("meeting-2026-summary.md")
         let content = try String(contentsOf: summaryPath, encoding: .utf8)
@@ -119,7 +120,7 @@ struct MeetingSummarizerTests {
             receivedMetadata = metadata
             return "## Summary"
         }
-        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         #expect(receivedSegments.count == 3)
         #expect(receivedSegments[0].speaker == "Alice")
@@ -148,7 +149,7 @@ struct MeetingSummarizerTests {
 
         let provider = FailingProvider()
         await #expect(throws: SummaryError.self) {
-            try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+            try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
         }
 
         let summaryPath = dir.appendingPathComponent("test-summary.md")
@@ -172,7 +173,7 @@ struct MeetingSummarizerTests {
         let jsonPath = dir.appendingPathComponent("test.json")
         try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
 
-        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: FailingProvider())
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: FailingProvider(), endpoint: "http://localhost:1234")
 
         guard case .failed(let message) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
@@ -196,7 +197,7 @@ struct MeetingSummarizerTests {
         try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
 
         let outcome = await MeetingSummarizer.runSummary(
-            transcriptPath: jsonPath, provider: MockProvider(response: "## Summary\nok"))
+            transcriptPath: jsonPath, provider: MockProvider(response: "## Summary\nok"), endpoint: "http://localhost:1234")
 
         #expect(outcome == .succeeded)
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("test-summary.md").path))
@@ -216,7 +217,7 @@ struct MeetingSummarizerTests {
         let jsonPath = dir.appendingPathComponent("Q3-Revenue-Review.json")
 
         let outcome = await MeetingSummarizer.runSummary(
-            transcriptPath: jsonPath, provider: MockProvider(response: "ok"))
+            transcriptPath: jsonPath, provider: MockProvider(response: "ok"), endpoint: "http://localhost:1234")
 
         guard case .failed(let message) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
@@ -273,7 +274,7 @@ struct MeetingSummarizerTests {
         try JSONSerialization.data(withJSONObject: transcript).write(to: jsonPath)
 
         let provider = InvalidEndpointProvider(endpoint: "https://gateway.example/v1/secret-token-123/openai")
-        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: provider)
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         guard case .failed(let message) = outcome else {
             Issue.record("expected .failed, got \(outcome)")
@@ -339,7 +340,7 @@ struct MeetingSummarizerTests {
             capturedMeta = metadata
             return "## Summary"
         }
-        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         #expect(capturedMeta?.dualStream == true)
         #expect(capturedMeta?.echoSegmentsRemoved == 7)
@@ -374,7 +375,7 @@ struct MeetingSummarizerTests {
             captured = metadata
             return "## Summary"
         }
-        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider)
+        try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         // The summary is dated by when the meeting was recorded, not when it was summarized.
         #expect(abs((captured?.date ?? Date()).timeIntervalSince(recordedAt)) < 1)

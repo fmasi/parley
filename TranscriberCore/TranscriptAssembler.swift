@@ -39,6 +39,12 @@ public enum TranscriptAssembler {
         if let provenance {
             metadata["capture_provenance"] = provenance.asMetadataDictionary()
         }
+        // Disclosure (#138): the transcript testifies whether its contents left the machine.
+        // A transcript is airgapped at assembly time — summaries are generated later (and only
+        // on explicit user opt-in against a configured endpoint), so MeetingSummarizer updates
+        // this block if/when a summary is run. Stamped explicitly (not by omission) so an absent
+        // field is never mistaken for "not disclosed".
+        metadata["disclosure"] = SummaryDisclosure.airgapped.asMetadataDictionary()
 
         let segmentDicts: [[String: Any]] = segments.map { seg in
             var dict: [String: Any] = [
