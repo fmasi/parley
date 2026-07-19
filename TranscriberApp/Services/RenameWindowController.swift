@@ -61,7 +61,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             jsonPath: jsonPath,
             speakers: speakers,
             onSave: { mapping in
-                guard Self.applySpeakerRenames(mapping, jsonPath: jsonPath) else {
+                guard TranscriptRenamer.applyRenames(mapping, jsonPath: jsonPath) else {
                     // Keep the panel open: the names are still in the fields, so the user can
                     // retry rather than discovering later that nothing was saved.
                     let alert = NSAlert()
@@ -122,166 +122,32 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - JSON Parsing
 
+    /// Up to 3 samples per speaker; speakers under 5 segments are usually diarization artifacts.
+    /// Collection itself lives in `TranscriptRenamer` (TranscriberCore), shared with the CLI.
     nonisolated static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
-        guard let data = try? Data(contentsOf: jsonPath) else {
+        do {
+            let collected = try TranscriptRenamer.collectSpeakerSamples(
+                from: jsonPath, maxSamplesPerSpeaker: 3, minSegmentsPerSpeaker: 5
+            )
+            return collected.map { SpeakerEntry(id: $0.id, displayName: $0.id, samples: $0.samples) }
+        } catch TranscriptRenamer.RenameError.cannotRead {
             Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .private)")
             return []
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let segments = json["segments"] as? [[String: Any]]
-        else {
+        } catch {
             Logger.files.error("Rename: \(jsonPath.lastPathComponent, privacy: .private) is not a readable transcript")
             return []
-        }
-
-        // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
-        // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that
-        // actually contains them (#132).
-        let metadata = json["metadata"] as? [String: Any]
-        let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
-        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
-
-        // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
-        // clean speech from crosstalk.
-        var allCandidates: [SpeakerSampleSelector.Candidate] = []
-        var segmentCounts: [String: Int] = [:]
-        var orderedIds: [String] = []
-
-        for seg in segments {
-            guard let speaker = seg["speaker"] as? String,
-                  let text = seg["text"] as? String,
-                  let start = seg["start"] as? Double,
-                  let end = seg["end"] as? Double else { continue }
-            let trimmed = text.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { continue }
-            if segmentCounts[speaker] == nil { orderedIds.append(speaker) }
-            segmentCounts[speaker, default: 0] += 1
-            let source = seg["source"] as? String ?? "remote"
-            allCandidates.append(SpeakerSampleSelector.Candidate(
-                speaker: speaker, start: start, end: end, source: source, text: trimmed
-            ))
-        }
-
-        let maxSamples = 3
-        let minSegments = 5
-
-        // Filter out noise speakers (< minSegments) — they're usually diarization artifacts.
-        // Fall back to unfiltered list if filtering would remove all speakers (e.g. short transcripts).
-        let filteredIds = orderedIds.filter { (segmentCounts[$0] ?? 0) >= minSegments }
-        let significantIds = filteredIds.isEmpty ? orderedIds : filteredIds
-
-        return significantIds.map { speaker in
-            // Isolated speech first, then longest — a sample exists to let a human recognise ONE
-            // voice, and the longest segment is very often the one they were talked over in.
-            let ranked = SpeakerSampleSelector.rank(speaker: speaker, allSegments: allCandidates)
-
-            var samples: [SpeakerSample] = []
-            for candidate in ranked where samples.count < maxSamples {
-                guard let hit = SpeakerSampleLocator.locate(
-                    source: candidate.source,
-                    start: candidate.start,
-                    end: candidate.end,
-                    layout: layout,
-                    chunkDurations: chunkDurations
-                ) else { continue }
-                samples.append(SpeakerSample(
-                    text: candidate.text,
-                    audioFile: hit.url,
-                    start: hit.start,
-                    end: hit.end,
-                    isLocal: hit.isLocal
-                ))
-            }
-
-            // No playable audio at all (e.g. archives deleted by the storage quota): still offer
-            // the speaker for renaming, with the sample text, but no dead play button.
-            if samples.isEmpty {
-                samples = ranked.prefix(maxSamples).map {
-                    SpeakerSample(text: $0.text, audioFile: nil, start: 0, end: 0, isLocal: $0.source == "local")
-                }
-            }
-
-            return SpeakerEntry(
-                id: speaker,
-                displayName: speaker,
-                samples: samples
-            )
-        }
-    }
-
-    // MARK: - Apply Renames
-
-    /// Apply speaker renames to the transcript on disk.
-    ///
-    /// Returns false (and logs) on failure. The previous version wrote with `try?` and returned
-    /// Void: on a read-only or full volume the user renamed every speaker, hit Save, the panel
-    /// closed, and nothing was written — with no error anywhere. The write is also atomic now,
-    /// because by this point the source WAVs are gone and this JSON is the only textual record of
-    /// the meeting; a kill mid-write would truncate it.
-    @discardableResult
-    static func applySpeakerRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
-        guard let data = try? Data(contentsOf: jsonPath),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var segments = json["segments"] as? [[String: Any]]
-        else {
-            Logger.files.error("Rename: cannot read transcript \(jsonPath.lastPathComponent, privacy: .private)")
-            return false
-        }
-
-        for i in segments.indices {
-            if let speaker = segments[i]["speaker"] as? String,
-               let newName = mapping[speaker] {
-                segments[i]["speaker"] = newName
-            }
-        }
-        json["segments"] = segments
-
-        // Record the applied names alongside the transcript, as the CLI path already does.
-        var metadata = json["metadata"] as? [String: Any] ?? [:]
-        var names = metadata["speaker_names"] as? [String: String] ?? [:]
-        for (original, renamed) in mapping where original != renamed {
-            names[original] = renamed
-        }
-        if !names.isEmpty {
-            metadata["speaker_names"] = names
-            json["metadata"] = metadata
-        }
-
-        do {
-            let updatedData = try JSONSerialization.data(
-                withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
-            )
-            try updatedData.write(to: jsonPath, options: .atomic)
-            return true
-        } catch {
-            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
-            return false
         }
     }
 
     // MARK: - Generate Format File
 
+    /// `writeFormatFile` reads `output_format` itself and no-ops for json/unknown, so no
+    /// pre-read guard is needed here.
     nonisolated static func generateFormatFile(jsonPath: URL) {
-        let format = Self.readOutputFormat(from: jsonPath) ?? "json"
-        guard format == "srt" || format == "txt" else { return }
-
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
-            let outputPath = jsonPath.deletingPathExtension().appendingPathExtension(format)
-            if FileManager.default.fileExists(atPath: outputPath.path) {
-                Logger.files.info("Format file written: \(outputPath.lastPathComponent, privacy: .private)")
-            }
         } catch {
             Logger.files.error("Failed to write format file: \(error, privacy: .public)")
         }
-    }
-
-    private nonisolated static func readOutputFormat(from jsonPath: URL) -> String? {
-        guard let data = try? Data(contentsOf: jsonPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let metadata = json["metadata"] as? [String: Any]
-        else { return nil }
-        return metadata["output_format"] as? String
     }
 }

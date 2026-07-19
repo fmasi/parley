@@ -3,18 +3,8 @@ import AVFoundation
 import TranscriberCore
 import os
 
-struct SpeakerSample {
-    let text: String
-    /// Chunk file this sample lives in, already resolved — nil when no playable audio exists.
-    let audioFile: URL?
-    /// Offsets WITHIN `audioFile`, not absolute transcript time (#132).
-    let start: TimeInterval
-    let end: TimeInterval
-    /// Which channel of the stereo archive holds this speaker (L = local/mic, R = remote/system).
-    /// Comes from the segment's `source`, not the display name — renaming a speaker must not
-    /// change which channel we read.
-    let isLocal: Bool
-}
+// SpeakerSample (the sample text + resolved audio location) lives in TranscriberCore
+// (TranscriptRenamer.swift), shared with the CLI rename path.
 
 struct SpeakerEntry: Identifiable {
     let id: String  // "Local Speaker 1", "Remote Speaker 1", etc.
