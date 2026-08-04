@@ -443,7 +443,9 @@ public enum AudioArchiver {
     ///
     /// `expectedSeconds` is nil only where no source duration is available; the duration check is
     /// then skipped rather than guessed at.
-    private static func verify(outputURL: URL, expectedSeconds: Double? = nil) async throws {
+    /// Internal rather than private so the guard that licenses deleting the only lossless copy is
+    /// directly testable — it is the check standing between a truncated encode and permanent loss.
+    static func verify(outputURL: URL, expectedSeconds: Double? = nil) async throws {
         let attr = try? FileManager.default.attributesOfItem(atPath: outputURL.path)
         let size = (attr?[.size] as? Int) ?? 0
         guard size > 0 else {

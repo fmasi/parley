@@ -44,8 +44,7 @@ public enum CaptureQualityNotice {
         else { return 0 }
         // Transcripts written before this field existed simply have no quality signal — absent means
         // 0, never a retroactive alarm.
-        if let count = provenance["quality_anomaly_count"] as? Int { return count }
-        if let count = provenance["quality_anomaly_count"] as? NSNumber { return count.intValue }
-        return 0
+        // `as? Int` already bridges the NSNumber that JSONSerialization produces for JSON integers.
+        return provenance["quality_anomaly_count"] as? Int ?? 0
     }
 }

@@ -149,6 +149,29 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.systemAudioUnrecovered = systemAudioUnrecovered
     }
 
+    /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
+    /// undecodable.
+    ///
+    /// `SessionState` persists this, and `ChunkSession.read()` decodes with `try?` — so a single
+    /// throwing field turns the whole session into "corrupt" and DROPS it. During crash recovery that
+    /// is an in-progress recording lost, which is the exact category of harm this PR exists to close.
+    /// Every field that did not ship in the first version is therefore `decodeIfPresent` with a
+    /// default, and any field added later must follow the same rule.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        engine = try c.decode(String.self, forKey: .engine)
+        systemFormat = try c.decodeIfPresent(String.self, forKey: .systemFormat)
+        micFormat = try c.decodeIfPresent(String.self, forKey: .micFormat)
+        micDevice = try c.decodeIfPresent(String.self, forKey: .micDevice)
+        routeChanges = try c.decode(Int.self, forKey: .routeChanges)
+        retries = try c.decode(Int.self, forKey: .retries)
+        recovered = try c.decode(Bool.self, forKey: .recovered)
+        anomalyCount = try c.decode(Int.self, forKey: .anomalyCount)
+        qualityAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .qualityAnomalyCount) ?? 0
+        // Also added after the original shape — same hazard, previously latent.
+        systemAudioUnrecovered = try c.decodeIfPresent(Bool.self, forKey: .systemAudioUnrecovered) ?? false
+    }
+
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
     public func asMetadataDictionary() -> [String: Any] {
         var d: [String: Any] = [
