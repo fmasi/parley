@@ -88,3 +88,17 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] **Privacy:** during a recording, `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows names/paths as `<private>`
 - [ ] **#86 (SCK default path):** mid-recording output switch (speakers → AirPods) while System Audio Capture is set to Screen Recording → stream restarts in place, remote audio resumes, no "unrecovered" warning in the menu bar panel.
 - [ ] **#103 (Core Audio Tap path):** with Settings › Audio › Capture Method set to Core Audio Tap, record a Zoom/Teams/Meet call → remote audio lands on the system channel; stop → no orphaned aggregate device in Audio MIDI Setup. (The tap is user-selectable in Settings, so it is a standing gate, not a one-off acceptance test. Full #103 / #71 acceptance matrices live in those PRs.)
+
+### Rate integrity (#58 — the chipmunk class)
+These are the only guard on behaviour no unit test can reach: the HAL's real response to a device
+changing under a live capture. A transcript that reads plausibly is NOT evidence — chipmunked audio
+transcribes into fluent, wrong text. Verify by ear and by log.
+- [ ] **Bluetooth connects mid-recording (the 2026-08-04 case):** start a Core Audio Tap recording on built-in speakers, then connect AirPods mid-call and keep talking (opening the mic on them is what forces A2DP→HFP). Expect: log shows `clocking capture off … reason: bluetoothVolatileRate`; remote audio at correct pitch for the WHOLE recording; if `rateDrift` appears in `.diag.jsonl` it must be paired with a remediation `restartInPlace` and correct audio afterwards.
+- [ ] **Bluetooth already connected at start:** with AirPods as the default output, start a tap recording. Same expectations, plus the "System tap rates" log line must show `aggregate(delivered): 48000Hz` — not 24000.
+- [ ] **Multi-Output Device:** create one in Audio MIDI Setup (built-in + AirPods), make it the default output, record. Expect a re-anchor with `reason: virtualVolatileClock`; remote pitch correct.
+- [ ] **Clock anchor unplugged:** with a USB audio interface as the anchor (Bluetooth default output, no usable built-in), unplug it mid-recording. Expect `reason: clock anchor device removed` and a rebuild — NOT a system track that silently stops growing.
+- [ ] **A2DP→HFP on the SCK path:** repeat the first item with Capture Method = Screen Recording. Stream restarts in place; remote pitch correct throughout.
+- [ ] **Mid-recording mic switch (functional, not just UI):** switch mics during a recording; both pre- and post-switch mic audio are present, aligned, and at correct pitch.
+- [ ] **Stereo mic (#59):** record with a stereo USB interface or webcam mic. Mic audio must be continuous — not choppy/stuttering, which is the signature of the half-buffer truncation.
+- [ ] **Pad-ratio backstop fires:** if any recording ends with an `excessivePadding` anomaly in `.diag.jsonl`, the completion notification must read "Transcription Complete — capture anomalies" rather than the plain title.
+- [ ] **Pitch spot-check (every audio device test):** play ~30s of the system channel by ear before signing off. Reading the transcript is not a check.

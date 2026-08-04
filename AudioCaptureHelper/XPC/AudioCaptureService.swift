@@ -83,7 +83,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
         // Unrecognized raw values fall back to the shipped SCK path, never a hard failure.
-        let source = SystemAudioSource(rawValue: systemAudioSource) ?? .screenCaptureKit
+        let source: SystemAudioSource
+        if let parsed = SystemAudioSource(rawValue: systemAudioSource) {
+            source = parsed
+        } else {
+            // Say so. A helper/app version skew or a corrupted config silently downgrades a user who
+            // chose the tap *because* SCK records silence for their Continuity calls — producing a
+            // structurally valid recording whose remote track is empty. Exactly this bug class.
+            source = .screenCaptureKit
+            Logger.audio.error(
+                "Unrecognized system_audio_source '\(systemAudioSource, privacy: .public)' — falling back to ScreenCaptureKit; a Core Audio tap selection will NOT be honoured"
+            )
+            diagnostics.record(CaptureEvent(
+                timestamp: Date(), origin: .helper,
+                kind: .captureSourceFallback, severity: .anomaly,
+                detail: [
+                    "reason": "unrecognized system_audio_source — fell back to sck",
+                    "requested": systemAudioSource,
+                ]
+            ))
+        }
 
         // Per-session reset (#101): a skipped finalize (crash) leaves stale events in the helper ring,
         // which would otherwise be drained into the next session's provenance. Clear them up front.

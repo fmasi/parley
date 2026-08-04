@@ -18,6 +18,30 @@ struct WavFileWriterTests {
 
     // MARK: - WAV header structure
 
+    /// Writing before `setSampleRate` is only reachable on an early-crash orphan — which is exactly
+    /// the path least likely to have been exercised by hand. The header then declares the 16 kHz
+    /// fallback while the data is almost certainly 48 kHz, and `repairHeader` deliberately preserves
+    /// format fields, so a crash immortalises the wrong rate: a structurally valid file that plays at
+    /// a third speed. Pin the behaviour so the fallback stays a known quantity rather than a surprise.
+    @Test func writingBeforeSampleRateIsSetUsesTheDocumentedFallback() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("norate-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        // No setSampleRate — straight to appending.
+        let samples = [Int16](repeating: 1234, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let declaredRate = data[24...27].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian
+        #expect(declaredRate == WavFileWriter.fallbackSampleRate)
+        // The samples themselves are intact — only the declared rate is wrong, which is why this
+        // class of corruption is losslessly rescuable by rewriting the header (gotcha #58).
+        #expect(data.count == 44 + 480 * 2)
+    }
+
     @Test func writesValidWavHeader() throws {
         let path = tempPath()
         defer { cleanup(path) }

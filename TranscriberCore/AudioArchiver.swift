@@ -58,7 +58,28 @@ public enum AudioArchiver {
             throw AudioArchiverError.cannotReadAudio("system: \(error.localizedDescription)")
         }
 
+        // Both streams MUST agree on rate before we encode them into one interleaved file.
+        //
+        // This used to take the mic's rate and never look at the system file's. `AVAudioFile.read(into:)`
+        // does not enforce the "formats must match" the docs describe — with a mismatched-rate buffer it
+        // neither throws nor resamples, it raw-copies frames. So a divergent pair encoded "successfully":
+        // the system channel came out pitch-shifted and half-length, the .m4a was structurally perfect,
+        // verification passed, and BOTH source WAVs were deleted at step 5. That is unrecoverable — the
+        // lossless header-rewrite rescue (gotcha #58) needs the original WAV, and after this ran only a
+        // lossy AAC of wrong-rate content remained.
+        //
+        // A rate mismatch means we do not understand our own inputs. On a courtroom-grade artifact the
+        // only safe response is to refuse and keep both sources.
         let sampleRate = micFile.processingFormat.sampleRate
+        let systemRate = sysFile.processingFormat.sampleRate
+        guard sampleRate == systemRate else {
+            Logger.files.error(
+                "AudioArchiver: refusing to archive — mic is \(sampleRate, privacy: .public)Hz but system is \(systemRate, privacy: .public)Hz; keeping both WAVs so the recording stays recoverable"
+            )
+            throw AudioArchiverError.cannotReadAudio(
+                "sample rate mismatch: mic \(Int(sampleRate))Hz vs system \(Int(systemRate))Hz"
+            )
+        }
 
         // 2. Remove any stale output.
         try? FileManager.default.removeItem(at: outputURL)
@@ -79,9 +100,11 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed(error.localizedDescription)
         }
 
-        // 4. Verify output.
+        // 4. Verify output — including that it is as long as the longer source, since step 5 deletes
+        //    the only lossless copies and a truncated encode would otherwise pass silently.
+        let expectedSeconds = Double(max(micFile.length, sysFile.length)) / sampleRate
         do {
-            try await verify(outputURL: outputURL)
+            try await verify(outputURL: outputURL, expectedSeconds: expectedSeconds)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
@@ -143,8 +166,12 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed(error.localizedDescription)
         }
 
+        // Same duration check as the dual-stream path — this one deletes the only lossless copy too,
+        // and it is the path crash-recovery and salvage batches take, so it is MORE exposed to a
+        // compromised capture, not less.
         do {
-            try await verify(outputURL: outputURL)
+            let expectedSeconds = sampleRate > 0 ? Double(sysFile.length) / sampleRate : nil
+            try await verify(outputURL: outputURL, expectedSeconds: expectedSeconds)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
@@ -406,8 +433,19 @@ public enum AudioArchiver {
         }
     }
 
-    /// Verify the output .m4a is non-empty and has an audio track.
-    private static func verify(outputURL: URL) async throws {
+    /// Verify the output .m4a is non-empty, has an audio track, and is as long as its sources.
+    ///
+    /// "Non-empty with a track" is far too weak a bar to justify what happens next — deleting the
+    /// only lossless copy of a meeting. A truncated or half-encoded archive satisfies it perfectly.
+    /// Comparing the encoded duration against the source duration is the check that makes the word
+    /// "verified" in gotcha #38 mean something, and it catches short encodes generally, not just the
+    /// rate-mismatch case that motivated it.
+    ///
+    /// `expectedSeconds` is nil only where no source duration is available; the duration check is
+    /// then skipped rather than guessed at.
+    /// Internal rather than private so the guard that licenses deleting the only lossless copy is
+    /// directly testable — it is the check standing between a truncated encode and permanent loss.
+    static func verify(outputURL: URL, expectedSeconds: Double? = nil) async throws {
         let attr = try? FileManager.default.attributesOfItem(atPath: outputURL.path)
         let size = (attr?[.size] as? Int) ?? 0
         guard size > 0 else {
@@ -418,6 +456,24 @@ public enum AudioArchiver {
         let tracks = try await asset.loadTracks(withMediaType: .audio)
         guard !tracks.isEmpty else {
             throw AudioArchiverError.verificationFailed("Output has no audio tracks")
+        }
+
+        guard let expectedSeconds, expectedSeconds > 0 else { return }
+        let duration = try await asset.load(.duration)
+        let actualSeconds = CMTimeGetSeconds(duration)
+        guard actualSeconds.isFinite, actualSeconds > 0 else {
+            throw AudioArchiverError.verificationFailed("Output duration is unreadable")
+        }
+        // AAC pads to a whole packet (1024 frames ≈ 21 ms at 48 kHz) and priming adds ≈44 ms, so the
+        // real slack needed is well under 100 ms. A 1-second tolerance was far too loose: for a
+        // 1-second source it made the check vacuous — any positive duration passed — which is exactly
+        // the case the unit tests exercise. 250 ms keeps ~4x margin over the encoder's real overhead
+        // while staying meaningful for short chunks.
+        let tolerance = 0.25
+        guard abs(actualSeconds - expectedSeconds) <= tolerance else {
+            throw AudioArchiverError.verificationFailed(
+                "Output is \(String(format: "%.1f", actualSeconds))s but sources are \(String(format: "%.1f", expectedSeconds))s"
+            )
         }
     }
 }

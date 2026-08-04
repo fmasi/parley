@@ -94,7 +94,7 @@ public final class WavFileWriter {
     /// still leaves a readable WAV (loss bounded to the last sync interval).
     public func flushHeader() {
         guard !finalized else { return }
-        let rate = sampleRate > 0 ? sampleRate : 16000
+        let rate = sampleRate > 0 ? sampleRate : Self.fallbackSampleRate
         fileHandle.seek(toFileOffset: 0)
         writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
         fileHandle.seekToEndOfFile()
@@ -103,9 +103,25 @@ public final class WavFileWriter {
     private func logFirstWrite() {
         guard !firstWriteLogged else { return }
         firstWriteLogged = true
-        let rate = sampleRate > 0 ? sampleRate : 16000
-        Logger.files.info("WAV first write — sampleRate: \(rate), channels: \(self.channelCount), path: \(self.path, privacy: .sensitive)")
+        guard sampleRate > 0 else {
+            // Writing before the rate is known means the header will claim the 16000 fallback while
+            // the data is almost certainly 48 kHz — a 3x slow-motion file that is structurally valid
+            // and passes every check. `repairHeader` deliberately preserves format fields, so a crash
+            // here immortalises the wrong rate. There is no legitimate write before setSampleRate, so
+            // make it loud rather than letting it look ordinary. (The downstream consequence — a
+            // rate-divergent pair reaching the archiver — is now refused there rather than silently
+            // encoded and the sources deleted.)
+            Logger.files.error(
+                "WAV first write with NO sample rate set — header will claim the \(WavFileWriter.fallbackSampleRate) fallback and the audio will play at the wrong speed: \(self.path, privacy: .sensitive)"
+            )
+            return
+        }
+        Logger.files.info("WAV first write — sampleRate: \(self.sampleRate), channels: \(self.channelCount), path: \(self.path, privacy: .sensitive)")
     }
+
+    /// Header rate used when a writer is finalized/flushed before anything told it the real one.
+    /// Only reachable on an early-crash orphan; see `logFirstWrite`.
+    static let fallbackSampleRate: UInt32 = 16000
 
     public func finalize() {
         guard !finalized else { return }   // idempotent — a second finalize must not touch the closed fd

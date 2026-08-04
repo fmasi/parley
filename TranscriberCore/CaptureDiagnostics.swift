@@ -28,6 +28,48 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// hold the wall clock, and the remote audio comes out 2x-fast with gaps — correct duration,
     /// corrupt content. The stream is still RUNNING, so this is not a stop error. Severity `.anomaly`.
     case rateDrift
+
+    /// Too much of a written track is silence we FABRICATED rather than captured. The timeline padder
+    /// inserts silence so samples land at their true wall-clock position; when a device under-delivers,
+    /// that same mechanism quietly makes up the shortfall and turns a detectably-short file into an
+    /// undetectably-corrupt one of exactly the right length. Padding only ever responds to delivery
+    /// deficit — never to quiet audio, which still arrives as buffers of zeros — so a high ratio means
+    /// frames genuinely went missing, whatever the cause. This is the mechanism-independent backstop
+    /// for the whole silent-divergence class (#58). Severity `.anomaly`.
+    case excessivePadding
+
+    /// A sustained run of system buffers rejected by the sticky format gate — the system track has
+    /// stopped being written while the stream still appears to run. Distinct from the transient
+    /// `formatChanged` so the two can be told apart when judging whether a recording is compromised.
+    case sustainedFormatDrop
+
+    /// The configured system-audio source could not be honoured and capture fell back to
+    /// ScreenCaptureKit. A user who explicitly chose the Core Audio tap usually did so BECAUSE SCK
+    /// records silence for their Continuity/VoIP calls — so a silent downgrade produces a
+    /// structurally valid recording whose remote track is empty. Severity `.anomaly`.
+    case captureSourceFallback
+}
+
+extension CaptureEventKind {
+    /// The kinds that mean THE RECORDING'S CONTENT may be wrong — as opposed to something happening
+    /// and being handled.
+    ///
+    /// `anomalyCount` cannot answer that question: `.streamStopError` is recorded as an anomaly for
+    /// what its own call site calls "a benign audio-route change (e.g. AirPods HFP↔A2DP)", and since
+    /// opening the mic is what triggers that flip, it fires on essentially EVERY recording made on
+    /// the default source with Bluetooth headphones — then the #86 restart recovers it completely.
+    /// Labelling those recordings "capture anomalies" would make the warning meaningless within a
+    /// week, which is worse than not warning at all: the point of the label is that it is rare.
+    ///
+    /// So the user-facing quality signal counts only the kinds that survive recovery.
+    public static let qualityCompromising: Set<CaptureEventKind> = [
+        .excessivePadding,
+        .rateDrift,
+        .sustainedFormatDrop,
+        .systemAudioUnrecovered,
+        .restartFailed,
+        .captureSourceFallback,
+    ]
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.
@@ -68,6 +110,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     public let retries: Int
     public let recovered: Bool
     public let anomalyCount: Int
+    /// Subset of `anomalyCount` that indicates compromised CONTENT rather than a handled event.
+    /// The user-facing "capture anomalies" label reads this, so that a routine Bluetooth route
+    /// change — which is recorded as an anomaly and fully recovered — does not brand every
+    /// recording as suspect.
+    public let qualityAnomalyCount: Int
     /// True when the MID-RECORDING system (remote) stream could not be restarted within budget during
     /// the session — the remote side stopped being captured even though the mic kept recording (#86).
     public let systemAudioUnrecovered: Bool
@@ -81,6 +128,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case retries
         case recovered
         case anomalyCount = "anomaly_count"
+        case qualityAnomalyCount = "quality_anomaly_count"
         case systemAudioUnrecovered = "system_audio_unrecovered"
     }
 
@@ -93,6 +141,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         retries: Int,
         recovered: Bool,
         anomalyCount: Int,
+        qualityAnomalyCount: Int = 0,
         systemAudioUnrecovered: Bool = false
     ) {
         self.engine = engine
@@ -103,7 +152,31 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.retries = retries
         self.recovered = recovered
         self.anomalyCount = anomalyCount
+        self.qualityAnomalyCount = qualityAnomalyCount
         self.systemAudioUnrecovered = systemAudioUnrecovered
+    }
+
+    /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
+    /// undecodable.
+    ///
+    /// `SessionState` persists this, and `ChunkSession.read()` decodes with `try?` — so a single
+    /// throwing field turns the whole session into "corrupt" and DROPS it. During crash recovery that
+    /// is an in-progress recording lost, which is the exact category of harm this PR exists to close.
+    /// Every field that did not ship in the first version is therefore `decodeIfPresent` with a
+    /// default, and any field added later must follow the same rule.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        engine = try c.decode(String.self, forKey: .engine)
+        systemFormat = try c.decodeIfPresent(String.self, forKey: .systemFormat)
+        micFormat = try c.decodeIfPresent(String.self, forKey: .micFormat)
+        micDevice = try c.decodeIfPresent(String.self, forKey: .micDevice)
+        routeChanges = try c.decode(Int.self, forKey: .routeChanges)
+        retries = try c.decode(Int.self, forKey: .retries)
+        recovered = try c.decode(Bool.self, forKey: .recovered)
+        anomalyCount = try c.decode(Int.self, forKey: .anomalyCount)
+        qualityAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .qualityAnomalyCount) ?? 0
+        // Also added after the original shape — same hazard, previously latent.
+        systemAudioUnrecovered = try c.decodeIfPresent(Bool.self, forKey: .systemAudioUnrecovered) ?? false
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -114,6 +187,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "retries": retries,
             "recovered": recovered,
             "anomaly_count": anomalyCount,
+            "quality_anomaly_count": qualityAnomalyCount,
             "system_audio_unrecovered": systemAudioUnrecovered,
         ]
         if let systemFormat { d["system_format"] = systemFormat }
@@ -198,6 +272,11 @@ public struct CaptureDiagnostics: Sendable {
     public var retryCount: Int { events.lazy.filter { $0.kind == .retry }.count }
     public var didRecover: Bool { events.contains { $0.kind == .launchRecovery } }
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
+    /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
+    /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
+    public var qualityAnomalyCount: Int {
+        events.lazy.filter { CaptureEventKind.qualityCompromising.contains($0.kind) }.count
+    }
     /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
     public var systemAudioUnrecovered: Bool { events.contains { $0.kind == .systemAudioUnrecovered } }
 
@@ -236,6 +315,7 @@ public struct CaptureDiagnostics: Sendable {
             retries: retryCount,
             recovered: didRecover,
             anomalyCount: anomalyCount,
+            qualityAnomalyCount: qualityAnomalyCount,
             systemAudioUnrecovered: systemAudioUnrecovered
         )
     }

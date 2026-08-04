@@ -121,7 +121,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 741 tests across 78 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
+# 874 tests across 99 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -140,16 +140,37 @@ bug) → then CI, and monitor it → device-test anything touching capture/audio
 deliberately** (PATCH = bug fixes only; MINOR = any new capability, *or* a fix that materially changes
 what the transcripts say) → release, and advance that line's `release/vX.Y.x` branch.
 
+### Always identify the RUNNING build before diagnosing a recording
+A bug report about a real recording is a report about **the build that produced it**, which is very
+often not the branch checked out in your working tree. Establish provenance FIRST — before reading any
+code, or you will debug a file the recording never ran:
+
+```bash
+/usr/bin/defaults read /Applications/Parley.app/Contents/Info.plist ATGitDescription  # e.g. v0.9.0-beta.1
+/usr/bin/stat -f '%Sm' /Applications/Parley.app/Contents/MacOS/Parley                 # build time
+git log -1 --format='%h %ci %s' <that-tag>                                            # the actual source
+git merge-base --is-ancestor <fix-commit> <that-tag> && echo "fix present" || echo "fix ABSENT"
+```
+
+Then read the code **at that commit** (`git show <tag>:path/to/File.swift`), not at `HEAD`. Note that
+squash-merged PRs mean a fix commit from a feature branch is *not* an ancestor of `main` even though its
+content shipped — check the squash commit, not the original SHA. And when you finish work, verify what
+is installed matches what you just built, so the next recording exercises the new code.
+
+Each recording also writes a `.diag.jsonl` beside its audio — a per-session event log (format
+detection, device changes, restarts, anomalies). Read it before theorising; it frequently names the
+fault outright.
+
 ## Documentation
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 48 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 64 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 48 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 64 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

@@ -27,6 +27,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var micFramesWritten: Int64 = 0
     private var systemFramesWritten: Int64 = 0
 
+    /// How much of each track we fabricated rather than captured. The padder's whole job is to hold
+    /// the wall clock, which means it silently repairs the symptom of a device under-delivering — so
+    /// the ratio it produces is the one signal that catches that class without knowing the mechanism.
+    /// Scoped to the CHUNK, reset by `swapWriters` alongside the timeline anchor and frame counters —
+    /// those are chunk-scoped, so accumulating the ratio across rotations would mix anchors and make
+    /// the number meaningless. The cost is that a bleed too small to cross the threshold within one
+    /// chunk never fires; the benefit is that the ratio always describes a coherent timeline.
+    private var systemPadMonitor = PadRatioMonitor()
+    private var micPadMonitor = PadRatioMonitor()
+
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
     var diagnostics: LockedDiagnostics?
@@ -109,6 +119,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         timelineAnchorPTS = nil
         micFramesWritten = 0
         systemFramesWritten = 0
+        systemPadMonitor.reset()
+        micPadMonitor.reset()
+        // Same chunk scoping as the pad monitors: without this a drop that fires in chunk 1 latches
+        // `stickyDropReported` for the whole session, so a mismatch persisting into later chunks goes
+        // unreported even as those chunks are written empty.
+        stickyDropCount = 0
+        stickyDropReported = false
 
         return (oldSystemPath, oldMicPath)
     }
@@ -137,11 +154,14 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
-        // Liveness stamp (#86): record that a real system buffer arrived, independent of its energy.
-        // The in-place restart's probe reads this from another queue to verify a rebuilt stream is
-        // actually delivering frames. Stamped on EVERY system buffer, before any format-drop early
-        // return — a muted remote still delivers buffers, so this never mistakes mute for failure.
-        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        // Liveness stamp (#86) moved BELOW the sticky format gate — see the stamp site after it.
+        //
+        // It used to be stamped here, on every arrival, before any format-drop early return. That
+        // made a stream whose buffers were all being DROPPED look perfectly healthy: the #86 restart
+        // probe would see fresh arrivals, conclude frames had resumed, reset its restart budget, and
+        // bless a stream writing nothing to disk. Liveness has to mean "we are recording", not "the
+        // OS is still calling us". A muted remote is still counted as alive, because a muted remote
+        // delivers buffers that PASS the gate — only writer-incompatible ones are excluded.
 
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
@@ -186,9 +206,21 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                     sampleRate: cfg.rate, channelCount: Int(cfg.channels),
                     isFloat: cfg.isFloat, bitsPerChannel: Int(cfg.bitsPerChannel)
                 )
-                if !configured.isWriterCompatible(with: fmt) { return }
+                if !configured.isWriterCompatible(with: fmt) {
+                    noteStickyDrop(configured: configured, incoming: fmt)
+                    return
+                }
             }
         }
+
+        // Liveness (#86): a buffer we can actually WRITE arrived. Stamped after the gate so dropped
+        // buffers can never masquerade as a healthy stream.
+        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        // Re-arm on recovery: a stream that resumes and then fails again in the same chunk is a
+        // second, separate event, and swallowing it would hide the later half of the recording
+        // going missing. The latch only exists to stop one sustained failure logging per buffer.
+        stickyDropCount = 0
+        stickyDropReported = false
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         var lengthAtOffset = 0, totalLength = 0
@@ -203,25 +235,32 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Pad the system track to its shared-timeline position before appending — fills a dropped or
         // #86-restarted run, and the startup offset when the mic anchored the timeline first (HOL-1).
         let sysRate = systemFormatInfo.map { $0.rate } ?? AudioConverter.outputSampleRate
-        systemFramesWritten += timelineSilencePad(
+        let sysPad = timelineSilencePad(
             into: systemWriter, framesWritten: systemFramesWritten, rate: sysRate,
             pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), label: "system"
         )
+        systemFramesWritten += sysPad
 
         let isFloat = isFloatFormat(from: sampleBuffer)
+        var dataFrames: Int64 = 0
         if isFloat {
             let count = totalLength / MemoryLayout<Float32>.size
             ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
                 systemWriter.append(UnsafeBufferPointer(start: floatPtr, count: count))
             }
             systemFramesWritten += Int64(count)
+            dataFrames = Int64(count)
         } else {
             let count = totalLength / MemoryLayout<Int16>.size
             ptr.withMemoryRebound(to: Int16.self, capacity: count) { int16Ptr in
                 systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
             systemFramesWritten += Int64(count)
+            dataFrames = Int64(count)
         }
+        notePadding(
+            systemPadMonitor.record(padFrames: sysPad, dataFrames: dataFrames, rate: sysRate),
+            track: "system")
     }
 
     /// Append pre-normalized 48 kHz mono Int16 system samples from the Core Audio output tap (#103,
@@ -249,11 +288,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let rate = systemFormatInfo?.rate ?? AudioConverter.outputSampleRate
-        systemFramesWritten += timelineSilencePad(
+        let pad = timelineSilencePad(
             into: systemWriter, framesWritten: systemFramesWritten, rate: rate, pts: pts, label: "system"
         )
+        systemFramesWritten += pad
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
+        // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
+        notePadding(
+            systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
+            track: "system")
     }
 
     // MARK: - Mic audio (normalized via AudioConverter)
@@ -297,33 +341,102 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
 
-        // Copy sample data from CMSampleBuffer into AVAudioPCMBuffer
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var lengthAtOffset = 0, totalLength = 0
-        var rawPtr: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer, atOffset: 0,
-            lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength,
-            dataPointerOut: &rawPtr
-        )
-        guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
+        // Sample width from the format, NOT from which channel-data accessor is non-nil — that
+        // inference is what broke stereo mics: interleaved buffers do NOT have nil `floatChannelData`
+        // (they expose one interleaved plane), so branching on it sent interleaved stereo down the
+        // planar path where the clamp omitted the channel count and dropped half of every buffer.
+        // `mBytesPerFrame` rather than `mBitsPerChannel / 8`: a 24-bit-in-4-byte container has 24 bits
+        // per channel but occupies 4, and memcpy needs the byte width.
+        let asbdPtr = inputFormat.streamDescription
+        let planeChannels = max(1, Int(inputFormat.channelCount))
+        let frameBytes = Int(asbdPtr.pointee.mBytesPerFrame)
+        let bytesPerSample = frameBytes > 0
+            ? (inputFormat.isInterleaved ? frameBytes / planeChannels : frameBytes)
+            : Int(asbdPtr.pointee.mBitsPerChannel) / 8
+        guard bytesPerSample > 0 else { return }
 
-        // Copy raw bytes into the PCM buffer's channel data (non-interleaved) or AudioBufferList
-        // (interleaved). Clamp every copy to the destination channel's capacity — a route change
-        // can briefly deliver a buffer whose byte count exceeds frameLength*sampleSize, and an
-        // unbounded memcpy would overrun the heap allocation (#94).
-        if let channelData = pcmBuffer.floatChannelData {
-            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Float>.size
-            memcpy(channelData[0], ptr, min(totalLength, capacity))
-        } else if let channelData = pcmBuffer.int16ChannelData {
-            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Int16>.size
-            memcpy(channelData[0], ptr, min(totalLength, capacity))
-        } else {
-            // Interleaved format — copy via AudioBufferList
-            let abl = pcmBuffer.mutableAudioBufferList
-            let buffers = UnsafeMutableAudioBufferListPointer(abl)
-            guard buffers.count > 0, let dstPtr = buffers[0].mData else { return }
-            memcpy(dstPtr, ptr, min(Int(buffers[0].mDataByteSize), totalLength))
+        // Let CoreMedia hand us a structured AudioBufferList instead of reasoning about the block
+        // buffer's internal layout ourselves. A `CMBlockBuffer` may be composed of several
+        // DISCONTIGUOUS memory blocks — one per plane is a valid layout — and it may 16-byte-align
+        // each plane, so computing a plane's address as `base + index * planeCapacity` can read into
+        // arbitrary memory. `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` exists exactly
+        // because that layout is not a contract; it returns one `AudioBuffer` per plane (or a single
+        // one when interleaved), each with its own pointer and true byte count. Copying buffer-to-
+        // buffer then handles both layouts with no arithmetic and no assumptions.
+        var ablSize = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &ablSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: nil
+        )
+        guard status == noErr, ablSize > 0 else { return }
+        let ablRaw = UnsafeMutableRawPointer.allocate(
+            byteCount: ablSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { ablRaw.deallocate() }
+        let ablPtr = ablRaw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        // `retainedBlockBuffer` owns the memory the buffer list points into — it must outlive the copy.
+        var retainedBlockBuffer: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablPtr,
+            bufferListSize: ablSize,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &retainedBlockBuffer
+        )
+        guard status == noErr else { return }
+
+        var copiedBytes = 0
+        withExtendedLifetime(retainedBlockBuffer) {
+            let source = UnsafeMutableAudioBufferListPointer(ablPtr)
+            let destination = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+            let planes = min(source.count, destination.count)
+            guard planes > 0 else { return }
+            // A short buffer shortens whichever plane it lands on, so the usable frame count is the
+            // MINIMUM across planes — taking plane 0's would leave the others' tails as uninitialised
+            // heap, which the converter turns into a noise blip rather than the silence it resembles.
+            var minPlaneBytes = Int.max
+            for index in 0..<planes {
+                // A skipped plane is NOT a smaller copy — it is an unwritten destination plane full
+                // of whatever the allocator left there, which the converter would read as audio for
+                // the whole (unshrunk) frameLength. There is no partial success worth salvaging on a
+                // multi-channel buffer, so drop it.
+                guard let srcPtr = source[index].mData,
+                      let dstPtr = destination[index].mData else {
+                    Logger.audio.error("Mic buffer plane \(index, privacy: .public) has no data pointer — dropping the buffer rather than converting uninitialised memory")
+                    minPlaneBytes = 0
+                    break
+                }
+                // Clamp to the destination too: a route change can briefly deliver more bytes than
+                // frameLength implies, and an unbounded memcpy would overrun the allocation (#94).
+                let bytes = min(Int(source[index].mDataByteSize), Int(destination[index].mDataByteSize))
+                memcpy(dstPtr, srcPtr, bytes)
+                minPlaneBytes = min(minPlaneBytes, bytes)
+            }
+            copiedBytes = minPlaneBytes == Int.max ? 0 : minPlaneBytes
+        }
+
+        // Trust the bytes that actually arrived, not the frame count the source claimed. A short
+        // buffer would otherwise leave an uninitialised tail that the converter turns into a noise
+        // blip rather than the silence it looks like.
+        let usableFrames = PCMCopyPlan.usableFrames(
+            copiedBytes: copiedBytes,
+            channelCount: Int(inputFormat.channelCount),
+            bytesPerSample: bytesPerSample,
+            isInterleaved: inputFormat.isInterleaved)
+        guard usableFrames > 0 else { return }
+        if usableFrames < Int(pcmBuffer.frameLength) {
+            Logger.audio.warning(
+                "Mic buffer short: \(copiedBytes, privacy: .public) bytes \(inputFormat.isInterleaved ? "(all channels)" : "(per plane)", privacy: .public) yielded \(usableFrames, privacy: .public) of \(frameCount, privacy: .public) frames"
+            )
+            pcmBuffer.frameLength = AVAudioFrameCount(usableFrames)
         }
 
         do {
@@ -337,12 +450,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
     /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
-        micFramesWritten += timelineSilencePad(
+        let pad = timelineSilencePad(
             into: micWriter, framesWritten: micFramesWritten,
             rate: AudioConverter.outputSampleRate, pts: pts, label: "mic"
         )
+        micFramesWritten += pad
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
+        notePadding(
+            micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
+                                 rate: AudioConverter.outputSampleRate),
+            track: "mic")
     }
 
     /// Insert leading/gap silence into `writer` so its next sample lands at this buffer's position on
@@ -386,6 +504,55 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let silence = [Int16](repeating: 0, count: Int(pad))
         silence.withUnsafeBufferPointer { writer.appendInt16($0) }
         return pad
+    }
+
+    /// Consecutive buffers rejected by the sticky format gate. Reset by the first accepted buffer.
+    private var stickyDropCount = 0
+    private var stickyDropReported = false
+
+    /// A sustained run of dropped buffers means the system track has stopped growing while the stream
+    /// still appears to run. The gate itself is correct — appending mismatched samples under a stale
+    /// WAV header would be worse — but dropping silently is how a recording ends up half-empty with
+    /// nothing to show for it. One drop is a transient; hundreds is a broken recording.
+    private func noteStickyDrop(configured: AudioStreamFormat, incoming: AudioStreamFormat) {
+        stickyDropCount += 1
+        // ~100 buffers is a couple of seconds of audio — long past "transient", short of alarmist.
+        guard stickyDropCount >= 100, !stickyDropReported else { return }
+        stickyDropReported = true
+        Logger.audio.error(
+            """
+            System audio: \(self.stickyDropCount, privacy: .public) consecutive buffers dropped — stream \
+            delivers \(Int(incoming.sampleRate), privacy: .public)Hz/\(incoming.channelCount, privacy: .public)ch \
+            but the writer is configured for \(Int(configured.sampleRate), privacy: .public)Hz/\(configured.channelCount, privacy: .public)ch. \
+            The system track is no longer being written.
+            """
+        )
+        record(.sustainedFormatDrop, .anomaly, [
+            "reason": "sustained sticky format drop — system track not being written",
+            "configured": "\(Int(configured.sampleRate))Hz/\(configured.channelCount)ch",
+            "incoming": "\(Int(incoming.sampleRate))Hz/\(incoming.channelCount)ch",
+            "dropped_buffers": "\(stickyDropCount)",
+        ])
+    }
+
+    /// Surface a track that is mostly fabricated silence. Fires at most once per track per CHUNK —
+    /// the original failure's per-buffer pad log fired ~57,000 times and told nobody anything.
+    private func notePadding(_ verdict: PadRatioMonitor.Verdict, track: String) {
+        guard case .excessive(let ratio, let paddedSeconds, let totalSeconds) = verdict else { return }
+        Logger.audio.error(
+            """
+            \(track, privacy: .public) track is \(Int(ratio * 100), privacy: .public)% fabricated silence \
+            (\(Int(paddedSeconds), privacy: .public)s padded of \(Int(totalSeconds), privacy: .public)s). \
+            The device is delivering fewer frames than its declared rate implies — the recording holds \
+            the right duration but its content is compromised.
+            """
+        )
+        record(.excessivePadding, .anomaly, [
+            "track": track,
+            "ratio": String(format: "%.3f", ratio),
+            "padded_seconds": "\(Int(paddedSeconds))",
+            "total_seconds": "\(Int(totalSeconds))",
+        ])
     }
 
     /// Record the mic input format, but only when it CHANGES — so a mid-stream mic switch (and an

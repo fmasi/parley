@@ -283,7 +283,7 @@ public final class RecordingCoordinator {
                     outputDirectory: outputDir,
                     config: configManager.config
                 )
-                presentCompletedTranscription(result)
+                await presentCompletedTranscription(result)
             } else {
                 // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
                 // re-attached to a still-recording XPC service — Flow A never calls
@@ -340,7 +340,7 @@ public final class RecordingCoordinator {
                 }
 
                 if let result {
-                    presentCompletedTranscription(result)
+                    await presentCompletedTranscription(result)
                 } else {
                     // Chunked recovery found nothing to salvage (e.g. session.json existed but had
                     // no chunks and no orphan WAVs) — nothing to notify or rename.
@@ -534,11 +534,50 @@ public final class RecordingCoordinator {
     /// The post-transcription success sequence, previously duplicated verbatim in both the chunked
     /// and fallback branches of `stopRecording`: publish the transcript paths, return to idle,
     /// notify, then hand off to the rename dialog + auto-summary.
-    private func presentCompletedTranscription(_ result: TranscriptionResult) {
+    private func presentCompletedTranscription(_ result: TranscriptionResult) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
-        appState.phase = .idle
-        notify("Transcription Complete", result.jsonPath.lastPathComponent)
+        // Say so when the capture layer flagged something. This used to be an unconditional
+        // "Transcription Complete" while `capture_provenance` sat right here recording that the
+        // recording was compromised — the app knew and the user did not (#58).
+        // Off the main actor: this is a synchronous file read of a transcript that can reach several
+        // hundred KB for a long meeting, on a path that has just finished writing it. `RecordingCoordinator`
+        // is @MainActor, so doing it inline would block the UI at exactly the wrong moment.
+        let jsonPath = result.jsonPath
+        let anomalies = await Task.detached(priority: .utility) {
+            CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
+        }.value
+        // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
+        // async read (setting it first let a new recording start mid-read), but deferring opens the
+        // mirror-image risk: the main actor is free during the suspension, so a crash handler or a
+        // newly started session may legitimately have moved the phase on. Guarding only the `.idle`
+        // assignment protects the wrong thing — the intrusive part is `presentTranscript`, which
+        // would open the rename dialog on top of a live recording.
+        var sessionStillOurs = false
+        if case .transcribing = appState.phase {
+            appState.phase = .idle
+            sessionStillOurs = true
+        }
+        if anomalies > 0 {
+            Logger.state.error(
+                "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
+            )
+        }
+        // The notification is passive, so it always fires: the transcript IS finished, and staying
+        // silent about it would be the bigger failure.
+        notify(
+            CaptureQualityNotice.completionTitle(anomalyCount: anomalies),
+            CaptureQualityNotice.completionBody(
+                fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies)
+        )
+        guard sessionStillOurs else {
+            // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is
+            // only the modal presentation that is skipped.
+            Logger.state.warning(
+                "Recording state advanced while finishing the previous transcript — skipping the rename dialog so it cannot open over a live session"
+            )
+            return
+        }
         presentTranscript(result.jsonPath, configManager.config)
     }
 

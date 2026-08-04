@@ -63,14 +63,25 @@ final class SystemTapSession {
     private let monitorQueue = DispatchQueue(label: "system-tap.device-monitor")
     /// Retained so the SAME reference can be passed to remove it (Swift boxes a fresh block per call).
     private var outputListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Second HAL listener, on the device LIST. The default-output listener cannot cover us any more:
+    /// re-anchoring means our clock is routinely some device the user never selected, and when that
+    /// one is unplugged no default-output notification fires. The IOProc then stalls forever — and a
+    /// stall is invisible to the rate-drift watchdog, which only runs when buffers arrive. Mirrors
+    /// what `MicCaptureSession` has always done (gotcha #55).
+    private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
+    /// UID of the device currently clocking the aggregate, so a device-list change can tell whether
+    /// the one that matters is the one that disappeared. Guarded by `stateLock`.
+    private var anchorDeviceUID: String?
 
     /// Private aggregate UID prefix — also used to sweep orphans from a prior crash on startup.
     private static let aggregateUIDPrefix = "eu.fmasi.parley.system-tap."
 
-    /// Rates that only ever appear because a Bluetooth link dropped to a hands-free profile
-    /// (A2DP -> HFP). A 44.1 kHz output is perfectly healthy and must NOT trigger re-anchoring:
-    /// substituting the clock for a device that is fine is a risk with no upside.
-    private static let handsFreeRates: Set<Int> = [8000, 16000, 24000, 32000]
+    /// Latched once the watchdog measures a real frame shortfall: from then on every rebuild clocks
+    /// off a full-rate device, whatever the output device claims about itself. Mutated under `stateLock`.
+    private var forceFullRateAnchor = false
+    /// Bounded (`ClockAnchorPolicy.maxDriftRemediations`) so a permanently-drifting device cannot
+    /// rebuild in a loop, tearing a dead window in the recording each time. Under `stateLock`.
+    private var driftRemediations = 0
 
     /// Rate-drift watchdog. If the device silently changes rate underneath us (Bluetooth A2DP -> HFP
     /// is NOT a device change, so no output-switch listener fires), the IOProc keeps delivering
@@ -165,30 +176,54 @@ final class SystemTapSession {
         // letting their headset's limitations dictate what we record.
         var anchor = output
         let outputRate = Int(Self.deviceNominalRate(output).rounded())
-        if Self.handsFreeRates.contains(outputRate) {
+        let decision = ClockAnchorPolicy.decide(
+            outputRate: outputRate,
+            isBluetooth: Self.isBluetooth(output),
+            isVirtual: Self.isVirtual(output),
+            forcedByDrift: stateLock.sync { forceFullRateAnchor })
+        if case .reanchor(let reason) = decision {
             if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
                 Logger.audio.info(
-                    "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(outputRate, privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
+                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
                 )
                 anchor = fullRate
             } else {
-                // Degraded output and NO full-rate device to clock off (a Mac with no built-in
-                // output, headset as the only device). We are about to capture the remote side at
-                // the headset's hands-free rate. Say so at setup rather than leaving it to the
-                // watchdog, which only fires 5+ seconds in.
-                Logger.audio.error(
-                    "System tap: output device is at \(outputRate, privacy: .public)Hz (hands-free) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
-                )
-                onEvent?(.rateDrift, .anomaly, [
-                    "source": "system-tap",
-                    "reason": "degraded output rate, no full-rate anchor available",
-                    "outputRate": "\(outputRate)",
-                ])
+                // Nothing full-rate to clock off (a Mac with no built-in output, headset as the only
+                // device). Whether that is already costing us audio depends on WHY we wanted to move.
+                switch reason {
+                case .degradedRate, .driftRemediation:
+                    // Actively degraded right now. Say so at setup rather than leaving it to the
+                    // watchdog, which only fires 5+ seconds in. Distinguish "there is nothing better"
+                    // from "the best full-rate device IS the one we are already on" — the second is
+                    // what happens when a wired built-in output under-delivers, and calling that
+                    // "no full-rate device available" sends the next debugger down the wrong path.
+                    let alreadyBest = Self.fullRateOutputDevice(minimum: 44100) == output
+                    Logger.audio.error(
+                        "System tap: \(alreadyBest ? "the clock anchor is already the best full-rate device" : "no full-rate device is available to clock the capture", privacy: .public) and the output is at \(outputRate, privacy: .public)Hz (\(reason.rawValue, privacy: .public)) — remote audio will be captured at reduced quality"
+                    )
+                    onEvent?(.rateDrift, .anomaly, [
+                        "source": "system-tap",
+                        "reason": "no full-rate anchor available",
+                        "trigger": reason.rawValue,
+                        "outputRate": "\(outputRate)",
+                    ])
+                case .bluetoothVolatileRate, .virtualVolatileClock:
+                    // Delivering fine at this instant; it just has no safety net if its rate changes
+                    // later (a Bluetooth profile flip, or a virtual device's hidden clock member
+                    // doing the same). Not an anomaly yet — the watchdog catches it if it happens.
+                    Logger.audio.warning(
+                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
+                    )
+                }
             }
         }
         guard let outUID = Self.deviceUID(anchor) else {
             throw SystemTapError.noDefaultOutput
         }
+        // Remember what is clocking us. When the anchor is NOT the default output — which is now the
+        // common case, since any Bluetooth or virtual default sends us elsewhere — the default-output
+        // listener will never tell us it vanished, and a vanished anchor stalls the IOProc silently.
+        stateLock.sync { anchorDeviceUID = outUID }
 
         let aggUID = Self.aggregateUIDPrefix + uuid
         let aggDesc: [String: Any] = [
@@ -247,6 +282,15 @@ final class SystemTapSession {
             }
         } else if tapFmtOK {
             Logger.audio.warning("System tap: aggregate input stream not readable after retries — falling back to tap-reported format (\(tapFmt.mSampleRate)Hz), which can be the wrong rate (chipmunk risk)")
+            // Record it, don't just log it. This is the exact read that produced the original
+            // chipmunk, and a `.warning` in the unified log reaches nobody: without an event the
+            // session isn't marked anomalous and `.diag.jsonl` may never be flushed, so the one
+            // branch the code itself calls chipmunk-risky was invisible to the forensic trail.
+            onEvent?(.rateDrift, .anomaly, [
+                "source": "system-tap",
+                "reason": "aggregate input stream unreadable — using tap-reported format",
+                "declared": "\(Int(tapFmt.mSampleRate))",
+            ])
             asbd = tapFmt
         } else {
             AudioHardwareDestroyAggregateDevice(agg)
@@ -462,6 +506,73 @@ final class SystemTapSession {
             Logger.audio.error("System tap: default-output HAL listener registration failed (\(st))")
             onEvent?(.streamStopError, .anomaly, ["source": "system-tap", "reason": "output monitor unavailable", "status": "\(st)"])
         }
+
+        // Second listener: the device LIST. Re-anchoring means our clock is often a device that is
+        // not the default output, and unplugging THAT fires no default-output notification — the
+        // IOProc simply stops being called. Nothing else would notice: the rate-drift watchdog is
+        // driven from inside the IOProc, so zero callbacks means zero detection, and the track just
+        // stops growing while the mic keeps recording and finalize reports success.
+        let listBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDeviceListChange()
+        }
+        stateLock.sync { deviceListListenerBlock = listBlock }
+        var listAddr = Self.deviceListAddress
+        let listSt = AudioObjectAddPropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
+        if listSt != noErr {
+            Logger.audio.error("System tap: device-list HAL listener registration failed (\(listSt))")
+            onEvent?(.streamStopError, .anomaly, [
+                "source": "system-tap", "reason": "device list monitor unavailable", "status": "\(listSt)",
+            ])
+        }
+    }
+
+    private static let deviceListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// A device appeared or disappeared. Only act if the one that vanished is the one clocking us —
+    /// otherwise every AirPods connect/disconnect in the building would tear a hole in the recording.
+    /// Runs on `monitorQueue`.
+    private func handleDeviceListChange() {
+        if stateLock.sync(execute: { isStopping }) { return }
+        guard let anchorUID = stateLock.sync(execute: { anchorDeviceUID }) else { return }
+        guard !Self.deviceExists(uid: anchorUID) else { return }
+        Logger.audio.error(
+            "System tap: the device clocking capture disappeared — rebuilding before the IOProc stalls silently"
+        )
+        onEvent?(.restartInPlace, .warning, [
+            "source": "system-tap", "reason": "clock anchor device removed",
+        ])
+        // Reuse the debounce so an unplug that also changes the default output collapses into one
+        // rebuild rather than two racing ones.
+        scheduleOutputReevaluation()
+    }
+
+    /// Whether a device with this UID is still present in the HAL's device list.
+    private static func deviceExists(uid: String) -> Bool {
+        var size = UInt32(0)
+        var addr = deviceListAddress
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr, size > 0
+        else {
+            // Fail OPEN: a spurious rebuild costs a real dead window in the recording, while a missed
+            // unplug is caught by the next device-list event (or, failing that, by the pad-ratio
+            // backstop). Log it so the two cases are distinguishable after the fact rather than
+            // silently identical.
+            Logger.audio.error("System tap: device list unreadable while checking the clock anchor — assuming it is still present")
+            return true
+        }
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        var devices = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr
+        else {
+            Logger.audio.error("System tap: device list read failed while checking the clock anchor — assuming it is still present")
+            return true
+        }
+        return devices.contains { deviceUID($0) == uid }
     }
 
     private func stopDeviceMonitoring() {
@@ -474,6 +585,17 @@ final class SystemTapSession {
             let system = AudioObjectID(kAudioObjectSystemObject)
             var addr = Self.defaultOutputAddress
             _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
+        }
+        let listBlock: AudioObjectPropertyListenerBlock? = stateLock.sync {
+            let b = deviceListListenerBlock
+            deviceListListenerBlock = nil
+            anchorDeviceUID = nil
+            return b
+        }
+        if let listBlock {
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            var listAddr = Self.deviceListAddress
+            _ = AudioObjectRemovePropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
         }
         // Listener removed first (so no new rebuild can be scheduled), then cancel any already-pending
         // debounced rebuild so it doesn't fire after stop() or keep a [weak self] closure alive (#112).
@@ -557,6 +679,37 @@ final class SystemTapSession {
             "declared": "\(Int(declaredRate))",
             "actual": "\(Int(effectiveRate))",
         ])
+
+        // Remediate, don't just narrate. Detection alone cost a real 24-minute meeting: the watchdog
+        // fired 5s in and the remaining 22 minutes were still written at half rate. Latch the forced
+        // anchor and rebuild — the next generation is clocked off a full-rate device, so the rest of
+        // the meeting records correctly. Bounded, because each rebuild resets the monitor and costs a
+        // short dead window; a device that drifts no matter what we clock off must not loop forever.
+        // Note the asymmetry: `driftMonitor` is reset per aggregate generation (in `teardownIO`), but
+        // `driftRemediations` deliberately is NOT — the budget is per SESSION, so unrelated rebuilds
+        // (an output switch) neither consume it nor refund it.
+        let attempt: Int? = stateLock.sync {
+            guard ClockAnchorPolicy.shouldRemediate(attemptsSoFar: driftRemediations) else { return nil }
+            forceFullRateAnchor = true
+            driftRemediations += 1
+            return driftRemediations
+        }
+        guard let attempt else {
+            Logger.audio.error(
+                "System tap: rate drift persists after \(ClockAnchorPolicy.maxDriftRemediations, privacy: .public) re-anchor attempts — not rebuilding again"
+            )
+            return
+        }
+        Logger.audio.error(
+            "System tap: re-anchoring the capture clock to a full-rate device and rebuilding (attempt \(attempt, privacy: .public))"
+        )
+        onEvent?(.restartInPlace, .warning, [
+            "source": "system-tap",
+            "reason": "rate drift remediation",
+            "attempt": "\(attempt)",
+        ])
+        // Hops to configQueue internally — never blocks the audio queue we are on.
+        rebuildForOutputChange()
     }
 
     /// An output device running at or above `minimum` Hz, preferring the built-in one.
@@ -584,13 +737,35 @@ final class SystemTapSession {
         for device in devices where hasOutputStreams(device) && isBuiltIn(device) {
             if deviceNominalRate(device) >= minimum { return device }
         }
-        // Fallback: a physical, non-virtual device. Virtual/aggregate devices (ZoomAudioDevice,
-        // BlackHole, Krisp) are exactly the ones that appear and vanish under us.
+        // Fallback: a physical, non-virtual, non-Bluetooth device. Virtual/aggregate devices
+        // (ZoomAudioDevice, BlackHole, Krisp) are exactly the ones that appear and vanish under us —
+        // and Bluetooth must be excluded here too, or a Mac with no usable built-in output would
+        // refuse the Bluetooth DEFAULT and then anchor to a different Bluetooth device: precisely the
+        // volatile clock this whole policy exists to forbid. If that empties the candidate list, the
+        // caller's no-anchor branch handles it honestly.
         for device in devices
-        where hasOutputStreams(device) && deviceNominalRate(device) >= minimum && !isVirtual(device) {
+        where hasOutputStreams(device) && deviceNominalRate(device) >= minimum
+            && !isVirtual(device) && !isBluetooth(device) {
             return device
         }
         return nil
+    }
+
+    /// Bluetooth links switch profile (A2DP -> HFP) whenever something opens their microphone — which
+    /// is precisely what recording a call does. The rate halves, and because a profile switch is not a
+    /// device change, no HAL listener fires and nothing rebuilds. So a Bluetooth device's rate right
+    /// now predicts nothing about its rate a second from now: never trust one as a clock.
+    private static func isBluetooth(_ device: AudioObjectID) -> Bool {
+        var transport = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &transport) == noErr
+        else { return false }   // unknown transport: leave it to the rate check, don't force a move
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     /// Virtual and aggregate devices come and go with the apps that install them — never a safe clock.

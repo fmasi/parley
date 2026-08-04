@@ -5,9 +5,13 @@ import AVFoundation
 
 struct AudioArchiverTests {
 
-    /// Helper: create a mono 48kHz WAV file with a sine wave.
-    private static func createTestWav(at url: URL, frequency: Double = 440.0, durationSeconds: Double = 1.0) throws {
-        let sampleRate: Double = 48000
+    /// Helper: create a mono WAV file with a sine wave (48 kHz unless overridden).
+    private static func createTestWav(
+        at url: URL,
+        frequency: Double = 440.0,
+        durationSeconds: Double = 1.0,
+        sampleRate: Double = 48000
+    ) throws {
         let frameCount = Int(sampleRate * durationSeconds)
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else {
@@ -24,6 +28,80 @@ struct AudioArchiverTests {
 
     enum ArchiverTestError: Error {
         case cannotCreateBuffer
+    }
+
+    /// The archiver takes its encode rate from the MIC file and never consulted the system file's.
+    /// `AVAudioFile.read(into:)` does not resample when the buffer's rate differs from the file's —
+    /// it raw-copies frames — so a rate-divergent pair encoded "successfully" into a structurally
+    /// perfect .m4a whose system channel was pitch-shifted and half-length, passed the (weak)
+    /// verification, and then BOTH source WAVs were deleted. That is irreversible: the lossless
+    /// header-rewrite rescue that gotcha #58 depends on needs the original WAV.
+    ///
+    /// A rate mismatch means we do not understand the inputs. Refuse, and keep the sources.
+    @Test func archiveRefusesRateMismatchAndKeepsSourceWavs() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("archiver-ratemismatch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("meeting.wav")
+        let micWav = dir.appendingPathComponent("meeting_mic.wav")
+        // Exactly the 2026-08-04 shape: system captured at 24 kHz, mic healthy at 48 kHz.
+        try Self.createTestWav(at: systemWav, frequency: 880, sampleRate: 24000)
+        try Self.createTestWav(at: micWav, frequency: 440, sampleRate: 48000)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await AudioArchiver.archive(
+                systemAudio: systemWav,
+                micAudio: micWav,
+                outputDirectory: dir,
+                bitrateKbps: 64
+            )
+        }
+
+        // The whole point: the originals must survive so the recording stays recoverable.
+        #expect(FileManager.default.fileExists(atPath: systemWav.path))
+        #expect(FileManager.default.fileExists(atPath: micWav.path))
+    }
+
+    // MARK: - The duration guard that licenses deleting the only lossless copy
+
+    /// `verify` is what permits step 5 to delete the source WAVs. "Non-empty with a track" was far
+    /// too weak a bar — a truncated or half-encoded archive satisfies it perfectly — so the duration
+    /// comparison is the part that makes "verified" mean something. Test it directly on both paths.
+    @Test func verifyRejectsAnArchiveShorterThanItsSource() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verify-short-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Produce a real, structurally valid 1-second archive...
+        let systemWav = dir.appendingPathComponent("sysonly.wav")
+        try Self.createTestWav(at: systemWav, frequency: 660, durationSeconds: 1.0)
+        let result = try await AudioArchiver.archiveSystemOnly(
+            systemAudio: systemWav, outputDirectory: dir, bitrateKbps: 64)
+
+        // ...then verify it while CLAIMING the source was 30 seconds long: exactly the shape of a
+        // truncated encode. It must be rejected rather than blessed.
+        await #expect(throws: (any Error).self) {
+            try await AudioArchiver.verify(outputURL: result.archivePath, expectedSeconds: 30.0)
+        }
+    }
+
+    /// The same archive must PASS against its true duration — the guard has to be precise, or it
+    /// would strand every recording as an un-archivable WAV.
+    @Test func verifyAcceptsAnArchiveMatchingItsSource() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("verify-ok-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("sysonly.wav")
+        try Self.createTestWav(at: systemWav, frequency: 660, durationSeconds: 1.0)
+        let result = try await AudioArchiver.archiveSystemOnly(
+            systemAudio: systemWav, outputDirectory: dir, bitrateKbps: 64)
+
+        try await AudioArchiver.verify(outputURL: result.archivePath, expectedSeconds: 1.0)
     }
 
     @Test func archiveCreatesStereoM4a() async throws {
