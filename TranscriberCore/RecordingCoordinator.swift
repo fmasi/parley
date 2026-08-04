@@ -283,7 +283,7 @@ public final class RecordingCoordinator {
                     outputDirectory: outputDir,
                     config: configManager.config
                 )
-                presentCompletedTranscription(result)
+                await presentCompletedTranscription(result)
             } else {
                 // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
                 // re-attached to a still-recording XPC service — Flow A never calls
@@ -340,7 +340,7 @@ public final class RecordingCoordinator {
                 }
 
                 if let result {
-                    presentCompletedTranscription(result)
+                    await presentCompletedTranscription(result)
                 } else {
                     // Chunked recovery found nothing to salvage (e.g. session.json existed but had
                     // no chunks and no orphan WAVs) — nothing to notify or rename.
@@ -534,14 +534,20 @@ public final class RecordingCoordinator {
     /// The post-transcription success sequence, previously duplicated verbatim in both the chunked
     /// and fallback branches of `stopRecording`: publish the transcript paths, return to idle,
     /// notify, then hand off to the rename dialog + auto-summary.
-    private func presentCompletedTranscription(_ result: TranscriptionResult) {
+    private func presentCompletedTranscription(_ result: TranscriptionResult) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         appState.phase = .idle
         // Say so when the capture layer flagged something. This used to be an unconditional
         // "Transcription Complete" while `capture_provenance` sat right here recording that the
         // recording was compromised — the app knew and the user did not (#58).
-        let anomalies = CaptureQualityNotice.anomalyCount(inTranscriptAt: result.jsonPath)
+        // Off the main actor: this is a synchronous file read of a transcript that can reach several
+        // hundred KB for a long meeting, on a path that has just finished writing it. `RecordingCoordinator`
+        // is @MainActor, so doing it inline would block the UI at exactly the wrong moment.
+        let jsonPath = result.jsonPath
+        let anomalies = await Task.detached(priority: .utility) {
+            CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
+        }.value
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"

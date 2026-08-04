@@ -121,6 +121,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         systemFramesWritten = 0
         systemPadMonitor.reset()
         micPadMonitor.reset()
+        // Same chunk scoping as the pad monitors: without this a drop that fires in chunk 1 latches
+        // `stickyDropReported` for the whole session, so a mismatch persisting into later chunks goes
+        // unreported even as those chunks are written empty.
+        stickyDropCount = 0
+        stickyDropReported = false
 
         return (oldSystemPath, oldMicPath)
     }
@@ -332,32 +337,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
 
-        // Copy sample data from CMSampleBuffer into AVAudioPCMBuffer
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var lengthAtOffset = 0, totalLength = 0
-        var rawPtr: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer, atOffset: 0,
-            lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength,
-            dataPointerOut: &rawPtr
-        )
-        guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
-
-        // Copy raw bytes into the destination, clamped to its real capacity — a route change can
-        // briefly deliver a buffer whose byte count exceeds frameLength*sampleSize, and an unbounded
-        // memcpy would overrun the heap allocation (#94).
-        //
-        // Branch on `isInterleaved`, NOT on which channel-data accessor is non-nil. Interleaved
-        // buffers do NOT have nil `floatChannelData` — they expose a single interleaved plane — so
-        // the old ordering sent interleaved stereo down the planar branch, where the capacity clamp
-        // omitted the channel count and silently dropped HALF of every buffer. The destination tail
-        // stayed zero, producing choppy mic audio at the correct duration with no error reported:
-        // the same silent-divergence class as the chipmunk (#58), arriving through the clamp that
-        // was added to fix the overrun.
-        // Take the sample width from the format itself rather than inferring it from which accessor
-        // is non-nil — that inference is exactly what went wrong here.
-        // `mBytesPerFrame / channels` rather than `mBitsPerChannel / 8`: a 24-bit-in-4-byte container
-        // has 24 bits per channel but occupies 4 bytes, and the byte width is what memcpy needs.
+        // Sample width from the format, NOT from which channel-data accessor is non-nil — that
+        // inference is what broke stereo mics: interleaved buffers do NOT have nil `floatChannelData`
+        // (they expose one interleaved plane), so branching on it sent interleaved stereo down the
+        // planar path where the clamp omitted the channel count and dropped half of every buffer.
+        // `mBytesPerFrame` rather than `mBitsPerChannel / 8`: a 24-bit-in-4-byte container has 24 bits
+        // per channel but occupies 4, and memcpy needs the byte width.
         let asbdPtr = inputFormat.streamDescription
         let planeChannels = max(1, Int(inputFormat.channelCount))
         let frameBytes = Int(asbdPtr.pointee.mBytesPerFrame)
@@ -365,33 +350,62 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             ? (inputFormat.isInterleaved ? frameBytes / planeChannels : frameBytes)
             : Int(asbdPtr.pointee.mBitsPerChannel) / 8
         guard bytesPerSample > 0 else { return }
+
+        // Let CoreMedia hand us a structured AudioBufferList instead of reasoning about the block
+        // buffer's internal layout ourselves. A `CMBlockBuffer` may be composed of several
+        // DISCONTIGUOUS memory blocks — one per plane is a valid layout — and it may 16-byte-align
+        // each plane, so computing a plane's address as `base + index * planeCapacity` can read into
+        // arbitrary memory. `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` exists exactly
+        // because that layout is not a contract; it returns one `AudioBuffer` per plane (or a single
+        // one when interleaved), each with its own pointer and true byte count. Copying buffer-to-
+        // buffer then handles both layouts with no arithmetic and no assumptions.
+        var ablSize = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &ablSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: nil
+        )
+        guard status == noErr, ablSize > 0 else { return }
+        let ablRaw = UnsafeMutableRawPointer.allocate(
+            byteCount: ablSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { ablRaw.deallocate() }
+        let ablPtr = ablRaw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        // `retainedBlockBuffer` owns the memory the buffer list points into — it must outlive the copy.
+        var retainedBlockBuffer: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablPtr,
+            bufferListSize: ablSize,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &retainedBlockBuffer
+        )
+        guard status == noErr else { return }
+
         var copiedBytes = 0
-        if inputFormat.isInterleaved {
-            // One plane holding every channel.
-            let buffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
-            guard let dstPtr = buffers.first?.mData else { return }
-            copiedBytes = min(Int(buffers[0].mDataByteSize), totalLength)
-            memcpy(dstPtr, ptr, copiedBytes)
-        } else {
-            // One plane PER channel, laid out consecutively in the source block buffer.
-            let buffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
-            let planeCapacity = PCMCopyPlan.capacityBytes(
-                frameLength: Int(pcmBuffer.frameLength),
-                channelCount: Int(inputFormat.channelCount),
-                bytesPerSample: bytesPerSample,
-                isInterleaved: false)
-            // A short source shortfall lands on the LAST plane first (only high indices see a reduced
-            // `available`), so the usable frame count is the MINIMUM across planes — not plane 0's,
-            // which is always full and would defeat the shrink below, leaving plane 1's tail as
-            // uninitialised heap that the converter turns into a noise blip in one channel.
+        withExtendedLifetime(retainedBlockBuffer) {
+            let source = UnsafeMutableAudioBufferListPointer(ablPtr)
+            let destination = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+            let planes = min(source.count, destination.count)
+            guard planes > 0 else { return }
+            // A short buffer shortens whichever plane it lands on, so the usable frame count is the
+            // MINIMUM across planes — taking plane 0's would leave the others' tails as uninitialised
+            // heap, which the converter turns into a noise blip rather than the silence it resembles.
             var minPlaneBytes = Int.max
-            for (index, buffer) in buffers.enumerated() {
-                guard let dstPtr = buffer.mData else { continue }
-                let sourceOffset = index * planeCapacity
-                guard sourceOffset < totalLength else { minPlaneBytes = 0; break }
-                let available = min(planeCapacity, totalLength - sourceOffset)
-                let bytes = min(Int(buffer.mDataByteSize), available)
-                memcpy(dstPtr, ptr.advanced(by: sourceOffset), bytes)
+            for index in 0..<planes {
+                guard let srcPtr = source[index].mData,
+                      let dstPtr = destination[index].mData else { continue }
+                // Clamp to the destination too: a route change can briefly deliver more bytes than
+                // frameLength implies, and an unbounded memcpy would overrun the allocation (#94).
+                let bytes = min(Int(source[index].mDataByteSize), Int(destination[index].mDataByteSize))
+                memcpy(dstPtr, srcPtr, bytes)
                 minPlaneBytes = min(minPlaneBytes, bytes)
             }
             copiedBytes = minPlaneBytes == Int.max ? 0 : minPlaneBytes

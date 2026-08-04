@@ -462,9 +462,12 @@ public enum AudioArchiver {
         guard actualSeconds.isFinite, actualSeconds > 0 else {
             throw AudioArchiverError.verificationFailed("Output duration is unreadable")
         }
-        // AAC pads to a whole packet (1024 frames) and the encoder can add priming, so allow a
-        // second of slack. The failures worth catching are proportional, not marginal.
-        let tolerance = 1.0
+        // AAC pads to a whole packet (1024 frames ≈ 21 ms at 48 kHz) and priming adds ≈44 ms, so the
+        // real slack needed is well under 100 ms. A 1-second tolerance was far too loose: for a
+        // 1-second source it made the check vacuous — any positive duration passed — which is exactly
+        // the case the unit tests exercise. 250 ms keeps ~4x margin over the encoder's real overhead
+        // while staying meaningful for short chunks.
+        let tolerance = 0.25
         guard abs(actualSeconds - expectedSeconds) <= tolerance else {
             throw AudioArchiverError.verificationFailed(
                 "Output is \(String(format: "%.1f", actualSeconds))s but sources are \(String(format: "%.1f", expectedSeconds))s"
