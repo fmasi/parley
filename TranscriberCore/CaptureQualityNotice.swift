@@ -36,6 +36,10 @@ public enum CaptureQualityNotice {
     /// crash-recovery and salvage paths get the same treatment as a clean stop for free — those are
     /// exactly the paths where a compromised capture is most likely and least examined.
     /// Returns 0 when absent or unreadable: never invent an alarm.
+    ///
+    /// - Important: synchronous file I/O. A long meeting's transcript can reach several hundred KB,
+    ///   so call this OFF the main actor (`RecordingCoordinator` uses a detached task) — blocking
+    ///   the UI to decide how to phrase a notification would be a poor trade.
     public static func anomalyCount(inTranscriptAt url: URL) -> Int {
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -547,25 +547,37 @@ public final class RecordingCoordinator {
         let anomalies = await Task.detached(priority: .utility) {
             CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
         }.value
-        // Go idle only AFTER the async gap — setting it first let the user start a new recording
-        // during the read, so `presentTranscript` could fire into an active session. But deferring
-        // it opens the mirror-image risk: the main actor is free during the suspension, so a crash
-        // handler or a new session may legitimately have moved the phase on, and an unconditional
-        // assignment here would stamp `.idle` over a live recording. Only retire the phase we came
-        // in on.
+        // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
+        // async read (setting it first let a new recording start mid-read), but deferring opens the
+        // mirror-image risk: the main actor is free during the suspension, so a crash handler or a
+        // newly started session may legitimately have moved the phase on. Guarding only the `.idle`
+        // assignment protects the wrong thing — the intrusive part is `presentTranscript`, which
+        // would open the rename dialog on top of a live recording.
+        var sessionStillOurs = false
         if case .transcribing = appState.phase {
             appState.phase = .idle
+            sessionStillOurs = true
         }
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
             )
         }
+        // The notification is passive, so it always fires: the transcript IS finished, and staying
+        // silent about it would be the bigger failure.
         notify(
             CaptureQualityNotice.completionTitle(anomalyCount: anomalies),
             CaptureQualityNotice.completionBody(
                 fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies)
         )
+        guard sessionStillOurs else {
+            // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is
+            // only the modal presentation that is skipped.
+            Logger.state.warning(
+                "Recording state advanced while finishing the previous transcript — skipping the rename dialog so it cannot open over a live session"
+            )
+            return
+        }
         presentTranscript(result.jsonPath, configManager.config)
     }
 

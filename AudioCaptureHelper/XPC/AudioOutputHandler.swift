@@ -216,7 +216,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Liveness (#86): a buffer we can actually WRITE arrived. Stamped after the gate so dropped
         // buffers can never masquerade as a healthy stream.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        // Re-arm on recovery: a stream that resumes and then fails again in the same chunk is a
+        // second, separate event, and swallowing it would hide the later half of the recording
+        // going missing. The latch only exists to stop one sustained failure logging per buffer.
         stickyDropCount = 0
+        stickyDropReported = false
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         var lengthAtOffset = 0, totalLength = 0
