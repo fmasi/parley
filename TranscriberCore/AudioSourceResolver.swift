@@ -21,9 +21,6 @@ public enum AudioSourceResolverError: LocalizedError {
 /// - Right channel = remote system audio (other participants)
 public enum AudioSourceResolver {
 
-    /// Split a stereo AAC file into two mono WAV files.
-    /// Returns (local mic, remote system) paths.
-    /// L channel → local mic, R channel → remote system.
     /// Real channel count of an audio file's first audio track.
     ///
     /// `splitChannels` asks the reader for 2 channels, so a MONO source is upmixed to L=R and the
@@ -40,6 +37,9 @@ public enum AudioSourceResolver {
         return Int(asbd.pointee.mChannelsPerFrame)
     }
 
+    /// Split a stereo AAC file into two mono WAV files.
+    /// Returns (local mic, remote system) paths.
+    /// L channel → local mic, R channel → remote system.
     public static func splitChannels(
         stereoAac: URL,
         outputDirectory: URL

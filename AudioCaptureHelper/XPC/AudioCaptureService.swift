@@ -96,7 +96,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             )
             diagnostics.record(CaptureEvent(
                 timestamp: Date(), origin: .helper,
-                kind: .streamStopError, severity: .anomaly,
+                kind: .captureSourceFallback, severity: .anomaly,
                 detail: [
                     "reason": "unrecognized system_audio_source — fell back to sck",
                     "requested": systemAudioSource,

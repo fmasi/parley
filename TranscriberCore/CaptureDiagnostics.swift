@@ -42,6 +42,12 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// stopped being written while the stream still appears to run. Distinct from the transient
     /// `formatChanged` so the two can be told apart when judging whether a recording is compromised.
     case sustainedFormatDrop
+
+    /// The configured system-audio source could not be honoured and capture fell back to
+    /// ScreenCaptureKit. A user who explicitly chose the Core Audio tap usually did so BECAUSE SCK
+    /// records silence for their Continuity/VoIP calls — so a silent downgrade produces a
+    /// structurally valid recording whose remote track is empty. Severity `.anomaly`.
+    case captureSourceFallback
 }
 
 extension CaptureEventKind {
@@ -62,6 +68,7 @@ extension CaptureEventKind {
         .sustainedFormatDrop,
         .systemAudioUnrecovered,
         .restartFailed,
+        .captureSourceFallback,
     ]
 }
 
