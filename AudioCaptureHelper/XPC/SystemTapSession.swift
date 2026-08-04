@@ -67,10 +67,12 @@ final class SystemTapSession {
     /// Private aggregate UID prefix — also used to sweep orphans from a prior crash on startup.
     private static let aggregateUIDPrefix = "eu.fmasi.parley.system-tap."
 
-    /// Rates that only ever appear because a Bluetooth link dropped to a hands-free profile
-    /// (A2DP -> HFP). A 44.1 kHz output is perfectly healthy and must NOT trigger re-anchoring:
-    /// substituting the clock for a device that is fine is a risk with no upside.
-    private static let handsFreeRates: Set<Int> = [8000, 16000, 24000, 32000]
+    /// Latched once the watchdog measures a real frame shortfall: from then on every rebuild clocks
+    /// off a full-rate device, whatever the output device claims about itself. Mutated under `stateLock`.
+    private var forceFullRateAnchor = false
+    /// Bounded (`ClockAnchorPolicy.maxDriftRemediations`) so a permanently-drifting device cannot
+    /// rebuild in a loop, tearing a dead window in the recording each time. Under `stateLock`.
+    private var driftRemediations = 0
 
     /// Rate-drift watchdog. If the device silently changes rate underneath us (Bluetooth A2DP -> HFP
     /// is NOT a device change, so no output-switch listener fires), the IOProc keeps delivering
@@ -165,25 +167,39 @@ final class SystemTapSession {
         // letting their headset's limitations dictate what we record.
         var anchor = output
         let outputRate = Int(Self.deviceNominalRate(output).rounded())
-        if Self.handsFreeRates.contains(outputRate) {
+        let decision = ClockAnchorPolicy.decide(
+            outputRate: outputRate,
+            isBluetooth: Self.isBluetooth(output),
+            forcedByDrift: stateLock.sync { forceFullRateAnchor })
+        if case .reanchor(let reason) = decision {
             if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
                 Logger.audio.info(
-                    "System tap: output device \(Self.deviceName(output), privacy: .public) is at \(outputRate, privacy: .public)Hz (degraded) — clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead"
+                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
                 )
                 anchor = fullRate
             } else {
-                // Degraded output and NO full-rate device to clock off (a Mac with no built-in
-                // output, headset as the only device). We are about to capture the remote side at
-                // the headset's hands-free rate. Say so at setup rather than leaving it to the
-                // watchdog, which only fires 5+ seconds in.
-                Logger.audio.error(
-                    "System tap: output device is at \(outputRate, privacy: .public)Hz (hands-free) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
-                )
-                onEvent?(.rateDrift, .anomaly, [
-                    "source": "system-tap",
-                    "reason": "degraded output rate, no full-rate anchor available",
-                    "outputRate": "\(outputRate)",
-                ])
+                // Nothing full-rate to clock off (a Mac with no built-in output, headset as the only
+                // device). Whether that is already costing us audio depends on WHY we wanted to move.
+                switch reason {
+                case .degradedRate, .driftRemediation:
+                    // Actively degraded right now. Say so at setup rather than leaving it to the
+                    // watchdog, which only fires 5+ seconds in.
+                    Logger.audio.error(
+                        "System tap: output device is at \(outputRate, privacy: .public)Hz (\(reason.rawValue, privacy: .public)) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
+                    )
+                    onEvent?(.rateDrift, .anomaly, [
+                        "source": "system-tap",
+                        "reason": "no full-rate anchor available",
+                        "trigger": reason.rawValue,
+                        "outputRate": "\(outputRate)",
+                    ])
+                case .bluetoothVolatileRate:
+                    // Delivering fine at this instant; it just has no safety net if it flips to HFP
+                    // later. Not an anomaly yet — the watchdog will catch it if it happens.
+                    Logger.audio.warning(
+                        "System tap: clocking off Bluetooth output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if it drops to hands-free"
+                    )
+                }
             }
         }
         guard let outUID = Self.deviceUID(anchor) else {
@@ -557,6 +573,34 @@ final class SystemTapSession {
             "declared": "\(Int(declaredRate))",
             "actual": "\(Int(effectiveRate))",
         ])
+
+        // Remediate, don't just narrate. Detection alone cost a real 24-minute meeting: the watchdog
+        // fired 5s in and the remaining 22 minutes were still written at half rate. Latch the forced
+        // anchor and rebuild — the next generation is clocked off a full-rate device, so the rest of
+        // the meeting records correctly. Bounded, because each rebuild resets the monitor and costs a
+        // short dead window; a device that drifts no matter what we clock off must not loop forever.
+        let attempt: Int? = stateLock.sync {
+            guard ClockAnchorPolicy.shouldRemediate(attemptsSoFar: driftRemediations) else { return nil }
+            forceFullRateAnchor = true
+            driftRemediations += 1
+            return driftRemediations
+        }
+        guard let attempt else {
+            Logger.audio.error(
+                "System tap: rate drift persists after \(ClockAnchorPolicy.maxDriftRemediations, privacy: .public) re-anchor attempts — not rebuilding again"
+            )
+            return
+        }
+        Logger.audio.error(
+            "System tap: re-anchoring the capture clock to a full-rate device and rebuilding (attempt \(attempt, privacy: .public))"
+        )
+        onEvent?(.restartInPlace, .warning, [
+            "source": "system-tap",
+            "reason": "rate drift remediation",
+            "attempt": "\(attempt)",
+        ])
+        // Hops to configQueue internally — never blocks the audio queue we are on.
+        rebuildForOutputChange()
     }
 
     /// An output device running at or above `minimum` Hz, preferring the built-in one.
@@ -591,6 +635,23 @@ final class SystemTapSession {
             return device
         }
         return nil
+    }
+
+    /// Bluetooth links switch profile (A2DP -> HFP) whenever something opens their microphone — which
+    /// is precisely what recording a call does. The rate halves, and because a profile switch is not a
+    /// device change, no HAL listener fires and nothing rebuilds. So a Bluetooth device's rate right
+    /// now predicts nothing about its rate a second from now: never trust one as a clock.
+    private static func isBluetooth(_ device: AudioObjectID) -> Bool {
+        var transport = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &transport) == noErr
+        else { return false }   // unknown transport: leave it to the rate check, don't force a move
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     /// Virtual and aggregate devices come and go with the apps that install them — never a safe clock.
