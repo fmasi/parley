@@ -538,7 +538,20 @@ public final class RecordingCoordinator {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         appState.phase = .idle
-        notify("Transcription Complete", result.jsonPath.lastPathComponent)
+        // Say so when the capture layer flagged something. This used to be an unconditional
+        // "Transcription Complete" while `capture_provenance` sat right here recording that the
+        // recording was compromised — the app knew and the user did not (#58).
+        let anomalies = CaptureQualityNotice.anomalyCount(inTranscriptAt: result.jsonPath)
+        if anomalies > 0 {
+            Logger.state.error(
+                "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
+            )
+        }
+        notify(
+            CaptureQualityNotice.completionTitle(anomalyCount: anomalies),
+            CaptureQualityNotice.completionBody(
+                fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies)
+        )
         presentTranscript(result.jsonPath, configManager.config)
     }
 

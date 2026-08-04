@@ -124,6 +124,20 @@ enum CLIHandler {
                 shouldSplit = promptForStereoHandling()
             }
 
+            // Splitting a MONO file is meaningless: the resolver upmixes to 2 channels, so L and R
+            // are identical and the speaker is transcribed as both sides of the conversation — then
+            // echo dedup fights itself over the duplicate. Check the real channel count rather than
+            // trusting the extension.
+            let channelCount = try? await AudioSourceResolver.channelCount(of: inputURLs[0])
+            if shouldSplit, let channelCount, channelCount < 2 {
+                print("""
+                Refusing --split: '\(inputURLs[0].lastPathComponent)' is mono (\(channelCount) channel).
+                Splitting it would duplicate the same audio into both the local and remote streams.
+                Re-run without --split (or with --no-split) to transcribe it as a single stream.
+                """)
+                exit(2)
+            }
+
             if shouldSplit {
                 let split = try await AudioSourceResolver.splitChannels(
                     stereoAac: inputURLs[0], outputDirectory: outputDir

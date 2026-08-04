@@ -27,6 +27,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var micFramesWritten: Int64 = 0
     private var systemFramesWritten: Int64 = 0
 
+    /// How much of each track we fabricated rather than captured. The padder's whole job is to hold
+    /// the wall clock, which means it silently repairs the symptom of a device under-delivering — so
+    /// the ratio it produces is the one signal that catches that class without knowing the mechanism.
+    /// Scoped to the session (not the chunk): a per-chunk view would reset away a slow bleed.
+    private var systemPadMonitor = PadRatioMonitor()
+    private var micPadMonitor = PadRatioMonitor()
+
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
     var diagnostics: LockedDiagnostics?
@@ -109,6 +116,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         timelineAnchorPTS = nil
         micFramesWritten = 0
         systemFramesWritten = 0
+        systemPadMonitor.reset()
+        micPadMonitor.reset()
 
         return (oldSystemPath, oldMicPath)
     }
@@ -137,11 +146,14 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
-        // Liveness stamp (#86): record that a real system buffer arrived, independent of its energy.
-        // The in-place restart's probe reads this from another queue to verify a rebuilt stream is
-        // actually delivering frames. Stamped on EVERY system buffer, before any format-drop early
-        // return — a muted remote still delivers buffers, so this never mistakes mute for failure.
-        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        // Liveness stamp (#86) moved BELOW the sticky format gate — see the stamp site after it.
+        //
+        // It used to be stamped here, on every arrival, before any format-drop early return. That
+        // made a stream whose buffers were all being DROPPED look perfectly healthy: the #86 restart
+        // probe would see fresh arrivals, conclude frames had resumed, reset its restart budget, and
+        // bless a stream writing nothing to disk. Liveness has to mean "we are recording", not "the
+        // OS is still calling us". A muted remote is still counted as alive, because a muted remote
+        // delivers buffers that PASS the gate — only writer-incompatible ones are excluded.
 
         // Per-buffer format tracking (#94): system audio is pinned to 48kHz mono by the stream
         // config, so the steady state is `.first` once then `.unchanged`. A writer-incompatible
@@ -186,9 +198,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                     sampleRate: cfg.rate, channelCount: Int(cfg.channels),
                     isFloat: cfg.isFloat, bitsPerChannel: Int(cfg.bitsPerChannel)
                 )
-                if !configured.isWriterCompatible(with: fmt) { return }
+                if !configured.isWriterCompatible(with: fmt) {
+                    noteStickyDrop(configured: configured, incoming: fmt)
+                    return
+                }
             }
         }
+
+        // Liveness (#86): a buffer we can actually WRITE arrived. Stamped after the gate so dropped
+        // buffers can never masquerade as a healthy stream.
+        systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        stickyDropCount = 0
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         var lengthAtOffset = 0, totalLength = 0
@@ -203,25 +223,32 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Pad the system track to its shared-timeline position before appending — fills a dropped or
         // #86-restarted run, and the startup offset when the mic anchored the timeline first (HOL-1).
         let sysRate = systemFormatInfo.map { $0.rate } ?? AudioConverter.outputSampleRate
-        systemFramesWritten += timelineSilencePad(
+        let sysPad = timelineSilencePad(
             into: systemWriter, framesWritten: systemFramesWritten, rate: sysRate,
             pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), label: "system"
         )
+        systemFramesWritten += sysPad
 
         let isFloat = isFloatFormat(from: sampleBuffer)
+        var dataFrames: Int64 = 0
         if isFloat {
             let count = totalLength / MemoryLayout<Float32>.size
             ptr.withMemoryRebound(to: Float32.self, capacity: count) { floatPtr in
                 systemWriter.append(UnsafeBufferPointer(start: floatPtr, count: count))
             }
             systemFramesWritten += Int64(count)
+            dataFrames = Int64(count)
         } else {
             let count = totalLength / MemoryLayout<Int16>.size
             ptr.withMemoryRebound(to: Int16.self, capacity: count) { int16Ptr in
                 systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
             systemFramesWritten += Int64(count)
+            dataFrames = Int64(count)
         }
+        notePadding(
+            systemPadMonitor.record(padFrames: sysPad, dataFrames: dataFrames, rate: sysRate),
+            track: "system")
     }
 
     /// Append pre-normalized 48 kHz mono Int16 system samples from the Core Audio output tap (#103,
@@ -249,11 +276,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let rate = systemFormatInfo?.rate ?? AudioConverter.outputSampleRate
-        systemFramesWritten += timelineSilencePad(
+        let pad = timelineSilencePad(
             into: systemWriter, framesWritten: systemFramesWritten, rate: rate, pts: pts, label: "system"
         )
+        systemFramesWritten += pad
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
+        // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
+        notePadding(
+            systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
+            track: "system")
     }
 
     // MARK: - Mic audio (normalized via AudioConverter)
@@ -377,12 +409,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
     /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
-        micFramesWritten += timelineSilencePad(
+        let pad = timelineSilencePad(
             into: micWriter, framesWritten: micFramesWritten,
             rate: AudioConverter.outputSampleRate, pts: pts, label: "mic"
         )
+        micFramesWritten += pad
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
+        notePadding(
+            micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
+                                 rate: AudioConverter.outputSampleRate),
+            track: "mic")
     }
 
     /// Insert leading/gap silence into `writer` so its next sample lands at this buffer's position on
@@ -426,6 +463,55 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let silence = [Int16](repeating: 0, count: Int(pad))
         silence.withUnsafeBufferPointer { writer.appendInt16($0) }
         return pad
+    }
+
+    /// Consecutive buffers rejected by the sticky format gate. Reset by the first accepted buffer.
+    private var stickyDropCount = 0
+    private var stickyDropReported = false
+
+    /// A sustained run of dropped buffers means the system track has stopped growing while the stream
+    /// still appears to run. The gate itself is correct — appending mismatched samples under a stale
+    /// WAV header would be worse — but dropping silently is how a recording ends up half-empty with
+    /// nothing to show for it. One drop is a transient; hundreds is a broken recording.
+    private func noteStickyDrop(configured: AudioStreamFormat, incoming: AudioStreamFormat) {
+        stickyDropCount += 1
+        // ~100 buffers is a couple of seconds of audio — long past "transient", short of alarmist.
+        guard stickyDropCount == 100, !stickyDropReported else { return }
+        stickyDropReported = true
+        Logger.audio.error(
+            """
+            System audio: \(self.stickyDropCount, privacy: .public) consecutive buffers dropped — stream \
+            delivers \(Int(incoming.sampleRate), privacy: .public)Hz/\(incoming.channelCount, privacy: .public)ch \
+            but the writer is configured for \(Int(configured.sampleRate), privacy: .public)Hz/\(configured.channelCount, privacy: .public)ch. \
+            The system track is no longer being written.
+            """
+        )
+        record(.formatChanged, .anomaly, [
+            "reason": "sustained sticky format drop — system track not being written",
+            "configured": "\(Int(configured.sampleRate))Hz/\(configured.channelCount)ch",
+            "incoming": "\(Int(incoming.sampleRate))Hz/\(incoming.channelCount)ch",
+            "dropped_buffers": "\(stickyDropCount)",
+        ])
+    }
+
+    /// Surface a track that is mostly fabricated silence. Fires at most once per track per session —
+    /// the original failure's per-buffer pad log fired ~57,000 times and told nobody anything.
+    private func notePadding(_ verdict: PadRatioMonitor.Verdict, track: String) {
+        guard case .excessive(let ratio, let paddedSeconds, let totalSeconds) = verdict else { return }
+        Logger.audio.error(
+            """
+            \(track, privacy: .public) track is \(Int(ratio * 100), privacy: .public)% fabricated silence \
+            (\(Int(paddedSeconds), privacy: .public)s padded of \(Int(totalSeconds), privacy: .public)s). \
+            The device is delivering fewer frames than its declared rate implies — the recording holds \
+            the right duration but its content is compromised.
+            """
+        )
+        record(.excessivePadding, .anomaly, [
+            "track": track,
+            "ratio": String(format: "%.3f", ratio),
+            "padded_seconds": "\(Int(paddedSeconds))",
+            "total_seconds": "\(Int(totalSeconds))",
+        ])
     }
 
     /// Record the mic input format, but only when it CHANGES — so a mid-stream mic switch (and an

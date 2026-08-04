@@ -63,6 +63,15 @@ final class SystemTapSession {
     private let monitorQueue = DispatchQueue(label: "system-tap.device-monitor")
     /// Retained so the SAME reference can be passed to remove it (Swift boxes a fresh block per call).
     private var outputListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Second HAL listener, on the device LIST. The default-output listener cannot cover us any more:
+    /// re-anchoring means our clock is routinely some device the user never selected, and when that
+    /// one is unplugged no default-output notification fires. The IOProc then stalls forever — and a
+    /// stall is invisible to the rate-drift watchdog, which only runs when buffers arrive. Mirrors
+    /// what `MicCaptureSession` has always done (gotcha #55).
+    private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
+    /// UID of the device currently clocking the aggregate, so a device-list change can tell whether
+    /// the one that matters is the one that disappeared. Guarded by `stateLock`.
+    private var anchorDeviceUID: String?
 
     /// Private aggregate UID prefix — also used to sweep orphans from a prior crash on startup.
     private static let aggregateUIDPrefix = "eu.fmasi.parley.system-tap."
@@ -207,6 +216,10 @@ final class SystemTapSession {
         guard let outUID = Self.deviceUID(anchor) else {
             throw SystemTapError.noDefaultOutput
         }
+        // Remember what is clocking us. When the anchor is NOT the default output — which is now the
+        // common case, since any Bluetooth or virtual default sends us elsewhere — the default-output
+        // listener will never tell us it vanished, and a vanished anchor stalls the IOProc silently.
+        stateLock.sync { anchorDeviceUID = outUID }
 
         let aggUID = Self.aggregateUIDPrefix + uuid
         let aggDesc: [String: Any] = [
@@ -489,6 +502,63 @@ final class SystemTapSession {
             Logger.audio.error("System tap: default-output HAL listener registration failed (\(st))")
             onEvent?(.streamStopError, .anomaly, ["source": "system-tap", "reason": "output monitor unavailable", "status": "\(st)"])
         }
+
+        // Second listener: the device LIST. Re-anchoring means our clock is often a device that is
+        // not the default output, and unplugging THAT fires no default-output notification — the
+        // IOProc simply stops being called. Nothing else would notice: the rate-drift watchdog is
+        // driven from inside the IOProc, so zero callbacks means zero detection, and the track just
+        // stops growing while the mic keeps recording and finalize reports success.
+        let listBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDeviceListChange()
+        }
+        stateLock.sync { deviceListListenerBlock = listBlock }
+        var listAddr = Self.deviceListAddress
+        let listSt = AudioObjectAddPropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
+        if listSt != noErr {
+            Logger.audio.error("System tap: device-list HAL listener registration failed (\(listSt))")
+            onEvent?(.streamStopError, .anomaly, [
+                "source": "system-tap", "reason": "device list monitor unavailable", "status": "\(listSt)",
+            ])
+        }
+    }
+
+    private static let deviceListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// A device appeared or disappeared. Only act if the one that vanished is the one clocking us —
+    /// otherwise every AirPods connect/disconnect in the building would tear a hole in the recording.
+    /// Runs on `monitorQueue`.
+    private func handleDeviceListChange() {
+        if stateLock.sync(execute: { isStopping }) { return }
+        guard let anchorUID = stateLock.sync(execute: { anchorDeviceUID }) else { return }
+        guard !Self.deviceExists(uid: anchorUID) else { return }
+        Logger.audio.error(
+            "System tap: the device clocking capture disappeared — rebuilding before the IOProc stalls silently"
+        )
+        onEvent?(.restartInPlace, .warning, [
+            "source": "system-tap", "reason": "clock anchor device removed",
+        ])
+        // Reuse the debounce so an unplug that also changes the default output collapses into one
+        // rebuild rather than two racing ones.
+        scheduleOutputReevaluation()
+    }
+
+    /// Whether a device with this UID is still present in the HAL's device list.
+    private static func deviceExists(uid: String) -> Bool {
+        var size = UInt32(0)
+        var addr = deviceListAddress
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr, size > 0
+        else { return true }   // can't tell — assume present rather than churn the aggregate
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        var devices = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr
+        else { return true }
+        return devices.contains { deviceUID($0) == uid }
     }
 
     private func stopDeviceMonitoring() {
@@ -501,6 +571,17 @@ final class SystemTapSession {
             let system = AudioObjectID(kAudioObjectSystemObject)
             var addr = Self.defaultOutputAddress
             _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
+        }
+        let listBlock: AudioObjectPropertyListenerBlock? = stateLock.sync {
+            let b = deviceListListenerBlock
+            deviceListListenerBlock = nil
+            anchorDeviceUID = nil
+            return b
+        }
+        if let listBlock {
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            var listAddr = Self.deviceListAddress
+            _ = AudioObjectRemovePropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
         }
         // Listener removed first (so no new rebuild can be scheduled), then cancel any already-pending
         // debounced rebuild so it doesn't fire after stop() or keep a [weak self] closure alive (#112).

@@ -24,6 +24,22 @@ public enum AudioSourceResolver {
     /// Split a stereo AAC file into two mono WAV files.
     /// Returns (local mic, remote system) paths.
     /// L channel → local mic, R channel → remote system.
+    /// Real channel count of an audio file's first audio track.
+    ///
+    /// `splitChannels` asks the reader for 2 channels, so a MONO source is upmixed to L=R and the
+    /// "split" yields two identical streams — the same person transcribed as both sides of the
+    /// conversation. Callers offering a split must consult this first rather than inferring stereo
+    /// from a file extension. Returns nil when the track carries no readable format description.
+    public static func channelCount(of url: URL) async throws -> Int? {
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
+        let descriptions = try await track.load(.formatDescriptions)
+        guard let description = descriptions.first,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)
+        else { return nil }
+        return Int(asbd.pointee.mChannelsPerFrame)
+    }
+
     public static func splitChannels(
         stereoAac: URL,
         outputDirectory: URL

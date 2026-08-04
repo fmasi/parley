@@ -28,6 +28,15 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// hold the wall clock, and the remote audio comes out 2x-fast with gaps — correct duration,
     /// corrupt content. The stream is still RUNNING, so this is not a stop error. Severity `.anomaly`.
     case rateDrift
+
+    /// Too much of a written track is silence we FABRICATED rather than captured. The timeline padder
+    /// inserts silence so samples land at their true wall-clock position; when a device under-delivers,
+    /// that same mechanism quietly makes up the shortfall and turns a detectably-short file into an
+    /// undetectably-corrupt one of exactly the right length. Padding only ever responds to delivery
+    /// deficit — never to quiet audio, which still arrives as buffers of zeros — so a high ratio means
+    /// frames genuinely went missing, whatever the cause. This is the mechanism-independent backstop
+    /// for the whole silent-divergence class (#58). Severity `.anomaly`.
+    case excessivePadding
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.
