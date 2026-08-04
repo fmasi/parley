@@ -505,7 +505,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private func noteStickyDrop(configured: AudioStreamFormat, incoming: AudioStreamFormat) {
         stickyDropCount += 1
         // ~100 buffers is a couple of seconds of audio — long past "transient", short of alarmist.
-        guard stickyDropCount == 100, !stickyDropReported else { return }
+        guard stickyDropCount >= 100, !stickyDropReported else { return }
         stickyDropReported = true
         Logger.audio.error(
             """

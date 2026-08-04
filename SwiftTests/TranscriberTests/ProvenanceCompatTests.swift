@@ -64,12 +64,15 @@ import Foundation
         #expect(decoded == original)
     }
 
-    /// A whole legacy `SessionState` must survive — this is the path crash recovery actually takes.
+    /// A whole legacy `SessionState` must survive — this is the path crash recovery actually takes,
+    /// and the one that matters: `ChunkSession.read()` drops the session on ANY decode failure, so
+    /// asserting only that the inner type tolerates the missing key would prove the wrong thing.
     @Test func legacySessionStateWithOldProvenanceSurvives() throws {
         let json: [String: Any] = [
             "sessionId": "153004-meeting",
-            "outputDirectory": "/tmp/recordings",
-            "startedAt": 770000000.0,
+            "meetingStart": 770_000_000.0,
+            "engine": "fluid_audio",
+            "chunkDurationMinutes": 10,
             "chunks": [],
             "provenance": [
                 "engine": "fluid_audio",
@@ -77,21 +80,15 @@ import Foundation
                 "retries": 0,
                 "recovered": false,
                 "anomaly_count": 1,
+                // pre-dates quality_anomaly_count AND system_audio_unrecovered
             ],
         ]
         let data = try JSONSerialization.data(withJSONObject: json)
-        // The decode must not throw; whether every SessionState field lines up with this fixture is
-        // secondary — what matters is that a missing provenance key cannot poison the whole session.
-        let decoded = try? JSONDecoder().decode(SessionState.self, from: data)
-        if let decoded {
-            #expect(decoded.provenance?.qualityAnomalyCount == 0)
-        } else {
-            // If SessionState's own shape differs from this fixture, at least prove the inner type
-            // is not the reason.
-            let inner = try JSONDecoder().decode(
-                CaptureProvenance.self,
-                from: try JSONSerialization.data(withJSONObject: json["provenance"] as Any))
-            #expect(inner.qualityAnomalyCount == 0)
-        }
+        // Unconditional: if this throws, a real crash-recovery session would be silently discarded.
+        let decoded = try JSONDecoder().decode(SessionState.self, from: data)
+        #expect(decoded.sessionId == "153004-meeting")
+        #expect(decoded.provenance?.anomalyCount == 1)
+        #expect(decoded.provenance?.qualityAnomalyCount == 0)
+        #expect(decoded.provenance?.systemAudioUnrecovered == false)
     }
 }
