@@ -685,6 +685,9 @@ final class SystemTapSession {
         // anchor and rebuild — the next generation is clocked off a full-rate device, so the rest of
         // the meeting records correctly. Bounded, because each rebuild resets the monitor and costs a
         // short dead window; a device that drifts no matter what we clock off must not loop forever.
+        // Note the asymmetry: `driftMonitor` is reset per aggregate generation (in `teardownIO`), but
+        // `driftRemediations` deliberately is NOT — the budget is per SESSION, so unrelated rebuilds
+        // (an output switch) neither consume it nor refund it.
         let attempt: Int? = stateLock.sync {
             guard ClockAnchorPolicy.shouldRemediate(attemptsSoFar: driftRemediations) else { return nil }
             forceFullRateAnchor = true

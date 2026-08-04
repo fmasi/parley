@@ -1,28 +1,18 @@
 import Foundation
 
-/// Byte arithmetic for copying raw PCM bytes into an `AVAudioPCMBuffer`.
+/// Frame arithmetic for copying raw PCM bytes into an `AVAudioPCMBuffer`.
 ///
 /// Extracted because getting it wrong is silent. The mic path clamped every copy to
 /// `frameLength * sizeof(sample)` with no channel count; interleaved stereo does not have nil
 /// `floatChannelData` (it exposes a single interleaved plane), so a stereo mic took that branch and
 /// lost half of every buffer — the destination's tail stayed zero. Correct duration, choppy content,
-/// no error: the same failure shape as the chipmunk. Pure arithmetic belongs where it can be tested.
+/// no error: the same failure shape as the chipmunk.
+///
+/// The COPY clamp no longer lives here: `AudioOutputHandler` bounds each memcpy by the destination
+/// buffer's real `mDataByteSize`, which is inherently right for both layouts and cannot drift from
+/// the format the way a recomputed capacity can. What remains is the one calculation that still has
+/// to be derived — how many whole frames the bytes that actually arrived represent.
 public enum PCMCopyPlan {
-
-    /// Bytes the destination can accept.
-    ///
-    /// Interleaved buffers hold every channel in ONE plane, so capacity scales with channel count.
-    /// Non-interleaved buffers hold one plane per channel, so a single plane's capacity does not.
-    public static func capacityBytes(
-        frameLength: Int,
-        channelCount: Int,
-        bytesPerSample: Int,
-        isInterleaved: Bool
-    ) -> Int {
-        guard frameLength > 0, channelCount > 0, bytesPerSample > 0 else { return 0 }
-        let perFrame = isInterleaved ? channelCount * bytesPerSample : bytesPerSample
-        return frameLength * perFrame
-    }
 
     /// How many whole frames the bytes that actually arrived represent.
     ///

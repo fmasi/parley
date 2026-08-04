@@ -430,7 +430,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         guard usableFrames > 0 else { return }
         if usableFrames < Int(pcmBuffer.frameLength) {
             Logger.audio.warning(
-                "Mic buffer short: \(copiedBytes, privacy: .public) bytes yielded \(usableFrames, privacy: .public) of \(frameCount, privacy: .public) frames"
+                "Mic buffer short: \(copiedBytes, privacy: .public) bytes \(inputFormat.isInterleaved ? "(all channels)" : "(per plane)", privacy: .public) yielded \(usableFrames, privacy: .public) of \(frameCount, privacy: .public) frames"
             )
             pcmBuffer.frameLength = AVAudioFrameCount(usableFrames)
         }
