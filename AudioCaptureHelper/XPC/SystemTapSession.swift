@@ -170,6 +170,7 @@ final class SystemTapSession {
         let decision = ClockAnchorPolicy.decide(
             outputRate: outputRate,
             isBluetooth: Self.isBluetooth(output),
+            isVirtual: Self.isVirtual(output),
             forcedByDrift: stateLock.sync { forceFullRateAnchor })
         if case .reanchor(let reason) = decision {
             if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
@@ -193,11 +194,12 @@ final class SystemTapSession {
                         "trigger": reason.rawValue,
                         "outputRate": "\(outputRate)",
                     ])
-                case .bluetoothVolatileRate:
-                    // Delivering fine at this instant; it just has no safety net if it flips to HFP
-                    // later. Not an anomaly yet — the watchdog will catch it if it happens.
+                case .bluetoothVolatileRate, .virtualVolatileClock:
+                    // Delivering fine at this instant; it just has no safety net if its rate changes
+                    // later (a Bluetooth profile flip, or a virtual device's hidden clock member
+                    // doing the same). Not an anomaly yet — the watchdog catches it if it happens.
                     Logger.audio.warning(
-                        "System tap: clocking off Bluetooth output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if it drops to hands-free"
+                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
                     )
                 }
             }
@@ -263,6 +265,15 @@ final class SystemTapSession {
             }
         } else if tapFmtOK {
             Logger.audio.warning("System tap: aggregate input stream not readable after retries — falling back to tap-reported format (\(tapFmt.mSampleRate)Hz), which can be the wrong rate (chipmunk risk)")
+            // Record it, don't just log it. This is the exact read that produced the original
+            // chipmunk, and a `.warning` in the unified log reaches nobody: without an event the
+            // session isn't marked anomalous and `.diag.jsonl` may never be flushed, so the one
+            // branch the code itself calls chipmunk-risky was invisible to the forensic trail.
+            onEvent?(.rateDrift, .anomaly, [
+                "source": "system-tap",
+                "reason": "aggregate input stream unreadable — using tap-reported format",
+                "declared": "\(Int(tapFmt.mSampleRate))",
+            ])
             asbd = tapFmt
         } else {
             AudioHardwareDestroyAggregateDevice(agg)

@@ -308,22 +308,62 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == kCMBlockBufferNoErr, let ptr = rawPtr else { return }
 
-        // Copy raw bytes into the PCM buffer's channel data (non-interleaved) or AudioBufferList
-        // (interleaved). Clamp every copy to the destination channel's capacity — a route change
-        // can briefly deliver a buffer whose byte count exceeds frameLength*sampleSize, and an
-        // unbounded memcpy would overrun the heap allocation (#94).
-        if let channelData = pcmBuffer.floatChannelData {
-            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Float>.size
-            memcpy(channelData[0], ptr, min(totalLength, capacity))
-        } else if let channelData = pcmBuffer.int16ChannelData {
-            let capacity = Int(pcmBuffer.frameLength) * MemoryLayout<Int16>.size
-            memcpy(channelData[0], ptr, min(totalLength, capacity))
+        // Copy raw bytes into the destination, clamped to its real capacity — a route change can
+        // briefly deliver a buffer whose byte count exceeds frameLength*sampleSize, and an unbounded
+        // memcpy would overrun the heap allocation (#94).
+        //
+        // Branch on `isInterleaved`, NOT on which channel-data accessor is non-nil. Interleaved
+        // buffers do NOT have nil `floatChannelData` — they expose a single interleaved plane — so
+        // the old ordering sent interleaved stereo down the planar branch, where the capacity clamp
+        // omitted the channel count and silently dropped HALF of every buffer. The destination tail
+        // stayed zero, producing choppy mic audio at the correct duration with no error reported:
+        // the same silent-divergence class as the chipmunk (#58), arriving through the clamp that
+        // was added to fix the overrun.
+        // Take the sample width from the format itself rather than inferring it from which accessor
+        // is non-nil — that inference is exactly what went wrong here.
+        let bytesPerSample = Int(inputFormat.streamDescription.pointee.mBitsPerChannel) / 8
+        guard bytesPerSample > 0 else { return }
+        var copiedBytes = 0
+        if inputFormat.isInterleaved {
+            // One plane holding every channel.
+            let buffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+            guard let dstPtr = buffers.first?.mData else { return }
+            copiedBytes = min(Int(buffers[0].mDataByteSize), totalLength)
+            memcpy(dstPtr, ptr, copiedBytes)
         } else {
-            // Interleaved format — copy via AudioBufferList
-            let abl = pcmBuffer.mutableAudioBufferList
-            let buffers = UnsafeMutableAudioBufferListPointer(abl)
-            guard buffers.count > 0, let dstPtr = buffers[0].mData else { return }
-            memcpy(dstPtr, ptr, min(Int(buffers[0].mDataByteSize), totalLength))
+            // One plane PER channel, laid out consecutively in the source block buffer.
+            let buffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+            let planeCapacity = PCMCopyPlan.capacityBytes(
+                frameLength: Int(pcmBuffer.frameLength),
+                channelCount: Int(inputFormat.channelCount),
+                bytesPerSample: bytesPerSample,
+                isInterleaved: false)
+            for (index, buffer) in buffers.enumerated() {
+                guard let dstPtr = buffer.mData else { continue }
+                let sourceOffset = index * planeCapacity
+                guard sourceOffset < totalLength else { break }
+                let available = min(planeCapacity, totalLength - sourceOffset)
+                let bytes = min(Int(buffer.mDataByteSize), available)
+                memcpy(dstPtr, ptr.advanced(by: sourceOffset), bytes)
+                // Every plane holds the same frame count, so one plane's bytes decide the length.
+                if index == 0 { copiedBytes = bytes }
+            }
+        }
+
+        // Trust the bytes that actually arrived, not the frame count the source claimed. A short
+        // buffer would otherwise leave an uninitialised tail that the converter turns into a noise
+        // blip rather than the silence it looks like.
+        let usableFrames = PCMCopyPlan.usableFrames(
+            copiedBytes: copiedBytes,
+            channelCount: Int(inputFormat.channelCount),
+            bytesPerSample: bytesPerSample,
+            isInterleaved: inputFormat.isInterleaved)
+        guard usableFrames > 0 else { return }
+        if usableFrames < Int(pcmBuffer.frameLength) {
+            Logger.audio.warning(
+                "Mic buffer short: \(copiedBytes, privacy: .public) bytes yielded \(usableFrames, privacy: .public) of \(frameCount, privacy: .public) frames"
+            )
+            pcmBuffer.frameLength = AVAudioFrameCount(usableFrames)
         }
 
         do {

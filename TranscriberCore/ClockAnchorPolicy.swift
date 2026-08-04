@@ -24,6 +24,9 @@ public enum ClockAnchorPolicy {
         case degradedRate
         /// The output is Bluetooth: healthy *now*, but free to drop to HFP with no notification.
         case bluetoothVolatileRate
+        /// The output is virtual or an aggregate (e.g. a Multi-Output Device): it reports its own
+        /// nominal rate while its clock is actually some member device we cannot see from here.
+        case virtualVolatileClock
         /// The watchdog measured a real frame shortfall — the device is not delivering what it claims.
         case driftRemediation
     }
@@ -48,14 +51,25 @@ public enum ClockAnchorPolicy {
     /// - Parameters:
     ///   - outputRate: nominal sample rate the default output device reports right now.
     ///   - isBluetooth: whether that device's transport is Bluetooth (classic or LE).
+    ///   - isVirtual: whether it is a virtual or aggregate device (e.g. a Multi-Output Device,
+    ///     ZoomAudioDevice, BlackHole). Such a device reports its own nominal rate while its actual
+    ///     clock comes from a member we cannot inspect here — which may itself be Bluetooth. Without
+    ///     this, a Multi-Output of speakers + AirPods reads as a healthy 48 kHz wired device and
+    ///     reopens the exact failure this policy exists to prevent, one indirection down.
     ///   - forcedByDrift: the watchdog has measured a sustained frame shortfall this session.
-    public static func decide(outputRate: Int, isBluetooth: Bool, forcedByDrift: Bool) -> Decision {
+    public static func decide(
+        outputRate: Int,
+        isBluetooth: Bool,
+        isVirtual: Bool,
+        forcedByDrift: Bool
+    ) -> Decision {
         // Measured beats claimed: if frames are genuinely short, nothing the device reports about
         // itself is worth consulting.
         if forcedByDrift { return .reanchor(.driftRemediation) }
         // Degraded-rate first — it is the more specific and more actionable diagnosis when both hold.
         if handsFreeRates.contains(outputRate) { return .reanchor(.degradedRate) }
         if isBluetooth { return .reanchor(.bluetoothVolatileRate) }
+        if isVirtual { return .reanchor(.virtualVolatileClock) }
         return .keepOutput
     }
 

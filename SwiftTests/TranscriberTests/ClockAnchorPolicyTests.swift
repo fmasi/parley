@@ -13,14 +13,14 @@ import Testing
     // MARK: - Healthy outputs must be left alone
 
     @Test func healthyWiredOutputKeepsItsOwnClock() {
-        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, forcedByDrift: false)
+        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, isVirtual: false, forcedByDrift: false)
                 == .keepOutput)
     }
 
     /// 44.1 kHz is a perfectly healthy rate. Substituting the clock for a device that is fine is a
     /// risk with no upside — this guard is deliberate, not an oversight.
     @Test func fortyFourOneIsHealthyNotDegraded() {
-        #expect(ClockAnchorPolicy.decide(outputRate: 44100, isBluetooth: false, forcedByDrift: false)
+        #expect(ClockAnchorPolicy.decide(outputRate: 44100, isBluetooth: false, isVirtual: false, forcedByDrift: false)
                 == .keepOutput)
     }
 
@@ -28,7 +28,7 @@ import Testing
 
     @Test func handsFreeRateReanchors() {
         for rate in [8000, 16000, 24000, 32000] {
-            #expect(ClockAnchorPolicy.decide(outputRate: rate, isBluetooth: false, forcedByDrift: false)
+            #expect(ClockAnchorPolicy.decide(outputRate: rate, isBluetooth: false, isVirtual: false, forcedByDrift: false)
                     == .reanchor(.degradedRate),
                     "rate \(rate) should re-anchor")
         }
@@ -40,15 +40,34 @@ import Testing
     /// it can drop to HFP *after* the aggregate is built, and that transition fires no device-change
     /// notification. Its rate at build time predicts nothing, so it must never be trusted as a clock.
     @Test func bluetoothReportingFullRateStillReanchors() {
-        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: true, forcedByDrift: false)
+        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: true, isVirtual: false, forcedByDrift: false)
                 == .reanchor(.bluetoothVolatileRate))
     }
 
     @Test func bluetoothAlreadyInHandsFreeReanchors() {
         // Degraded-rate is the more specific, more actionable reason — it wins over the generic
         // "bluetooth is volatile".
-        #expect(ClockAnchorPolicy.decide(outputRate: 24000, isBluetooth: true, forcedByDrift: false)
+        #expect(ClockAnchorPolicy.decide(outputRate: 24000, isBluetooth: true, isVirtual: false, forcedByDrift: false)
                 == .reanchor(.degradedRate))
+    }
+
+    // MARK: - Virtual / aggregate outputs
+
+    /// A user-created Multi-Output Device (speakers + AirPods) has transport `Aggregate` and reports
+    /// a healthy 48 kHz, so a transport check that only asks "is this Bluetooth?" says yes-it's-fine
+    /// — while its clock master may be the Bluetooth member, which drops to HFP with no notification.
+    /// That reopens the exact 2026-08-04 failure one level of indirection down.
+    @Test func virtualOrAggregateOutputReanchorsEvenAtFullRate() {
+        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, isVirtual: true,
+                                         forcedByDrift: false)
+                == .reanchor(.virtualVolatileClock))
+    }
+
+    /// A plain wired device is not virtual and not Bluetooth — still the one case we leave alone.
+    @Test func nonVirtualNonBluetoothFullRateStillKept() {
+        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, isVirtual: false,
+                                         forcedByDrift: false)
+                == .keepOutput)
     }
 
     // MARK: - Drift remediation
@@ -56,7 +75,7 @@ import Testing
     /// The watchdog measured a real shortfall. Whatever the device claims about itself, it is lying:
     /// force the re-anchor.
     @Test func measuredDriftForcesReanchorEvenWhenOutputLooksHealthy() {
-        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, forcedByDrift: true)
+        #expect(ClockAnchorPolicy.decide(outputRate: 48000, isBluetooth: false, isVirtual: false, forcedByDrift: true)
                 == .reanchor(.driftRemediation))
     }
 
