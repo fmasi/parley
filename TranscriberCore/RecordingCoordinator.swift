@@ -547,10 +547,15 @@ public final class RecordingCoordinator {
         let anomalies = await Task.detached(priority: .utility) {
             CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
         }.value
-        // Go idle only AFTER the async gap. Setting it first let the user start a new recording
-        // during the read, so `presentTranscript` could fire into an active session — popping the
-        // rename dialog mid-recording and running the auto-summary against a now-live path.
-        appState.phase = .idle
+        // Go idle only AFTER the async gap — setting it first let the user start a new recording
+        // during the read, so `presentTranscript` could fire into an active session. But deferring
+        // it opens the mirror-image risk: the main actor is free during the suspension, so a crash
+        // handler or a new session may legitimately have moved the phase on, and an unconditional
+        // assignment here would stamp `.idle` over a live recording. Only retire the phase we came
+        // in on.
+        if case .transcribing = appState.phase {
+            appState.phase = .idle
+        }
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"

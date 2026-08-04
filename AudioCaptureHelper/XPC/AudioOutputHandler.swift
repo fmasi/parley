@@ -400,8 +400,16 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             // heap, which the converter turns into a noise blip rather than the silence it resembles.
             var minPlaneBytes = Int.max
             for index in 0..<planes {
+                // A skipped plane is NOT a smaller copy — it is an unwritten destination plane full
+                // of whatever the allocator left there, which the converter would read as audio for
+                // the whole (unshrunk) frameLength. There is no partial success worth salvaging on a
+                // multi-channel buffer, so drop it.
                 guard let srcPtr = source[index].mData,
-                      let dstPtr = destination[index].mData else { continue }
+                      let dstPtr = destination[index].mData else {
+                    Logger.audio.error("Mic buffer plane \(index, privacy: .public) has no data pointer — dropping the buffer rather than converting uninitialised memory")
+                    minPlaneBytes = 0
+                    break
+                }
                 // Clamp to the destination too: a route change can briefly deliver more bytes than
                 // frameLength implies, and an unbounded memcpy would overrun the allocation (#94).
                 let bytes = min(Int(source[index].mDataByteSize), Int(destination[index].mDataByteSize))
