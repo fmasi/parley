@@ -556,12 +556,22 @@ final class SystemTapSession {
         var addr = deviceListAddress
         guard AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr, size > 0
-        else { return true }   // can't tell — assume present rather than churn the aggregate
+        else {
+            // Fail OPEN: a spurious rebuild costs a real dead window in the recording, while a missed
+            // unplug is caught by the next device-list event (or, failing that, by the pad-ratio
+            // backstop). Log it so the two cases are distinguishable after the fact rather than
+            // silently identical.
+            Logger.audio.error("System tap: device list unreadable while checking the clock anchor — assuming it is still present")
+            return true
+        }
         let count = Int(size) / MemoryLayout<AudioObjectID>.size
         var devices = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr
-        else { return true }
+        else {
+            Logger.audio.error("System tap: device list read failed while checking the clock anchor — assuming it is still present")
+            return true
+        }
         return devices.contains { deviceUID($0) == uid }
     }
 

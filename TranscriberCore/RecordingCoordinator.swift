@@ -537,7 +537,6 @@ public final class RecordingCoordinator {
     private func presentCompletedTranscription(_ result: TranscriptionResult) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
-        appState.phase = .idle
         // Say so when the capture layer flagged something. This used to be an unconditional
         // "Transcription Complete" while `capture_provenance` sat right here recording that the
         // recording was compromised — the app knew and the user did not (#58).
@@ -548,6 +547,10 @@ public final class RecordingCoordinator {
         let anomalies = await Task.detached(priority: .utility) {
             CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
         }.value
+        // Go idle only AFTER the async gap. Setting it first let the user start a new recording
+        // during the read, so `presentTranscript` could fire into an active session — popping the
+        // rename dialog mid-recording and running the auto-summary against a now-live path.
+        appState.phase = .idle
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
