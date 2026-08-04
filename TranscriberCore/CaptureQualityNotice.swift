@@ -24,7 +24,13 @@ public enum CaptureQualityNotice {
         return "\(fileName) — \(anomalyCount) capture \(noun) recorded; audio may be affected"
     }
 
-    /// Read the anomaly count a transcript carries in `metadata.capture_provenance.anomaly_count`.
+    /// Read the CONTENT-compromising anomaly count a transcript carries in
+    /// `metadata.capture_provenance.quality_anomaly_count`.
+    ///
+    /// Deliberately NOT `anomaly_count`: that includes `.streamStopError`, which is recorded for a
+    /// benign Bluetooth route change and fires on nearly every recording made on the default source
+    /// with wireless headphones. Reading it would brand healthy recordings as suspect and destroy the
+    /// signal on arrival. See `CaptureEventKind.qualityCompromising`.
     ///
     /// Reading it back from the artifact (rather than threading it through every call site) means the
     /// crash-recovery and salvage paths get the same treatment as a clean stop for free — those are
@@ -36,8 +42,10 @@ public enum CaptureQualityNotice {
               let metadata = root["metadata"] as? [String: Any],
               let provenance = metadata["capture_provenance"] as? [String: Any]
         else { return 0 }
-        if let count = provenance["anomaly_count"] as? Int { return count }
-        if let count = provenance["anomaly_count"] as? NSNumber { return count.intValue }
+        // Transcripts written before this field existed simply have no quality signal — absent means
+        // 0, never a retroactive alarm.
+        if let count = provenance["quality_anomaly_count"] as? Int { return count }
+        if let count = provenance["quality_anomaly_count"] as? NSNumber { return count.intValue }
         return 0
     }
 }

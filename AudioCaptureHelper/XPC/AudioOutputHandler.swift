@@ -30,7 +30,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// How much of each track we fabricated rather than captured. The padder's whole job is to hold
     /// the wall clock, which means it silently repairs the symptom of a device under-delivering — so
     /// the ratio it produces is the one signal that catches that class without knowing the mechanism.
-    /// Scoped to the session (not the chunk): a per-chunk view would reset away a slow bleed.
+    /// Scoped to the CHUNK, reset by `swapWriters` alongside the timeline anchor and frame counters —
+    /// those are chunk-scoped, so accumulating the ratio across rotations would mix anchors and make
+    /// the number meaningless. The cost is that a bleed too small to cross the threshold within one
+    /// chunk never fires; the benefit is that the ratio always describes a coherent timeline.
     private var systemPadMonitor = PadRatioMonitor()
     private var micPadMonitor = PadRatioMonitor()
 
@@ -353,7 +356,14 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // was added to fix the overrun.
         // Take the sample width from the format itself rather than inferring it from which accessor
         // is non-nil — that inference is exactly what went wrong here.
-        let bytesPerSample = Int(inputFormat.streamDescription.pointee.mBitsPerChannel) / 8
+        // `mBytesPerFrame / channels` rather than `mBitsPerChannel / 8`: a 24-bit-in-4-byte container
+        // has 24 bits per channel but occupies 4 bytes, and the byte width is what memcpy needs.
+        let asbdPtr = inputFormat.streamDescription
+        let planeChannels = max(1, Int(inputFormat.channelCount))
+        let frameBytes = Int(asbdPtr.pointee.mBytesPerFrame)
+        let bytesPerSample = frameBytes > 0
+            ? (inputFormat.isInterleaved ? frameBytes / planeChannels : frameBytes)
+            : Int(asbdPtr.pointee.mBitsPerChannel) / 8
         guard bytesPerSample > 0 else { return }
         var copiedBytes = 0
         if inputFormat.isInterleaved {
@@ -370,16 +380,21 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 channelCount: Int(inputFormat.channelCount),
                 bytesPerSample: bytesPerSample,
                 isInterleaved: false)
+            // A short source shortfall lands on the LAST plane first (only high indices see a reduced
+            // `available`), so the usable frame count is the MINIMUM across planes — not plane 0's,
+            // which is always full and would defeat the shrink below, leaving plane 1's tail as
+            // uninitialised heap that the converter turns into a noise blip in one channel.
+            var minPlaneBytes = Int.max
             for (index, buffer) in buffers.enumerated() {
                 guard let dstPtr = buffer.mData else { continue }
                 let sourceOffset = index * planeCapacity
-                guard sourceOffset < totalLength else { break }
+                guard sourceOffset < totalLength else { minPlaneBytes = 0; break }
                 let available = min(planeCapacity, totalLength - sourceOffset)
                 let bytes = min(Int(buffer.mDataByteSize), available)
                 memcpy(dstPtr, ptr.advanced(by: sourceOffset), bytes)
-                // Every plane holds the same frame count, so one plane's bytes decide the length.
-                if index == 0 { copiedBytes = bytes }
+                minPlaneBytes = min(minPlaneBytes, bytes)
             }
+            copiedBytes = minPlaneBytes == Int.max ? 0 : minPlaneBytes
         }
 
         // Trust the bytes that actually arrived, not the frame count the source claimed. A short
@@ -486,7 +501,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             The system track is no longer being written.
             """
         )
-        record(.formatChanged, .anomaly, [
+        record(.sustainedFormatDrop, .anomaly, [
             "reason": "sustained sticky format drop — system track not being written",
             "configured": "\(Int(configured.sampleRate))Hz/\(configured.channelCount)ch",
             "incoming": "\(Int(incoming.sampleRate))Hz/\(incoming.channelCount)ch",
@@ -494,7 +509,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ])
     }
 
-    /// Surface a track that is mostly fabricated silence. Fires at most once per track per session —
+    /// Surface a track that is mostly fabricated silence. Fires at most once per track per CHUNK —
     /// the original failure's per-buffer pad log fired ~57,000 times and told nobody anything.
     private func notePadding(_ verdict: PadRatioMonitor.Verdict, track: String) {
         guard case .excessive(let ratio, let paddedSeconds, let totalSeconds) = verdict else { return }

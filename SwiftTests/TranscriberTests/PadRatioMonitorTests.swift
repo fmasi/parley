@@ -69,6 +69,56 @@ import Testing
         #expect(verdict == .healthy)
     }
 
+    // MARK: - The early window (council finding)
+
+    /// A ratio alone fires far too easily near the start: a single gap of G seconds evaluated at
+    /// t=30s reads G/30, so a 4-second gap is 13% and trips. Real 4-second gaps at the start of a
+    /// healthy recording are ORDINARY — a Bluetooth mic taking seconds to negotiate HFP, or one #86
+    /// restart whose first liveness probe misses. Crying wolf on the start of a normal meeting would
+    /// make the whole signal worthless within a week. An absolute floor is what separates them.
+    @Test func bluetoothMicBringUpAtStartDoesNotFire() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        // 3.5s of leading pad while the headset negotiates, then a clean minute of audio.
+        var v = monitor.record(padFrames: 48_000 * 7 / 2, dataFrames: 0, rate: Self.rate())
+        if case .excessive = v { fired = v }
+        for _ in 0..<60 {
+            v = monitor.record(padFrames: 0, dataFrames: 48_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        #expect(fired == nil, "a 3.5s start gap must not be called corruption")
+    }
+
+    /// The worst realistic benign case: an SCK restart at the start costing ~8s (rebuild + a missed
+    /// 4s liveness probe + backoff), inside the first 30 seconds.
+    @Test func earlyRestartGapDoesNotFire() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        var v = monitor.record(padFrames: 48_000 * 8, dataFrames: 0, rate: Self.rate())
+        if case .excessive = v { fired = v }
+        for _ in 0..<120 {
+            v = monitor.record(padFrames: 0, dataFrames: 48_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        #expect(fired == nil, "an 8s early restart gap must not be called corruption")
+    }
+
+    /// The floor must not blunt real detection: a ~50% deficit accrues the absolute floor within
+    /// seconds, so the incident is still caught almost as fast as before.
+    @Test func realDeficitStillFiresPromptly() {
+        var monitor = PadRatioMonitor()
+        var firedAtSecond: Int?
+        for second in 1...120 {
+            let v = monitor.record(padFrames: 24_000, dataFrames: 24_000, rate: Self.rate())
+            if case .excessive = v, firedAtSecond == nil { firedAtSecond = second }
+        }
+        guard let firedAtSecond else {
+            Issue.record("half-rate delivery must still fire")
+            return
+        }
+        #expect(firedAtSecond <= 45, "detection should stay prompt, fired at \(firedAtSecond)s")
+    }
+
     // MARK: - Warm-up
 
     /// Leading silence dominates the ratio before any real audio arrives, so a verdict must wait for

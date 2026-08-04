@@ -37,6 +37,32 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// frames genuinely went missing, whatever the cause. This is the mechanism-independent backstop
     /// for the whole silent-divergence class (#58). Severity `.anomaly`.
     case excessivePadding
+
+    /// A sustained run of system buffers rejected by the sticky format gate — the system track has
+    /// stopped being written while the stream still appears to run. Distinct from the transient
+    /// `formatChanged` so the two can be told apart when judging whether a recording is compromised.
+    case sustainedFormatDrop
+}
+
+extension CaptureEventKind {
+    /// The kinds that mean THE RECORDING'S CONTENT may be wrong — as opposed to something happening
+    /// and being handled.
+    ///
+    /// `anomalyCount` cannot answer that question: `.streamStopError` is recorded as an anomaly for
+    /// what its own call site calls "a benign audio-route change (e.g. AirPods HFP↔A2DP)", and since
+    /// opening the mic is what triggers that flip, it fires on essentially EVERY recording made on
+    /// the default source with Bluetooth headphones — then the #86 restart recovers it completely.
+    /// Labelling those recordings "capture anomalies" would make the warning meaningless within a
+    /// week, which is worse than not warning at all: the point of the label is that it is rare.
+    ///
+    /// So the user-facing quality signal counts only the kinds that survive recovery.
+    public static let qualityCompromising: Set<CaptureEventKind> = [
+        .excessivePadding,
+        .rateDrift,
+        .sustainedFormatDrop,
+        .systemAudioUnrecovered,
+        .restartFailed,
+    ]
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.
@@ -77,6 +103,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     public let retries: Int
     public let recovered: Bool
     public let anomalyCount: Int
+    /// Subset of `anomalyCount` that indicates compromised CONTENT rather than a handled event.
+    /// The user-facing "capture anomalies" label reads this, so that a routine Bluetooth route
+    /// change — which is recorded as an anomaly and fully recovered — does not brand every
+    /// recording as suspect.
+    public let qualityAnomalyCount: Int
     /// True when the MID-RECORDING system (remote) stream could not be restarted within budget during
     /// the session — the remote side stopped being captured even though the mic kept recording (#86).
     public let systemAudioUnrecovered: Bool
@@ -90,6 +121,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case retries
         case recovered
         case anomalyCount = "anomaly_count"
+        case qualityAnomalyCount = "quality_anomaly_count"
         case systemAudioUnrecovered = "system_audio_unrecovered"
     }
 
@@ -102,6 +134,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         retries: Int,
         recovered: Bool,
         anomalyCount: Int,
+        qualityAnomalyCount: Int = 0,
         systemAudioUnrecovered: Bool = false
     ) {
         self.engine = engine
@@ -112,6 +145,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.retries = retries
         self.recovered = recovered
         self.anomalyCount = anomalyCount
+        self.qualityAnomalyCount = qualityAnomalyCount
         self.systemAudioUnrecovered = systemAudioUnrecovered
     }
 
@@ -123,6 +157,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "retries": retries,
             "recovered": recovered,
             "anomaly_count": anomalyCount,
+            "quality_anomaly_count": qualityAnomalyCount,
             "system_audio_unrecovered": systemAudioUnrecovered,
         ]
         if let systemFormat { d["system_format"] = systemFormat }
@@ -207,6 +242,11 @@ public struct CaptureDiagnostics: Sendable {
     public var retryCount: Int { events.lazy.filter { $0.kind == .retry }.count }
     public var didRecover: Bool { events.contains { $0.kind == .launchRecovery } }
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
+    /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
+    /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
+    public var qualityAnomalyCount: Int {
+        events.lazy.filter { CaptureEventKind.qualityCompromising.contains($0.kind) }.count
+    }
     /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
     public var systemAudioUnrecovered: Bool { events.contains { $0.kind == .systemAudioUnrecovered } }
 
@@ -245,6 +285,7 @@ public struct CaptureDiagnostics: Sendable {
             retries: retryCount,
             recovered: didRecover,
             anomalyCount: anomalyCount,
+            qualityAnomalyCount: qualityAnomalyCount,
             systemAudioUnrecovered: systemAudioUnrecovered
         )
     }

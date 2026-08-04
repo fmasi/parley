@@ -37,7 +37,7 @@ import Foundation
 
     @Test func readsAnomalyCountFromProvenance() throws {
         let url = try writeTranscript([
-            "metadata": ["capture_provenance": ["anomaly_count": 2]],
+            "metadata": ["capture_provenance": ["quality_anomaly_count": 2]],
             "segments": [],
         ])
         defer { try? FileManager.default.removeItem(at: url) }
@@ -51,6 +51,7 @@ import Foundation
                 "engine": "fluid_audio",
                 "capture_provenance": [
                     "anomaly_count": 1,
+                    "quality_anomaly_count": 1,
                     "system_format": "24000Hz/2ch",
                 ],
             ],
@@ -69,6 +70,24 @@ import Foundation
         let url = try writeTranscript(["metadata": ["engine": "fluid_audio"], "segments": []])
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: url) == 0)
+    }
+
+    /// The calibration that keeps the label meaningful: a benign Bluetooth route change is recorded
+    /// as an anomaly and fully recovered. It fires on nearly every recording made on the default
+    /// source with wireless headphones, so counting it would brand healthy recordings as suspect.
+    @Test func recoveredRouteChangeAnomaliesDoNotTaintTheRecording() throws {
+        let url = try writeTranscript([
+            "metadata": ["capture_provenance": [
+                "anomaly_count": 2,          // two benign stream stops, both recovered
+                "quality_anomaly_count": 0,
+                "route_changes": 2,
+                "recovered": true,
+            ]],
+            "segments": [],
+        ])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: url) == 0)
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0) == "Transcription Complete")
     }
 
     @Test func unreadableFileIsNotAnAlarm() {

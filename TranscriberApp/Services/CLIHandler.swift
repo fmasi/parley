@@ -130,12 +130,14 @@ enum CLIHandler {
             // trusting the extension.
             let channelCount = try? await AudioSourceResolver.channelCount(of: inputURLs[0])
             if shouldSplit, let channelCount, channelCount < 2 {
-                print("""
+                fputs("""
                 Refusing --split: '\(inputURLs[0].lastPathComponent)' is mono (\(channelCount) channel).
                 Splitting it would duplicate the same audio into both the local and remote streams.
                 Re-run without --split (or with --no-split) to transcribe it as a single stream.
-                """)
-                exit(2)
+
+                """, stderr)
+                // exit(1) like every other CLI error path — exit code 2 means permission denied.
+                exit(1)
             }
 
             if shouldSplit {

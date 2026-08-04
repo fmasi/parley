@@ -193,9 +193,13 @@ final class SystemTapSession {
                 switch reason {
                 case .degradedRate, .driftRemediation:
                     // Actively degraded right now. Say so at setup rather than leaving it to the
-                    // watchdog, which only fires 5+ seconds in.
+                    // watchdog, which only fires 5+ seconds in. Distinguish "there is nothing better"
+                    // from "the best full-rate device IS the one we are already on" — the second is
+                    // what happens when a wired built-in output under-delivers, and calling that
+                    // "no full-rate device available" sends the next debugger down the wrong path.
+                    let alreadyBest = Self.fullRateOutputDevice(minimum: 44100) == output
                     Logger.audio.error(
-                        "System tap: output device is at \(outputRate, privacy: .public)Hz (\(reason.rawValue, privacy: .public)) and no full-rate device is available to clock the capture — remote audio will be captured at reduced quality"
+                        "System tap: \(alreadyBest ? "the clock anchor is already the best full-rate device" : "no full-rate device is available to clock the capture", privacy: .public) and the output is at \(outputRate, privacy: .public)Hz (\(reason.rawValue, privacy: .public)) — remote audio will be captured at reduced quality"
                     )
                     onEvent?(.rateDrift, .anomaly, [
                         "source": "system-tap",
@@ -720,10 +724,15 @@ final class SystemTapSession {
         for device in devices where hasOutputStreams(device) && isBuiltIn(device) {
             if deviceNominalRate(device) >= minimum { return device }
         }
-        // Fallback: a physical, non-virtual device. Virtual/aggregate devices (ZoomAudioDevice,
-        // BlackHole, Krisp) are exactly the ones that appear and vanish under us.
+        // Fallback: a physical, non-virtual, non-Bluetooth device. Virtual/aggregate devices
+        // (ZoomAudioDevice, BlackHole, Krisp) are exactly the ones that appear and vanish under us —
+        // and Bluetooth must be excluded here too, or a Mac with no usable built-in output would
+        // refuse the Bluetooth DEFAULT and then anchor to a different Bluetooth device: precisely the
+        // volatile clock this whole policy exists to forbid. If that empties the candidate list, the
+        // caller's no-anchor branch handles it honestly.
         for device in devices
-        where hasOutputStreams(device) && deviceNominalRate(device) >= minimum && !isVirtual(device) {
+        where hasOutputStreams(device) && deviceNominalRate(device) >= minimum
+            && !isVirtual(device) && !isBluetooth(device) {
             return device
         }
         return nil

@@ -33,14 +33,27 @@ public struct PadRatioMonitor {
     /// Leading silence dominates the ratio before real audio arrives, so hold off judging until the
     /// track has enough material that the number means something.
     public let minimumSeconds: Double
+    /// Absolute floor, and the reason this detector is usable at all.
+    ///
+    /// A ratio alone fires far too easily near the start: one gap of G seconds evaluated at the 30 s
+    /// mark reads G/30, so a 4-second gap is 13% and trips. Four-second gaps at the start of a HEALTHY
+    /// recording are ordinary — a Bluetooth mic taking seconds to negotiate HFP, or one #86 restart
+    /// whose first liveness probe misses. Labelling those "content is compromised" would make the
+    /// warning background noise within a week, which is worse than not warning at all.
+    ///
+    /// Requiring real fabricated seconds as well as a high proportion separates them cleanly, and
+    /// costs almost nothing in detection latency: a ~50% deficit (the incident) accrues 15 s of pad
+    /// within about 30 s of audio, so the real thing is still caught in well under a minute.
+    public let minimumPaddedSeconds: Double
 
     private var padFrames: Int64 = 0
     private var totalFrames: Int64 = 0
     private var reported = false
 
-    public init(threshold: Double = 0.10, minimumSeconds: Double = 30) {
+    public init(threshold: Double = 0.10, minimumSeconds: Double = 30, minimumPaddedSeconds: Double = 15) {
         self.threshold = threshold
         self.minimumSeconds = minimumSeconds
+        self.minimumPaddedSeconds = minimumPaddedSeconds
     }
 
     /// Feed one append. `padFrames` is the silence just fabricated, `dataFrames` the real samples
@@ -54,18 +67,12 @@ public struct PadRatioMonitor {
         guard totalSeconds >= minimumSeconds, totalFrames > 0 else { return .notYet }
 
         let ratio = Double(padFrames) / Double(totalFrames)
-        guard ratio > threshold else { return .healthy }
+        let paddedSeconds = Double(padFrames) / rate
+        // BOTH conditions: a high proportion AND enough absolute fabricated time. Either alone
+        // misfires — the ratio on early gaps, the absolute figure on genuinely long recordings.
+        guard ratio > threshold, paddedSeconds >= minimumPaddedSeconds else { return .healthy }
         reported = true
-        return .excessive(
-            ratio: ratio,
-            paddedSeconds: Double(padFrames) / rate,
-            totalSeconds: totalSeconds
-        )
-    }
-
-    /// Fraction of the track fabricated so far, for finalize-time provenance regardless of verdict.
-    public var currentRatio: Double {
-        totalFrames > 0 ? Double(padFrames) / Double(totalFrames) : 0
+        return .excessive(ratio: ratio, paddedSeconds: paddedSeconds, totalSeconds: totalSeconds)
     }
 
     public mutating func reset() {

@@ -166,8 +166,12 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed(error.localizedDescription)
         }
 
+        // Same duration check as the dual-stream path — this one deletes the only lossless copy too,
+        // and it is the path crash-recovery and salvage batches take, so it is MORE exposed to a
+        // compromised capture, not less.
         do {
-            try await verify(outputURL: outputURL)
+            let expectedSeconds = sampleRate > 0 ? Double(sysFile.length) / sampleRate : nil
+            try await verify(outputURL: outputURL, expectedSeconds: expectedSeconds)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
