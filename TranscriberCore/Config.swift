@@ -25,6 +25,12 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
     public var contextOverheadPercent: Int?
     /// Tokens reserved for the summary response (default 2048).
     public var maxOutputTokens: Int?
+    /// Seconds to wait for the model to produce a summary (default 600).
+    ///
+    /// URLSession's stock 60s is the wrong order of magnitude for a LOCAL model summarising a long
+    /// meeting: it accepts the request immediately, then generates for minutes. Two real recordings
+    /// failed at exactly 60s (#173) — the transcript was fine both times, only the summary was lost.
+    public var requestTimeoutSeconds: Int?
 
     public init(
         enabled: Bool,
@@ -34,7 +40,8 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         model: String,
         contextLength: Int? = nil,
         contextOverheadPercent: Int? = nil,
-        maxOutputTokens: Int? = nil
+        maxOutputTokens: Int? = nil,
+        requestTimeoutSeconds: Int? = nil
     ) {
         self.enabled = enabled
         self.provider = provider
@@ -44,6 +51,7 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         self.contextLength = contextLength
         self.contextOverheadPercent = contextOverheadPercent
         self.maxOutputTokens = maxOutputTokens
+        self.requestTimeoutSeconds = requestTimeoutSeconds
     }
 
     enum CodingKeys: String, CodingKey {
@@ -55,6 +63,7 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         case contextLength = "context_length"
         case contextOverheadPercent = "context_overhead_percent"
         case maxOutputTokens = "max_output_tokens"
+        case requestTimeoutSeconds = "request_timeout_seconds"
     }
 
     public init(from decoder: Decoder) throws {

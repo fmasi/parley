@@ -49,6 +49,16 @@ public struct PadRatioMonitor {
     private var padFrames: Int64 = 0
     private var totalFrames: Int64 = 0
     private var reported = false
+    /// Whether this track has ever delivered real frames.
+    ///
+    /// Padding BEFORE the first delivered frame is a start offset, not a deficit: there was nothing
+    /// to capture, so nothing went missing. This distinction is what makes the detector usable —
+    /// the Core Audio tap delivers NO buffers while the output device is idle, so a recording
+    /// started before joining a call accrues pure padding until the call connects. Device-observed
+    /// 2026-08-11: a healthy recording read 97.6% zeros in its first 30s and fired at ratio 0.911
+    /// on leading silence alone. Starting the recording first is the ordinary way to use the app,
+    /// so counting that as corruption makes the label worthless.
+    private var hasDeliveredData = false
 
     public init(threshold: Double = 0.10, minimumSeconds: Double = 30, minimumPaddedSeconds: Double = 15) {
         self.threshold = threshold
@@ -60,6 +70,10 @@ public struct PadRatioMonitor {
     /// written alongside it.
     public mutating func record(padFrames newPad: Int64, dataFrames: Int64, rate: Double) -> Verdict {
         guard rate > 0, !reported else { return .notYet }
+        // Nothing counts until the track proves it can deliver. Once it has, everything counts —
+        // including padding, which is the whole point.
+        if dataFrames > 0 { hasDeliveredData = true }
+        guard hasDeliveredData else { return .notYet }
         padFrames += max(0, newPad)
         totalFrames += max(0, newPad) + max(0, dataFrames)
 
@@ -79,5 +93,6 @@ public struct PadRatioMonitor {
         padFrames = 0
         totalFrames = 0
         reported = false
+        hasDeliveredData = false
     }
 }

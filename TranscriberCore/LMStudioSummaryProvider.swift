@@ -21,7 +21,8 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         model: String,
         contextLength: Int? = nil,
         contextOverheadPercent: Int? = nil,
-        maxOutputTokens: Int? = nil
+        maxOutputTokens: Int? = nil,
+        requestTimeoutSeconds: Int? = nil
     ) {
         self.endpoint = endpoint
         self.apiKey = apiKey
@@ -29,7 +30,14 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         self.contextLength = contextLength
         self.overheadPercent = contextOverheadPercent ?? Self.defaultOverheadPercent
         self.outputBuffer = maxOutputTokens ?? Self.defaultOutputBuffer
+        self.requestTimeoutSeconds = requestTimeoutSeconds ?? Self.defaultRequestTimeoutSeconds
     }
+
+    /// Generous by design: a local model accepts the request instantly and then generates for
+    /// minutes on a long transcript. Ten minutes is far past any real generation while still
+    /// bounded, so a genuinely dead server still fails rather than hanging forever.
+    public static let defaultRequestTimeoutSeconds = 600
+    private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
         // Calibrate on first encounter with this model
@@ -156,6 +164,9 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A local model accepts instantly and then generates for minutes; the stock 60s timeout is
+        // the wrong order of magnitude and cost two real summaries (#173).
+        request.timeoutInterval = TimeInterval(requestTimeoutSeconds)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

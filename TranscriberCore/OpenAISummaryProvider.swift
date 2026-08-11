@@ -55,19 +55,27 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
     /// backoff and an over-large `Retry-After`.
     static let maxBackoffSeconds: Double = 30
 
-    public init(endpoint: String, apiKey: String, model: String) {
-        self.init(endpoint: endpoint, apiKey: apiKey, model: model, session: .shared)
+    public init(endpoint: String, apiKey: String, model: String, requestTimeoutSeconds: Int? = nil) {
+        self.init(endpoint: endpoint, apiKey: apiKey, model: model, session: .shared,
+                  requestTimeoutSeconds: requestTimeoutSeconds)
     }
+
+    /// See `LMStudioSummaryProvider.defaultRequestTimeoutSeconds` — same reasoning.
+    public static let defaultRequestTimeoutSeconds = 600
 
     /// Testable initializer: inject a `URLSession` (e.g. with a mock `URLProtocol`) and a
     /// shorter retry base delay so the 429 backoff path runs fast under test.
-    init(endpoint: String, apiKey: String, model: String, session: URLSession, retryBaseDelay: Double = 1.0) {
+    init(endpoint: String, apiKey: String, model: String, session: URLSession,
+         retryBaseDelay: Double = 1.0, requestTimeoutSeconds: Int? = nil) {
         self.endpoint = endpoint
         self.apiKey = apiKey
         self.model = model
         self.session = session
         self.retryBaseDelay = retryBaseDelay
+        self.requestTimeoutSeconds = requestTimeoutSeconds ?? Self.defaultRequestTimeoutSeconds
     }
+
+    private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
         let request = try buildRequest(segments: segments, metadata: metadata)
@@ -146,6 +154,9 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A local model accepts instantly and then generates for minutes; the stock 60s timeout is
+        // the wrong order of magnitude and cost two real summaries (#173).
+        request.timeoutInterval = TimeInterval(requestTimeoutSeconds)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
