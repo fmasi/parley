@@ -66,6 +66,10 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 return try await retryRequest(segments: segments, metadata: metadata)
             }
 
+            // 401/403 has a precise fix and a body that may echo the credential — classify it.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
 
@@ -98,6 +102,9 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
             let body = String(data: data, encoding: .utf8) ?? ""
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode) (after retry): \(body.prefix(200))")
         }
 

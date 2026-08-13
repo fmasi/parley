@@ -9,6 +9,14 @@ public enum SummaryError: LocalizedError {
     /// a completion. Surfacing the server's own message is what keeps a misconfigured endpoint
     /// (bad token, unknown model) diagnosable instead of masked as `emptyResponse` (#134).
     case serverError(message: String, code: String?)
+    /// The endpoint rejected our credentials (401/403).
+    ///
+    /// Separate from `requestFailed` for two reasons. It is the one failure with a precise, useful
+    /// instruction — "check the API key" — and a generic "HTTP 401: <body>" buries that in noise.
+    /// And it must NOT echo the response body: some servers reflect the offending credential back,
+    /// and this text reaches a notification that may be on screen during a shared meeting. The same
+    /// concern already sanitizes `invalidEndpoint`.
+    case authenticationFailed(status: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +26,8 @@ public enum SummaryError: LocalizedError {
         case .serverError(let message, let code):
             let suffix = code.map { " (\($0))" } ?? ""
             return "Summary provider error: \(message)\(suffix)"
+        case .authenticationFailed(let status):
+            return "The summary endpoint rejected the API key (HTTP \(status)) — check it in Settings"
         }
     }
 
@@ -104,6 +114,10 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
             }
 
             let body = String(data: data, encoding: .utf8) ?? ""
+            // 401/403 has a precise fix and a body that may echo the credential — classify it.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
     }
