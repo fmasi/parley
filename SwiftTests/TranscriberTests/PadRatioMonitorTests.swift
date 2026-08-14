@@ -119,6 +119,62 @@ import Testing
         #expect(firedAtSecond <= 45, "detection should stay prompt, fired at \(firedAtSecond)s")
     }
 
+    // MARK: - THE 2026-08-11 FALSE POSITIVE (device-observed)
+
+    /// The first real-world firing of this detector was WRONG, and the recording was healthy.
+    ///
+    /// A call recorded on speaker: capture started at 11:59:44, the call audio began ~60s later.
+    /// Measured zero-sample ratio on the system track — 97.6% in 0-30s, 2.8% from 60-300s, 4.2%
+    /// overall. Nothing was wrong with it. But the monitor judged at exactly t=30s and saw 27s of
+    /// padding in 30s (ratio 0.911), clearing both the ratio threshold and the 15s absolute floor.
+    ///
+    /// The cause is a property of the Core Audio tap that SCK does not share: the tap delivers no
+    /// buffers at all while the output device is idle. Before the call connects there is genuinely
+    /// nothing to capture, so the padder fills wall clock and every one of those frames counts as
+    /// "fabricated". Starting a recording before joining the call is the single most common way to
+    /// use this app, so this fires on the ordinary case.
+    ///
+    /// The distinction that matters: padding BEFORE a track has ever delivered data is a start
+    /// offset, not a deficit. Only once frames are flowing does missing frames mean something.
+    @Test func leadingSilenceBeforeTheCallStartsIsNotCorruption() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        // 60s of pure padding — the tap delivers nothing while the output device is idle.
+        for _ in 0..<60 {
+            let v = monitor.record(padFrames: 48_000, dataFrames: 0, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        // Then the call connects and audio flows normally for 5 minutes.
+        for _ in 0..<300 {
+            let v = monitor.record(padFrames: 0, dataFrames: 48_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        #expect(fired == nil, "a recording started before the call must not be called corrupted")
+    }
+
+    /// The corollary that must still hold: once a track HAS delivered data, a sustained deficit is
+    /// real and must fire. This is the 2026-08-04 shape — the tap was delivering (a call was
+    /// connected) at roughly half the declared rate.
+    @Test func deficitAfterDataStartsStillFires() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        // Leading silence first — must be ignored, not merely diluted.
+        for _ in 0..<60 {
+            _ = monitor.record(padFrames: 48_000, dataFrames: 0, rate: Self.rate())
+        }
+        // Now frames flow, but only half of what the declared rate implies.
+        for _ in 0..<60 {
+            let v = monitor.record(padFrames: 24_000, dataFrames: 24_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        guard case .excessive(let ratio, _, _) = fired else {
+            Issue.record("a real deficit after data starts must still fire, got \(String(describing: fired))")
+            return
+        }
+        // The leading silence must not inflate the ratio either — this is ~0.5, not ~0.8.
+        #expect(ratio > 0.45 && ratio < 0.55, "leading silence must be excluded from the ratio, got \(ratio)")
+    }
+
     // MARK: - Warm-up
 
     /// Leading silence dominates the ratio before any real audio arrives, so a verdict must wait for
