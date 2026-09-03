@@ -94,3 +94,28 @@ struct TranscriptRediarizerTests {
         #expect(merged.first?["source"] as? String == "remote")
     }
 }
+
+@Suite("TranscriptRediarizer errors")
+struct TranscriptRediarizerErrorTests {
+
+    @Test("an unreadable transcript surfaces the underlying OS error, not a generic message")
+    func underlyingReadErrorSurfaces() async {
+        // `try? Data(contentsOf:)` flattened permission-denied, quota-exceeded and
+        // deleted-mid-run into one "Could not read the transcript." with nothing in the log to
+        // say which — so a failure report had no way to name its own cause.
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("does-not-exist-\(UUID().uuidString).json")
+        do {
+            _ = try await TranscriptRediarizer.rediarize(
+                transcript: missing, source: "local", speakerCount: 2,
+                diarizer: FluidAudioDiarizer())
+            Issue.record("expected a throw for a missing transcript")
+        } catch {
+            // NSCocoaErrorDomain 260 = NSFileReadNoSuchFileError. The point is that the real
+            // error reaches the caller instead of being replaced by our own wording.
+            let ns = error as NSError
+            #expect(ns.domain == NSCocoaErrorDomain)
+            #expect(ns.code == NSFileReadNoSuchFileError)
+        }
+    }
+}

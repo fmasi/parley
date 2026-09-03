@@ -137,8 +137,15 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// unforced one is the hot path and is never rebuilt, and a re-diarization at a user-stated
     /// count pays one model load (from the local cache — no download) the first time that count
     /// is used.
+    ///
+    /// At most TWO managers are kept: the unforced one (key 0, the hot path, never evicted) and the
+    /// most recent forced count. Keying without a bound let every distinct count accumulate its own
+    /// manager, each holding the full pyannote + WeSpeaker + VBx models — capped at 21 only by the
+    /// UI stepper's 1...20 range, which is not a property this actor should depend on. Re-detect is
+    /// used a couple of times per session and never concurrently, so a one-deep forced slot costs
+    /// nothing real and removes the growth entirely.
     private func ensureLoaded(forcedSpeakerCount: Int? = nil) async throws -> OfflineDiarizerManager {
-        let key = (forcedSpeakerCount ?? 0) > 0 ? forcedSpeakerCount! : 0
+        let key = forcedSpeakerCount.map { $0 > 0 ? $0 : 0 } ?? 0
         if let mgr = managers[key] {
             return mgr
         }
@@ -171,6 +178,8 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let elapsed = ContinuousClock.now - loadStart
         Logger.transcription.info("FluidAudio diarization models loaded in \(elapsed.components.seconds)s")
 
+        // Evict any previously cached forced count; keep key 0 (unforced) permanently.
+        managers = managers.filter { $0.key == 0 }
         managers[key] = mgr
         return mgr
     }

@@ -128,10 +128,16 @@ struct RenameDialog: View {
                 await MainActor.run {
                     if !refreshed.isEmpty { speakers = refreshed }
                     sampleIndices = [:]
+                    // Drop the stated count so the stepper falls back to what the diarizer actually
+                    // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,
+                    // which reads as a result rather than as the request it was.
+                    speakerCounts[channel] = nil
                     rediarizing = nil
                 }
             } catch {
-                Logger.transcription.error("Re-diarize failed: \(error.localizedDescription, privacy: .public)")
+                // .private: OS errors routinely embed full filesystem paths in their messages,
+                // and a recording's path names the meeting.
+                Logger.transcription.error("Re-diarize failed: \(error.localizedDescription, privacy: .private)")
                 await MainActor.run {
                     rediarizeError = error.localizedDescription
                     rediarizing = nil

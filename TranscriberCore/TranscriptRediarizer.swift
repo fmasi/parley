@@ -86,8 +86,11 @@ public enum TranscriptRediarizer {
         vadSpeechThreshold: Double = 0.5,
         scratchDirectory: URL = FileManager.default.temporaryDirectory
     ) async throws -> Outcome {
-        guard let data = try? Data(contentsOf: url),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        // Read and parse SEPARATELY, and let the read throw: flattening permission-denied,
+        // quota-exceeded and deleted-mid-run into one message of our own left a failure report
+        // with no way to name its own cause.
+        let data = try Data(contentsOf: url)
+        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawSegments = json["segments"] as? [[String: Any]]
         else { throw RediarizeError.unreadableTranscript }
 
@@ -164,6 +167,16 @@ public enum TranscriptRediarizer {
 
         case .chunkedArchives(let chunks):
             var channels: [URL] = []
+            // Every split file we create is a temp file we own. A throw from splitChannels on a
+            // later chunk, or from concatenate after the loop, used to leave the ones already
+            // produced behind — and on a multi-chunk recording those are hundreds of MB.
+            var temporaries: [URL] = []
+            var handedOff = false
+            defer {
+                if !handedOff {
+                    for t in temporaries { try? FileManager.default.removeItem(at: t) }
+                }
+            }
             for chunk in chunks where FileManager.default.fileExists(atPath: chunk.path) {
                 // A WAV-fallback chunk is system-only — there is no mic channel in it (#183).
                 if wantsLocal, SpeakerSampleLocator.isSystemOnly(chunk) { continue }
@@ -172,18 +185,29 @@ public enum TranscriptRediarizer {
                 } else {
                     let split = try await AudioSourceResolver.splitChannels(
                         stereoAac: chunk, outputDirectory: scratchDirectory)
-                    channels.append(wantsLocal ? split.local : split.remote)
+                    let wanted = wantsLocal ? split.local : split.remote
+                    channels.append(wanted)
+                    temporaries.append(wanted)
                     try? FileManager.default.removeItem(at: wantsLocal ? split.remote : split.local)
                 }
             }
             guard !channels.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
-            guard channels.count > 1 else { return (channels[0], true) }
+            if channels.count == 1 {
+                // A single chunk needs no concatenation. Only a SPLIT file is ours to delete; an
+                // original mono fallback WAV must survive, so hand back whether it is temporary.
+                let single = channels[0]
+                let isTemporary = temporaries.contains(single)
+                handedOff = isTemporary
+                return (single, isTemporary)
+            }
             // Diarize the whole timeline at once rather than per chunk: one clustering pass over
             // every chunk needs no cross-chunk reconciliation and cannot disagree with itself.
             let joined = try await AudioConcatenator.concatenate(
                 sources: channels, outputDirectory: scratchDirectory,
                 outputName: "rediarize-\(source)")
-            for c in channels { try? FileManager.default.removeItem(at: c) }
+            for t in temporaries { try? FileManager.default.removeItem(at: t) }
+            temporaries = []
+            handedOff = true
             return (joined.outputPath, true)
         }
     }
