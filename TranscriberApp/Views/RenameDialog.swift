@@ -140,7 +140,11 @@ struct RenameDialog: View {
                 // view's MainActor, so running it inline stalls the UI for O(chunks) file opens —
                 // right when the dialog is meant to be showing a spinner.
                 let refreshed = await Task.detached(priority: .userInitiated) {
-                    RenameWindowController.parseSpeakers(from: path)
+                    // minSegments: 1 — the user has just stated how many people are on this
+                    // channel. Dropping one of them as "diarization noise" for being quiet
+                    // contradicts the answer they gave and leaves a speaker they can see in the
+                    // transcript with no row to name.
+                    RenameWindowController.parseSpeakers(from: path, minSegments: 1)
                 }.value
                 await MainActor.run {
                     if refreshed.isEmpty {
@@ -166,7 +170,12 @@ struct RenameDialog: View {
                 // and a recording's path names the meeting.
                 Logger.transcription.error("Re-diarize failed: \(error.localizedDescription, privacy: .private)")
                 await MainActor.run {
-                    rediarizeError = error.localizedDescription
+                    // Only OUR errors are shown verbatim — we write those strings and they name no
+                    // paths. Foundation embeds the full file path in its descriptions, and a
+                    // recording's path names the meeting; this label can be on screen while the
+                    // user is sharing that screen. Same reasoning as the sanitized summary errors.
+                    rediarizeError = (error as? TranscriptRediarizer.RediarizeError)?.errorDescription
+                        ?? "Re-detection failed. See Console for details."
                     rediarizing = nil
                 }
             }

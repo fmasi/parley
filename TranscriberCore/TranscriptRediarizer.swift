@@ -178,7 +178,7 @@ public enum TranscriptRediarizer {
     }
 
     /// What a chunk file can contribute to one channel's audio.
-    public enum ChannelRole: Equatable {
+    enum ChannelRole: Equatable {
         /// A stereo archive: split it and take the wanted side.
         case needsSplit
         /// A mono fallback WAV that already IS the wanted channel.
@@ -194,7 +194,7 @@ public enum TranscriptRediarizer {
     /// WAVs for local requests; treating "not system-only" as "stereo" sent a mono mic WAV to
     /// `splitChannels`. Both are wrong for a mic-only recording — which is precisely the kind the
     /// speaker-count control exists to fix.
-    public static func channelRole(of chunk: URL, wantsLocal: Bool) -> ChannelRole {
+    static func channelRole(of chunk: URL, wantsLocal: Bool) -> ChannelRole {
         if SpeakerSampleLocator.isLocalOnly(chunk) { return wantsLocal ? .useDirectly : .skip }
         if SpeakerSampleLocator.isSystemOnly(chunk) { return wantsLocal ? .skip : .useDirectly }
         return .needsSplit
@@ -245,7 +245,15 @@ public enum TranscriptRediarizer {
                     let wanted = wantsLocal ? split.local : split.remote
                     channels.append(wanted)
                     temporaries.append(wanted)
-                    try? FileManager.default.removeItem(at: wantsLocal ? split.remote : split.local)
+                    let discard = wantsLocal ? split.remote : split.local
+                    do {
+                        try FileManager.default.removeItem(at: discard)
+                    } catch {
+                        // Not fatal, but on a long multi-chunk re-diarize a disk-full condition
+                        // would otherwise strand one large temp file per chunk with no trace.
+                        Logger.files.warning(
+                            "Re-diarize: could not remove the unused split channel: \(error.localizedDescription, privacy: .private)")
+                    }
                 }
             }
             guard !channels.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
