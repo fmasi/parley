@@ -16,6 +16,9 @@ struct RenameDialog: View {
     @State private var speakers: [SpeakerEntry]
     @State private var audioPlayer: AVAudioPlayer?
     @State private var sampleIndices: [String: Int] = [:]  // speaker id → current sample index
+    @State private var speakerCounts: [String: Int] = [:]  // "local"/"remote" → user-stated count
+    @State private var rediarizing: String?                // channel currently being re-detected
+    @State private var rediarizeError: String?
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -33,6 +36,110 @@ struct RenameDialog: View {
         self.onCancel = onCancel
     }
 
+    /// Channels present in this recording, in display order.
+    private var channels: [String] {
+        var seen: [String] = []
+        for id in speakers.map(\.id) {
+            let channel = id.hasPrefix("Local ") ? "local" : (id.hasPrefix("Remote ") ? "remote" : "")
+            if !channel.isEmpty, !seen.contains(channel) { seen.append(channel) }
+        }
+        return seen
+    }
+
+    private func detectedCount(for channel: String) -> Int {
+        let prefix = channel == "local" ? "Local " : "Remote "
+        return max(1, speakers.filter { $0.id.hasPrefix(prefix) }.count)
+    }
+
+    /// Manual override for the diarizer's speaker count (#67).
+    ///
+    /// It lives here, after the recording, rather than only in the pre-recording dialog: before a
+    /// call you often do not know (someone joins late, a call goes to speakerphone mid-conversation),
+    /// but here the user is looking at the speaker list and can see it is wrong.
+    @ViewBuilder
+    private var speakerCountSection: some View {
+        if !channels.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Wrong number of speakers?")
+                    .font(.footnote.weight(.semibold))
+                Text("Set how many people were on a channel and Parley will work out the speakers again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(channels, id: \.self) { channel in
+                    HStack(spacing: 8) {
+                        Text(channel == "local" ? "This side" : "Other side")
+                            .font(.caption)
+                            .frame(width: 70, alignment: .leading)
+                        Stepper(
+                            value: Binding(
+                                get: { speakerCounts[channel] ?? detectedCount(for: channel) },
+                                set: { speakerCounts[channel] = max(1, min(20, $0)) }
+                            ),
+                            in: 1...20
+                        ) {
+                            Text("\(speakerCounts[channel] ?? detectedCount(for: channel))")
+                                .font(.caption.monospacedDigit())
+                        }
+                        .labelsHidden()
+                        Text("\(speakerCounts[channel] ?? detectedCount(for: channel)) speaker\((speakerCounts[channel] ?? detectedCount(for: channel)) == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        if rediarizing == channel {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Re-detect") { rediarize(channel: channel) }
+                                .font(.caption)
+                                .disabled(rediarizing != nil)
+                        }
+                    }
+                }
+
+                if let rediarizeError {
+                    Text(rediarizeError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func rediarize(channel: String) {
+        let count = speakerCounts[channel] ?? detectedCount(for: channel)
+        rediarizing = channel
+        rediarizeError = nil
+        stopPlayback()
+        let path = jsonPath
+        Task {
+            do {
+                _ = try await TranscriptRediarizer.rediarize(
+                    transcript: path,
+                    source: channel,
+                    speakerCount: count,
+                    diarizer: FluidAudioDiarizer()
+                )
+                // Rebuild the rows from the rewritten transcript: labels, sample text and the
+                // resolved audio offsets can all have moved.
+                let refreshed = RenameWindowController.parseSpeakers(from: path)
+                await MainActor.run {
+                    if !refreshed.isEmpty { speakers = refreshed }
+                    sampleIndices = [:]
+                    rediarizing = nil
+                }
+            } catch {
+                Logger.transcription.error("Re-diarize failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run {
+                    rediarizeError = error.localizedDescription
+                    rediarizing = nil
+                }
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
@@ -47,6 +154,8 @@ struct RenameDialog: View {
             ForEach($speakers) { $speaker in
                 speakerCard($speaker)
             }
+
+            speakerCountSection
 
             HStack {
                 Spacer()

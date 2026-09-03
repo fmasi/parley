@@ -1,0 +1,190 @@
+import Foundation
+import os
+
+/// Re-runs diarization on ONE channel of an existing recording at a user-stated speaker count,
+/// and rewrites the transcript with the result (#67).
+///
+/// Why this exists at all: the diarizer's speaker count is a guess, and it is wrong in both
+/// directions. On 2026-08-26 it invented a second remote speaker out of 28s of fragments; on
+/// 2026-09-02 it collapsed two people sharing a speakerphone into one. `DiarizationCleanup` fixes
+/// the first automatically. Nothing automatic fixes the second — only the person who was there
+/// knows how many people were talking — so this is the manual override, offered *after* the
+/// recording when the user can see the speaker list is wrong.
+public enum TranscriptRediarizer {
+
+    /// Replace one source's segments with a freshly labeled set, keeping the other source as-is.
+    ///
+    /// Not a 1:1 relabel: word-level boundary splitting (#120) can turn one ASR segment into two
+    /// when a speaker change lands mid-segment — measured 73 → 84 segments on `150633-Paul
+    /// feedback` — so the target source is replaced wholesale rather than patched in place.
+    public static func mergeRelabeled(
+        into segments: [[String: Any]],
+        source: String,
+        relabeled: [LabeledSegment]
+    ) -> [[String: Any]] {
+        var kept = segments.filter { ($0["source"] as? String) != source }
+        kept.append(contentsOf: relabeled.map { seg in
+            var dict: [String: Any] = [
+                "start": seg.start,
+                "end": seg.end,
+                "speaker": seg.speaker,
+                "source": seg.source,
+                "text": seg.text,
+            ]
+            if let confidence = seg.confidence { dict["confidence"] = confidence }
+            if let language = seg.language { dict["language"] = language }
+            return dict
+        })
+        return kept.sorted { ($0["start"] as? Double ?? 0) < ($1["start"] as? Double ?? 0) }
+    }
+
+    /// Drop `speaker_names` entries for labels the re-diarization no longer produces.
+    ///
+    /// A stale entry is not merely untidy: speaker numbering is positional, so "Local Speaker 3"
+    /// surviving a run that yields two local speakers would either apply a name to nobody or —
+    /// if a later run produces three again — attach an old name to a different person.
+    /// Only the re-diarized channel is pruned; the other channel's names are none of our business.
+    public static func prunedSpeakerNames(
+        _ names: [String: String],
+        source: String,
+        survivingLabels: Set<String>
+    ) -> [String: String] {
+        let prefix = source == "local" ? "Local " : "Remote "
+        return names.filter { !$0.key.hasPrefix(prefix) || survivingLabels.contains($0.key) }
+    }
+
+    // MARK: - Orchestration
+
+    public struct Outcome: Sendable {
+        public let speakerCount: Int
+        public let segmentsRelabeled: Int
+    }
+
+    public enum RediarizeError: LocalizedError {
+        case unreadableTranscript
+        case noAudioForChannel(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unreadableTranscript: return "Could not read the transcript."
+            case .noAudioForChannel(let c): return "No \(c) audio is available for this recording."
+            }
+        }
+    }
+
+    /// Re-diarize one channel at `speakerCount` and rewrite the transcript in place.
+    ///
+    /// **Relabels only — it does not re-run ASR.** The words stay exactly as recorded; only speaker
+    /// attribution changes. Re-transcribing would produce marginally better turn boundaries (word
+    /// timings let #120 split a segment where a speaker change lands mid-sentence), but silently
+    /// rewriting what was *said* to fix who said it is the wrong trade for a record people rely on.
+    public static func rediarize(
+        transcript url: URL,
+        source: String,
+        speakerCount: Int,
+        diarizer: any DiarizationProvider,
+        vadSpeechThreshold: Double = 0.5,
+        scratchDirectory: URL = FileManager.default.temporaryDirectory
+    ) async throws -> Outcome {
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawSegments = json["segments"] as? [[String: Any]]
+        else { throw RediarizeError.unreadableTranscript }
+
+        var metadata = json["metadata"] as? [String: Any] ?? [:]
+        let audioPaths = (metadata["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+        let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
+
+        let (channelAudio, isTemporary) = try await resolveChannelAudio(
+            layout: layout, source: source, scratchDirectory: scratchDirectory)
+        defer { if isTemporary { try? FileManager.default.removeItem(at: channelAudio) } }
+
+        // The user's answer is authoritative: force the count AND skip minority absorption, which
+        // exists to second-guess a count nobody supplied.
+        let diarization = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
+        let speechMap = try? await VadSpeechMap().analyze(audioPath: channelAudio)
+
+        let transcriptSegments = rawSegments
+            .filter { ($0["source"] as? String) == source }
+            .compactMap { dict -> TranscriptSegment? in
+                guard let start = dict["start"] as? Double,
+                      let end = dict["end"] as? Double,
+                      let text = dict["text"] as? String else { return nil }
+                return TranscriptSegment(
+                    start: start, end: end, text: text,
+                    language: dict["language"] as? String,
+                    confidence: (dict["confidence"] as? Double).map(Float.init))
+            }
+
+        let result = StreamLabeling.withDiarization(
+            segments: transcriptSegments,
+            diarizationResult: diarization,
+            speechMap: speechMap,
+            vadSpeechThreshold: vadSpeechThreshold,
+            speakerCountIsUserStated: true)
+
+        var labeled = result.labeled
+        for i in labeled.indices { labeled[i].source = source }
+        SpeakerAssignment.tagWithSourcePrefix(&labeled)
+
+        json["segments"] = mergeRelabeled(into: rawSegments, source: source, relabeled: labeled)
+        if let names = metadata["speaker_names"] as? [String: String] {
+            metadata["speaker_names"] = prunedSpeakerNames(
+                names, source: source, survivingLabels: Set(labeled.map { $0.speaker }))
+        }
+        metadata["speaker_count_\(source)"] = speakerCount
+        json["metadata"] = metadata
+
+        let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try out.write(to: url, options: .atomic)
+
+        let found = Set(labeled.map { $0.speaker }).count
+        Logger.transcription.info(
+            "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
+        return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)
+    }
+
+    /// Produce a mono file holding just the requested channel, concatenating chunks when needed.
+    /// Returns `isTemporary: true` when the caller must clean the file up.
+    private static func resolveChannelAudio(
+        layout: AudioLayout,
+        source: String,
+        scratchDirectory: URL
+    ) async throws -> (URL, Bool) {
+        let wantsLocal = source == "local"
+        switch layout {
+        case .unavailable:
+            throw RediarizeError.noAudioForChannel(source)
+
+        case .legacyDualStream(let remote, let local):
+            guard let url = wantsLocal ? local : remote,
+                  FileManager.default.fileExists(atPath: url.path)
+            else { throw RediarizeError.noAudioForChannel(source) }
+            return (url, false)
+
+        case .chunkedArchives(let chunks):
+            var channels: [URL] = []
+            for chunk in chunks where FileManager.default.fileExists(atPath: chunk.path) {
+                // A WAV-fallback chunk is system-only — there is no mic channel in it (#183).
+                if wantsLocal, SpeakerSampleLocator.isSystemOnly(chunk) { continue }
+                if SpeakerSampleLocator.isSystemOnly(chunk) {
+                    channels.append(chunk)
+                } else {
+                    let split = try await AudioSourceResolver.splitChannels(
+                        stereoAac: chunk, outputDirectory: scratchDirectory)
+                    channels.append(wantsLocal ? split.local : split.remote)
+                    try? FileManager.default.removeItem(at: wantsLocal ? split.remote : split.local)
+                }
+            }
+            guard !channels.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
+            guard channels.count > 1 else { return (channels[0], true) }
+            // Diarize the whole timeline at once rather than per chunk: one clustering pass over
+            // every chunk needs no cross-chunk reconciliation and cannot disagree with itself.
+            let joined = try await AudioConcatenator.concatenate(
+                sources: channels, outputDirectory: scratchDirectory,
+                outputName: "rediarize-\(source)")
+            for c in channels { try? FileManager.default.removeItem(at: c) }
+            return (joined.outputPath, true)
+        }
+    }
+}

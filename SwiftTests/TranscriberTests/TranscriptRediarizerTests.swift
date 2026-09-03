@@ -1,0 +1,96 @@
+import Testing
+import Foundation
+@testable import TranscriberCore
+
+/// Rewriting one channel's speakers after a re-diarization (#67).
+///
+/// Re-diarization is NOT a relabel in place: word-level boundary splitting (#120) can turn one
+/// ASR segment into two when a speaker change lands mid-segment. On `150633-Paul feedback` it
+/// turned 73 segments into 84. So the operation replaces one source's segments wholesale and
+/// leaves the other source untouched.
+@Suite("TranscriptRediarizer")
+struct TranscriptRediarizerTests {
+
+    private func seg(_ start: Double, _ end: Double, _ speaker: String, _ source: String, _ text: String) -> [String: Any] {
+        ["start": start, "end": end, "speaker": speaker, "source": source, "text": text, "confidence": 0.9]
+    }
+    private func labeled(_ start: Double, _ end: Double, _ speaker: String, _ text: String) -> LabeledSegment {
+        LabeledSegment(start: start, end: end, speaker: speaker, text: text, source: "local", confidence: 0.9)
+    }
+
+    @Test("replaces the target source's segments and leaves the other source alone")
+    func otherSourceIsUntouched() {
+        let original = [
+            seg(0, 5, "Local Speaker 1", "local", "mine"),
+            seg(5, 10, "Remote Speaker 1", "remote", "theirs"),
+        ]
+        let merged = TranscriptRediarizer.mergeRelabeled(
+            into: original, source: "local",
+            relabeled: [labeled(0, 5, "Local Speaker 2", "mine")]
+        )
+        #expect(merged.count == 2)
+        let remote = merged.first { $0["source"] as? String == "remote" }
+        #expect(remote?["speaker"] as? String == "Remote Speaker 1")
+        let local = merged.first { $0["source"] as? String == "local" }
+        #expect(local?["speaker"] as? String == "Local Speaker 2")
+    }
+
+    @Test("accepts a different segment count — boundary splitting adds segments")
+    func segmentCountMayGrow() {
+        let original = [seg(0, 10, "Local Speaker 1", "local", "one long turn")]
+        let merged = TranscriptRediarizer.mergeRelabeled(
+            into: original, source: "local",
+            relabeled: [labeled(0, 4, "Local Speaker 1", "one long"), labeled(4, 10, "Local Speaker 2", "turn")]
+        )
+        #expect(merged.count == 2)
+        #expect(merged.map { $0["speaker"] as? String } == ["Local Speaker 1", "Local Speaker 2"])
+    }
+
+    @Test("output is sorted by start time across both sources")
+    func outputIsTimeSorted() {
+        let original = [
+            seg(0, 5, "Local Speaker 1", "local", "a"),
+            seg(5, 10, "Remote Speaker 1", "remote", "b"),
+            seg(10, 15, "Local Speaker 1", "local", "c"),
+        ]
+        let merged = TranscriptRediarizer.mergeRelabeled(
+            into: original, source: "local",
+            relabeled: [labeled(0, 5, "Local Speaker 1", "a"), labeled(10, 15, "Local Speaker 2", "c")]
+        )
+        #expect(merged.compactMap { $0["start"] as? Double } == [0, 5, 10])
+        #expect(merged.map { $0["speaker"] as? String }
+                == ["Local Speaker 1", "Remote Speaker 1", "Local Speaker 2"])
+    }
+
+    @Test("a stale speaker_names entry for a label that no longer exists is dropped")
+    func staleSpeakerNamesAreDropped() {
+        // The user named "Local Speaker 3" before re-diarizing; the new run produces only two
+        // local speakers. Leaving the stale mapping would re-apply a name to nobody, or worse,
+        // to a different person if the numbering shifts.
+        let names = ["Local Speaker 1": "Fred", "Local Speaker 3": "Ghost", "Remote Speaker 1": "Paul"]
+        let kept = TranscriptRediarizer.prunedSpeakerNames(
+            names, source: "local", survivingLabels: ["Local Speaker 1", "Local Speaker 2"]
+        )
+        #expect(kept == ["Local Speaker 1": "Fred", "Remote Speaker 1": "Paul"])
+    }
+
+    @Test("pruning never touches names belonging to the other channel")
+    func pruningIsScopedToTheRediarizedChannel() {
+        let names = ["Remote Speaker 2": "Someone", "Local Speaker 1": "Fred"]
+        let kept = TranscriptRediarizer.prunedSpeakerNames(
+            names, source: "local", survivingLabels: ["Local Speaker 1"]
+        )
+        #expect(kept["Remote Speaker 2"] == "Someone")
+    }
+
+    @Test("an empty relabeling removes that source's segments rather than duplicating them")
+    func emptyRelabelingClearsTheSource() {
+        let original = [
+            seg(0, 5, "Local Speaker 1", "local", "a"),
+            seg(5, 10, "Remote Speaker 1", "remote", "b"),
+        ]
+        let merged = TranscriptRediarizer.mergeRelabeled(into: original, source: "local", relabeled: [])
+        #expect(merged.count == 1)
+        #expect(merged.first?["source"] as? String == "remote")
+    }
+}

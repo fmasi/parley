@@ -6,7 +6,8 @@ import FluidAudio
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models must be pre-downloaded via preDownloadModels() during setup.
 public actor FluidAudioDiarizer: DiarizationProvider {
-    private var manager: OfflineDiarizerManager?
+    /// Keyed by effective forced speaker count; 0 = unforced (the hot path).
+    private var managers: [Int: OfflineDiarizerManager] = [:]
 
     /// Euclidean distance threshold for unit-normalized embeddings. LOWER = stricter = more
     /// speakers kept apart; HIGHER = more merging. nil uses FluidAudio's default (0.6).
@@ -41,12 +42,22 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// is how TranscriptMerger shipped six passing tests and zero production bytes). Any change
     /// to these values — ours or a FluidAudio default moving under a dependency bump — must
     /// show up as a red diff against the checked-in golden.
-    public nonisolated func makeOfflineConfig() -> OfflineDiarizerConfig {
+    /// - Parameter forcedSpeakerCount: the number of speakers the USER stated for this specific
+    ///   recording. Overrides the diarizer's own `maxSpeakers`. Non-positive values are ignored —
+    ///   "0 speakers" is not an answer, and pinning clustering to it would be worse than the
+    ///   default. `nil` means "no answer given"; the configured/default behaviour applies.
+    ///
+    ///   `maxSpeakers` is a target rather than a ceiling in practice: on `150633-Paul feedback`
+    ///   the unbounded default produced ONE speaker while `maxSpeakers` of 2/3/4 produced exactly
+    ///   2/3/4. That is why a user's answer is routed here and not to a `numSpeakers` hint.
+    public nonisolated func makeOfflineConfig(forcedSpeakerCount: Int? = nil) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
         if let clusteringThreshold {
             config.clustering.threshold = clusteringThreshold
         }
-        if let maxSpeakers {
+        if let forced = forcedSpeakerCount, forced > 0 {
+            config.clustering.maxSpeakers = forced
+        } else if let maxSpeakers {
             config.clustering.maxSpeakers = maxSpeakers
         }
         return config
@@ -58,11 +69,15 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         self.excludeOverlap = excludeOverlap
     }
 
+    /// - Parameter numSpeakers: the user's stated speaker count for this recording, or `nil`.
+    ///   Until #67 this parameter was accepted and silently discarded — the body loaded one manager
+    ///   and called `process` regardless — so every caller that passed a hint got the default
+    ///   behaviour and no error. It is now routed to `clustering.maxSpeakers`.
     public func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
         let startTime = ContinuousClock.now
         Logger.transcription.info("FluidAudio diarization starting: \(audioPath.lastPathComponent, privacy: .sensitive)")
 
-        let mgr = try await ensureLoaded()
+        let mgr = try await ensureLoaded(forcedSpeakerCount: numSpeakers)
         let result = try await mgr.process(audioPath)
 
         let segments = result.segments.map { seg in
@@ -117,8 +132,14 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         try await VadSpeechMap.preDownloadModel()
     }
 
-    private func ensureLoaded() async throws -> OfflineDiarizerManager {
-        if let mgr = manager {
+    /// `OfflineDiarizerManager` takes its config at init and exposes no per-call override, so a
+    /// forced speaker count needs its own manager. Managers are cached per effective count: the
+    /// unforced one is the hot path and is never rebuilt, and a re-diarization at a user-stated
+    /// count pays one model load (from the local cache — no download) the first time that count
+    /// is used.
+    private func ensureLoaded(forcedSpeakerCount: Int? = nil) async throws -> OfflineDiarizerManager {
+        let key = (forcedSpeakerCount ?? 0) > 0 ? forcedSpeakerCount! : 0
+        if let mgr = managers[key] {
             return mgr
         }
 
@@ -140,9 +161,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
                 "Diarization: excludeOverlap is FALSE — speaker embeddings will blend overlapping voices and are expected to collapse into a single speaker. Measured on a 4-speaker reference meeting: 1 speaker instead of 4. Remove diarization_exclude_overlap from config.json."
             )
         }
-        let config = makeOfflineConfig()
+        let config = makeOfflineConfig(forcedSpeakerCount: forcedSpeakerCount)
         Logger.transcription.info(
-            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(self.maxSpeakers.map(String.init) ?? "unset", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
+            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(forcedSpeakerCount.map(String.init) ?? "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
         )
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()
@@ -150,7 +171,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let elapsed = ContinuousClock.now - loadStart
         Logger.transcription.info("FluidAudio diarization models loaded in \(elapsed.components.seconds)s")
 
-        manager = mgr
+        managers[key] = mgr
         return mgr
     }
 }

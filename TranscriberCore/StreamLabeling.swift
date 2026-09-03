@@ -8,15 +8,29 @@ import Foundation
 /// (the #136 disease — a fix applied to one copy silently missing the other).
 enum StreamLabeling {
 
-    /// Label transcript segments against a **successful** diarization result: assign speakers via
-    /// `SpeakerAssignment`, then remap the speaker-database keys from raw IDs ("S2") to the
-    /// friendly names ("Speaker 1") used in the segments (so echo dedup and the reconciler match).
+    /// Label transcript segments against a **successful** diarization result: absorb minority
+    /// clusters (#65), assign speakers via `SpeakerAssignment`, then remap the speaker-database keys
+    /// from raw IDs ("S2") to the friendly names ("Speaker 1") used in the segments (so echo dedup
+    /// and the reconciler match).
+    ///
+    /// - Parameter speakerCountIsUserStated: the user told us how many speakers this stream has, so
+    ///   the diarizer was already forced to that count. Absorption is skipped entirely — second-
+    ///   guessing an explicit answer by deleting one of the speakers they asked for is worse than
+    ///   any fragment it might remove.
     static func withDiarization(
         segments: [TranscriptSegment],
         diarizationResult: DiarizationResult,
         speechMap: [SpeechRegion]?,
-        vadSpeechThreshold: Double
+        vadSpeechThreshold: Double,
+        minSpeakerShare: Double? = DiarizationCleanup.defaultMinShare,
+        speakerCountIsUserStated: Bool = false
     ) -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]]) {
+        // Runs BEFORE assignment so the absorbed cluster never becomes a "Speaker N" label, and
+        // before `buildSpeakerMap` so the database keys agree with the labels (the invariant below).
+        let diarizationResult = DiarizationCleanup.absorbMinorityClusters(
+            diarizationResult,
+            minShare: speakerCountIsUserStated ? nil : minSpeakerShare
+        )
         let labeled = SpeakerAssignment.assign(
             transcriptSegments: segments,
             diarizationSegments: diarizationResult.segments,
