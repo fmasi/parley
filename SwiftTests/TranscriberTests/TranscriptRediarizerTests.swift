@@ -119,3 +119,42 @@ struct TranscriptRediarizerErrorTests {
         }
     }
 }
+
+/// How a single chunk file contributes to one channel's audio.
+///
+/// This is the seam where #183 and #67 meet, and it is wrong until both are together: #183
+/// redefined `isSystemOnly` so a `_mic.wav` fallback is no longer "system audio", which means the
+/// re-diarize path stopped skipping it for a LOCAL request (correct) but then fell through to
+/// `splitChannels` on a MONO file (wrong). Mic-only recordings are exactly the ones the speaker-
+/// count control exists for, so this seam has to hold.
+@Suite("TranscriptRediarizer channel roles")
+struct TranscriptRediarizerChannelRoleTests {
+
+    private func url(_ name: String) -> URL { URL(fileURLWithPath: "/rec/\(name)") }
+
+    @Test("a stereo archive must be split for either channel")
+    func archiveNeedsSplitting() {
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0.m4a"), wantsLocal: true) == .needsSplit)
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0.m4a"), wantsLocal: false) == .needsSplit)
+    }
+
+    @Test("a mic WAV fallback is used directly for the local channel")
+    func micWavUsedDirectlyForLocal() {
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0_mic.wav"), wantsLocal: true) == .useDirectly)
+    }
+
+    @Test("a mic WAV fallback contributes nothing to the remote channel")
+    func micWavSkippedForRemote() {
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0_mic.wav"), wantsLocal: false) == .skip)
+    }
+
+    @Test("a system WAV fallback is used directly for the remote channel")
+    func systemWavUsedDirectlyForRemote() {
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0.wav"), wantsLocal: false) == .useDirectly)
+    }
+
+    @Test("a system WAV fallback contributes nothing to the local channel")
+    func systemWavSkippedForLocal() {
+        #expect(TranscriptRediarizer.channelRole(of: url("call-0.wav"), wantsLocal: true) == .skip)
+    }
+}

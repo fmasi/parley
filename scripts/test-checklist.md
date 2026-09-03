@@ -131,3 +131,14 @@ transcribes into fluent, wrong text. Verify by ear and by log.
 **Known gap:** a mic-only recording (phone on speakerphone, no system audio) still has no `.m4a`
 and its transcript does not reference the mic WAV — #183. Re-detect will fail on those until #183
 lands. Verify the error message is the readable one.
+## Mic-only recordings (#183) — added 2026-09-03
+
+- [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —
+      previously the recording stayed as two WAVs forever.
+- [ ] Check the log for `system track is empty — archiving '<name>' as mic-only`.
+- [ ] Play the `.m4a`: your voice must be on the LEFT channel, right channel silent. If the voice
+      is on the right, the mic has been archived into the remote slot — stop and file it.
+- [ ] Open the rename dialog for that recording: the play button must be present and must play.
+- [ ] Regression: a normal dual-stream call still archives with L=mic / R=system as before.
+- [ ] Regression: a genuine rate mismatch (system 24 kHz vs mic 48 kHz — the 2026-08-04 chipmunk
+      shape) must STILL refuse to archive and keep both WAVs.

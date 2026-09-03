@@ -147,6 +147,29 @@ public enum TranscriptRediarizer {
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)
     }
 
+    /// What a chunk file can contribute to one channel's audio.
+    public enum ChannelRole: Equatable {
+        /// A stereo archive: split it and take the wanted side.
+        case needsSplit
+        /// A mono fallback WAV that already IS the wanted channel.
+        case useDirectly
+        /// A mono fallback WAV holding the other channel — it contributes nothing here.
+        case skip
+    }
+
+    /// Decide a chunk's role for the requested channel.
+    ///
+    /// The three-way distinction matters because a WAV fallback holds exactly ONE channel and the
+    /// filename says which (#183). Treating "not a stereo archive" as "system audio" skipped mic
+    /// WAVs for local requests; treating "not system-only" as "stereo" sent a mono mic WAV to
+    /// `splitChannels`. Both are wrong for a mic-only recording — which is precisely the kind the
+    /// speaker-count control exists to fix.
+    public static func channelRole(of chunk: URL, wantsLocal: Bool) -> ChannelRole {
+        if SpeakerSampleLocator.isLocalOnly(chunk) { return wantsLocal ? .useDirectly : .skip }
+        if SpeakerSampleLocator.isSystemOnly(chunk) { return wantsLocal ? .skip : .useDirectly }
+        return .needsSplit
+    }
+
     /// Produce a mono file holding just the requested channel, concatenating chunks when needed.
     /// Returns `isTemporary: true` when the caller must clean the file up.
     private static func resolveChannelAudio(
@@ -178,11 +201,12 @@ public enum TranscriptRediarizer {
                 }
             }
             for chunk in chunks where FileManager.default.fileExists(atPath: chunk.path) {
-                // A WAV-fallback chunk is system-only — there is no mic channel in it (#183).
-                if wantsLocal, SpeakerSampleLocator.isSystemOnly(chunk) { continue }
-                if SpeakerSampleLocator.isSystemOnly(chunk) {
+                switch channelRole(of: chunk, wantsLocal: wantsLocal) {
+                case .skip:
+                    continue
+                case .useDirectly:
                     channels.append(chunk)
-                } else {
+                case .needsSplit:
                     let split = try await AudioSourceResolver.splitChannels(
                         stereoAac: chunk, outputDirectory: scratchDirectory)
                     let wanted = wantsLocal ? split.local : split.remote
