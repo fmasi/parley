@@ -77,10 +77,21 @@ public enum SpeakerSampleLocator {
         return .chunkedArchives(audioPaths)
     }
 
-    /// A chunk that fell back to raw WAV carries system audio only — the mic stream is not
-    /// archived — so local samples cannot be played from it.
+    /// A chunk that fell back to raw WAV carries ONE channel, and the filename says which:
+    /// `<base>_mic.wav` is the mic (local) stream, any other WAV is the system (remote) stream.
+    /// Only a `.m4a` archive carries both.
+    ///
+    /// Treating every non-`.m4a` as system-only was half of #183: a speakerphone recording whose
+    /// only surviving audio is `_mic.wav` could not play a local sample — every segment in it is
+    /// local — so the rename dialog offered no play button at all.
     static func isSystemOnly(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() != "m4a" && !isLocalOnly(url)
+    }
+
+    /// A raw mic WAV fallback: local audio only, no system channel to play.
+    static func isLocalOnly(_ url: URL) -> Bool {
         url.pathExtension.lowercased() != "m4a"
+            && url.lastPathComponent.lowercased().hasSuffix("_mic.wav")
     }
 
     /// Read each chunk's duration so absolute time can be mapped onto it.
@@ -132,8 +143,9 @@ public enum SpeakerSampleLocator {
             ), chunks.indices.contains(hit.index) else { return nil }
             let url = chunks[hit.index]
             guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-            // A WAV-fallback chunk holds system audio only, so there is no mic channel to play.
+            // A WAV-fallback chunk holds ONE channel; refuse the sample when it is the other one.
             if isLocal, isSystemOnly(url) { return nil }
+            if !isLocal, isLocalOnly(url) { return nil }
             return SpeakerSampleLocation(url: url, start: hit.start, end: hit.end, isLocal: isLocal)
 
         case .legacyDualStream(let remote, let local):

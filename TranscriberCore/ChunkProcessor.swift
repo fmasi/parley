@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import os
 
 /// Processes finalized chunks in the background: transcribe both streams,
@@ -206,8 +207,17 @@ public final class ChunkProcessor {
                 protectedFile: archiveResult.archivePath
             )
         } catch {
-            // Archive failed — keep the WAV(s) as a last-resort fallback (audioPath stays .wav).
-            Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s): \(error, privacy: .public)")
+            // Archive failed — keep the WAV(s) as a last-resort fallback. Record whichever one
+            // actually holds audio: on a speakerphone recording the system WAV is an empty header
+            // and the mic WAV holds every word, and pointing the transcript at the empty one left
+            // the real audio referenced nowhere (#183).
+            audioPath = AudioArchiver.fallbackAudioName(
+                systemName: systemURL.lastPathComponent,
+                systemHasFrames: Self.hasAudioFrames(systemURL),
+                micName: micFileExists ? micURL.lastPathComponent : nil,
+                micHasFrames: micFileExists && Self.hasAudioFrames(micURL)
+            )
+            Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .public)")
         }
 
         // 7. Create ProcessedChunk
@@ -241,6 +251,13 @@ public final class ChunkProcessor {
     private struct StreamResult {
         let segments: [LabeledSegment]
         let speakerDatabase: [String: [Float]]
+    }
+
+    /// Whether a WAV holds any audio at all. A capture that opened a file and never wrote a frame
+    /// leaves a valid header with zero frames — readable, nominally 16 kHz, and completely empty.
+    private nonisolated static func hasAudioFrames(_ url: URL) -> Bool {
+        guard let file = try? AVAudioFile(forReading: url) else { return false }
+        return file.length > 0
     }
 
     /// Transcribe a single audio stream, with optional diarization + VAD.
