@@ -19,6 +19,10 @@ struct RenameDialog: View {
     @State private var speakerCounts: [String: Int] = [:]  // "local"/"remote" → user-stated count
     @State private var rediarizing: String?                // channel currently being re-detected
     @State private var rediarizeError: String?
+    /// One instance for the dialog's lifetime. `FluidAudioDiarizer` caches a loaded manager per
+    /// speaker count, and a fresh instance per press would throw that away — re-loading the models
+    /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
+    @State private var diarizer = FluidAudioDiarizer()
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -122,13 +126,20 @@ struct RenameDialog: View {
                     transcript: path,
                     source: channel,
                     speakerCount: count,
-                    diarizer: FluidAudioDiarizer()
+                    diarizer: diarizer
                 )
                 // Rebuild the rows from the rewritten transcript: labels, sample text and the
                 // resolved audio offsets can all have moved.
                 let refreshed = RenameWindowController.parseSpeakers(from: path)
                 await MainActor.run {
-                    if !refreshed.isEmpty { speakers = refreshed }
+                    if refreshed.isEmpty {
+                        // The transcript HAS been rewritten at this point. Silently keeping the old
+                        // rows would show a stale speaker list under a dialog that looked like it
+                        // succeeded — worse than saying nothing happened.
+                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded."
+                    } else {
+                        speakers = refreshed
+                    }
                     sampleIndices = [:]
                     // Drop the stated count so the stepper falls back to what the diarizer actually
                     // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,

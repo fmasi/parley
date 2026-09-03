@@ -63,7 +63,7 @@ public enum DiarizationCleanup {
         guard !absorbed.isEmpty else { return result }
 
         Logger.transcription.info(
-            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int(minShare * 100), privacy: .public)% of \(Int(total), privacy: .public)s of speech)"
+            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int(minShare * 100), privacy: .public)% of \(String(format: "%.1f", total), privacy: .public)s of speech)"
         )
 
         let segments = result.segments.map { seg in

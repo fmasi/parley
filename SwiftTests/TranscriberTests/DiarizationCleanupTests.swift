@@ -121,6 +121,18 @@ struct DiarizationCleanupTests {
         #expect(durations(cleaned).count == 2)
     }
 
+    @Test("absorbs every minority cluster in a single pass, not just the smallest")
+    func absorbsMultipleMinorityClusters() {
+        // S1=80%, S2=3%, S3=2%. Both fragments must vanish in one call. Every other test here has
+        // exactly one minority cluster, so a change that absorbed one per call — or stopped at the
+        // first hit — would pass the whole suite.
+        let cleaned = DiarizationCleanup.absorbMinorityClusters(
+            result([("S1", 800), ("S2", 30), ("S3", 20)]))
+        #expect(durations(cleaned).count == 1)
+        #expect(durations(cleaned)["S1"] == 850)
+        #expect(cleaned.speakerDatabase.keys.sorted() == ["S1"])
+    }
+
     @Test("a cluster at exactly the threshold is KEPT — the comparison is strict")
     func clusterExactlyAtThresholdIsKept() {
         // 5% of 600s is 30s. Pinning the boundary matters because the two device cases sit either
