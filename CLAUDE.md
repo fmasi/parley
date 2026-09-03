@@ -62,6 +62,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization; isModelCached()/preDownloadModel() for eager download; ensureLoaded() is load-only (never downloads)
 - `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores; isDiarizationCached()/preDownloadModels() for eager download; ensureLoaded() is load-only (never downloads)
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
+- `TranscriberCore/DiarizationCleanup.swift` -- post-processes a raw `DiarizationResult` before labeling: absorbs clusters holding under `diarization_min_speaker_share` of a stream's speech into the dominant speaker, only when one cluster holds >=50% (#65)
+- `TranscriberCore/TranscriptRediarizer.swift` -- re-runs diarization on ONE channel at a user-stated speaker count and rewrites the transcript in place (#67); relabels only, never re-runs ASR
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync

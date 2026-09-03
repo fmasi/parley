@@ -23,6 +23,9 @@ struct RenameDialog: View {
     /// speaker count, and a fresh instance per press would throw that away — re-loading the models
     /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
     @State private var diarizer = FluidAudioDiarizer()
+    /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
+    /// outlives the dialog and rewrites the transcript after the user asked it not to.
+    @State private var rediarizeTask: Task<Void, Never>?
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -120,13 +123,15 @@ struct RenameDialog: View {
         rediarizeError = nil
         stopPlayback()
         let path = jsonPath
-        Task {
+        let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
+        rediarizeTask = Task {
             do {
                 _ = try await TranscriptRediarizer.rediarize(
                     transcript: path,
                     source: channel,
                     speakerCount: count,
-                    diarizer: diarizer
+                    diarizer: diarizer,
+                    vadSpeechThreshold: vadThreshold
                 )
                 // Rebuild the rows from the rewritten transcript: labels, sample text and the
                 // resolved audio offsets can all have moved.
@@ -178,7 +183,7 @@ struct RenameDialog: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { onCancel() }
+                Button("Cancel") { rediarizeTask?.cancel(); onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     var mapping: [String: String] = [:]
@@ -201,6 +206,7 @@ struct RenameDialog: View {
         .onDisappear {
             // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
             // created, and closing the dialog is the common exit.
+            rediarizeTask?.cancel()
             stopPlayback()
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil

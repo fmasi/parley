@@ -115,6 +115,7 @@ public enum TranscriptRediarizer {
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
         let diarization = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
+        try Task.checkCancellation()
         let speechMap = try? await VadSpeechMap().analyze(audioPath: channelAudio)
 
         let transcriptSegments = rawSegments
@@ -152,6 +153,9 @@ public enum TranscriptRediarizer {
         metadata["speaker_count_\(source)"] = found
         json["metadata"] = metadata
 
+        // Last check before the only irreversible step. Cancelling after diarization has run just
+        // wastes the work; cancelling after this leaves a transcript the user asked us not to write.
+        try Task.checkCancellation()
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try out.write(to: url, options: .atomic)
         Logger.transcription.info(
