@@ -131,6 +131,7 @@ transcribes into fluent, wrong text. Verify by ear and by log.
 **Known gap:** a mic-only recording (phone on speakerphone, no system audio) still has no `.m4a`
 and its transcript does not reference the mic WAV — #183. Re-detect will fail on those until #183
 lands. Verify the error message is the readable one.
+
 ## Mic-only recordings (#183) — added 2026-09-03
 
 - [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —

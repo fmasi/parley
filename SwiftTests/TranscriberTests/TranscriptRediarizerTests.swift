@@ -158,3 +158,45 @@ struct TranscriptRediarizerChannelRoleTests {
         #expect(TranscriptRediarizer.channelRole(of: url("call-0.wav"), wantsLocal: true) == .skip)
     }
 }
+
+@Suite("TranscriptRediarizer guards")
+struct TranscriptRediarizerGuardTests {
+
+    @Test("a non-positive speaker count is refused rather than silently half-applied")
+    func nonPositiveSpeakerCountThrows() async throws {
+        // ≤ 0 is not merely ignored: FluidAudioDiarizer treats it as "unforced" (correctly), but
+        // the caller still passes speakerCountIsUserStated: true, which DISABLES minority
+        // absorption. The result is unforced diarization with the automatic cleanup switched off —
+        // neither of the two behaviours anyone asked for.
+        //
+        // Uses a REAL, readable transcript so the count is the only possible reason to throw: with
+        // a nonexistent path this test passes whether or not the guard exists.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-guard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = [
+            "metadata": ["audio_paths": []],
+            "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "Local Speaker 1", "source": "local"]],
+        ]
+        try JSONSerialization.data(withJSONObject: doc).write(to: transcript)
+        let before = try Data(contentsOf: transcript)
+
+        for count in [0, -1] {
+            do {
+                _ = try await TranscriptRediarizer.rediarize(
+                    transcript: transcript, source: "local", speakerCount: count,
+                    diarizer: FluidAudioDiarizer())
+                Issue.record("expected a throw for speakerCount \(count)")
+            } catch TranscriptRediarizer.RediarizeError.invalidSpeakerCount(let got) {
+                // The SPECIFIC case: an empty audio_paths list throws noAudioForChannel from the
+                // same function, so matching on the error type alone passes with no guard at all.
+                #expect(got == count)
+            } catch {
+                Issue.record("wrong error for speakerCount \(count): \(error)")
+            }
+        }
+        // And it must refuse before touching anything.
+        #expect(try Data(contentsOf: transcript) == before)
+    }
+}

@@ -69,29 +69,32 @@ struct RenameDialog: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 ForEach(channels, id: \.self) { channel in
+                    // Resolved once per row: `detectedCount` filters `speakers`, and SwiftUI
+                    // re-evaluates this body on every stepper tick.
+                    let count = speakerCounts[channel] ?? detectedCount(for: channel)
                     HStack(spacing: 8) {
                         Text(channel == "local" ? "This side" : "Other side")
                             .font(.caption)
                             .frame(width: 70, alignment: .leading)
                         Stepper(
                             value: Binding(
-                                get: { speakerCounts[channel] ?? detectedCount(for: channel) },
+                                get: { count },
                                 set: { speakerCounts[channel] = max(1, min(20, $0)) }
                             ),
                             in: 1...20
                         ) {
-                            Text("\(speakerCounts[channel] ?? detectedCount(for: channel))")
+                            Text("\(count)")
                                 .font(.caption.monospacedDigit())
                         }
                         .labelsHidden()
-                        Text("\(speakerCounts[channel] ?? detectedCount(for: channel)) speaker\((speakerCounts[channel] ?? detectedCount(for: channel)) == 1 ? "" : "s")")
+                        Text("\(count) speaker\(count == 1 ? "" : "s")")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         if rediarizing == channel {
                             ProgressView().controlSize(.small)
                         } else {
-                            Button("Re-detect") { rediarize(channel: channel) }
+                            Button("Re-detect") { rediarize(channel: channel, count: count) }
                                 .font(.caption)
                                 .disabled(rediarizing != nil)
                         }
@@ -108,8 +111,7 @@ struct RenameDialog: View {
         }
     }
 
-    private func rediarize(channel: String) {
-        let count = speakerCounts[channel] ?? detectedCount(for: channel)
+    private func rediarize(channel: String, count: Int) {
         rediarizing = channel
         rediarizeError = nil
         stopPlayback()

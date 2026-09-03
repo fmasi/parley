@@ -63,11 +63,13 @@ public enum TranscriptRediarizer {
     public enum RediarizeError: LocalizedError {
         case unreadableTranscript
         case noAudioForChannel(String)
+        case invalidSpeakerCount(Int)
 
         public var errorDescription: String? {
             switch self {
             case .unreadableTranscript: return "Could not read the transcript."
             case .noAudioForChannel(let c): return "No \(c) audio is available for this recording."
+            case .invalidSpeakerCount(let n): return "\(n) is not a valid number of speakers."
             }
         }
     }
@@ -86,11 +88,19 @@ public enum TranscriptRediarizer {
         vadSpeechThreshold: Double = 0.5,
         scratchDirectory: URL = FileManager.default.temporaryDirectory
     ) async throws -> Outcome {
+        // Refuse before touching anything. A non-positive count is not merely ignored downstream:
+        // `FluidAudioDiarizer` correctly treats <= 0 as "unforced", but we still pass
+        // `speakerCountIsUserStated: true` below, which DISABLES minority absorption — leaving
+        // unforced diarization with the automatic cleanup switched off, which is neither of the two
+        // behaviours anyone asked for.
+        guard speakerCount > 0 else { throw RediarizeError.invalidSpeakerCount(speakerCount) }
+
         // Read and parse SEPARATELY, and let the read throw: flattening permission-denied,
         // quota-exceeded and deleted-mid-run into one message of our own left a failure report
         // with no way to name its own cause.
         let data = try Data(contentsOf: url)
-        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let parsed = try JSONSerialization.jsonObject(with: data)
+        guard var json = parsed as? [String: Any],
               let rawSegments = json["segments"] as? [[String: Any]]
         else { throw RediarizeError.unreadableTranscript }
 
@@ -135,13 +145,15 @@ public enum TranscriptRediarizer {
             metadata["speaker_names"] = prunedSpeakerNames(
                 names, source: source, survivingLabels: Set(labeled.map { $0.speaker }))
         }
-        metadata["speaker_count_\(source)"] = speakerCount
+        // Persist what the diarizer actually PRODUCED, not what was requested. They diverge — on
+        // 2026-09-02 a request for 2 could yield 1 — and a stored request would misreport the
+        // transcript's own contents to anything reading it back, including the stepper's pre-fill.
+        let found = Set(labeled.map { $0.speaker }).count
+        metadata["speaker_count_\(source)"] = found
         json["metadata"] = metadata
 
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try out.write(to: url, options: .atomic)
-
-        let found = Set(labeled.map { $0.speaker }).count
         Logger.transcription.info(
             "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)

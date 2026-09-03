@@ -121,6 +121,20 @@ struct DiarizationCleanupTests {
         #expect(durations(cleaned).count == 2)
     }
 
+    @Test("a cluster at exactly the threshold is KEPT — the comparison is strict")
+    func clusterExactlyAtThresholdIsKept() {
+        // 5% of 600s is 30s. Pinning the boundary matters because the two device cases sit either
+        // side of it (3.5% absorbed, 40% kept) and neither exercises equality.
+        let cleaned = DiarizationCleanup.absorbMinorityClusters(result([("S1", 570), ("S2", 30)]))
+        #expect(durations(cleaned).count == 2)
+    }
+
+    @Test("a cluster just below the threshold is absorbed")
+    func clusterJustBelowThresholdIsAbsorbed() {
+        let cleaned = DiarizationCleanup.absorbMinorityClusters(result([("S1", 571), ("S2", 29)]))
+        #expect(durations(cleaned).count == 1)
+    }
+
     @Test("share is measured against total speech, not wall-clock duration")
     func shareIgnoresSilenceBetweenSegments() {
         // 28s out of 794s of SPEECH is 3.5% and must be absorbed, even though the recording
