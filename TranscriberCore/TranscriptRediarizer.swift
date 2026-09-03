@@ -270,6 +270,13 @@ public enum TranscriptRediarizer {
                 // original mono fallback WAV must survive, so hand back whether it is temporary.
                 let single = channels[0]
                 let isTemporary = temporaries.contains(single)
+                // Anything else still tracked is a discard whose removal failed above. Setting
+                // `handedOff` suppresses the defer, so this is the last chance to clear it —
+                // without this, a failed discard removal in the single-chunk stereo case leaks
+                // permanently, which is exactly the hole the tracking was added to close.
+                for t in temporaries where t != single {
+                    try? FileManager.default.removeItem(at: t)
+                }
                 handedOff = isTemporary
                 return (single, isTemporary)
             }
