@@ -178,6 +178,14 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         let elapsed = ContinuousClock.now - loadStart
         Logger.transcription.info("FluidAudio diarization models loaded in \(elapsed.components.seconds)s")
 
+        // Actors re-enter at every `await`, and `prepareModels()` above is one. Two callers that
+        // both missed the cache before it will both arrive here having loaded the full model stack;
+        // without this re-check each would then evict the other's entry below. Keep whichever
+        // landed first so concurrent callers converge on one manager instead of thrashing.
+        if let existing = managers[key] {
+            return existing
+        }
+
         // Evict any previously cached forced count; keep key 0 (unforced) permanently.
         managers = managers.filter { $0.key == 0 }
         managers[key] = mgr

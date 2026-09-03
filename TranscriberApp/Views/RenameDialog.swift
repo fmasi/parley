@@ -152,6 +152,9 @@ struct RenameDialog: View {
                     speakerCounts[channel] = nil
                     rediarizing = nil
                 }
+            } catch is CancellationError {
+                // The user asked for this. Reporting it as a failure would make Cancel look broken.
+                await MainActor.run { rediarizing = nil }
             } catch {
                 // .private: OS errors routinely embed full filesystem paths in their messages,
                 // and a recording's path names the meeting.

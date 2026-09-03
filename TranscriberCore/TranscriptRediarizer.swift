@@ -237,6 +237,9 @@ public enum TranscriptRediarizer {
                 case .useDirectly:
                     channels.append(chunk)
                 case .needsSplit:
+                    // Per-iteration: splitting one large archive is itself slow, so a cancel during
+                    // chunk 2 of 10 should not wait for the remaining eight.
+                    try Task.checkCancellation()
                     let split = try await AudioSourceResolver.splitChannels(
                         stereoAac: chunk, outputDirectory: scratchDirectory)
                     let wanted = wantsLocal ? split.local : split.remote
