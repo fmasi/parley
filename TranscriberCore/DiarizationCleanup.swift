@@ -18,6 +18,15 @@ public enum DiarizationCleanup {
     /// fragments and collapse into whoever happened to be longest.
     public static let dominanceShare = 0.5
 
+    /// The point past which this knob stops describing fragments and starts deleting people.
+    ///
+    /// Absorption only runs when some cluster holds >= `dominanceShare`, so every other cluster
+    /// shares less than half the stream between them. A five-way meeting with one dominant speaker
+    /// leaves the rest around 12% each; the smallest real participant observed on device was 40%.
+    /// A threshold above half of what the non-dominant speakers can hold is therefore absorbing the
+    /// median other participant, not a fragment — no configured value should be allowed there.
+    public static let maxSensibleShare = dominanceShare / 2
+
     /// Absorb clusters holding a negligible share of the stream's speech into the dominant cluster.
     ///
     /// Two device recordings bound this rule, and **only share of speech separates them**:

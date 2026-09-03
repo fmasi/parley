@@ -135,7 +135,13 @@ struct RenameDialog: View {
                 )
                 // Rebuild the rows from the rewritten transcript: labels, sample text and the
                 // resolved audio offsets can all have moved.
-                let refreshed = RenameWindowController.parseSpeakers(from: path)
+                // Detached, matching `RenameWindowController.openRenameDialog`: `parseSpeakers`
+                // opens an AVAudioFile per chunk to measure durations, and this `Task` inherits the
+                // view's MainActor, so running it inline stalls the UI for O(chunks) file opens —
+                // right when the dialog is meant to be showing a spinner.
+                let refreshed = await Task.detached(priority: .userInitiated) {
+                    RenameWindowController.parseSpeakers(from: path)
+                }.value
                 await MainActor.run {
                     if refreshed.isEmpty {
                         // The transcript HAS been rewritten at this point. Silently keeping the old

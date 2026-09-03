@@ -186,8 +186,12 @@ public actor FluidAudioDiarizer: DiarizationProvider {
             return existing
         }
 
-        // Evict any previously cached forced count; keep key 0 (unforced) permanently.
-        managers = managers.filter { $0.key == 0 }
+        // Evict any previously cached FORCED count; keep key 0 (unforced) permanently. Loading the
+        // unforced manager evicts nothing — it has no reason to discard a forced one someone may be
+        // about to reuse.
+        if key != 0 {
+            managers = managers.filter { $0.key == 0 }
+        }
         managers[key] = mgr
         return mgr
     }

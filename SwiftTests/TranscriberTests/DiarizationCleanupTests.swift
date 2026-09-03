@@ -195,3 +195,22 @@ struct DiarizationCleanupConfigTests {
         #expect(config.resolvedDiarizationMinSpeakerShare == nil)
     }
 }
+
+extension DiarizationCleanupConfigTests {
+
+    @Test("a share above the sensible ceiling is clamped, not obeyed")
+    func shareAboveCeilingIsClamped() throws {
+        // Absorption only runs when some cluster holds >= 50%, so a minShare of 0.45 would swallow
+        // a speaker holding 40% of the conversation — a full participant, not a fragment.
+        let json = #"{"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"json","launch_on_startup":false,"suppress_capture_warning":false,"engine":"fluid_audio","system_audio_source":"sck","archive_bitrate_kbps":64,"audio_archive_limit_hours":37,"chunk_duration_minutes":30,"chunk_processing_qos":"utility","merge_chunked_audio":false,"model_update_check_enabled":true,"calendar_lookahead_minutes":10,"diarization_min_speaker_share":0.45}"#
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.resolvedDiarizationMinSpeakerShare == DiarizationCleanup.defaultMinShare)
+    }
+
+    @Test("a share below the sensible ceiling is still honoured")
+    func shareBelowCeilingIsHonoured() throws {
+        let json = #"{"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"json","launch_on_startup":false,"suppress_capture_warning":false,"engine":"fluid_audio","system_audio_source":"sck","archive_bitrate_kbps":64,"audio_archive_limit_hours":37,"chunk_duration_minutes":30,"chunk_processing_qos":"utility","merge_chunked_audio":false,"model_update_check_enabled":true,"calendar_lookahead_minutes":10,"diarization_min_speaker_share":0.2}"#
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.resolvedDiarizationMinSpeakerShare == 0.2)
+    }
+}

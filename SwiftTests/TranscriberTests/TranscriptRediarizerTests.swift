@@ -203,3 +203,31 @@ struct TranscriptRediarizerGuardTests {
         #expect(try Data(contentsOf: transcript) == before)
     }
 }
+
+extension TranscriptRediarizerGuardTests {
+
+    @Test("a recording whose audio is gone reports it instead of failing obscurely")
+    func missingAudioReportsNoAudioForChannel() async throws {
+        // The storage quota evicts .m4a archives, so a transcript can outlive its audio. The
+        // checklist calls this out as a must-verify path and nothing covered it.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-noaudio-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = [
+            "metadata": ["audio_paths": [dir.appendingPathComponent("evicted-0.m4a").path]],
+            "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "Local Speaker 1", "source": "local"]],
+        ]
+        try JSONSerialization.data(withJSONObject: doc).write(to: transcript)
+
+        do {
+            _ = try await TranscriptRediarizer.rediarize(
+                transcript: transcript, source: "local", speakerCount: 2, diarizer: FluidAudioDiarizer())
+            Issue.record("expected a throw when the archive is gone")
+        } catch TranscriptRediarizer.RediarizeError.noAudioForChannel(let channel) {
+            #expect(channel == "local")
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+}

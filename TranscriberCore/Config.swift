@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case openai
@@ -95,7 +96,18 @@ public struct Config: Codable, Equatable, Sendable {
     /// enabled, and the difference matters when reading a log.
     public var resolvedDiarizationMinSpeakerShare: Double? {
         guard let share = diarizationMinSpeakerShare else { return DiarizationCleanup.defaultMinShare }
-        return share > 0 ? share : nil
+        guard share > 0 else { return nil }
+        // Past `maxSensibleShare` the knob stops describing fragments and starts deleting people:
+        // absorption only runs when some cluster holds >= 50%, so a share of 0.45 would swallow a
+        // speaker holding 40% of the conversation. Clamp rather than obey, and say so — the value
+        // came from a hand-edited config file and silently ignoring it teaches nothing.
+        guard share <= DiarizationCleanup.maxSensibleShare else {
+            Logger.config.warning(
+                "diarization_min_speaker_share \(share, privacy: .public) exceeds the \(DiarizationCleanup.maxSensibleShare, privacy: .public) ceiling — at that level a real participant is absorbed, not a fragment. Using the \(DiarizationCleanup.defaultMinShare, privacy: .public) default instead."
+            )
+            return DiarizationCleanup.defaultMinShare
+        }
+        return share
     }
     /// Exclude overlapped speech when computing speaker embeddings. **Defaults to TRUE** (nil resolves
     /// to true at every consumer). Do not set this to false.
