@@ -102,3 +102,15 @@ transcribes into fluent, wrong text. Verify by ear and by log.
 - [ ] **Stereo mic (#59):** record with a stereo USB interface or webcam mic. Mic audio must be continuous — not choppy/stuttering, which is the signature of the half-buffer truncation.
 - [ ] **Pad-ratio backstop fires:** if any recording ends with an `excessivePadding` anomaly in `.diag.jsonl`, the completion notification must read "Transcription Complete — capture anomalies" rather than the plain title.
 - [ ] **Pitch spot-check (every audio device test):** play ~30s of the system channel by ear before signing off. Reading the transcript is not a check.
+
+## Mic-only recordings (#183) — added 2026-09-03
+
+- [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —
+      previously the recording stayed as two WAVs forever.
+- [ ] Check the log for `system track is empty — archiving '<name>' as mic-only`.
+- [ ] Play the `.m4a`: your voice must be on the LEFT channel, right channel silent. If the voice
+      is on the right, the mic has been archived into the remote slot — stop and file it.
+- [ ] Open the rename dialog for that recording: the play button must be present and must play.
+- [ ] Regression: a normal dual-stream call still archives with L=mic / R=system as before.
+- [ ] Regression: a genuine rate mismatch (system 24 kHz vs mic 48 kHz — the 2026-08-04 chipmunk
+      shape) must STILL refuse to archive and keep both WAVs.
