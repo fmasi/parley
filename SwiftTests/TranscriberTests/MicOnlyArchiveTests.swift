@@ -139,6 +139,62 @@ struct MicOnlyArchiveTests {
         #expect(peaks.right < 0.01)
     }
 
+    @Test("routing to mic-only also removes the empty system WAV it left behind")
+    func emptySystemWavIsNotLeftBehind() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("miconly-leak-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("call.wav")
+        let micWav = dir.appendingPathComponent("call_mic.wav")
+        try Self.createEmptyWav(at: systemWav, sampleRate: 16000)
+        try Self.createTestWav(at: micWav, sampleRate: 48000)
+
+        _ = try await AudioArchiver.archive(
+            systemAudio: systemWav, micAudio: micWav, outputDirectory: dir, bitrateKbps: 64)
+
+        // The whole point of archiving is that no WAV survives the success path.
+        #expect(!FileManager.default.fileExists(atPath: systemWav.path))
+        #expect(!FileManager.default.fileExists(atPath: micWav.path))
+    }
+
+    @Test("preserveSourceWAV keeps the empty system WAV too, for diagnosis")
+    func emptySystemWavKeptWhenPreserving() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("miconly-leak2-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let systemWav = dir.appendingPathComponent("call.wav")
+        let micWav = dir.appendingPathComponent("call_mic.wav")
+        try Self.createEmptyWav(at: systemWav, sampleRate: 16000)
+        try Self.createTestWav(at: micWav, sampleRate: 48000)
+
+        _ = try await AudioArchiver.archive(
+            systemAudio: systemWav, micAudio: micWav, outputDirectory: dir,
+            bitrateKbps: 64, preserveSourceWAV: true)
+        #expect(FileManager.default.fileExists(atPath: systemWav.path))
+        #expect(FileManager.default.fileExists(atPath: micWav.path))
+    }
+
+    @Test("archiveMicOnly refuses a zero-frame mic instead of deleting it for an empty archive")
+    func micOnlyRefusesEmptyMic() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("miconly-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let micWav = dir.appendingPathComponent("call_mic.wav")
+        try Self.createEmptyWav(at: micWav, sampleRate: 48000)
+
+        // `verify` returns early when expectedSeconds is 0 (an AAC file with no samples still has
+        // nonzero size and a track), so without an explicit guard this path produced an empty
+        // archive, called it verified, and deleted the only source.
+        await #expect(throws: (any Error).self) {
+            _ = try await AudioArchiver.archiveMicOnly(
+                micAudio: micWav, outputDirectory: dir, bitrateKbps: 64)
+        }
+        #expect(FileManager.default.fileExists(atPath: micWav.path))
+    }
+
     @Test("a real rate mismatch is still refused — the empty-file case must not weaken the guard")
     func genuineRateMismatchStillRefuses() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("miconly-guard-\(UUID().uuidString)")

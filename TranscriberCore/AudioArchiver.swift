@@ -67,12 +67,19 @@ public enum AudioArchiver {
         if sysFile.length == 0, micFile.length > 0 {
             Logger.files.info(
                 "AudioArchiver: system track is empty — archiving '\(baseName, privacy: .sensitive)' as mic-only")
-            return try await archiveMicOnly(
+            let result = try await archiveMicOnly(
                 micAudio: micAudio,
                 outputDirectory: outputDirectory,
                 bitrateKbps: bitrateKbps,
                 preserveSourceWAV: preserveSourceWAV,
                 outputName: baseName)
+            // The empty system WAV is not a source anybody can recover anything from, and no WAV
+            // may survive the success path — that is the whole contract of archiving. Deleting it
+            // only AFTER archiveMicOnly returned means a thrown encode leaves both files in place.
+            if !preserveSourceWAV {
+                try? FileManager.default.removeItem(at: systemAudio)
+            }
+            return result
         }
         guard micFile.length > 0 || sysFile.length > 0 else {
             throw AudioArchiverError.cannotReadAudio("both tracks are empty")
@@ -239,6 +246,15 @@ public enum AudioArchiver {
             throw AudioArchiverError.cannotReadAudio("mic: \(error.localizedDescription)")
         }
         let sampleRate = micFile.processingFormat.sampleRate
+
+        // `verify` cannot catch this: it returns early when expectedSeconds is 0, and an AAC file
+        // with no samples still has nonzero size and an audio track. The encoder does fail on a
+        // zero-frame input today (there is a test), so this is not the difference between data loss
+        // and safety — it is the difference between naming the cause and surfacing an encoder
+        // internal for a condition we can see up front.
+        guard micFile.length > 0 else {
+            throw AudioArchiverError.cannotReadAudio("mic track is empty — nothing to archive")
+        }
 
         try? FileManager.default.removeItem(at: outputURL)
 
