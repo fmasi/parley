@@ -304,7 +304,8 @@ public final class ChunkProcessor {
                     segments: segments,
                     diarizationResult: diarizationResult,
                     speechMap: speechMap,
-                    vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5
+                    vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
+                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase

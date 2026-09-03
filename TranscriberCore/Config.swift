@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case openai
@@ -86,6 +87,28 @@ public struct Config: Codable, Equatable, Sendable {
     public var diarizationClusteringThreshold: Double?
     /// Upper bound on diarized speakers per stream. nil = unbounded.
     public var diarizationMaxSpeakers: Int?
+    /// Share of a stream's speech below which a diarization cluster is absorbed into the dominant
+    /// speaker (#65). nil = `DiarizationCleanup.defaultMinShare`; `0` disables absorption.
+    public var diarizationMinSpeakerShare: Double?
+
+    /// The value handed to `DiarizationCleanup`. `0` in config means "off", which must become `nil`
+    /// here rather than a literal 0 — a 0 threshold would absorb nothing while still claiming to be
+    /// enabled, and the difference matters when reading a log.
+    public var resolvedDiarizationMinSpeakerShare: Double? {
+        guard let share = diarizationMinSpeakerShare else { return DiarizationCleanup.defaultMinShare }
+        guard share > 0 else { return nil }
+        // Past `maxSensibleShare` the knob stops describing fragments and starts deleting people:
+        // absorption only runs when some cluster holds >= 50%, so a share of 0.45 would swallow a
+        // speaker holding 40% of the conversation. Clamp rather than obey.
+        //
+        // Deliberately SILENT here: this is read once per stream per chunk, so warning from a
+        // computed property would print the same line eight times on a two-hour meeting.
+        // `ConfigManager.load` warns once, when the file is read.
+        guard share <= DiarizationCleanup.maxSensibleShare else {
+            return DiarizationCleanup.defaultMinShare
+        }
+        return share
+    }
     /// Exclude overlapped speech when computing speaker embeddings. **Defaults to TRUE** (nil resolves
     /// to true at every consumer). Do not set this to false.
     ///
@@ -152,6 +175,7 @@ public struct Config: Codable, Equatable, Sendable {
         vadSpeechThreshold: nil,
         diarizationClusteringThreshold: nil,
         diarizationMaxSpeakers: nil,
+        diarizationMinSpeakerShare: nil,
         diarizationExcludeOverlap: nil,
         preserveSourceWAV: nil,
         echoTemporalThreshold: nil,
@@ -180,6 +204,7 @@ public struct Config: Codable, Equatable, Sendable {
         vadSpeechThreshold: Double? = nil,
         diarizationClusteringThreshold: Double? = nil,
         diarizationMaxSpeakers: Int? = nil,
+        diarizationMinSpeakerShare: Double? = nil,
         diarizationExcludeOverlap: Bool? = nil,
         preserveSourceWAV: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
@@ -206,6 +231,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.vadSpeechThreshold = vadSpeechThreshold
         self.diarizationClusteringThreshold = diarizationClusteringThreshold
         self.diarizationMaxSpeakers = diarizationMaxSpeakers
+        self.diarizationMinSpeakerShare = diarizationMinSpeakerShare
         self.diarizationExcludeOverlap = diarizationExcludeOverlap
         self.preserveSourceWAV = preserveSourceWAV
         self.echoTemporalThreshold = echoTemporalThreshold
@@ -234,6 +260,7 @@ public struct Config: Codable, Equatable, Sendable {
         case vadSpeechThreshold = "vad_speech_threshold"
         case diarizationClusteringThreshold = "diarization_clustering_threshold"
         case diarizationMaxSpeakers = "diarization_max_speakers"
+        case diarizationMinSpeakerShare = "diarization_min_speaker_share"
         case diarizationExcludeOverlap = "diarization_exclude_overlap"
         case preserveSourceWAV = "preserve_source_wav"
         case echoTemporalThreshold = "echo_temporal_threshold"
@@ -263,6 +290,7 @@ public struct Config: Codable, Equatable, Sendable {
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
         diarizationClusteringThreshold = try c.decodeIfPresent(Double.self, forKey: .diarizationClusteringThreshold)
         diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
+        diarizationMinSpeakerShare = try c.decodeIfPresent(Double.self, forKey: .diarizationMinSpeakerShare)
         diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
         preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)

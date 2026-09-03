@@ -16,6 +16,16 @@ struct RenameDialog: View {
     @State private var speakers: [SpeakerEntry]
     @State private var audioPlayer: AVAudioPlayer?
     @State private var sampleIndices: [String: Int] = [:]  // speaker id → current sample index
+    @State private var speakerCounts: [String: Int] = [:]  // "local"/"remote" → user-stated count
+    @State private var rediarizing: String?                // channel currently being re-detected
+    @State private var rediarizeError: String?
+    /// One instance for the dialog's lifetime. `FluidAudioDiarizer` caches a loaded manager per
+    /// speaker count, and a fresh instance per press would throw that away — re-loading the models
+    /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
+    @State private var diarizer = FluidAudioDiarizer()
+    /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
+    /// outlives the dialog and rewrites the transcript after the user asked it not to.
+    @State private var rediarizeTask: Task<Void, Never>?
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -33,6 +43,145 @@ struct RenameDialog: View {
         self.onCancel = onCancel
     }
 
+    /// Channels present in this recording, in display order.
+    private var channels: [String] {
+        var seen: [String] = []
+        for id in speakers.map(\.id) {
+            let channel = id.hasPrefix("Local ") ? "local" : (id.hasPrefix("Remote ") ? "remote" : "")
+            if !channel.isEmpty, !seen.contains(channel) { seen.append(channel) }
+        }
+        return seen
+    }
+
+    private func detectedCount(for channel: String) -> Int {
+        let prefix = channel == "local" ? "Local " : "Remote "
+        return max(1, speakers.filter { $0.id.hasPrefix(prefix) }.count)
+    }
+
+    /// Manual override for the diarizer's speaker count (#67).
+    ///
+    /// It lives here, after the recording, rather than only in the pre-recording dialog: before a
+    /// call you often do not know (someone joins late, a call goes to speakerphone mid-conversation),
+    /// but here the user is looking at the speaker list and can see it is wrong.
+    @ViewBuilder
+    private var speakerCountSection: some View {
+        if !channels.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Wrong number of speakers?")
+                    .font(.footnote.weight(.semibold))
+                Text("Set how many people were on a channel and Parley will work out the speakers again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(channels, id: \.self) { channel in
+                    // Resolved once per row: `detectedCount` filters `speakers`, and SwiftUI
+                    // re-evaluates this body on every stepper tick.
+                    let count = speakerCounts[channel] ?? detectedCount(for: channel)
+                    HStack(spacing: 8) {
+                        Text(channel == "local" ? "This side" : "Other side")
+                            .font(.caption)
+                            .frame(width: 70, alignment: .leading)
+                        Stepper(
+                            value: Binding(
+                                get: { count },
+                                set: { speakerCounts[channel] = max(1, min(20, $0)) }
+                            ),
+                            in: 1...20
+                        ) {
+                            Text("\(count)")
+                                .font(.caption.monospacedDigit())
+                        }
+                        .labelsHidden()
+                        Text("\(count) speaker\(count == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        if rediarizing == channel {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Re-detect") { rediarize(channel: channel, count: count) }
+                                .font(.caption)
+                                .disabled(rediarizing != nil)
+                        }
+                    }
+                }
+
+                if let rediarizeError {
+                    Text(rediarizeError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func rediarize(channel: String, count: Int) {
+        rediarizing = channel
+        rediarizeError = nil
+        stopPlayback()
+        let path = jsonPath
+        let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
+        rediarizeTask = Task {
+            do {
+                _ = try await TranscriptRediarizer.rediarize(
+                    transcript: path,
+                    source: channel,
+                    speakerCount: count,
+                    diarizer: diarizer,
+                    vadSpeechThreshold: vadThreshold
+                )
+                // Rebuild the rows from the rewritten transcript: labels, sample text and the
+                // resolved audio offsets can all have moved.
+                // Detached, matching `RenameWindowController.openRenameDialog`: `parseSpeakers`
+                // opens an AVAudioFile per chunk to measure durations, and this `Task` inherits the
+                // view's MainActor, so running it inline stalls the UI for O(chunks) file opens —
+                // right when the dialog is meant to be showing a spinner.
+                let refreshed = await Task.detached(priority: .userInitiated) {
+                    // minSegments: 1 — the user has just stated how many people are on this
+                    // channel. Dropping one of them as "diarization noise" for being quiet
+                    // contradicts the answer they gave and leaves a speaker they can see in the
+                    // transcript with no row to name.
+                    RenameWindowController.parseSpeakers(from: path, minSegments: 1)
+                }.value
+                await MainActor.run {
+                    if refreshed.isEmpty {
+                        // The transcript HAS been rewritten at this point. Silently keeping the old
+                        // rows would show a stale speaker list under a dialog that looked like it
+                        // succeeded — worse than saying nothing happened.
+                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded."
+                    } else {
+                        speakers = refreshed
+                    }
+                    sampleIndices = [:]
+                    // Drop the stated count so the stepper falls back to what the diarizer actually
+                    // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,
+                    // which reads as a result rather than as the request it was.
+                    speakerCounts[channel] = nil
+                    rediarizing = nil
+                }
+            } catch is CancellationError {
+                // The user asked for this. Reporting it as a failure would make Cancel look broken.
+                await MainActor.run { rediarizing = nil }
+            } catch {
+                // .private: OS errors routinely embed full filesystem paths in their messages,
+                // and a recording's path names the meeting.
+                Logger.transcription.error("Re-diarize failed: \(error.localizedDescription, privacy: .private)")
+                await MainActor.run {
+                    // Only OUR errors are shown verbatim — we write those strings and they name no
+                    // paths. Foundation embeds the full file path in its descriptions, and a
+                    // recording's path names the meeting; this label can be on screen while the
+                    // user is sharing that screen. Same reasoning as the sanitized summary errors.
+                    rediarizeError = (error as? TranscriptRediarizer.RediarizeError)?.errorDescription
+                        ?? "Re-detection failed. See Console for details."
+                    rediarizing = nil
+                }
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
@@ -48,9 +197,11 @@ struct RenameDialog: View {
                 speakerCard($speaker)
             }
 
+            speakerCountSection
+
             HStack {
                 Spacer()
-                Button("Cancel") { onCancel() }
+                Button("Cancel") { rediarizeTask?.cancel(); onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     var mapping: [String: String] = [:]
@@ -65,6 +216,10 @@ struct RenameDialog: View {
                     onSave(mapping)
                 }
                 .keyboardShortcut(.defaultAction)
+                // Saving mid-re-detect is a lost-work race: onSave writes the speaker names, the
+                // dialog closes, and a re-diarization already past its last cancellation check then
+                // rewrites the whole transcript — wiping the names that were just applied.
+                .disabled(rediarizing != nil)
             }
         }
         .padding(20)
@@ -73,6 +228,7 @@ struct RenameDialog: View {
         .onDisappear {
             // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
             // created, and closing the dialog is the common exit.
+            rediarizeTask?.cancel()
             stopPlayback()
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil

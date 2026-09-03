@@ -103,6 +103,35 @@ transcribes into fluent, wrong text. Verify by ear and by log.
 - [ ] **Pad-ratio backstop fires:** if any recording ends with an `excessivePadding` anomaly in `.diag.jsonl`, the completion notification must read "Transcription Complete — capture anomalies" rather than the plain title.
 - [ ] **Pitch spot-check (every audio device test):** play ~30s of the system channel by ear before signing off. Reading the transcript is not a check.
 
+## Speaker count + minority absorption (#65 / #67) — added 2026-09-03
+
+**Absorption (#65) — should need no interaction at all**
+- [ ] Record a 1:1 call where only the other side talks for a stretch. Transcript must show ONE
+      remote speaker, not one real speaker plus a fragment. Check the log for
+      `DiarizationCleanup: absorbed N minority cluster(s)`.
+- [ ] Record a genuine 3-way call. All three must survive — absorption must NOT fire.
+      (Guard: absorption only runs when one cluster holds ≥50% of the stream.)
+
+**Speaker count control (#67) — rename dialog**
+- [ ] Put a phone call on speakerphone and record it. Expect the local channel to come out as ONE
+      speaker (this is the 2026-09-02 failure).
+- [ ] Open the rename dialog. A "Wrong number of speakers?" section must appear with a stepper per
+      channel, pre-filled with the detected count.
+- [ ] Set "This side" to 2, press Re-detect. Spinner shows, then the speaker rows rebuild with two
+      local speakers.
+- [ ] Play a sample for each new speaker — audio must play and match the label.
+- [ ] Name them, Save, reopen the transcript: names stick and segments are attributed to both.
+- [ ] Re-detect a channel you had already named. Names for labels that no longer exist must be
+      dropped, not re-applied to a different person.
+- [ ] Re-detect on a multi-chunk (>30 min) recording: channel audio is concatenated across chunks
+      and diarized once, so speaker numbering must stay consistent across the whole recording.
+- [ ] Re-detect on a recording whose archive is gone (storage quota evicted it): must show a clear
+      "No <channel> audio is available" error, not a spinner that never ends.
+
+**Known gap:** a mic-only recording (phone on speakerphone, no system audio) still has no `.m4a`
+and its transcript does not reference the mic WAV — #183. Re-detect will fail on those until #183
+lands. Verify the error message is the readable one.
+
 ## Mic-only recordings (#183) — added 2026-09-03
 
 - [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —
