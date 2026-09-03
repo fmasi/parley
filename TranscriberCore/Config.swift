@@ -99,12 +99,12 @@ public struct Config: Codable, Equatable, Sendable {
         guard share > 0 else { return nil }
         // Past `maxSensibleShare` the knob stops describing fragments and starts deleting people:
         // absorption only runs when some cluster holds >= 50%, so a share of 0.45 would swallow a
-        // speaker holding 40% of the conversation. Clamp rather than obey, and say so — the value
-        // came from a hand-edited config file and silently ignoring it teaches nothing.
+        // speaker holding 40% of the conversation. Clamp rather than obey.
+        //
+        // Deliberately SILENT here: this is read once per stream per chunk, so warning from a
+        // computed property would print the same line eight times on a two-hour meeting.
+        // `ConfigManager.load` warns once, when the file is read.
         guard share <= DiarizationCleanup.maxSensibleShare else {
-            Logger.config.warning(
-                "diarization_min_speaker_share \(share, privacy: .public) exceeds the \(DiarizationCleanup.maxSensibleShare, privacy: .public) ceiling — at that level a real participant is absorbed, not a fragment. Using the \(DiarizationCleanup.defaultMinShare, privacy: .public) default instead."
-            )
             return DiarizationCleanup.defaultMinShare
         }
         return share

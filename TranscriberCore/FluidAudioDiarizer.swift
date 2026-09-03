@@ -145,6 +145,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// used a couple of times per session and never concurrently, so a one-deep forced slot costs
     /// nothing real and removes the growth entirely.
     private func ensureLoaded(forcedSpeakerCount: Int? = nil) async throws -> OfflineDiarizerManager {
+        // A non-positive count is a NO-OP by design, not an error: it means "no hint", and maps to
+        // the same unforced slot as nil. Callers that consider 0 a caller bug reject it themselves —
+        // `TranscriptRediarizer.rediarize` throws `invalidSpeakerCount` before reaching here — because
+        // there it also disables absorption, which makes it meaningful rather than merely absent.
         let key = forcedSpeakerCount.map { $0 > 0 ? $0 : 0 } ?? 0
         if let mgr = managers[key] {
             return mgr

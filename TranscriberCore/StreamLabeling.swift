@@ -22,7 +22,10 @@ enum StreamLabeling {
         diarizationResult: DiarizationResult,
         speechMap: [SpeechRegion]?,
         vadSpeechThreshold: Double,
-        minSpeakerShare: Double? = DiarizationCleanup.defaultMinShare,
+        /// No default on purpose: production callers pass `config.resolvedDiarizationMinSpeakerShare`,
+        /// and a defaulted parameter would let a future transcription path silently absorb at the
+        /// hardcoded value while ignoring the user's config, with nothing to warn them.
+        minSpeakerShare: Double?,
         speakerCountIsUserStated: Bool = false
     ) -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]]) {
         // Runs BEFORE assignment so the absorbed cluster never becomes a "Speaker N" label, and

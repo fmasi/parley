@@ -140,6 +140,9 @@ public enum TranscriptRediarizer {
             diarizationResult: diarization,
             speechMap: speechMap,
             vadSpeechThreshold: vadSpeechThreshold,
+            // nil, not the config value: `speakerCountIsUserStated: true` disables absorption
+            // outright, so passing a share would imply a knob that has no effect on this path.
+            minSpeakerShare: nil,
             speakerCountIsUserStated: true)
 
         var labeled = result.labeled
@@ -246,8 +249,13 @@ public enum TranscriptRediarizer {
                     channels.append(wanted)
                     temporaries.append(wanted)
                     let discard = wantsLocal ? split.remote : split.local
+                    // Tracked BEFORE the attempt: if this removal fails, the defer and the
+                    // success-path cleanup both still know about the file. Untracked, a failed
+                    // delete stranded it permanently — hundreds of MB on a ten-chunk recording.
+                    temporaries.append(discard)
                     do {
                         try FileManager.default.removeItem(at: discard)
+                        temporaries.removeLast()
                     } catch {
                         // Not fatal, but on a long multi-chunk re-diarize a disk-full condition
                         // would otherwise strand one large temp file per chunk with no trace.

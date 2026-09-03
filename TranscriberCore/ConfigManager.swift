@@ -29,6 +29,12 @@ public final class ConfigManager {
            json["sample_rate"] != nil {
             Logger.config.warning("Config field 'sample_rate' is deprecated and ignored — system audio is captured at 48 kHz")
         }
+        if let share = config.diarizationMinSpeakerShare,
+           share > DiarizationCleanup.maxSensibleShare {
+            Logger.config.warning(
+                "diarization_min_speaker_share \(share, privacy: .public) exceeds the \(DiarizationCleanup.maxSensibleShare, privacy: .public) ceiling — at that level a real participant is absorbed, not a fragment. Using the \(DiarizationCleanup.defaultMinShare, privacy: .public) default instead."
+            )
+        }
         Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), engine: \(config.engine.rawValue, privacy: .public)")
         return config
     }

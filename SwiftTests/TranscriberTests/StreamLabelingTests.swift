@@ -52,7 +52,7 @@ struct StreamLabelingTests {
             diarizationResult: result,
             speechMap: nil,
             vadSpeechThreshold: 0.5
-        )
+        , minSpeakerShare: DiarizationCleanup.defaultMinShare)
 
         #expect(!labeled.isEmpty)
         // Raw diarizer ID is remapped to the friendly label; the raw key is gone.
@@ -78,7 +78,7 @@ struct StreamLabelingTests {
                 TranscriptSegment(start: 3, end: 6, text: "b", language: nil),
             ],
             diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
-        )
+        , minSpeakerShare: DiarizationCleanup.defaultMinShare)
 
         // The segment labels and the database keys must agree — the documented invariant.
         #expect(labeled.map(\.speaker) == ["Speaker 1", "Speaker 2"])
@@ -96,7 +96,7 @@ struct StreamLabelingTests {
             diarizationResult: DiarizationResult(segments: [], speakerDatabase: [:]),
             speechMap: nil,
             vadSpeechThreshold: 0.5
-        )
+        , minSpeakerShare: DiarizationCleanup.defaultMinShare)
         #expect(db.isEmpty)
     }
 
@@ -118,11 +118,11 @@ struct StreamLabelingTests {
 
         let (nilMap, _) = StreamLabeling.withDiarization(
             segments: segs, diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
-        )
+        , minSpeakerShare: DiarizationCleanup.defaultMinShare)
         let (withMap, _) = StreamLabeling.withDiarization(
             segments: segs, diarizationResult: result,
             speechMap: [SpeechRegion(start: 0, end: 5, probability: 0.95)], vadSpeechThreshold: 0.5
-        )
+        , minSpeakerShare: DiarizationCleanup.defaultMinShare)
 
         #expect(nilMap.first?.speaker == "Speaker 1")
         #expect(withMap.first?.speaker == "Unknown")

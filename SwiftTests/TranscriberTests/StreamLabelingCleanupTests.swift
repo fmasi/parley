@@ -30,7 +30,8 @@ struct StreamLabelingCleanupTests {
             segments: transcript([(10, 20, "hello"), (770, 780, "still me")]),
             diarizationResult: overSplitDiarization(),
             speechMap: nil,
-            vadSpeechThreshold: 0.5
+            vadSpeechThreshold: 0.5,
+            minSpeakerShare: DiarizationCleanup.defaultMinShare
         )
         #expect(Set(result.labeled.map { $0.speaker }) == ["Speaker 1"])
     }
@@ -41,7 +42,8 @@ struct StreamLabelingCleanupTests {
             segments: transcript([(10, 20, "hello"), (770, 780, "still me")]),
             diarizationResult: overSplitDiarization(),
             speechMap: nil,
-            vadSpeechThreshold: 0.5
+            vadSpeechThreshold: 0.5,
+            minSpeakerShare: DiarizationCleanup.defaultMinShare
         )
         // A stale embedding here would let the cross-chunk reconciler resurrect the fragment as a
         // global speaker in the next chunk — the exact 2026-08-26 symptom.
@@ -55,6 +57,7 @@ struct StreamLabelingCleanupTests {
             diarizationResult: overSplitDiarization(),
             speechMap: nil,
             vadSpeechThreshold: 0.5,
+            minSpeakerShare: DiarizationCleanup.defaultMinShare,
             speakerCountIsUserStated: true
         )
         #expect(Set(result.labeled.map { $0.speaker }).count == 2)
@@ -74,7 +77,8 @@ struct StreamLabelingCleanupTests {
             segments: transcript([(10, 20, "mine"), (400, 410, "yours")]),
             diarizationResult: diar,
             speechMap: nil,
-            vadSpeechThreshold: 0.5
+            vadSpeechThreshold: 0.5,
+            minSpeakerShare: DiarizationCleanup.defaultMinShare
         )
         #expect(Set(result.labeled.map { $0.speaker }).count == 2)
     }
