@@ -21,12 +21,20 @@ struct DiarizationCleanupTests {
         var segments: [DiarizedSegment] = []
         var db: [String: [Float]] = [:]
         var t = 0.0
-        for (idx, pair) in durations.enumerated() {
+        var speakerIndex: [String: Int] = [:]
+        for pair in durations {
             segments.append(DiarizedSegment(start: t, end: t + pair.1, speaker: pair.0, qualityScore: 1.0))
             t += pair.1
-            var emb = [Float](repeating: 0, count: embeddingDim)
-            emb[idx % embeddingDim] = 1.0
-            db[pair.0] = emb
+            // Keyed by SPEAKER, not by segment: enumerating segments gave the same speaker a
+            // different unit vector each time they reappeared, so a fixture with two segments for
+            // one speaker would silently describe two different embeddings.
+            if speakerIndex[pair.0] == nil {
+                let idx = speakerIndex.count
+                speakerIndex[pair.0] = idx
+                var emb = [Float](repeating: 0, count: embeddingDim)
+                emb[idx % embeddingDim] = 1.0
+                db[pair.0] = emb
+            }
         }
         return DiarizationResult(segments: segments, speakerDatabase: db)
     }

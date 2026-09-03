@@ -198,6 +198,10 @@ struct RenameDialog: View {
                     onSave(mapping)
                 }
                 .keyboardShortcut(.defaultAction)
+                // Saving mid-re-detect is a lost-work race: onSave writes the speaker names, the
+                // dialog closes, and a re-diarization already past its last cancellation check then
+                // rewrites the whole transcript — wiping the names that were just applied.
+                .disabled(rediarizing != nil)
             }
         }
         .padding(20)

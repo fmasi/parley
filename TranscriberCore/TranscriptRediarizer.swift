@@ -64,12 +64,14 @@ public enum TranscriptRediarizer {
         case unreadableTranscript
         case noAudioForChannel(String)
         case invalidSpeakerCount(Int)
+        case producedNoLabels(String)
 
         public var errorDescription: String? {
             switch self {
             case .unreadableTranscript: return "Could not read the transcript."
             case .noAudioForChannel(let c): return "No \(c) audio is available for this recording."
             case .invalidSpeakerCount(let n): return "\(n) is not a valid number of speakers."
+            case .producedNoLabels(let c): return "Re-detection found no speech on the \(c) channel; the transcript is unchanged."
             }
         }
     }
@@ -114,6 +116,9 @@ public enum TranscriptRediarizer {
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
+        // Resolving the channel can concatenate hundreds of MB on a multi-chunk recording; without
+        // a check here a cancel during that work goes unnoticed until a full diarize has also run.
+        try Task.checkCancellation()
         let diarization = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
         try Task.checkCancellation()
         let speechMap = try? await VadSpeechMap().analyze(audioPath: channelAudio)
@@ -138,6 +143,15 @@ public enum TranscriptRediarizer {
             speakerCountIsUserStated: true)
 
         var labeled = result.labeled
+        // `mergeRelabeled` replaces the channel WHOLESALE, so an empty relabeling would delete every
+        // segment this channel had. That is never the right outcome for a transcript that demonstrably
+        // contained speech a moment ago: it means diarization or VAD returned nothing, and losing the
+        // words is far worse than leaving the speaker labels as they were.
+        guard !labeled.isEmpty || transcriptSegments.isEmpty else {
+            Logger.transcription.error(
+                "Re-diarize produced no labels for \(source, privacy: .public) from \(transcriptSegments.count, privacy: .public) segments — refusing to write")
+            throw RediarizeError.producedNoLabels(source)
+        }
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 

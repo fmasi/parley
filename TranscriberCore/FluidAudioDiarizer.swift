@@ -170,7 +170,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         }
         let config = makeOfflineConfig(forcedSpeakerCount: forcedSpeakerCount)
         Logger.transcription.info(
-            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(forcedSpeakerCount.map(String.init) ?? "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
+            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(key > 0 ? String(key) : "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
         )
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels()

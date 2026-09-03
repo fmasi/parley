@@ -83,6 +83,9 @@ struct TranscriptRediarizerTests {
         #expect(kept["Remote Speaker 2"] == "Someone")
     }
 
+    /// `mergeRelabeled` is a pure replace, so an empty relabeling empties the channel. That is the
+    /// correct behaviour for this function and a catastrophic one for a transcript, which is why
+    /// `rediarize` refuses to call it with no labels (`RediarizeError.producedNoLabels`).
     @Test("an empty relabeling removes that source's segments rather than duplicating them")
     func emptyRelabelingClearsTheSource() {
         let original = [
