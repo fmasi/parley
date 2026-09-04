@@ -231,3 +231,34 @@ extension SummaryConfigDecodingTests {
         #expect(round.provider == .lmstudio)
     }
 }
+
+/// The #173 fix is only real if the configured timeout reaches the actual `URLRequest`. Decoding it
+/// from config is tested elsewhere; this pins the other half — a decode that lands nowhere would
+/// leave every install on the stock 60s that caused the original failure, with the config key
+/// looking like it worked.
+@Suite("The configured timeout reaches the request")
+struct RequestTimeoutWiringTests {
+
+    private func fixture() -> ([SummarySegment], SummaryMetadata) {
+        ([SummarySegment(start: 0, end: 10, speaker: "A", text: "hello there")],
+         SummaryMetadata(sessionName: "s", date: Date(timeIntervalSince1970: 0), durationSeconds: 60, speakers: ["A"]))
+    }
+
+    @Test("OpenAI provider applies the configured timeout")
+    func openAIAppliesConfiguredTimeout() throws {
+        let (segs, meta) = fixture()
+        let p = OpenAISummaryProvider(endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m",
+                                      requestTimeoutSeconds: 123)
+        #expect(try p.buildRequest(segments: segs, metadata: meta).timeoutInterval == 123)
+    }
+
+    @Test("OpenAI provider defaults to 600s, not URLSession's implicit 60s")
+    func openAIDefaultsToTenMinutes() throws {
+        let (segs, meta) = fixture()
+        let p = OpenAISummaryProvider(endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        let interval = try p.buildRequest(segments: segs, metadata: meta).timeoutInterval
+        #expect(interval == TimeInterval(OpenAISummaryProvider.defaultRequestTimeoutSeconds))
+        // The regression: 60s is what produced the -1001 that cost two debugging sessions.
+        #expect(interval > 60)
+    }
+}
