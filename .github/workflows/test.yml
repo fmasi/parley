@@ -59,8 +59,11 @@ jobs:
           # the script's URL or output filename would restore the OLD bytes, the script's
           # already-present guard would skip the download, and CI would silently keep testing
           # against a stale fixture — the kind of failure that reports green.
+          # NO restore-keys, deliberately. A prefix fallback would restore the previous fixture
+          # whenever the script changes — recreating precisely the stale-fixture failure the derived
+          # key exists to prevent, since the script's "already present" guard would then skip the
+          # download. An exact-key miss must fall through to a real fetch.
           key: ami-fixture-${{ hashFiles('scripts/fetch-diarization-fixtures.sh') }}
-          restore-keys: ami-fixture-
 
       - name: Cache SwiftPM dependency resolution
         uses: actions/cache@v6
