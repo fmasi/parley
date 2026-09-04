@@ -67,8 +67,21 @@ So apply a filter, the same one you'd apply to your own code:
   satisfying a reviewer that cannot say "enough" is how a PR never merges.
 
 CI itself must be able to catch the class of bug you just fixed. If it can't, **that is part of
-the fix** — the `diarization-guard` job exists because the regression tests skipped silently in
-CI, so the suite reported green while asserting nothing.
+the fix** — the AMI ground-truth guard is run with `PARLEY_REQUIRE_AMI_FIXTURE=1` because those
+regression tests once skipped silently in CI, so the suite reported green while asserting nothing.
+(It had its own `diarization-guard` job until 2026-09-04; the tests live in the `TranscriberTests`
+target, so that job was rebuilding the whole package to run something the `test` job had already
+compiled. Merging them changed no coverage — the env var, not the job, is what makes the guard
+unskippable.)
+
+**Known CI gap — the red-first gate cannot judge diarization tests.** The `red-first` job does not
+fetch the AMI fixture or set `PARLEY_REQUIRE_AMI_FIXTURE`, so anything you add or change in
+`DiarizationRegressionTests` SKIPS there. The gate counts a skip as passed, so it concludes your new
+test "passes at the parent commit" and **fails the PR** — a false failure on exactly the
+fix-plus-regression-test PR the gate exists to reward. Mark such a test
+`RED-FIRST-EXEMPT: <reason>`, verify it locally with the fixture present
+(`bash scripts/fetch-diarization-fixtures.sh`), and rely on the `test` job — which does run it — for
+the real signal.
 
 **What CI cannot cover:** anything needing real audio hardware — the capture path, Bluetooth/HFP
 behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,

@@ -56,7 +56,10 @@ TEST_DIR="SwiftTests/TranscriberTests"
 PROD_PATHS="TranscriberCore TranscriberApp AudioCaptureHelper AudioCaptureProtocol audio_capture_helper Package.swift"
 
 # Flags matching the documented `swift test` invocation (CommandLineTools frameworks).
-SWIFT_FLAGS="-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
+# --no-parallel for the same reason as the CI test job: concurrent AVFoundation/CoreML tests
+# can wedge a shared media daemon on a headless runner and hang the run. This gate invokes
+# swift test TWICE per run (merge base, then HEAD), so it is doubly exposed.
+SWIFT_FLAGS="--no-parallel -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/"
 

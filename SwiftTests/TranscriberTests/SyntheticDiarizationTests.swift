@@ -17,7 +17,16 @@ import Testing
 /// difference (2 speakers either way, at every overlap level tried), because the collapse
 /// needs realistic conversational overlap that clean TTS audio does not have. The AMI job
 /// remains the executable oracle for that bug class.
-@Suite struct SyntheticDiarizationTests {
+/// `.serialized`: these tests drive CoreML + `say` synthesis, which are clients of shared media XPC
+/// daemons. A timed-out CI run on 2026-09-04 showed 27 such tests starting within six
+/// seconds and none ever finishing — a wedged daemon blocks every client forever. Running
+/// this suite's cases one at a time reduces how many are ever in flight together.
+///
+/// NOTE: CI currently also runs the whole suite with `--no-parallel`, because serialising
+/// these suites alone cut the frozen set from 27 tests to 15 and did not stop the stall —
+/// it is cross-suite. These traits are kept because they document which suites are
+/// implicated, and they keep the constraint if parallelism is ever restored.
+@Suite(.serialized) struct SyntheticDiarizationTests {
 
     @Test func threeConcatenatedVoicesYieldMultipleSpeakers() async throws {
         guard try await TestModels.ensureDiarization() else { return }

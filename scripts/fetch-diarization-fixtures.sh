@@ -25,7 +25,11 @@ fetch() {
         return
     fi
     echo "==> Fetching $name ..."
-    if ! curl -fL --progress-bar -o "$DIR/$name.part" "$url"; then
+    # Bounded: without --max-time a server that accepts the connection and then stalls leaves
+    # curl waiting forever, and the job burns its entire 30-minute budget on a download that
+    # will never finish. 300s is generous for a 33 MB fixture on a runner.
+    if ! curl -fL --connect-timeout 20 --max-time 300 --retry 2 --retry-delay 3 \
+            --progress-bar -o "$DIR/$name.part" "$url"; then
         rm -f "$DIR/$name.part"
         echo "error: could not download $name — fixture host unreachable (network?), NOT a code regression." >&2
         echo "       url: $url" >&2
