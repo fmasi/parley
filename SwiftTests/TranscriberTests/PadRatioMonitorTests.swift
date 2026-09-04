@@ -272,3 +272,22 @@ struct PadRatioMonitorDeadTrackTests {
         if case .neverDelivered = m.finish() { Issue.record("5s is not enough to conclude anything") }
     }
 }
+
+extension PadRatioMonitorDeadTrackTests {
+
+    @Test("a chunk that was dead is still reported even though rotation resets the monitor")
+    func deadChunkSurvivesRotation() {
+        // `swapWriters` resets both monitors on every chunk rotation. Without closing the chunk
+        // first, a track that died only in an INTERMEDIATE chunk was discarded silently — the
+        // verdict went with the reset, and finalizeAll() only ever sees the final chunk.
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        guard case .neverDelivered = m.finish() else {
+            Issue.record("the dead chunk must be reported at rotation"); return
+        }
+        // ...and after reset the next chunk starts clean and can be healthy.
+        m.reset()
+        for _ in 0..<60 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
+        if case .neverDelivered = m.finish() { Issue.record("the next chunk delivered") }
+    }
+}

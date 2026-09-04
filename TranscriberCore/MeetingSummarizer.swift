@@ -109,6 +109,10 @@ public enum MeetingSummarizer {
                 return .failed("The model took too long to respond — the transcript is safe; try a smaller model or raise the summary timeout")
             case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .notConnectedToInternet:
                 return .failed("Couldn't reach the summary endpoint — is your model server running?")
+            case .cancelled:
+                // The user quit, or the stop path tore the task down. Not a fault, and reporting it
+                // as "Summary request failed" would send someone hunting a problem they caused.
+                return .failed("Summary cancelled — the transcript is safe")
             default:
                 return .failed("Summary request failed: \(error.localizedDescription)")
             }

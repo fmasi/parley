@@ -124,6 +124,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         timelineAnchorPTS = nil
         micFramesWritten = 0
         systemFramesWritten = 0
+        // Close the chunk before resetting: a track that delivered nothing for THIS chunk is dead
+        // for it, and rotation would otherwise discard that fact silently. Missing this meant a
+        // track that died only in an intermediate chunk was never reported at all — the verdict
+        // was thrown away by reset() and finalizeAll() only ever sees the final chunk.
+        noteDeadTrack(systemPadMonitor.finish(), track: "system")
+        noteDeadTrack(micPadMonitor.finish(), track: "mic")
         systemPadMonitor.reset()
         micPadMonitor.reset()
         // Same chunk scoping as the pad monitors: without this a drop that fires in chunk 1 latches

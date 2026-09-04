@@ -72,14 +72,14 @@ import Foundation
 struct RunSummaryURLErrorTests {
 
     /// A provider that fails the way a local model server does.
-    private struct ThrowingProvider: SummaryProvider {
+    internal struct ThrowingProvider: SummaryProvider {
         let error: any Error
         func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
             throw error
         }
     }
 
-    private func transcript() throws -> URL {
+    internal func transcript() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("runsummary-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -92,7 +92,7 @@ struct RunSummaryURLErrorTests {
         return url
     }
 
-    private func outcome(for error: any Error) async throws -> SummaryOutcome {
+    internal func outcome(for error: any Error) async throws -> SummaryOutcome {
         let url = try transcript()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         return await MeetingSummarizer.runSummary(
@@ -163,5 +163,21 @@ struct SummaryConfigDecodingTests {
         #expect(c.contextOverheadPercent == 15)
         #expect(c.maxOutputTokens == 900)
         #expect(c.requestTimeoutSeconds == 42)
+    }
+}
+
+extension RunSummaryURLErrorTests {
+
+    @Test("a cancelled summary is not reported as a failure the user must chase")
+    func cancellationIsNotReportedAsAFault() async throws {
+        // Reachable whenever Swift concurrency cancels the task — the app quitting, or the stop
+        // path tearing it down. "Summary request failed: cancelled" sends someone hunting a
+        // problem they caused themselves.
+        guard case .failed(let message) = try await outcome(for: URLError(.cancelled)) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(message.localizedCaseInsensitiveContains("cancel"))
+        #expect(message.localizedCaseInsensitiveContains("transcript is safe"))
+        #expect(!message.localizedCaseInsensitiveContains("disk space"))
     }
 }
