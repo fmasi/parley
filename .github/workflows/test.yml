@@ -172,9 +172,11 @@ jobs:
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
 
-      # KNOWN GAP: this job does not fetch the AMI fixture or set PARLEY_REQUIRE_AMI_FIXTURE, so a
-      # PR that changes DiarizationRegressionTests has those cases SKIPPED by the red-first gate
-      # rather than run. The gate then proves nothing about them. Pre-existing — the old
+      # KNOWN GAP: this job does not fetch the AMI fixture or set PARLEY_REQUIRE_AMI_FIXTURE, so
+      # any PR touching DiarizationRegressionTests has those cases SKIPPED by the red-first gate
+      # rather than run — and that includes ADDING a new @Test to guard a freshly fixed regression,
+      # which is exactly the case the gate exists for. It would report green having executed
+      # nothing. The gate then proves nothing about them. Pre-existing — the old
       # diarization-guard job never ran verify-regression-tests.sh either — and left alone here
       # because fixing it means paying the fixture fetch and the AMI compute on a second job, which
       # is exactly the duplication this PR removes. Tracked rather than silently carried.
