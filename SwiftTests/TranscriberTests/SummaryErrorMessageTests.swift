@@ -60,3 +60,75 @@ import Foundation
         #expect(message.contains("model failed to load"))
     }
 }
+
+/// The three `URLError` messages in `MeetingSummarizer.runSummary` are the literal fix for #173 —
+/// a `-1001` timeout that fell through to the catch-all and was reported as *"check disk space and
+/// permissions"*, sending two debugging sessions down the wrong path.
+///
+/// The provider-level tests above cannot protect them: this is about `runSummary`'s **catch order**.
+/// Reshuffle the catches, or add a `SummaryError` case that matches before `URLError`, and the old
+/// misdirecting message comes back with the rest of the suite still green.
+@Suite("What runSummary tells the user when the network fails")
+struct RunSummaryURLErrorTests {
+
+    /// A provider that fails the way a local model server does.
+    private struct ThrowingProvider: SummaryProvider {
+        let error: any Error
+        func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+            throw error
+        }
+    }
+
+    private func transcript() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runsummary-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("meeting.json")
+        let doc: [String: Any] = [
+            "metadata": [:],
+            "segments": [["start": 0.0, "end": 2.0, "text": "hello", "speaker": "Speaker 1", "source": "local"]],
+        ]
+        try JSONSerialization.data(withJSONObject: doc).write(to: url)
+        return url
+    }
+
+    private func outcome(for error: any Error) async throws -> SummaryOutcome {
+        let url = try transcript()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        return await MeetingSummarizer.runSummary(
+            transcriptPath: url,
+            provider: ThrowingProvider(error: error),
+            endpoint: "http://127.0.0.1:1234")
+    }
+
+    @Test("a timeout blames the model, not the filesystem")
+    func timeoutMessageNamesTheModel() async throws {
+        guard case .failed(let message) = try await outcome(for: URLError(.timedOut)) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(message.localizedCaseInsensitiveContains("too long"))
+        // The exact regression: this used to say "check disk space and permissions".
+        #expect(!message.localizedCaseInsensitiveContains("disk space"))
+        #expect(!message.localizedCaseInsensitiveContains("permission"))
+    }
+
+    @Test("an unreachable server says so instead of blaming the transcript")
+    func unreachableHostMessageNamesTheServer() async throws {
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .notConnectedToInternet] {
+            guard case .failed(let message) = try await outcome(for: URLError(code)) else {
+                Issue.record("expected .failed for \(code)"); return
+            }
+            #expect(message.localizedCaseInsensitiveContains("reach"))
+            #expect(!message.localizedCaseInsensitiveContains("disk space"))
+        }
+    }
+
+    @Test("an unclassified URLError still avoids the file-failure wording")
+    func unclassifiedURLErrorIsNotReportedAsAFileFailure() async throws {
+        guard case .failed(let message) = try await outcome(for: URLError(.badServerResponse)) else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(!message.localizedCaseInsensitiveContains("disk space"))
+        #expect(!message.localizedCaseInsensitiveContains("permission"))
+    }
+}

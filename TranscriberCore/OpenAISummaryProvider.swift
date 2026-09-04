@@ -113,11 +113,15 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
                 continue
             }
 
-            let body = String(data: data, encoding: .utf8) ?? ""
-            // 401/403 has a precise fix and a body that may echo the credential — classify it.
+            // 401/403 has a precise fix and a body that may echo the credential back — classify it
+            // and throw BEFORE the body is decoded at all. There was no leak either way (the old
+            // ordering decoded it and then discarded it on this path), but decoding a
+            // credential-bearing body above the guard that stops it escaping reads like a bug
+            // waiting to be introduced by the next edit.
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
             }
+            let body = String(data: data, encoding: .utf8) ?? ""
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
     }
