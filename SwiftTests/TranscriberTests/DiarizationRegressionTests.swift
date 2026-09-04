@@ -16,7 +16,8 @@ import Testing
 ///     bash scripts/fetch-diarization-fixtures.sh
 ///
 /// Skip semantics (#137, item 4 — a skip must never hide a missing assertion):
-///   - The CI diarization-guard job sets PARLEY_REQUIRE_AMI_FIXTURE=1: there, a missing fixture
+///   - The CI `test` job sets PARLEY_REQUIRE_AMI_FIXTURE=1 (it fetches the fixture first): there,
+///     a missing fixture
 ///     or model is a test FAILURE, and `guardJobCannotSkip()` additionally proves the
 ///     ground-truth tests' preconditions hold, so they cannot have been silently disabled.
 ///   - Locally without the fixture, tests skip via `.enabled(if:)` — visible in test output,
@@ -33,7 +34,7 @@ import Testing
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Set by the CI diarization-guard job, which fetches the fixture first: with it set, the
+    /// Set by the CI `test` job, which fetches the fixture first: with it set, the
     /// ground-truth tests RUN and fail loudly on a missing fixture instead of being disabled.
     private static var fixtureRequired: Bool {
         ProcessInfo.processInfo.environment["PARLEY_REQUIRE_AMI_FIXTURE"] == "1"
@@ -41,7 +42,7 @@ import Testing
 
     private static var canRun: Bool { amiFixture != nil || fixtureRequired }
 
-    /// Meta-test: the guard job must be UNABLE to skip the ground-truth assertions.
+    /// Meta-test: CI must be UNABLE to skip the ground-truth assertions.
     ///
     /// Rather than counting executed tests (test ordering is not guaranteed, so a counter check
     /// can race), this asserts the preconditions that decide whether they run: with the fixture
@@ -50,7 +51,7 @@ import Testing
     /// silently no-opped. This is the test that was missing when the guard skipped in CI for
     /// months while the suite reported green.
     @Test func guardJobCannotSkip() async throws {
-        guard Self.fixtureRequired else { return }  // meaningful only on the guard job
+        guard Self.fixtureRequired else { return }  // meaningful only where the fixture is required
         #expect(Self.amiFixture != nil,
                 "PARLEY_REQUIRE_AMI_FIXTURE=1 but the AMI fixture is missing — did scripts/fetch-diarization-fixtures.sh run?")
         let modelsReady = try await TestModels.ensureDiarization()

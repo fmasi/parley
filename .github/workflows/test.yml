@@ -26,10 +26,9 @@ concurrency:
 jobs:
   test:
     runs-on: macos-15
-    # Bound it, like the other two jobs already are. Twice on 2026-09-03/04 this job sat 80+
-    # minutes inside a step whose test suite completes in ~42 seconds, while `red-first` and
-    # `diarization-guard` — running the same swift test binary against the same models cache —
-    # passed. Without a timeout that runs to GitHub's 6-hour default, so the branch is blocked for
+    # Bound it, as `red-first` already is. Twice on 2026-09-03/04 this job sat 80+ minutes inside
+    # a step whose test suite completes in ~42 seconds, while the other jobs — running the same
+    # swift test binary against the same models cache — passed. Without a timeout that runs to GitHub's 6-hour default, so the branch is blocked for
     # a working day on a hang nobody is watching. 30 minutes is ~40x the step's real runtime, so it
     # cannot fire on a slow-but-healthy run, and a timed-out job leaves a log naming the test that
     # was executing — which is how the next occurrence gets diagnosed rather than merely cancelled.
@@ -48,11 +47,43 @@ jobs:
           key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
           restore-keys: fluidaudio-models-
 
-      - name: Run Swift tests
+      - name: Cache AMI reference audio
+        uses: actions/cache@v6
+        with:
+          path: fixtures/diarization
+          key: ami-es2004a-v1
+
+      - name: Cache SwiftPM dependency resolution
+        uses: actions/cache@v6
+        with:
+          # The git clones and checkouts SPM makes, NOT the compiled output. Measured on a clean
+          # run: 26s of the job goes to resolution before a single file is compiled, and 21s of
+          # that is one line — `Computed Sparkle at 2.9.4 (21.17s)` — because SPM clones Sparkle's
+          # full history and walks its tags to pick a version it already knows from Package.resolved.
+          #
+          # Compiled output (.build/<triple>/debug, 814 MB) is deliberately NOT cached. It would
+          # save ~76s but costs a large transfer, and a stale object surviving into a run of THIS
+          # suite would mean a green tick on code that was not actually built. Resolution is pure
+          # download with no such failure mode.
+          path: |
+            .build/repositories
+            .build/checkouts
+            .build/artifacts
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Fetch AMI reference audio (4-speaker meeting)
+        run: bash scripts/fetch-diarization-fixtures.sh
+
+      - name: Run Swift tests, including the AMI ground-truth guard
         env:
           # Let model-needing tests download for themselves. On CI a missing model is a test
           # FAILURE, never a silent skip (see SwiftTests/TranscriberTests/Support/TestModels.swift).
           PARLEY_FETCH_MODELS: "1"
+          # A skip is a failure: with this set, a missing fixture or model FAILS the ground-truth
+          # tests instead of disabling them, and `guardJobCannotSkip` proves their preconditions
+          # held (see DiarizationRegressionTests).
+          PARLEY_REQUIRE_AMI_FIXTURE: "1"
         run: |
           swift test --filter TranscriberTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
@@ -84,6 +115,25 @@ jobs:
           key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
           restore-keys: fluidaudio-models-
 
+      - name: Cache SwiftPM dependency resolution
+        uses: actions/cache@v6
+        with:
+          # The git clones and checkouts SPM makes, NOT the compiled output. Measured on a clean
+          # run: 26s of the job goes to resolution before a single file is compiled, and 21s of
+          # that is one line — `Computed Sparkle at 2.9.4 (21.17s)` — because SPM clones Sparkle's
+          # full history and walks its tags to pick a version it already knows from Package.resolved.
+          #
+          # Compiled output (.build/<triple>/debug, 814 MB) is deliberately NOT cached. It would
+          # save ~76s but costs a large transfer, and a stale object surviving into a run of THIS
+          # suite would mean a green tick on code that was not actually built. Resolution is pure
+          # download with no such failure mode.
+          path: |
+            .build/repositories
+            .build/checkouts
+            .build/artifacts
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
       - name: Changed tests must be RED at the merge base, GREEN at HEAD
         env:
           # Gated suites may include model-needing tests; without this they would fail at HEAD
@@ -93,58 +143,9 @@ jobs:
           BASE=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
           bash scripts/verify-regression-tests.sh "$BASE"
 
-  # Ground-truth diarization guard.
-  #
-  # The DEFAULT speaker-separation oracle is SyntheticDiarizationTests in the `test` job above:
-  # its fixture is synthesized with `say` at test time, so it runs on every CI run with no fetch
-  # step. This job is the stronger, labeled-ground-truth oracle on real overlapping conversation —
-  # the AMI fixture is 33 MB and git-ignored, which is why it needs its own job. Keep both: the
-  # synthetic guard catches a collapse everywhere, this one also catches quality regressions that
-  # clean single-voice TTS audio cannot exercise (overlap, crosstalk, far-field mics).
-  #
-  # `embeddingExcludeOverlap: false` (every speaker merged into one) shipped and survived for
-  # months precisely because no CI job asserted anything about speaker separation, and every
-  # device test was a 1:1 call where the channel split does the diarizer's job for it.
-  #
-  # This job fetches both and runs the guard against AMI ES2004a, a 4-speaker reference meeting.
-  # Both are cached: the models are only ~23 MB (diarization + VAD — the large Parakeet ASR model is
-  # not needed here) and the fixture ~33 MB, so a warm run costs seconds.
-  diarization-guard:
-    runs-on: macos-15
-    # Bound it: a hung model/fixture download would otherwise hold a runner until GitHub's 6h limit.
-    timeout-minutes: 25
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache diarization models
-        uses: actions/cache@v6
-        with:
-          path: ~/Library/Application Support/FluidAudio/Models
-          # Keyed on the resolved FluidAudio version: a dependency bump must re-download, because a
-          # model change is exactly the kind of thing that could move diarization quality.
-          key: fluidaudio-models-${{ hashFiles('Package.resolved') }}
-          restore-keys: fluidaudio-models-
-
-      - name: Cache AMI reference audio
-        uses: actions/cache@v6
-        with:
-          path: fixtures/diarization
-          key: ami-es2004a-v1
-
-      - name: Fetch AMI reference audio (4-speaker meeting)
-        run: bash scripts/fetch-diarization-fixtures.sh
-
-      # PARLEY_FETCH_MODELS lets the test download the models itself (~23 MB, ~6s cold). We can't
-      # shell out to the app binary here: it's the GUI target, and a headless runner SIGKILLs it.
-      - name: Verify the diarizer still separates 4 speakers
-        env:
-          PARLEY_FETCH_MODELS: "1"
-          # A skip is a failure here: with this set, a missing fixture or model FAILS the
-          # ground-truth tests instead of disabling them (see DiarizationRegressionTests).
-          PARLEY_REQUIRE_AMI_FIXTURE: "1"
-        run: |
-          swift test --filter DiarizationRegressionTests \
-            -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+  # NOTE: there is no separate `diarization-guard` job any more. `DiarizationRegressionTests` lives
+  # in the `TranscriberTests` target, so the `test` job above already BUILDS it and — now that the
+  # AMI fixture is fetched and PARLEY_REQUIRE_AMI_FIXTURE is set there — already RUNS it. The old
+  # job was a second full build of the same package (measured: 325s of its 416s was build and
+  # dependency resolution) to run tests the first job had already compiled. Coverage is unchanged;
+  # `guardJobCannotSkip` still proves the ground-truth assertions cannot silently no-op.
