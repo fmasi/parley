@@ -118,7 +118,9 @@ run_suites() {
   log=$(mktemp)
   ec=0
   # shellcheck disable=SC2086  # SWIFT_FLAGS is intentionally word-split
-  (cd "$tree" && swift test --filter "($suites)" $SWIFT_FLAGS) >"$log" 2>&1 || ec=$?
+  # --no-parallel for the same reason as the CI test job: concurrent AVFoundation/CoreML tests
+  # can wedge a shared media daemon on a headless runner and hang the whole run (see test.yml).
+  (cd "$tree" && swift test --no-parallel --filter "($suites)" $SWIFT_FLAGS) >"$log" 2>&1 || ec=$?
   # swift-testing summary line: "Test run with N tests in M suites passed/failed after ..."
   tests_run=$(grep -oE 'Test run with [0-9]+ test' "$log" | grep -oE '[0-9]+' | tail -1 || true)
   if [ "$ec" -ne 0 ]; then
