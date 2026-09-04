@@ -74,13 +74,14 @@ target, so that job was rebuilding the whole package to run something the `test`
 compiled. Merging them changed no coverage — the env var, not the job, is what makes the guard
 unskippable.)
 
-**Known CI gap — the red-first gate does not run the diarization ground truth.** The `red-first`
-job does not fetch the AMI fixture or set `PARLEY_REQUIRE_AMI_FIXTURE`, so any test you add or
-change in `DiarizationRegressionTests` is SKIPPED by that gate rather than run. It will report green
-having executed nothing — including for a brand-new `@Test` guarding a regression you just fixed,
-which is the exact case the gate exists for. Verify those by running them locally with the fixture
-present (`bash scripts/fetch-diarization-fixtures.sh`), and rely on the `test` job, which does run
-them, for the green signal.
+**Known CI gap — the red-first gate cannot judge diarization tests.** The `red-first` job does not
+fetch the AMI fixture or set `PARLEY_REQUIRE_AMI_FIXTURE`, so anything you add or change in
+`DiarizationRegressionTests` SKIPS there. The gate counts a skip as passed, so it concludes your new
+test "passes at the parent commit" and **fails the PR** — a false failure on exactly the
+fix-plus-regression-test PR the gate exists to reward. Mark such a test
+`RED-FIRST-EXEMPT: <reason>`, verify it locally with the fixture present
+(`bash scripts/fetch-diarization-fixtures.sh`), and rely on the `test` job — which does run it — for
+the real signal.
 
 **What CI cannot cover:** anything needing real audio hardware — the capture path, Bluetooth/HFP
 behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,

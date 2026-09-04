@@ -181,13 +181,16 @@ jobs:
           restore-keys: spm-${{ runner.os }}-
 
       # KNOWN GAP: this job does not fetch the AMI fixture or set PARLEY_REQUIRE_AMI_FIXTURE, so
-      # any PR touching DiarizationRegressionTests has those cases SKIPPED by the red-first gate
-      # rather than run — and that includes ADDING a new @Test to guard a freshly fixed regression,
-      # which is exactly the case the gate exists for. It would report green having executed
-      # nothing. The gate then proves nothing about them. Pre-existing — the old
-      # diarization-guard job never ran verify-regression-tests.sh either — and left alone here
-      # because fixing it means paying the fixture fetch and the AMI compute on a second job, which
-      # is exactly the duplication this PR removes. Tracked rather than silently carried.
+      # DiarizationRegressionTests SKIP here. The gate counts a skip as PASSED
+      # (verify-regression-tests.sh: "a skipped test counts as passed"), so a PR that fixes a
+      # diarization bug and adds a test for it gets RUN_STATUS=green at the merge base and the gate
+      # FAILS with "the changed tests PASS at the parent commit" — a false failure that blocks a
+      # legitimate PR, not a false pass. Loud rather than silent, but wrong either way.
+      #
+      # Workaround until it is fixed: mark such a test `RED-FIRST-EXEMPT: <reason>`, which is what
+      # that marker exists for. Fixing it properly means fetching the fixture and paying the AMI
+      # compute in a second job, which is the duplication this PR removes — so it is recorded here
+      # and in docs/development-process.md rather than silently carried.
       - name: Changed tests must be RED at the merge base, GREEN at HEAD
         env:
           # Gated suites may include model-needing tests; without this they would fail at HEAD
