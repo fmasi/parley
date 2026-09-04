@@ -26,6 +26,13 @@ concurrency:
 jobs:
   test:
     runs-on: macos-15
+    # Bound it, like the other two jobs already are. Without a timeout a wedged run hangs to
+    # GitHub's 6-hour default AND its logs are never retained, so the failure is invisible: twice
+    # on 2026-09-03/04 this job sat 80+ minutes inside a step that normally takes ~2 minutes, while
+    # `red-first` and `diarization-guard` — which run the same swift test binary — passed. Each
+    # time the only remedy was cancelling by hand, which also destroyed the evidence. A bounded
+    # failure produces a log; an unbounded hang produces nothing.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
