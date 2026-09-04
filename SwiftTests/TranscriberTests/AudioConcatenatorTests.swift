@@ -3,6 +3,12 @@ import Foundation
 import AVFoundation
 @testable import TranscriberCore
 
+/// `.serialized`: these tests drive AVAssetWriter/AVAssetReader, which are clients of shared media XPC
+/// daemons. A timed-out CI run on 2026-09-04 showed 27 such tests starting within six
+/// seconds and none ever finishing — a wedged daemon blocks every client forever. Running
+/// this suite's cases one at a time reduces how many are ever in flight together, without
+/// paying the ~470s that a blanket `--no-parallel` costs on a CI runner.
+@Suite(.serialized)
 struct AudioConcatenatorTests {
 
     // MARK: - Helper

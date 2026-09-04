@@ -75,19 +75,17 @@ jobs:
       - name: Fetch AMI reference audio (4-speaker meeting)
         run: bash scripts/fetch-diarization-fixtures.sh
 
-      # --no-parallel is not a style choice, it is the fix for a 30-minute CI hang.
+      # The suite stays PARALLEL here. A blanket --no-parallel was tried and measured on CI:
+      # 596s for this step against 127s of tests before, i.e. ~470s worse per run — far more
+      # expensive than the intermittent hang it was meant to prevent. My local measurement said
+      # serial cost only five seconds, which was misleading: this machine runs the suite in ~13s,
+      # so scheduling overhead dominates there, while a slower CI runner gets real work from the
+      # concurrency. Measure on the machine that pays the bill.
       #
-      # Swift Testing runs suites concurrently by default. On 2026-09-04 a timed-out job showed 27
-      # tests starting within 6 seconds of each other and NONE of them ever finishing — the run
-      # froze wholesale and burned the 30-minute budget. They are almost all AVFoundation or CoreML
-      # (AVAssetWriter/Reader in the archiver and concatenator suites, the diarization ground truth),
-      # i.e. clients of shared media XPC daemons. When one of those wedges on a headless runner
-      # every client blocks forever, which is exactly the signature observed and why it never
-      # reproduces on a developer Mac with a full window server.
-      #
-      # Measured cost locally: 18.3s serial vs 12.8s parallel — about five seconds. Total wall
-      # clock is actually LOWER serially (23.7s vs 38.6s) because the scheduling overhead exceeds
-      # the gain at this suite size. Five seconds is a trivial price for a deterministic run.
+      # The hang is instead mitigated where it originates — `.serialized` on the AVFoundation and
+      # CoreML suites (see AudioArchiverTests, AudioConcatenatorTests, and the diarization suites),
+      # which is what a timed-out run showed freezing 27 tests at once. `timeout-minutes` above
+      # bounds any recurrence and leaves a log.
       - name: Run Swift tests, including the AMI ground-truth guard
         env:
           # Let model-needing tests download for themselves. On CI a missing model is a test
@@ -98,7 +96,7 @@ jobs:
           # held (see DiarizationRegressionTests).
           PARLEY_REQUIRE_AMI_FIXTURE: "1"
         run: |
-          swift test --no-parallel --filter TranscriberTests \
+          swift test --filter TranscriberTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/

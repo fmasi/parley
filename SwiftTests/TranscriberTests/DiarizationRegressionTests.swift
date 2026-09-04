@@ -22,7 +22,12 @@ import Testing
 ///     ground-truth tests' preconditions hold, so they cannot have been silently disabled.
 ///   - Locally without the fixture, tests skip via `.enabled(if:)` — visible in test output,
 ///     and harmless because CI cannot take that path.
-@Suite struct DiarizationRegressionTests {
+/// `.serialized`: these tests drive CoreML, which are clients of shared media XPC
+/// daemons. A timed-out CI run on 2026-09-04 showed 27 such tests starting within six
+/// seconds and none ever finishing — a wedged daemon blocks every client forever. Running
+/// this suite's cases one at a time reduces how many are ever in flight together, without
+/// paying the ~470s that a blanket `--no-parallel` costs on a CI runner.
+@Suite(.serialized) struct DiarizationRegressionTests {
 
     /// AMI ES2004a: a scenario meeting from the AMI Meeting Corpus with exactly 4 participants.
     private static var amiFixture: URL? {
