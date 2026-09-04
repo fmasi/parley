@@ -55,7 +55,12 @@ jobs:
         uses: actions/cache@v6
         with:
           path: fixtures/diarization
-          key: ami-es2004a-v1
+          # Keyed on the fetch script, not a hand-bumped literal. A static key meant that changing
+          # the script's URL or output filename would restore the OLD bytes, the script's
+          # already-present guard would skip the download, and CI would silently keep testing
+          # against a stale fixture — the kind of failure that reports green.
+          key: ami-fixture-${{ hashFiles('scripts/fetch-diarization-fixtures.sh') }}
+          restore-keys: ami-fixture-
 
       - name: Cache SwiftPM dependency resolution
         uses: actions/cache@v6
