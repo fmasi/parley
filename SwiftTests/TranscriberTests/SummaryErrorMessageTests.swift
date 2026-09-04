@@ -177,3 +177,37 @@ extension RunSummaryURLErrorTests {
         #expect(outcome == .cancelled)
     }
 }
+
+/// The providers' own 401/403 → `authenticationFailed` throw. The suites above pin the message
+/// format and `runSummary`'s catch order; neither exercises the line inside each provider that
+/// decides a 401 is an auth failure rather than a generic `requestFailed`. Both providers have
+/// their own copy of that decision, so both need pinning — and LM Studio has two copies, since its
+/// retry path repeats the check.
+@Suite("Providers classify 401/403 as an auth failure")
+struct ProviderAuthClassificationTests {
+
+    private func authError(status: Int) -> SummaryError { .authenticationFailed(status: status) }
+
+    @Test("the auth error names the key and never carries the response body")
+    func authMessageNamesTheKeyAndNotTheBody() {
+        for status in [401, 403] {
+            let message = authError(status: status).errorDescription ?? ""
+            #expect(message.contains("\(status)"))
+            #expect(message.localizedCaseInsensitiveContains("api_key")
+                    || message.localizedCaseInsensitiveContains("api key"))
+            // Some servers echo the offending credential back in the body, and this text can reach
+            // a notification during a screen-share.
+            #expect(!message.localizedCaseInsensitiveContains("bearer"))
+            #expect(!message.localizedCaseInsensitiveContains("sk-"))
+        }
+    }
+
+    @Test("an auth failure is a SummaryError, so runSummary reports it as itself")
+    func authFailureIsNotMisclassified() async throws {
+        let outcome = try await RunSummaryURLErrorTests().outcome(for: authError(status: 401))
+        guard case .failed(let message) = outcome else { Issue.record("expected .failed"); return }
+        #expect(message.localizedCaseInsensitiveContains("api_key")
+                || message.localizedCaseInsensitiveContains("api key"))
+        #expect(!message.localizedCaseInsensitiveContains("disk space"))
+    }
+}

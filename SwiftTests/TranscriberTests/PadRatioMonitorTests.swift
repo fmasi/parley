@@ -281,19 +281,31 @@ struct PadRatioMonitorDeadTrackTests {
 
 extension PadRatioMonitorDeadTrackTests {
 
-    @Test("a chunk that was dead is still reported even though rotation resets the monitor")
-    func deadChunkSurvivesRotation() {
-        // `swapWriters` resets both monitors on every chunk rotation. Without closing the chunk
-        // first, a track that died only in an INTERMEDIATE chunk was discarded silently — the
-        // verdict went with the reset, and finalizeAll() only ever sees the final chunk.
+    @Test("a rotation before the call connects does NOT file a dead-track anomaly")
+    func rotationBeforeConnectIsNotDead() {
+        // The #179 false positive in its third disguise: record, rotate, and only then does the
+        // call connect. Judging "never delivered" per chunk brands that healthy recording.
         var m = PadRatioMonitor()
         for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
-        guard case .neverDelivered = m.finish() else {
-            Issue.record("the dead chunk must be reported at rotation"); return
+        m.reset()                                   // chunk rotation
+        for _ in 0..<120 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
+        if case .neverDelivered = m.finish() {
+            Issue.record("the call connected after the rotation — this recording is healthy")
         }
-        // ...and after reset the next chunk starts clean and can be healthy.
-        m.reset()
-        for _ in 0..<60 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
-        if case .neverDelivered = m.finish() { Issue.record("the next chunk delivered") }
+    }
+
+    @Test("a track dead for the WHOLE recording is still caught across rotations")
+    func deadAcrossRotationsIsStillCaught() {
+        var m = PadRatioMonitor()
+        for _ in 0..<3 {                            // three chunks, never a single real frame
+            for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+            m.reset()
+        }
+        guard case .neverDelivered(let seconds) = m.finish() else {
+            Issue.record("a track that never delivered across the whole recording must be caught")
+            return
+        }
+        // Accumulated across all three chunks, not just the last.
+        #expect(seconds >= 180)
     }
 }

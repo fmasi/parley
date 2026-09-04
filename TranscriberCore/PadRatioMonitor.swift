@@ -122,12 +122,16 @@ public struct PadRatioMonitor {
         return .neverDelivered(seconds: seconds)
     }
 
+    /// Reset the per-CHUNK ratio state at a rotation.
+    ///
+    /// Deliberately does NOT clear `hasDeliveredData`, `deadFrames` or `lastRate`: "never delivered
+    /// a frame" is a property of the RECORDING, not of a chunk. Clearing it per chunk means a user
+    /// who starts recording before the call connects gets a `trackNeverDelivered` anomaly the
+    /// moment a rotation happens first — the #179 false positive again, in a third disguise.
+    /// Only `finalizeAll()` may judge, because only there is "never" true of the whole recording.
     public mutating func reset() {
         padFrames = 0
         totalFrames = 0
         reported = false
-        hasDeliveredData = false
-        deadFrames = 0
-        lastRate = 0
     }
 }

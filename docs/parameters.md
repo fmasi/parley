@@ -63,6 +63,7 @@ All summary fields are nested under the `"summary"` key in config.json. The enti
 | Context length | `context_length` | `null` | Maximum context window in tokens to advertise to the provider. When `null`, the provider uses its own model default. Primarily relevant for `lmstudio` which passes this per-request. |
 | Context overhead percent | `context_overhead_percent` | `10` | Safety margin (%) added to estimated input token count before computing fit. Prevents context overflows from estimation error. |
 | Max output tokens | `max_output_tokens` | `2048` | Tokens reserved for the summary response. Subtracted from the usable context window when deciding how much transcript to include. |
+| `request_timeout_seconds` | int | `600` | Seconds a single summary request may take before `URLSession` gives up. **Deliberately far above URLSession's implicit 60 s**: that default governs a *network* call, and this one drives a LOCAL model that routinely needs minutes. Measured on one transcript — cold (model not loaded) 36 s, warm 13 s, the failure that motivated this 60.5 s — so a cold load plus ANE/GPU contention from the ASR that just finished can exceed 60 s on an ordinary meeting. A timeout here surfaces as "The model took too long to respond", not as a file error (#173). |
 
 ---
 
