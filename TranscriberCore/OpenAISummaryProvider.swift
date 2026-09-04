@@ -9,6 +9,14 @@ public enum SummaryError: LocalizedError {
     /// a completion. Surfacing the server's own message is what keeps a misconfigured endpoint
     /// (bad token, unknown model) diagnosable instead of masked as `emptyResponse` (#134).
     case serverError(message: String, code: String?)
+    /// The endpoint rejected our credentials (401/403).
+    ///
+    /// Separate from `requestFailed` for two reasons. It is the one failure with a precise, useful
+    /// instruction — "check the API key" — and a generic "HTTP 401: <body>" buries that in noise.
+    /// And it must NOT echo the response body: some servers reflect the offending credential back,
+    /// and this text reaches a notification that may be on screen during a shared meeting. The same
+    /// concern already sanitizes `invalidEndpoint`.
+    case authenticationFailed(status: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +26,8 @@ public enum SummaryError: LocalizedError {
         case .serverError(let message, let code):
             let suffix = code.map { " (\($0))" } ?? ""
             return "Summary provider error: \(message)\(suffix)"
+        case .authenticationFailed(let status):
+            return "The summary endpoint rejected the API key (HTTP \(status)) — update api_key in config.json or Settings"
         }
     }
 
@@ -55,19 +65,27 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
     /// backoff and an over-large `Retry-After`.
     static let maxBackoffSeconds: Double = 30
 
-    public init(endpoint: String, apiKey: String, model: String) {
-        self.init(endpoint: endpoint, apiKey: apiKey, model: model, session: .shared)
+    public init(endpoint: String, apiKey: String, model: String, requestTimeoutSeconds: Int? = nil) {
+        self.init(endpoint: endpoint, apiKey: apiKey, model: model, session: .shared,
+                  requestTimeoutSeconds: requestTimeoutSeconds)
     }
+
+    /// See `LMStudioSummaryProvider.defaultRequestTimeoutSeconds` — same reasoning.
+    public static let defaultRequestTimeoutSeconds = 600
 
     /// Testable initializer: inject a `URLSession` (e.g. with a mock `URLProtocol`) and a
     /// shorter retry base delay so the 429 backoff path runs fast under test.
-    init(endpoint: String, apiKey: String, model: String, session: URLSession, retryBaseDelay: Double = 1.0) {
+    init(endpoint: String, apiKey: String, model: String, session: URLSession,
+         retryBaseDelay: Double = 1.0, requestTimeoutSeconds: Int? = nil) {
         self.endpoint = endpoint
         self.apiKey = apiKey
         self.model = model
         self.session = session
         self.retryBaseDelay = retryBaseDelay
+        self.requestTimeoutSeconds = requestTimeoutSeconds ?? Self.defaultRequestTimeoutSeconds
     }
+
+    private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
         let request = try buildRequest(segments: segments, metadata: metadata)
@@ -95,6 +113,14 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
                 continue
             }
 
+            // 401/403 has a precise fix and a body that may echo the credential back — classify it
+            // and throw BEFORE the body is decoded at all. There was no leak either way (the old
+            // ordering decoded it and then discarded it on this path), but decoding a
+            // credential-bearing body above the guard that stops it escaping reads like a bug
+            // waiting to be introduced by the next edit.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             let body = String(data: data, encoding: .utf8) ?? ""
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
@@ -146,6 +172,9 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A local model accepts instantly and then generates for minutes; the stock 60s timeout is
+        // the wrong order of magnitude and cost two real summaries (#173).
+        request.timeoutInterval = TimeInterval(requestTimeoutSeconds)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

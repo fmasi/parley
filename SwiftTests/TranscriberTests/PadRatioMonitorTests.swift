@@ -119,6 +119,62 @@ import Testing
         #expect(firedAtSecond <= 45, "detection should stay prompt, fired at \(firedAtSecond)s")
     }
 
+    // MARK: - THE 2026-08-11 FALSE POSITIVE (device-observed)
+
+    /// The first real-world firing of this detector was WRONG, and the recording was healthy.
+    ///
+    /// A call recorded on speaker: capture started at 11:59:44, the call audio began ~60s later.
+    /// Measured zero-sample ratio on the system track — 97.6% in 0-30s, 2.8% from 60-300s, 4.2%
+    /// overall. Nothing was wrong with it. But the monitor judged at exactly t=30s and saw 27s of
+    /// padding in 30s (ratio 0.911), clearing both the ratio threshold and the 15s absolute floor.
+    ///
+    /// The cause is a property of the Core Audio tap that SCK does not share: the tap delivers no
+    /// buffers at all while the output device is idle. Before the call connects there is genuinely
+    /// nothing to capture, so the padder fills wall clock and every one of those frames counts as
+    /// "fabricated". Starting a recording before joining the call is the single most common way to
+    /// use this app, so this fires on the ordinary case.
+    ///
+    /// The distinction that matters: padding BEFORE a track has ever delivered data is a start
+    /// offset, not a deficit. Only once frames are flowing does missing frames mean something.
+    @Test func leadingSilenceBeforeTheCallStartsIsNotCorruption() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        // 60s of pure padding — the tap delivers nothing while the output device is idle.
+        for _ in 0..<60 {
+            let v = monitor.record(padFrames: 48_000, dataFrames: 0, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        // Then the call connects and audio flows normally for 5 minutes.
+        for _ in 0..<300 {
+            let v = monitor.record(padFrames: 0, dataFrames: 48_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        #expect(fired == nil, "a recording started before the call must not be called corrupted")
+    }
+
+    /// The corollary that must still hold: once a track HAS delivered data, a sustained deficit is
+    /// real and must fire. This is the 2026-08-04 shape — the tap was delivering (a call was
+    /// connected) at roughly half the declared rate.
+    @Test func deficitAfterDataStartsStillFires() {
+        var monitor = PadRatioMonitor()
+        var fired: PadRatioMonitor.Verdict?
+        // Leading silence first — must be ignored, not merely diluted.
+        for _ in 0..<60 {
+            _ = monitor.record(padFrames: 48_000, dataFrames: 0, rate: Self.rate())
+        }
+        // Now frames flow, but only half of what the declared rate implies.
+        for _ in 0..<60 {
+            let v = monitor.record(padFrames: 24_000, dataFrames: 24_000, rate: Self.rate())
+            if case .excessive = v, fired == nil { fired = v }
+        }
+        guard case .excessive(let ratio, _, _) = fired else {
+            Issue.record("a real deficit after data starts must still fire, got \(String(describing: fired))")
+            return
+        }
+        // The leading silence must not inflate the ratio either — this is ~0.5, not ~0.8.
+        #expect(ratio > 0.45 && ratio < 0.55, "leading silence must be excluded from the ratio, got \(ratio)")
+    }
+
     // MARK: - Warm-up
 
     /// Leading silence dominates the ratio before any real audio arrives, so a verdict must wait for
@@ -160,5 +216,113 @@ import Testing
     @Test func zeroRateIsSafe() {
         var monitor = PadRatioMonitor()
         #expect(monitor.record(padFrames: 100, dataFrames: 100, rate: 0) == .notYet)
+    }
+}
+
+/// The start-offset fix (#179) has an edge the fix itself created: a track that NEVER delivers a
+/// frame stays permanently in "not yet", so a capture that failed outright — SCK never starting,
+/// an IOProc that never runs, an XPC session torn down at once — became SILENT where it previously
+/// tripped on all-padding. That is the opposite failure to the one being fixed, and worse: a false
+/// negative on a genuinely broken recording.
+@Suite("PadRatioMonitor — a dead track must not be silent")
+struct PadRatioMonitorDeadTrackTests {
+
+    @Test("a track that never delivers a single frame is reported as dead at finish")
+    func neverDeliveredIsReportedAtFinish() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        guard case .neverDelivered(let seconds) = m.finish() else {
+            Issue.record("expected .neverDelivered"); return
+        }
+        #expect(seconds >= 60)
+    }
+
+    @Test("a late start is never judged mid-stream, however long it runs")
+    func nothingReportedMidStream() {
+        var m = PadRatioMonitor()
+        // Ten minutes of leading silence: legitimate if the user records before joining.
+        for _ in 0..<600 {
+            #expect(m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) == .notYet)
+        }
+        // The assertion above is `== .notYet`, NOT `if case .neverDelivered`. `record()` cannot
+        // return `.neverDelivered` by construction, so matching on it would be vacuous — the branch
+        // could never execute and the test would pass against any implementation, including one
+        // that reported `.excessive` on every append. Asserting the exact verdict is what makes
+        // this fail if the mid-stream rule is ever weakened.
+        if case .neverDelivered = m.finish() {} else {
+            Issue.record("ten minutes of pure padding IS dead once the stream closes")
+        }
+    }
+
+    @Test("a late start that DOES deliver is healthy, at finish too — the #179 fix must survive")
+    func lateStartStaysHealthy() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        for _ in 0..<120 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
+        if case .neverDelivered = m.finish() { Issue.record("the track did deliver") }
+    }
+
+    @Test("repeated finish() calls report once")
+    func deadTrackReportsOnce() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        var reports = 0
+        for _ in 0..<5 { if case .neverDelivered = m.finish() { reports += 1 } }
+        #expect(reports == 1)
+    }
+
+    @Test("a reset between finishes re-arms the monitor — the caller must dedup, not this type")
+    func resetReArmsSoTheCallerMustDedup() {
+        // `reset()` clears `reported`, so finish() → reset() → finish() DOES report twice. That is
+        // correct for a per-chunk ratio reset, and it is why `AudioOutputHandler` keeps its own
+        // `deadTrackReported` set: the "one dead track, one anomaly" invariant belongs to the
+        // diagnostic, not to this value type. The previous version of this test called finish()
+        // five times with no reset, so it never exercised the path that can double-report.
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        var reports = 0
+        for _ in 0..<3 {
+            if case .neverDelivered = m.finish() { reports += 1 }
+            m.reset()
+        }
+        #expect(reports == 3, "reset() re-arms by design — dedup is the caller's job")
+    }
+
+    @Test("a track too short to judge is not called dead")
+    func tooShortIsNotDead() {
+        var m = PadRatioMonitor()
+        for _ in 0..<5 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        if case .neverDelivered = m.finish() { Issue.record("5s is not enough to conclude anything") }
+    }
+}
+
+extension PadRatioMonitorDeadTrackTests {
+
+    @Test("a rotation before the call connects does NOT file a dead-track anomaly")
+    func rotationBeforeConnectIsNotDead() {
+        // The #179 false positive in its third disguise: record, rotate, and only then does the
+        // call connect. Judging "never delivered" per chunk brands that healthy recording.
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        m.reset()                                   // chunk rotation
+        for _ in 0..<120 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
+        if case .neverDelivered = m.finish() {
+            Issue.record("the call connected after the rotation — this recording is healthy")
+        }
+    }
+
+    @Test("a track dead for the WHOLE recording is still caught across rotations")
+    func deadAcrossRotationsIsStillCaught() {
+        var m = PadRatioMonitor()
+        for _ in 0..<3 {                            // three chunks, never a single real frame
+            for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+            m.reset()
+        }
+        guard case .neverDelivered(let seconds) = m.finish() else {
+            Issue.record("a track that never delivered across the whole recording must be caught")
+            return
+        }
+        // Accumulated across all three chunks, not just the last.
+        #expect(seconds >= 180)
     }
 }

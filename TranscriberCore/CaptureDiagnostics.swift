@@ -37,6 +37,10 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// frames genuinely went missing, whatever the cause. This is the mechanism-independent backstop
     /// for the whole silent-divergence class (#58). Severity `.anomaly`.
     case excessivePadding
+    /// The track never delivered a single real frame — the capture never started. Distinct from
+    /// `excessivePadding` ("delivered, then fell behind") because reading a `.diag.jsonl` should not
+    /// require inferring which fault occurred from an attribute.
+    case trackNeverDelivered
 
     /// A sustained run of system buffers rejected by the sticky format gate — the system track has
     /// stopped being written while the stream still appears to run. Distinct from the transient
@@ -64,6 +68,9 @@ extension CaptureEventKind {
     /// So the user-facing quality signal counts only the kinds that survive recovery.
     public static let qualityCompromising: Set<CaptureEventKind> = [
         .excessivePadding,
+        // A track that never started is unambiguously compromising — the file holds nothing but
+        // fabricated silence.
+        .trackNeverDelivered,
         .rateDrift,
         .sustainedFormatDrop,
         .systemAudioUnrecovered,

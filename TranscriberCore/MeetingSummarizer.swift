@@ -7,6 +7,11 @@ public enum SummaryOutcome: Equatable, Sendable {
     case skipped                 // summary not configured / disabled
     case succeeded
     case failed(String)          // localized description of the failure
+    /// The user cancelled — quit the app, or the stop path tore the task down. Deliberately NOT
+    /// `.failed`: the only call site pattern-matches `.failed` to post a "Summary Failed"
+    /// notification, so reusing it would tell someone their summary broke when they are the one
+    /// who stopped it. Nothing went wrong and nothing needs saying.
+    case cancelled
 }
 
 public enum MeetingSummarizer {
@@ -94,11 +99,36 @@ public enum MeetingSummarizer {
             // sanitized in the branch above.
             Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")
             return .failed(error.localizedDescription)
+        } catch let error as URLError {
+            // NOT a file failure. This branch exists because a URLError fell through to the
+            // catch-all below and was reported as "check disk space and permissions" — which read as
+            // a permissions problem and sent two separate debugging sessions down the wrong path
+            // (2026-08-04 and 2026-08-11, both actually `-1001` request timeouts against a local
+            // LM Studio that accepted the request and then generated for longer than the timeout).
+            // An error message that misdescribes the fault is worse than a vague one.
+            Logger.transcription.error(
+                "Summary generation failed: \(error.code.rawValue, privacy: .public) \(error.localizedDescription, privacy: .public)"
+            )
+            switch error.code {
+            case .timedOut:
+                return .failed("The model took too long to respond — the transcript is safe; try a smaller model or raise the summary timeout")
+            case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .notConnectedToInternet:
+                return .failed("Couldn't reach the summary endpoint — is your model server running?")
+            case .cancelled:
+                // The user quit, or the stop path tore the task down. Not a fault: `.cancelled`
+                // rather than `.failed`, so no "Summary Failed" notification fires for something
+                // they did on purpose.
+                Logger.transcription.info("Summary cancelled — transcript is untouched")
+                return .cancelled
+            default:
+                return .failed("Summary request failed: \(error.localizedDescription)")
+            }
         } catch {
-            // A non-SummaryError here is a file read/write failure (transcript unreadable, summary
-            // write failed). CocoaError's description embeds the transcript/session filename, which
-            // would surface in the notification (visible during a screen-share) — so keep the detail
-            // in the local log and give the user a generic, actionable message (#134 review).
+            // A non-SummaryError, non-URLError here is a file read/write failure (transcript
+            // unreadable, summary write failed). CocoaError's description embeds the
+            // transcript/session filename, which would surface in the notification (visible during a
+            // screen-share) — so keep the detail in the local log and give the user a generic,
+            // actionable message (#134 review).
             Logger.transcription.error("Summary generation failed: \(error.localizedDescription)")
             return .failed("Couldn't read the transcript or write the summary — check disk space and permissions")
         }
@@ -114,13 +144,15 @@ public enum MeetingSummarizer {
                 model: summary.model,
                 contextLength: summary.contextLength,
                 contextOverheadPercent: summary.contextOverheadPercent,
-                maxOutputTokens: summary.maxOutputTokens
+                maxOutputTokens: summary.maxOutputTokens,
+                requestTimeoutSeconds: summary.requestTimeoutSeconds
             )
         case .openai:
             return OpenAISummaryProvider(
                 endpoint: summary.endpoint,
                 apiKey: summary.apiKey,
-                model: summary.model
+                model: summary.model,
+                requestTimeoutSeconds: summary.requestTimeoutSeconds
             )
         }
     }

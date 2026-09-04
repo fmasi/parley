@@ -21,7 +21,8 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         model: String,
         contextLength: Int? = nil,
         contextOverheadPercent: Int? = nil,
-        maxOutputTokens: Int? = nil
+        maxOutputTokens: Int? = nil,
+        requestTimeoutSeconds: Int? = nil
     ) {
         self.endpoint = endpoint
         self.apiKey = apiKey
@@ -29,7 +30,14 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         self.contextLength = contextLength
         self.overheadPercent = contextOverheadPercent ?? Self.defaultOverheadPercent
         self.outputBuffer = maxOutputTokens ?? Self.defaultOutputBuffer
+        self.requestTimeoutSeconds = requestTimeoutSeconds ?? Self.defaultRequestTimeoutSeconds
     }
+
+    /// Generous by design: a local model accepts the request instantly and then generates for
+    /// minutes on a long transcript. Ten minutes is far past any real generation while still
+    /// bounded, so a genuinely dead server still fails rather than hanging forever.
+    public static let defaultRequestTimeoutSeconds = 600
+    private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
         // Calibrate on first encounter with this model
@@ -43,6 +51,11 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+            // Decoded up front here, unlike the retry path and OpenAISummaryProvider, because the
+            // 500 branch below PARSES it (`parseContextError`) to recover the model's real token
+            // count. Do not "fix" the ordering to match the others — it would break the
+            // context-overflow retry. The 401/403 guard still prevents the body reaching any
+            // message, which is the property that actually matters.
             let body = String(data: data, encoding: .utf8) ?? ""
 
             // Context too small — parse actual token count from error, set exact ratio, retry once
@@ -58,6 +71,10 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 return try await retryRequest(segments: segments, metadata: metadata)
             }
 
+            // 401/403 has a precise fix and a body that may echo the credential — classify it.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode): \(body.prefix(200))")
         }
 
@@ -89,6 +106,14 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+            // Auth first, before the body is decoded at all — some servers echo the offending
+            // credential back, and this text can reach a notification during a screen-share. Same
+            // ordering as the non-retry path above and as OpenAISummaryProvider, whose comment calls
+            // the old shape "a bug waiting to be introduced by the next edit". This retry path was
+            // the copy that still had it.
+            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
+            }
             let body = String(data: data, encoding: .utf8) ?? ""
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode) (after retry): \(body.prefix(200))")
         }
@@ -156,6 +181,9 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A local model accepts instantly and then generates for minutes; the stock 60s timeout is
+        // the wrong order of magnitude and cost two real summaries (#173).
+        request.timeoutInterval = TimeInterval(requestTimeoutSeconds)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

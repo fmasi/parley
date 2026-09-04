@@ -34,6 +34,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// those are chunk-scoped, so accumulating the ratio across rotations would mix anchors and make
     /// the number meaningless. The cost is that a bleed too small to cross the threshold within one
     /// chunk never fires; the benefit is that the ratio always describes a coherent timeline.
+    /// Tracks already reported dead, so one persistently-dead track files one anomaly, not one
+    /// per chunk rotation.
+    private var deadTrackReported: Set<String> = []
     private var systemPadMonitor = PadRatioMonitor()
     private var micPadMonitor = PadRatioMonitor()
 
@@ -87,6 +90,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     func finalizeAll() {
         systemWriter.finalize()
         micWriter.finalize()
+        // A track that delivered nothing by the time the stream closes never started. That cannot
+        // be judged mid-stream — a legitimate start offset has no upper bound — so it is judged
+        // here, where "never" is finally knowable.
+        noteDeadTrack(systemPadMonitor.finish(), track: "system")
+        noteDeadTrack(micPadMonitor.finish(), track: "mic")
     }
 
     /// Swap writers for chunk rotation. MUST be called on the audio callback queue.
@@ -119,6 +127,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         timelineAnchorPTS = nil
         micFramesWritten = 0
         systemFramesWritten = 0
+        // No dead-track judgement here. Rotation resets only the per-chunk RATIO state; whether a
+        // track ever delivered is a property of the whole recording and is decided in
+        // `finalizeAll()`. Judging it per chunk filed a `trackNeverDelivered` anomaly on a healthy
+        // recording whenever a rotation happened before the call connected — #179 all over again.
         systemPadMonitor.reset()
         micPadMonitor.reset()
         // Same chunk scoping as the pad monitors: without this a drop that fires in chunk 1 latches
@@ -552,6 +564,31 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             "ratio": String(format: "%.3f", ratio),
             "padded_seconds": "\(Int(paddedSeconds))",
             "total_seconds": "\(Int(totalSeconds))",
+        ])
+    }
+
+    /// Surface a track that never delivered a single real frame — a capture that never started,
+    /// as opposed to one that started and fell behind (`notePadding`). Without this the #179
+    /// start-offset rule would keep a dead track silent forever, trading a false positive for a
+    /// false negative on a genuinely broken recording.
+    private func noteDeadTrack(_ verdict: PadRatioMonitor.Verdict, track: String) {
+        guard case .neverDelivered(let seconds) = verdict else { return }
+        // Belt and braces. `finish()` is now called only from `finalizeAll()`, so this cannot
+        // currently fire twice for one track — but `finalizeAll()` is not contractually
+        // once-per-recording, and an earlier revision of this PR did call `finish()` on every
+        // rotation and filed one anomaly per chunk for a single fault. The guard costs nothing and
+        // keeps the invariant true of the DIAGNOSTIC rather than of one call site: one dead track,
+        // one anomaly. The original pad bug was lost inside ~57,000 repeated log lines.
+        guard deadTrackReported.insert(track).inserted else { return }
+        Logger.audio.error(
+            """
+            \(track, privacy: .public) track never delivered a single frame in \(Int(seconds), privacy: .public)s \
+            — the capture never started, and the file holds nothing but fabricated silence.
+            """
+        )
+        record(.trackNeverDelivered, .anomaly, [
+            "track": track,
+            "total_seconds": "\(Int(seconds))",
         ])
     }
 
