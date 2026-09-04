@@ -25,8 +25,12 @@ import Testing
 /// `.serialized`: these tests drive CoreML, which are clients of shared media XPC
 /// daemons. A timed-out CI run on 2026-09-04 showed 27 such tests starting within six
 /// seconds and none ever finishing — a wedged daemon blocks every client forever. Running
-/// this suite's cases one at a time reduces how many are ever in flight together, without
-/// paying the ~470s that a blanket `--no-parallel` costs on a CI runner.
+/// this suite's cases one at a time reduces how many are ever in flight together.
+///
+/// NOTE: CI currently also runs the whole suite with `--no-parallel`, because serialising
+/// these suites alone cut the frozen set from 27 tests to 15 and did not stop the stall —
+/// it is cross-suite. These traits are kept because they document which suites are
+/// implicated, and they keep the constraint if parallelism is ever restored.
 @Suite(.serialized) struct DiarizationRegressionTests {
 
     /// AMI ES2004a: a scenario meeting from the AMI Meeting Corpus with exactly 4 participants.

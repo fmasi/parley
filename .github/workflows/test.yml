@@ -27,11 +27,15 @@ jobs:
   test:
     runs-on: macos-15
     # Bound it, as `red-first` already is. Twice on 2026-09-03/04 this job sat 80+ minutes inside
-    # a step whose test suite completes in ~42 seconds, while the other jobs — running the same
-    # swift test binary against the same models cache — passed. Without a timeout that runs to GitHub's 6-hour default, so the branch is blocked for
-    # a working day on a hang nobody is watching. 30 minutes is ~40x the step's real runtime, so it
-    # cannot fire on a slow-but-healthy run, and a timed-out job leaves a log naming the test that
-    # was executing — which is how the next occurrence gets diagnosed rather than merely cancelled.
+    # its test step while the other jobs — running the same swift test binary against the same
+    # models cache — passed. Without a timeout it runs to GitHub's 6-hour default, so the branch is
+    # blocked for a working day on a hang nobody is watching.
+    #
+    # 30 minutes is ~3.7x the job's measured runtime (483s on the first green run with everything
+    # in this PR applied: ~117s build, ~342s serial tests, ~24s setup and caches). It cannot fire
+    # on a healthy run, and a timed-out job leaves a log naming the tests that were executing —
+    # which is exactly how the hang in this PR was diagnosed after four cancellations produced
+    # nothing.
     timeout-minutes: 30
 
     steps:
@@ -63,8 +67,13 @@ jobs:
           #
           # Compiled output (.build/<triple>/debug, 814 MB) is deliberately NOT cached. It would
           # save ~76s but costs a large transfer, and a stale object surviving into a run of THIS
-          # suite would mean a green tick on code that was not actually built. Resolution is pure
-          # download with no such failure mode.
+          # suite would mean a green tick on code that was not actually built.
+          #
+          # These three are safe to cache because none of them is OUR compiled code: `repositories`
+          # and `checkouts` are dependency sources, and `artifacts` holds prebuilt binary targets
+          # (Sparkle ships an XCFramework). They are all content addressed by `Package.resolved`,
+          # so a stale entry cannot silently stand in for a rebuild of the code under test — the
+          # cache key changes the moment a dependency version does.
           path: |
             .build/repositories
             .build/checkouts
@@ -72,6 +81,12 @@ jobs:
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
 
+      # Blast radius, stated deliberately: this fetch now gates the whole `test` job, so an
+      # unreachable fixture server fails all 934 unit tests rather than just an isolated guard job.
+      # Accepted, because `PARLEY_REQUIRE_AMI_FIXTURE=1` means a missing fixture MUST fail loudly —
+      # the entire reason that env var exists is that these tests once skipped silently in CI for
+      # months while the suite reported green. A fetch failure that merely disabled the guard would
+      # recreate exactly that. The fixture is cached above, so the fetch is a no-op on a cache hit.
       - name: Fetch AMI reference audio (4-speaker meeting)
         run: bash scripts/fetch-diarization-fixtures.sh
 
@@ -143,8 +158,13 @@ jobs:
           #
           # Compiled output (.build/<triple>/debug, 814 MB) is deliberately NOT cached. It would
           # save ~76s but costs a large transfer, and a stale object surviving into a run of THIS
-          # suite would mean a green tick on code that was not actually built. Resolution is pure
-          # download with no such failure mode.
+          # suite would mean a green tick on code that was not actually built.
+          #
+          # These three are safe to cache because none of them is OUR compiled code: `repositories`
+          # and `checkouts` are dependency sources, and `artifacts` holds prebuilt binary targets
+          # (Sparkle ships an XCFramework). They are all content addressed by `Package.resolved`,
+          # so a stale entry cannot silently stand in for a rebuild of the code under test — the
+          # cache key changes the moment a dependency version does.
           path: |
             .build/repositories
             .build/checkouts
@@ -152,6 +172,12 @@ jobs:
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
 
+      # KNOWN GAP: this job does not fetch the AMI fixture or set PARLEY_REQUIRE_AMI_FIXTURE, so a
+      # PR that changes DiarizationRegressionTests has those cases SKIPPED by the red-first gate
+      # rather than run. The gate then proves nothing about them. Pre-existing — the old
+      # diarization-guard job never ran verify-regression-tests.sh either — and left alone here
+      # because fixing it means paying the fixture fetch and the AMI compute on a second job, which
+      # is exactly the duplication this PR removes. Tracked rather than silently carried.
       - name: Changed tests must be RED at the merge base, GREEN at HEAD
         env:
           # Gated suites may include model-needing tests; without this they would fail at HEAD
