@@ -262,13 +262,30 @@ struct PadRatioMonitorDeadTrackTests {
         if case .neverDelivered = m.finish() { Issue.record("the track did deliver") }
     }
 
-    @Test("a dead track is reported once")
+    @Test("repeated finish() calls report once")
     func deadTrackReportsOnce() {
         var m = PadRatioMonitor()
         for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
         var reports = 0
         for _ in 0..<5 { if case .neverDelivered = m.finish() { reports += 1 } }
         #expect(reports == 1)
+    }
+
+    @Test("a reset between finishes re-arms the monitor — the caller must dedup, not this type")
+    func resetReArmsSoTheCallerMustDedup() {
+        // `reset()` clears `reported`, so finish() → reset() → finish() DOES report twice. That is
+        // correct for a per-chunk ratio reset, and it is why `AudioOutputHandler` keeps its own
+        // `deadTrackReported` set: the "one dead track, one anomaly" invariant belongs to the
+        // diagnostic, not to this value type. The previous version of this test called finish()
+        // five times with no reset, so it never exercised the path that can double-report.
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        var reports = 0
+        for _ in 0..<3 {
+            if case .neverDelivered = m.finish() { reports += 1 }
+            m.reset()
+        }
+        #expect(reports == 3, "reset() re-arms by design — dedup is the caller's job")
     }
 
     @Test("a track too short to judge is not called dead")

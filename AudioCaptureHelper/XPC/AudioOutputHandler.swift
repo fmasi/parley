@@ -573,11 +573,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// false negative on a genuinely broken recording.
     private func noteDeadTrack(_ verdict: PadRatioMonitor.Verdict, track: String) {
         guard case .neverDelivered(let seconds) = verdict else { return }
-        // Once per RECORDING, not once per chunk. `finish()` runs at every rotation, so a track
-        // that never connects for a two-hour meeting would otherwise file one anomaly per chunk —
-        // inflating qualityAnomalyCount and telling the user four times about one fault. The
-        // original pad bug was lost in ~57,000 repeated log lines; repeating a diagnostic is how
-        // it stops being read.
+        // Belt and braces. `finish()` is now called only from `finalizeAll()`, so this cannot
+        // currently fire twice for one track — but `finalizeAll()` is not contractually
+        // once-per-recording, and an earlier revision of this PR did call `finish()` on every
+        // rotation and filed one anomaly per chunk for a single fault. The guard costs nothing and
+        // keeps the invariant true of the DIAGNOSTIC rather than of one call site: one dead track,
+        // one anomaly. The original pad bug was lost inside ~57,000 repeated log lines.
         guard deadTrackReported.insert(track).inserted else { return }
         Logger.audio.error(
             """

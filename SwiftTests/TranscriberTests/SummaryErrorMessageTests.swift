@@ -211,3 +211,23 @@ struct ProviderAuthClassificationTests {
         #expect(!message.localizedCaseInsensitiveContains("disk space"))
     }
 }
+
+extension SummaryConfigDecodingTests {
+
+    @Test("a decoded config round-trips — the encoder must not drop what the decoder reads")
+    func roundTripsWithoutLosingKeys() throws {
+        // `SummaryConfig` uses the SYNTHESISED encoder today, so this passes. It is here because
+        // the decoder is hand-written: the moment anyone adds a matching `encode(to:)` — the
+        // natural next step when a property needs custom handling — it inherits the same trap that
+        // lost `request_timeout_seconds`, and a silently dropped key on WRITE is worse than on read
+        // because it destroys a value the user set.
+        let original = try decode(#"{"enabled":true,"provider":"lmstudio","endpoint":"http://127.0.0.1:1234","api_key":"k","model":"m","context_length":8192,"context_overhead_percent":15,"max_output_tokens":900,"request_timeout_seconds":42}"#)
+        let round = try JSONDecoder().decode(SummaryConfig.self, from: JSONEncoder().encode(original))
+        #expect(round.requestTimeoutSeconds == 42)
+        #expect(round.contextLength == 8192)
+        #expect(round.contextOverheadPercent == 15)
+        #expect(round.maxOutputTokens == 900)
+        #expect(round.model == "m")
+        #expect(round.provider == .lmstudio)
+    }
+}
