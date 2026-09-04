@@ -34,6 +34,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// those are chunk-scoped, so accumulating the ratio across rotations would mix anchors and make
     /// the number meaningless. The cost is that a bleed too small to cross the threshold within one
     /// chunk never fires; the benefit is that the ratio always describes a coherent timeline.
+    /// Tracks already reported dead, so one persistently-dead track files one anomaly, not one
+    /// per chunk rotation.
+    private var deadTrackReported: Set<String> = []
     private var systemPadMonitor = PadRatioMonitor()
     private var micPadMonitor = PadRatioMonitor()
 
@@ -572,6 +575,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// false negative on a genuinely broken recording.
     private func noteDeadTrack(_ verdict: PadRatioMonitor.Verdict, track: String) {
         guard case .neverDelivered(let seconds) = verdict else { return }
+        // Once per RECORDING, not once per chunk. `finish()` runs at every rotation, so a track
+        // that never connects for a two-hour meeting would otherwise file one anomaly per chunk —
+        // inflating qualityAnomalyCount and telling the user four times about one fault. The
+        // original pad bug was lost in ~57,000 repeated log lines; repeating a diagnostic is how
+        // it stops being read.
+        guard deadTrackReported.insert(track).inserted else { return }
         Logger.audio.error(
             """
             \(track, privacy: .public) track never delivered a single frame in \(Int(seconds), privacy: .public)s \

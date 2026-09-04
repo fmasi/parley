@@ -168,16 +168,12 @@ struct SummaryConfigDecodingTests {
 
 extension RunSummaryURLErrorTests {
 
-    @Test("a cancelled summary is not reported as a failure the user must chase")
+    @Test("a cancelled summary is .cancelled, not .failed — no notification fires")
     func cancellationIsNotReportedAsAFault() async throws {
-        // Reachable whenever Swift concurrency cancels the task — the app quitting, or the stop
-        // path tearing it down. "Summary request failed: cancelled" sends someone hunting a
-        // problem they caused themselves.
-        guard case .failed(let message) = try await outcome(for: URLError(.cancelled)) else {
-            Issue.record("expected .failed"); return
-        }
-        #expect(message.localizedCaseInsensitiveContains("cancel"))
-        #expect(message.localizedCaseInsensitiveContains("transcript is safe"))
-        #expect(!message.localizedCaseInsensitiveContains("disk space"))
+        // The only call site pattern-matches `.failed` to post a "Summary Failed" notification,
+        // so returning `.failed` here would tell the user their summary broke when they are the
+        // one who quit. Asserting the OUTCOME, not the message, is what pins that.
+        let outcome = try await outcome(for: URLError(.cancelled))
+        #expect(outcome == .cancelled)
     }
 }

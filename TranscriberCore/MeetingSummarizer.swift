@@ -7,6 +7,11 @@ public enum SummaryOutcome: Equatable, Sendable {
     case skipped                 // summary not configured / disabled
     case succeeded
     case failed(String)          // localized description of the failure
+    /// The user cancelled — quit the app, or the stop path tore the task down. Deliberately NOT
+    /// `.failed`: the only call site pattern-matches `.failed` to post a "Summary Failed"
+    /// notification, so reusing it would tell someone their summary broke when they are the one
+    /// who stopped it. Nothing went wrong and nothing needs saying.
+    case cancelled
 }
 
 public enum MeetingSummarizer {
@@ -110,9 +115,11 @@ public enum MeetingSummarizer {
             case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .notConnectedToInternet:
                 return .failed("Couldn't reach the summary endpoint — is your model server running?")
             case .cancelled:
-                // The user quit, or the stop path tore the task down. Not a fault, and reporting it
-                // as "Summary request failed" would send someone hunting a problem they caused.
-                return .failed("Summary cancelled — the transcript is safe")
+                // The user quit, or the stop path tore the task down. Not a fault: `.cancelled`
+                // rather than `.failed`, so no "Summary Failed" notification fires for something
+                // they did on purpose.
+                Logger.transcription.info("Summary cancelled — transcript is untouched")
+                return .cancelled
             default:
                 return .failed("Summary request failed: \(error.localizedDescription)")
             }
