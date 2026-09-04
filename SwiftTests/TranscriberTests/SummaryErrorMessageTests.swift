@@ -239,7 +239,7 @@ extension SummaryConfigDecodingTests {
 @Suite("The configured timeout reaches the request")
 struct RequestTimeoutWiringTests {
 
-    private func fixture() -> ([SummarySegment], SummaryMetadata) {
+    fileprivate func fixture() -> ([SummarySegment], SummaryMetadata) {
         ([SummarySegment(start: 0, end: 10, speaker: "A", text: "hello there")],
          SummaryMetadata(sessionName: "s", date: Date(timeIntervalSince1970: 0), durationSeconds: 60, speakers: ["A"]))
     }
@@ -260,5 +260,30 @@ struct RequestTimeoutWiringTests {
         #expect(interval == TimeInterval(OpenAISummaryProvider.defaultRequestTimeoutSeconds))
         // The regression: 60s is what produced the -1001 that cost two debugging sessions.
         #expect(interval > 60)
+    }
+}
+
+extension RequestTimeoutWiringTests {
+
+    @Test("LM Studio provider applies the configured timeout too")
+    func lmStudioAppliesConfiguredTimeout() async throws {
+        // Both providers set `timeoutInterval` at the same point and each has its own copy of the
+        // line, so covering only one leaves the other free to regress.
+        let (segs, meta) = fixture()
+        let p = LMStudioSummaryProvider(endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m",
+                                        requestTimeoutSeconds: 321)
+        let state = LMStudioSummaryProvider.ModelState(isLoaded: true, loadedContextLength: 262144)
+        let (request, _, _) = try await p.buildRequest(segments: segs, metadata: meta, loadedState: state)
+        #expect(request.timeoutInterval == 321)
+    }
+
+    @Test("LM Studio defaults to 600s, not URLSession's implicit 60s")
+    func lmStudioDefaultsToTenMinutes() async throws {
+        let (segs, meta) = fixture()
+        let p = LMStudioSummaryProvider(endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        let state = LMStudioSummaryProvider.ModelState(isLoaded: true, loadedContextLength: 262144)
+        let (request, _, _) = try await p.buildRequest(segments: segs, metadata: meta, loadedState: state)
+        #expect(request.timeoutInterval == TimeInterval(LMStudioSummaryProvider.defaultRequestTimeoutSeconds))
+        #expect(request.timeoutInterval > 60)
     }
 }

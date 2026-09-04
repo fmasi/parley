@@ -407,7 +407,13 @@ struct SettingsView: View {
             model: summaryModel,
             contextLength: Int(summaryContextLength),
             contextOverheadPercent: Int(summaryContextOverheadPercent),
-            maxOutputTokens: Int(summaryMaxOutputTokens)
+            maxOutputTokens: Int(summaryMaxOutputTokens),
+            // Carried through from the loaded config, NOT rebuilt from a field — there is no
+            // Settings control for it. Rebuilding this struct from the UI alone silently reset any
+            // hand-edited `request_timeout_seconds` to nil the first time the user pressed Save,
+            // destroying a value they had deliberately set. Any future config-only key needs the
+            // same treatment.
+            requestTimeoutSeconds: ConfigManager.shared.config.summary?.requestTimeoutSeconds
         )
     }
 
