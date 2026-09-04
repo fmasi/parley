@@ -237,14 +237,20 @@ struct PadRatioMonitorDeadTrackTests {
         #expect(seconds >= 60)
     }
 
-    @Test("nothing is reported mid-stream — a late start has no upper bound")
+    @Test("a late start is never judged mid-stream, however long it runs")
     func nothingReportedMidStream() {
         var m = PadRatioMonitor()
         // Ten minutes of leading silence: legitimate if the user records before joining.
         for _ in 0..<600 {
-            if case .neverDelivered = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) {
-                Issue.record("a late start must never be called dead mid-stream"); return
-            }
+            #expect(m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) == .notYet)
+        }
+        // The assertion above is `== .notYet`, NOT `if case .neverDelivered`. `record()` cannot
+        // return `.neverDelivered` by construction, so matching on it would be vacuous — the branch
+        // could never execute and the test would pass against any implementation, including one
+        // that reported `.excessive` on every append. Asserting the exact verdict is what makes
+        // this fail if the mid-stream rule is ever weakened.
+        if case .neverDelivered = m.finish() {} else {
+            Issue.record("ten minutes of pure padding IS dead once the stream closes")
         }
     }
 

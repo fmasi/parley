@@ -51,6 +51,11 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+            // Decoded up front here, unlike the retry path and OpenAISummaryProvider, because the
+            // 500 branch below PARSES it (`parseContextError`) to recover the model's real token
+            // count. Do not "fix" the ordering to match the others — it would break the
+            // context-overflow retry. The 401/403 guard still prevents the body reaching any
+            // message, which is the property that actually matters.
             let body = String(data: data, encoding: .utf8) ?? ""
 
             // Context too small — parse actual token count from error, set exact ratio, retry once
@@ -101,10 +106,15 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-            let body = String(data: data, encoding: .utf8) ?? ""
+            // Auth first, before the body is decoded at all — some servers echo the offending
+            // credential back, and this text can reach a notification during a screen-share. Same
+            // ordering as the non-retry path above and as OpenAISummaryProvider, whose comment calls
+            // the old shape "a bug waiting to be introduced by the next edit". This retry path was
+            // the copy that still had it.
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 throw SummaryError.authenticationFailed(status: httpResponse.statusCode)
             }
+            let body = String(data: data, encoding: .utf8) ?? ""
             throw SummaryError.requestFailed("HTTP \(httpResponse.statusCode) (after retry): \(body.prefix(200))")
         }
 

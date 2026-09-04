@@ -578,9 +578,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             — the capture never started, and the file holds nothing but fabricated silence.
             """
         )
-        record(.excessivePadding, .anomaly, [
+        record(.trackNeverDelivered, .anomaly, [
             "track": track,
-            "reason": "never_delivered",
             "total_seconds": "\(Int(seconds))",
         ])
     }
