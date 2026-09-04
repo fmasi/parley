@@ -1,0 +1,19 @@
+name: Traffic Snapshot
+
+# GitHub's clone/view traffic data only retains a rolling 14-day window on
+# every plan, so this runs daily and hands off to the shared reusable
+# workflow in fmasi/.github, which appends today's snapshot to the private
+# fmasi/traffic-data repo. See that repo's README for setup and the "why".
+
+"on":
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    uses: fmasi/.github/.github/workflows/traffic-snapshot.yml@main
+    secrets: inherit

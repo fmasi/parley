@@ -124,10 +124,14 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
     /// Up to 3 samples per speaker; speakers under 5 segments are usually diarization artifacts.
     /// Collection itself lives in `TranscriptRenamer` (TranscriberCore), shared with the CLI.
-    nonisolated static func parseSpeakers(from jsonPath: URL) -> [SpeakerEntry] {
+    /// - Parameter minSegments: speakers with fewer segments are dropped as diarization noise.
+    ///   After an explicit **Re-detect** the user has asserted how many people are on the channel,
+    ///   so dropping one of them for being quiet contradicts the answer they just gave — and leaves
+    ///   them unable to name a speaker they can see in the transcript. Pass 1 there.
+    nonisolated static func parseSpeakers(from jsonPath: URL, minSegments: Int = 5) -> [SpeakerEntry] {
         do {
             let collected = try TranscriptRenamer.collectSpeakerSamples(
-                from: jsonPath, maxSamplesPerSpeaker: 3, minSegmentsPerSpeaker: 5
+                from: jsonPath, maxSamplesPerSpeaker: 3, minSegmentsPerSpeaker: minSegments
             )
             return collected.map { SpeakerEntry(id: $0.id, displayName: $0.id, samples: $0.samples) }
         } catch TranscriptRenamer.RenameError.cannotRead {

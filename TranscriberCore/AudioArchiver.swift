@@ -58,6 +58,33 @@ public enum AudioArchiver {
             throw AudioArchiverError.cannotReadAudio("system: \(error.localizedDescription)")
         }
 
+        // A system track with ZERO frames is not a stream at a different rate — it is the absence
+        // of a stream (#183). Phone call on speakerphone: everything arrives through the mic and
+        // the tap writes a bare header. That header declares a nominal rate (16 kHz) which has
+        // nothing to do with any audio, so letting it reach the rate guard below refuses a
+        // perfectly archivable recording and leaves it as raw WAV forever. Device-observed twice:
+        // 2026-07-16 Leaseholder and 2026-09-02 Paul feedback.
+        if sysFile.length == 0, micFile.length > 0 {
+            Logger.files.info(
+                "AudioArchiver: system track is empty — archiving '\(baseName, privacy: .sensitive)' as mic-only")
+            let result = try await archiveMicOnly(
+                micAudio: micAudio,
+                outputDirectory: outputDirectory,
+                bitrateKbps: bitrateKbps,
+                preserveSourceWAV: preserveSourceWAV,
+                outputName: baseName)
+            // The empty system WAV is not a source anybody can recover anything from, and no WAV
+            // may survive the success path — that is the whole contract of archiving. Deleting it
+            // only AFTER archiveMicOnly returned means a thrown encode leaves both files in place.
+            if !preserveSourceWAV {
+                try? FileManager.default.removeItem(at: systemAudio)
+            }
+            return result
+        }
+        guard micFile.length > 0 || sysFile.length > 0 else {
+            throw AudioArchiverError.cannotReadAudio("both tracks are empty")
+        }
+
         // Both streams MUST agree on rate before we encode them into one interleaved file.
         //
         // This used to take the mic's rate and never look at the system file's. `AVAudioFile.read(into:)`
@@ -187,6 +214,95 @@ public enum AudioArchiver {
         return AudioArchiveResult(archivePath: outputURL)
     }
 
+    /// Encode a single mono MIC WAV (no system audio — a call on speakerphone, a recording where
+    /// the tap captured nothing) into a stereo AAC .m4a with the `L=mic, R=system` channel layout —
+    /// the mic (left) channel carries the voice, the system (right) channel is silent — so
+    /// `AudioSourceResolver` reads it back identically to a dual-stream archive.
+    ///
+    /// This is deliberately NOT `archiveSystemOnly` with a different argument: that one fills the
+    /// RIGHT channel, so passing mic audio to it would put the local speaker in the remote slot and
+    /// mislabel them in every downstream consumer — the #132 class of harm, silently.
+    ///
+    /// - Parameter outputName: base name for the archive. Defaults to the mic file's own name minus
+    ///   the `_mic` suffix, so `…-0_mic.wav` archives to `…-0.m4a` and matches the chunk naming
+    ///   every other path produces.
+    public static func archiveMicOnly(
+        micAudio: URL,
+        outputDirectory: URL,
+        bitrateKbps: Int,
+        preserveSourceWAV: Bool = false,
+        outputName: String? = nil
+    ) async throws -> AudioArchiveResult {
+        let derived = micAudio.deletingPathExtension().lastPathComponent
+        let baseName = outputName ?? (derived.hasSuffix("_mic") ? String(derived.dropLast(4)) : derived)
+        let outputURL = outputDirectory.appendingPathComponent("\(baseName).m4a")
+
+        Logger.files.info("AudioArchiver: starting mic-only archive '\(baseName, privacy: .sensitive)'")
+
+        let micFile: AVAudioFile
+        do {
+            micFile = try AVAudioFile(forReading: micAudio)
+        } catch {
+            throw AudioArchiverError.cannotReadAudio("mic: \(error.localizedDescription)")
+        }
+        let sampleRate = micFile.processingFormat.sampleRate
+
+        // `verify` cannot catch this: it returns early when expectedSeconds is 0, and an AAC file
+        // with no samples still has nonzero size and an audio track. The encoder does fail on a
+        // zero-frame input today (there is a test), so this is not the difference between data loss
+        // and safety — it is the difference between naming the cause and surfacing an encoder
+        // internal for a condition we can see up front.
+        guard micFile.length > 0 else {
+            throw AudioArchiverError.cannotReadAudio("mic track is empty — nothing to archive")
+        }
+
+        try? FileManager.default.removeItem(at: outputURL)
+
+        do {
+            try await streamEncodeAAC(
+                micFile: micFile, sysFile: nil,
+                sampleRate: sampleRate, outputURL: outputURL, bitrateKbps: bitrateKbps)
+        } catch {
+            Logger.files.error("AudioArchiver: mic-only encoding failed — \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: outputURL)
+            throw AudioArchiverError.encodingFailed(error.localizedDescription)
+        }
+
+        // Same duration guard as the other two paths — this one also deletes the only lossless copy.
+        do {
+            let expectedSeconds = sampleRate > 0 ? Double(micFile.length) / sampleRate : nil
+            try await verify(outputURL: outputURL, expectedSeconds: expectedSeconds)
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw error
+        }
+
+        if preserveSourceWAV {
+            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+        } else {
+            try? FileManager.default.removeItem(at: micAudio)
+        }
+
+        Logger.files.info("AudioArchiver: done (mic-only) — \(outputURL.lastPathComponent)")
+        return AudioArchiveResult(archivePath: outputURL)
+    }
+
+    /// Which surviving WAV represents a chunk when archiving failed.
+    ///
+    /// The transcript records ONE path per chunk, and that path is what the rename dialog resolves
+    /// samples against. Recording the system WAV unconditionally is what broke #183: on a
+    /// speakerphone recording the system WAV is an empty header and the mic WAV holds every word,
+    /// so the transcript pointed at nothing and the mic file was referenced nowhere at all.
+    public static func fallbackAudioName(
+        systemName: String,
+        systemHasFrames: Bool,
+        micName: String?,
+        micHasFrames: Bool
+    ) -> String {
+        if !systemHasFrames, let micName, micHasFrames { return micName }
+        return systemName
+    }
+
     /// A system + optional-mic segment to archive.
     public struct SegmentPair: Sendable {
         public let system: URL
@@ -247,7 +363,7 @@ public enum AudioArchiver {
     /// `micFile` is optional: when nil (system-only archive, #59) the left/mic channel is silent.
     private static func streamEncodeAAC(
         micFile: AVAudioFile?,
-        sysFile: AVAudioFile,
+        sysFile: AVAudioFile?,
         sampleRate: Double,
         outputURL: URL,
         bitrateKbps: Int
@@ -292,7 +408,7 @@ public enum AudioArchiver {
             throw AudioArchiverError.encodingFailed("Cannot allocate read buffers")
         }
 
-        let totalFrames = max(micFile?.length ?? 0, sysFile.length)
+        let totalFrames = max(micFile?.length ?? 0, sysFile?.length ?? 0)
         var frameOffset: Int64 = 0
 
         // Build ASBD for interleaved stereo Float32.
@@ -347,9 +463,9 @@ public enum AudioArchiver {
                 micFrames = 0
             }
 
-            // Read system block (zeros past EOF).
+            // Read system block (zeros past EOF, or always silent when there is no system file).
             let sysFrames: Int
-            if sysFile.framePosition < sysFile.length {
+            if let sysFile, sysFile.framePosition < sysFile.length {
                 let toRead = AVAudioFrameCount(min(
                     Int64(framesToProcess),
                     sysFile.length - sysFile.framePosition
