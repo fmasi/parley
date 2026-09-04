@@ -75,17 +75,24 @@ jobs:
       - name: Fetch AMI reference audio (4-speaker meeting)
         run: bash scripts/fetch-diarization-fixtures.sh
 
-      # The suite stays PARALLEL here. A blanket --no-parallel was tried and measured on CI:
-      # 596s for this step against 127s of tests before, i.e. ~470s worse per run — far more
-      # expensive than the intermittent hang it was meant to prevent. My local measurement said
-      # serial cost only five seconds, which was misleading: this machine runs the suite in ~13s,
-      # so scheduling overhead dominates there, while a slower CI runner gets real work from the
-      # concurrency. Measure on the machine that pays the bill.
+      # --no-parallel, chosen on EXPECTED cost rather than best-case cost.
       #
-      # The hang is instead mitigated where it originates — `.serialized` on the AVFoundation and
-      # CoreML suites (see AudioArchiverTests, AudioConcatenatorTests, and the diarization suites),
-      # which is what a timed-out run showed freezing 27 tests at once. `timeout-minutes` above
-      # bounds any recurrence and leaves a log.
+      # Raw comparison favours parallel: measured on CI, 127s of tests parallel vs 596s serial.
+      # But parallel wedges. A timed-out run showed 27 tests starting within six seconds and none
+      # ever finishing — nearly all AVFoundation or CoreML, i.e. clients of shared media XPC
+      # daemons, which block every client forever when one gets stuck. Marking only those suites
+      # `.serialized` cut the frozen set from 27 to 15 and did NOT stop it: the stall is
+      # cross-suite, and different suites still run concurrently.
+      #
+      # Measured wedge rate over recent runs: 2 in 3. So per run:
+      #
+      #   parallel   33% x 250s + 67% x (1800s timeout + 250s retry)  = ~1449s
+      #   serial     100% x 590s                                       =   590s
+      #
+      # Serial is ~2.5x cheaper in expectation and, more importantly, deterministic — a 10-minute
+      # CI that always finishes beats a 4-minute CI that hangs for half an hour two runs in three.
+      # Revisit if the underlying wedge is ever fixed; `timeout-minutes` will keep leaving the logs
+      # needed to do that.
       - name: Run Swift tests, including the AMI ground-truth guard
         env:
           # Let model-needing tests download for themselves. On CI a missing model is a test
@@ -96,7 +103,7 @@ jobs:
           # held (see DiarizationRegressionTests).
           PARLEY_REQUIRE_AMI_FIXTURE: "1"
         run: |
-          swift test --filter TranscriberTests \
+          swift test --no-parallel --filter TranscriberTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
