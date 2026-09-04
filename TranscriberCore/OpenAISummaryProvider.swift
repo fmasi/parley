@@ -27,7 +27,7 @@ public enum SummaryError: LocalizedError {
             let suffix = code.map { " (\($0))" } ?? ""
             return "Summary provider error: \(message)\(suffix)"
         case .authenticationFailed(let status):
-            return "The summary endpoint rejected the API key (HTTP \(status)) — check it in Settings"
+            return "The summary endpoint rejected the API key (HTTP \(status)) — update api_key in config.json or Settings"
         }
     }
 

@@ -132,3 +132,36 @@ struct RunSummaryURLErrorTests {
         #expect(!message.localizedCaseInsensitiveContains("permission"))
     }
 }
+
+/// `SummaryConfig` has a hand-written `init(from:)`, so a property added to `CodingKeys` is not
+/// automatically read — it has to be decoded explicitly. `request_timeout_seconds` was added to the
+/// keys and never decoded, which meant the knob this PR introduces to fix #173 silently did nothing
+/// and every install stayed on the 600s default.
+@Suite("SummaryConfig decoding")
+struct SummaryConfigDecodingTests {
+
+    private func decode(_ json: String) throws -> SummaryConfig {
+        try JSONDecoder().decode(SummaryConfig.self, from: Data(json.utf8))
+    }
+
+    @Test("request_timeout_seconds is read from config.json")
+    func requestTimeoutIsDecoded() throws {
+        let c = try decode(#"{"enabled":true,"provider":"lmstudio","endpoint":"http://127.0.0.1:1234","api_key":"","model":"m","request_timeout_seconds":120}"#)
+        #expect(c.requestTimeoutSeconds == 120)
+    }
+
+    @Test("an absent request_timeout_seconds stays nil so the provider default applies")
+    func absentTimeoutIsNil() throws {
+        let c = try decode(#"{"enabled":true,"provider":"lmstudio","endpoint":"http://127.0.0.1:1234","api_key":"","model":"m"}"#)
+        #expect(c.requestTimeoutSeconds == nil)
+    }
+
+    @Test("the other optional knobs still decode — guarding the same hand-written-decoder trap")
+    func otherOptionalsStillDecode() throws {
+        let c = try decode(#"{"enabled":true,"provider":"openai","endpoint":"http://x","api_key":"k","model":"m","context_length":8192,"context_overhead_percent":15,"max_output_tokens":900,"request_timeout_seconds":42}"#)
+        #expect(c.contextLength == 8192)
+        #expect(c.contextOverheadPercent == 15)
+        #expect(c.maxOutputTokens == 900)
+        #expect(c.requestTimeoutSeconds == 42)
+    }
+}

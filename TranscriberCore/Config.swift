@@ -77,6 +77,10 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
         contextOverheadPercent = try c.decodeIfPresent(Int.self, forKey: .contextOverheadPercent)
         maxOutputTokens = try c.decodeIfPresent(Int.self, forKey: .maxOutputTokens)
+        // Hand-written decoder: adding a property to CodingKeys is NOT enough, it must be decoded
+        // here too. Omitting this line meant `request_timeout_seconds` was accepted in config.json
+        // and silently ignored — the knob added to fix #173 did nothing.
+        requestTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .requestTimeoutSeconds)
     }
 }
 

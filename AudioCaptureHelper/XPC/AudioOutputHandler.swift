@@ -87,6 +87,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     func finalizeAll() {
         systemWriter.finalize()
         micWriter.finalize()
+        // A track that delivered nothing by the time the stream closes never started. That cannot
+        // be judged mid-stream — a legitimate start offset has no upper bound — so it is judged
+        // here, where "never" is finally knowable.
+        noteDeadTrack(systemPadMonitor.finish(), track: "system")
+        noteDeadTrack(micPadMonitor.finish(), track: "mic")
     }
 
     /// Swap writers for chunk rotation. MUST be called on the audio callback queue.
@@ -552,6 +557,25 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             "ratio": String(format: "%.3f", ratio),
             "padded_seconds": "\(Int(paddedSeconds))",
             "total_seconds": "\(Int(totalSeconds))",
+        ])
+    }
+
+    /// Surface a track that never delivered a single real frame — a capture that never started,
+    /// as opposed to one that started and fell behind (`notePadding`). Without this the #179
+    /// start-offset rule would keep a dead track silent forever, trading a false positive for a
+    /// false negative on a genuinely broken recording.
+    private func noteDeadTrack(_ verdict: PadRatioMonitor.Verdict, track: String) {
+        guard case .neverDelivered(let seconds) = verdict else { return }
+        Logger.audio.error(
+            """
+            \(track, privacy: .public) track never delivered a single frame in \(Int(seconds), privacy: .public)s \
+            — the capture never started, and the file holds nothing but fabricated silence.
+            """
+        )
+        record(.excessivePadding, .anomaly, [
+            "track": track,
+            "reason": "never_delivered",
+            "total_seconds": "\(Int(seconds))",
         ])
     }
 

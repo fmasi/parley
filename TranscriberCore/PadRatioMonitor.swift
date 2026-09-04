@@ -24,6 +24,11 @@ public struct PadRatioMonitor {
         /// Sustained fabrication. Reports ONCE — a persistent condition, and the original failure was
         /// lost precisely because its per-buffer log fired ~57,000 times.
         case excessive(ratio: Double, paddedSeconds: Double, totalSeconds: Double)
+        /// The track never delivered a single real frame. Distinct from `excessive`, which means
+        /// "delivered, then fell behind" — this one means the capture never started at all, and it
+        /// exists because the start-offset rule below would otherwise keep a dead track permanently
+        /// in `notYet` and say nothing. Reports ONCE, like `excessive`.
+        case neverDelivered(seconds: Double)
     }
 
     /// Fraction of the track that may be fabricated before we call it broken. Legitimate padding in a
@@ -59,6 +64,11 @@ public struct PadRatioMonitor {
     /// on leading silence alone. Starting the recording first is the ordinary way to use the app,
     /// so counting that as corruption makes the label worthless.
     private var hasDeliveredData = false
+    /// Silence fabricated before the track ever delivered, so a capture that never starts can be
+    /// distinguished from one that starts late.
+    private var deadFrames: Int64 = 0
+    /// Last rate seen while undelivered, so `finish()` can convert `deadFrames` to seconds.
+    private var lastRate: Double = 0
 
     public init(threshold: Double = 0.10, minimumSeconds: Double = 30, minimumPaddedSeconds: Double = 15) {
         self.threshold = threshold
@@ -73,7 +83,16 @@ public struct PadRatioMonitor {
         // Nothing counts until the track proves it can deliver. Once it has, everything counts —
         // including padding, which is the whole point.
         if dataFrames > 0 { hasDeliveredData = true }
-        guard hasDeliveredData else { return .notYet }
+        guard hasDeliveredData else {
+            // Padding before the first real frame is a START OFFSET, not a deficit (#179). How long
+            // that offset may legitimately be is unbounded — you can start recording and join the
+            // call ten minutes later — so a dead track CANNOT be identified mid-stream by any
+            // threshold. Accumulate the span and let `finish()` decide once the stream is closed
+            // and "never" is actually knowable.
+            deadFrames += max(0, newPad)
+            lastRate = rate
+            return .notYet
+        }
         padFrames += max(0, newPad)
         totalFrames += max(0, newPad) + max(0, dataFrames)
 
@@ -89,10 +108,26 @@ public struct PadRatioMonitor {
         return .excessive(ratio: ratio, paddedSeconds: paddedSeconds, totalSeconds: totalSeconds)
     }
 
+    /// Close the track. Call once the stream is finished — a track that delivered nothing by then
+    /// never started, which is a different fault from "started, then fell behind" and must not be
+    /// silent. This cannot be decided in `record()`: a legitimate start offset has no upper bound
+    /// (a device recording measured 59s of leading silence before the call connected), so any
+    /// mid-stream threshold would eventually mislabel a late start as a dead track — reintroducing
+    /// the #179 false positive from the other direction.
+    public mutating func finish() -> Verdict {
+        guard !reported, !hasDeliveredData, lastRate > 0 else { return .notYet }
+        let seconds = Double(deadFrames) / lastRate
+        guard seconds >= minimumSeconds else { return .notYet }
+        reported = true
+        return .neverDelivered(seconds: seconds)
+    }
+
     public mutating func reset() {
         padFrames = 0
         totalFrames = 0
         reported = false
         hasDeliveredData = false
+        deadFrames = 0
+        lastRate = 0
     }
 }

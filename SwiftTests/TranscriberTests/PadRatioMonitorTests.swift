@@ -218,3 +218,57 @@ import Testing
         #expect(monitor.record(padFrames: 100, dataFrames: 100, rate: 0) == .notYet)
     }
 }
+
+/// The start-offset fix (#179) has an edge the fix itself created: a track that NEVER delivers a
+/// frame stays permanently in "not yet", so a capture that failed outright — SCK never starting,
+/// an IOProc that never runs, an XPC session torn down at once — became SILENT where it previously
+/// tripped on all-padding. That is the opposite failure to the one being fixed, and worse: a false
+/// negative on a genuinely broken recording.
+@Suite("PadRatioMonitor — a dead track must not be silent")
+struct PadRatioMonitorDeadTrackTests {
+
+    @Test("a track that never delivers a single frame is reported as dead at finish")
+    func neverDeliveredIsReportedAtFinish() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        guard case .neverDelivered(let seconds) = m.finish() else {
+            Issue.record("expected .neverDelivered"); return
+        }
+        #expect(seconds >= 60)
+    }
+
+    @Test("nothing is reported mid-stream — a late start has no upper bound")
+    func nothingReportedMidStream() {
+        var m = PadRatioMonitor()
+        // Ten minutes of leading silence: legitimate if the user records before joining.
+        for _ in 0..<600 {
+            if case .neverDelivered = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) {
+                Issue.record("a late start must never be called dead mid-stream"); return
+            }
+        }
+    }
+
+    @Test("a late start that DOES deliver is healthy, at finish too — the #179 fix must survive")
+    func lateStartStaysHealthy() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        for _ in 0..<120 { _ = m.record(padFrames: 0, dataFrames: 48_000, rate: 48_000) }
+        if case .neverDelivered = m.finish() { Issue.record("the track did deliver") }
+    }
+
+    @Test("a dead track is reported once")
+    func deadTrackReportsOnce() {
+        var m = PadRatioMonitor()
+        for _ in 0..<60 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        var reports = 0
+        for _ in 0..<5 { if case .neverDelivered = m.finish() { reports += 1 } }
+        #expect(reports == 1)
+    }
+
+    @Test("a track too short to judge is not called dead")
+    func tooShortIsNotDead() {
+        var m = PadRatioMonitor()
+        for _ in 0..<5 { _ = m.record(padFrames: 48_000, dataFrames: 0, rate: 48_000) }
+        if case .neverDelivered = m.finish() { Issue.record("5s is not enough to conclude anything") }
+    }
+}
