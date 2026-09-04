@@ -9,6 +9,20 @@ on:
 permissions:
   contents: read
 
+# One live run per branch. Without this every push started another set of three macOS jobs and
+# nothing ever superseded the last, so a run of PRs queued them all against a scarce runner pool:
+# on 2026-09-03 a ten-push PR left five stale runs alive going back two hours, one job queued for
+# 100 minutes and another wedged 80 minutes inside a step that normally takes 2m19s. They only
+# cleared when cancelled by hand.
+#
+# `cancel-in-progress` is deliberately CONDITIONAL rather than a blanket `true`: superseding a PR
+# run is what we want, but cancelling a push to `main` would leave commits on the default branch
+# that were never actually tested — and main is the branch whose green history has to mean
+# something.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: macos-15
