@@ -113,8 +113,10 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     private func startScanIfIdle() {
         lock.lock()
         let begin = !scanning
-        scanning = true
-        if begin { scanSerial &+= 1 }
+        if begin {   // joining a running scan writes nothing
+            scanning = true
+            scanSerial &+= 1
+        }
         let serial = scanSerial
         lock.unlock()
         guard begin else { return }

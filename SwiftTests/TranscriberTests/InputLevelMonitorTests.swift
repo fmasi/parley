@@ -419,6 +419,53 @@ struct InputLevelMonitorNonBlockingTests {
         #expect(eventually { stuck.stops == 1 }, "the session was never stopped after its stuck start returned")
     }
 
+    @Test("after a timed-out release, a restart on the same mic waits for the stuck start, then goes live")
+    func restartAfterTimedOutReleaseGoesLive() async {
+        // MicSwitchDialog's failure path: the release timed out (the start is stuck), the switch then
+        // failed, and the meter restarts on that same mic while the old start is still stuck.
+        let slow = HangingStartSession()
+        let fast = InstantSession()
+        let sessions = SessionSequence([slow, fast])
+        let q = DispatchQueue(label: "test.publish")
+        let m = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { q.async(execute: $0) },
+                                  pendingStarts: PendingStartRegistry(), unresponsiveAfter: 0.1)
+        m.start(deviceId: "A")
+        guard slow.entered.wait(timeout: .now() + 2) == .success else {
+            slow.release.signal(); Issue.record("first start never began"); return
+        }
+        #expect(await m.stopAndRelease(timeout: 0.1) == false)
+        m.start(deviceId: "A")
+        #expect(eventually { q.sync { m.status } == .notResponding })   // waiting behind the stuck start
+        #expect(sessions.handedOut == 1, "the restart opened the mic while the stuck start still held it")
+
+        slow.release.signal()
+        #expect(eventually { q.sync { m.status } == .live }, "the restarted meter never came back")
+        #expect(fast.starts == 1)
+        #expect(eventually { slow.stops == 1 }, "the stuck session was never stopped once it returned")
+    }
+
+    @Test("a restart waiting behind a stuck start gives up when stopped — it never opens the mic")
+    func restartWaitingBehindAStuckStartGivesUpWhenStopped() async {
+        let slow = HangingStartSession()
+        let fast = InstantSession()
+        let sessions = SessionSequence([slow, fast])
+        let q = DispatchQueue(label: "test.publish")
+        let m = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { q.async(execute: $0) },
+                                  pendingStarts: PendingStartRegistry(), unresponsiveAfter: 0.1)
+        m.start(deviceId: "A")
+        guard slow.entered.wait(timeout: .now() + 2) == .success else {
+            slow.release.signal(); Issue.record("first start never began"); return
+        }
+        #expect(await m.stopAndRelease(timeout: 0.1) == false)
+        m.start(deviceId: "A")
+        #expect(eventually { q.sync { m.status } == .notResponding })
+        m.stop()                    // the dialog closes while the restart is still waiting
+        slow.release.signal()
+        #expect(eventually { slow.stops == 1 })
+        #expect(!eventually(within: 0.3) { sessions.handedOut > 1 }, "a stopped picker still opened the mic")
+        #expect(fast.starts == 0)
+    }
+
     @Test("stopAndRelease() with nothing running returns at once")
     func stopAndReleaseWhenIdle() async {
         let m = monitor(RecordingFactory([:]))
