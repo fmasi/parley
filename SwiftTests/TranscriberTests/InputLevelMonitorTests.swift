@@ -385,6 +385,25 @@ struct InputLevelMonitorNonBlockingTests {
         #expect(waited < 5, "waited \(waited)s — the mic switch would hang behind a wedged meter")
     }
 
+    @Test("stopAndRelease() during a stuck start gives up in time, and the session is still stopped later")
+    func stopAndReleaseDuringAStuckStart() async {
+        // The user clicks Start Recording while the meter's start is still stuck: the dialog must not
+        // wait past its budget, and the meter must still let go of the mic once the start returns.
+        let stuck = HangingStartSession()
+        let m = monitor(RecordingFactory(["default": stuck]))
+        m.start(deviceId: nil)
+        guard stuck.entered.wait(timeout: .now() + 2) == .success else {
+            stuck.release.signal(); Issue.record("start never began"); return
+        }
+        let began = Date()
+        let released = await m.stopAndRelease(timeout: 0.2)
+        let waited = Date().timeIntervalSince(began)
+        #expect(!released, "reported the mic released while its start was still stuck")
+        #expect(waited < 5, "waited \(waited)s behind a stuck start")
+        stuck.release.signal()
+        #expect(eventually { stuck.stops == 1 }, "the session was never stopped after its stuck start returned")
+    }
+
     @Test("stopAndRelease() with nothing running returns at once")
     func stopAndReleaseWhenIdle() async {
         let m = monitor(RecordingFactory([:]))

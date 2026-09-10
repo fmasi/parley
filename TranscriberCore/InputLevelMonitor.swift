@@ -13,12 +13,12 @@ public protocol LevelMeterSession: AnyObject {
 /// Physical devices whose level-meter `startRunning()` has not returned yet, process-wide. A new picker
 /// (the switcher reopened, or flipped back to the dead mic) must not open such a device again: that
 /// only parks another thread in the same HAL wait, every time, for the life of the app. Injectable so
-/// tests don't share state; production uses `.shared`.
-public final class PendingStartRegistry: @unchecked Sendable {
-    public static let shared = PendingStartRegistry()
+/// tests don't share state; production uses `.shared`. Internal: only `InputLevelMonitor` uses it.
+final class PendingStartRegistry: @unchecked Sendable {
+    static let shared = PendingStartRegistry()
     private let lock = NSLock()
     private var keys: Set<String> = []
-    public init() {}
+    init() {}
     /// Claims `key`; false if a start on it is already in flight.
     func claim(_ key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return keys.insert(key).inserted }
     func release(_ key: String) { lock.lock(); keys.remove(key); lock.unlock() }
@@ -244,8 +244,9 @@ public final class InputLevelMonitor: NSObject {
     /// Stop, then wait until the device is actually let go — its `stopRunning()` has returned — so
     /// another client can open it without contending with this session: the capture helper opening
     /// the mic this meter was showing (#192). Bounded: returns false if the release took longer than
-    /// `timeout` (a device whose start is still hung). The caller goes ahead either way; it just never
-    /// waits forever.
+    /// `timeout`. The budget runs from THIS call, so a start still stuck in `startRunning()` uses it up —
+    /// the stop can only run once that start returns, and it still does, later. The caller goes ahead
+    /// either way; it just never waits forever.
     @MainActor
     public func stopAndRelease(timeout: TimeInterval) async -> Bool {
         let old = detach()

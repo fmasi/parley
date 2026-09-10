@@ -133,6 +133,8 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             let ready = Array(waiters.values)
             waiters = [:]
             lock.unlock()
+            // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
+            // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
             ready.forEach { $0(found) }
             publish { [weak self] in self?.devices = found }
         }
