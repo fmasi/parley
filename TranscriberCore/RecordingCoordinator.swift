@@ -37,6 +37,10 @@ public final class RecordingCoordinator {
     /// and the recovery handler honors it once capture is back up.
     var recoveryInFlight = false
     var stopRequestedDuringRecovery = false
+    /// True while stopRecording() is running (it suspends on the helper's stop). A second Stop in that
+    /// window — a double-tap, or a future programmatic caller — is ignored rather than reaching the
+    /// helper and the transcription pipeline twice. Internal for tests.
+    var stopInFlight = false
     /// True once the helper has reported which device it is actually capturing on (post auto-switch).
     /// When false, `helperMicId` is meaningless and the UI falls back to the user's selection.
     public private(set) var helperMicKnown: Bool = false
@@ -352,6 +356,12 @@ public final class RecordingCoordinator {
             appState.phase = .transcribing(progress: "Finishing…")
             return
         }
+        guard !stopInFlight else {
+            Logger.state.info("Stop already in progress — ignoring a second request")
+            return
+        }
+        stopInFlight = true
+        defer { stopInFlight = false }
         Logger.state.info("Recording stopped")
         do {
             let sentinel = RecordingSentinel.read(directory: sentinelDirectory)

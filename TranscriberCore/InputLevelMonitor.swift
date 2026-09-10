@@ -21,7 +21,7 @@ final class PendingStartRegistry: @unchecked Sendable {
     init() {}
     /// Claims `key`; false if a start on it is already in flight.
     func claim(_ key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return keys.insert(key).inserted }
-    func release(_ key: String) { lock.lock(); keys.remove(key); lock.unlock() }
+    func release(_ key: String) { lock.lock(); defer { lock.unlock() }; keys.remove(key) }
     func contains(_ key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return keys.contains(key) }
 }
 
@@ -136,7 +136,7 @@ public final class InputLevelMonitor: NSObject {
             self.queue = DispatchQueue(label: "input-level-monitor.session.\(generation)")
         }
         var hasStarted: Bool { lock.lock(); defer { lock.unlock() }; return started }
-        func markStarted() { lock.lock(); started = true; lock.unlock() }
+        func markStarted() { lock.lock(); defer { lock.unlock() }; started = true }
     }
 
     public override init() {

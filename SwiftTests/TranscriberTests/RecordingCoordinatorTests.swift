@@ -22,8 +22,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var startError: Error?
     /// Runs inside start(), i.e. at the moment the helper would be opening the mic.
     var onStart: (() -> Void)?
-    /// Runs inside stop(), i.e. while the helper still holds the mic.
-    var onStop: (() -> Void)?
+    /// Runs inside stop(), i.e. while the helper still holds the mic (and the coordinator is suspended).
+    var onStop: (() async -> Void)?
     var micUpdates: [String?] = []
     var updateMicError: Error?
     /// Runs inside updateMicrophone(), i.e. at the moment the helper would be opening the new mic.
@@ -59,7 +59,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     func stop() async throws -> AudioPaths {
         stopCalls += 1
-        onStop?()
+        await onStop?()
         if let stopError { throw stopError }
         guard let stopResult else { throw CocoaError(.fileNoSuchFile) }
         return stopResult
@@ -552,6 +552,23 @@ private struct Harness {
             try await h.coordinator.switchMicrophone(to: "mic-2")
         }
         #expect(h.client.micUpdates.isEmpty)
+    }
+
+    @Test func aSecondStopWhileOneIsInFlightIsIgnored() async throws {
+        // A second Stop lands while the first is suspended on the helper: it must not reach the helper
+        // (or start a second transcription). One-shot, so a missing guard fails cleanly, not recursively.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        let coordinator = h.coordinator
+        var fireSecondStop = true
+        h.client.onStop = {
+            if fireSecondStop { fireSecondStop = false; await coordinator.stopRecording() }
+        }
+
+        await h.coordinator.stopRecording()
+
+        #expect(h.client.stopCalls == 1, "a second Stop reached the helper while the first was in flight")
+        #expect(h.coordinator.stopInFlight == false, "the in-flight flag leaked past the stop")
     }
 
     @Test func stopKeepsTheMicMarkedUntilTheHelperHasLetGo() async throws {

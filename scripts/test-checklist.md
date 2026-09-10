@@ -164,6 +164,9 @@ lands. Verify the error message is the readable one.
       beach ball.
 - [ ] Mid-recording, the switcher's meter next to the CURRENT mic reads **In use** (it no longer opens
       the mic being recorded); pick another mic and its meter moves.
+- [ ] Cancel wins: press **Start Recording** and immediately **Cancel** (or close the panel) —
+      no recording starts. Same in the switcher: **Switch** then immediately **Cancel** — the mic
+      does not change. (This guard lives in the app target, which has no unit tests.)
 - [ ] Switch to a second mic, then open the switcher again: the mic you switched TO now reads
       **In use**, and the one you left shows a live meter.
 - [ ] With the lid closed, pick the built-in mic in the switcher: within ~2 s it reads **Not
