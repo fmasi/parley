@@ -560,8 +560,10 @@ struct InputLevelMonitorNonBlockingTests {
                                   unresponsiveAfter: 0.1)
         m.start(deviceId: "A")
         #expect(eventually { q.sync { m.status } == .inUseByRecording })
-        Thread.sleep(forTimeInterval: 0.4)   // well past the watchdog's 0.1 s
-        #expect(q.sync { m.status } == .inUseByRecording, "the watchdog overwrote a settled status")
+        // A time-based invariant: across a window well past the watchdog's 0.1 s, it must never flip.
+        #expect(!eventually(within: 0.5) { q.sync { m.status } == .notResponding },
+                "the watchdog overwrote a settled status")
+        #expect(q.sync { m.status } == .inUseByRecording)
     }
 
     @Test("a start that has not returned in time says the mic is not responding, then recovers")

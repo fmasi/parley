@@ -355,6 +355,7 @@ public final class InputLevelMonitor: NSObject {
     /// Publish a level measured by the session of `generation`. Levels from any other session — one the
     /// user switched away from, whose async stop has not landed yet — are dropped, so the old mic can
     /// never show on the new mic's meter.
+    /// Internal, not fileprivate: `levelFromSupersededSessionIsDropped` drives it directly (test seam).
     func receiveLevel(_ normalized: Float, generation gen: UInt64) {
         publish { [weak self] in
             guard let self, self.isCurrent(gen), self.status == .live else { return }
