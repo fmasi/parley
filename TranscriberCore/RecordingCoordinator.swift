@@ -268,6 +268,9 @@ public final class RecordingCoordinator {
     public func switchMicrophone(to deviceId: String?) async throws {
         guard appState.isRecording else { return }
         guard !recoveryInFlight else { throw MicSwitchError.recoveryInProgress }
+        // Stop is already running (the phase flips only once the helper's stop returns): the recording
+        // is ending, so there is nothing to switch — and the helper must not get a switch mid-stop.
+        guard !stopInFlight else { return }
         // Three states: `.none` = nothing marked (not expected mid-recording — see the restore below),
         // `.some(nil)` = recording on the system default, `.some(id)` = recording on that device.
         let before = recordingMicrophone.current

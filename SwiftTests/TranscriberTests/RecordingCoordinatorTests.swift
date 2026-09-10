@@ -554,6 +554,23 @@ private struct Harness {
         #expect(h.client.micUpdates.isEmpty)
     }
 
+    @Test func aSwitchWhileStopIsInFlightNeverReachesTheHelper() async throws {
+        // The user taps Switch while Stop is waiting on the helper — the phase still reads "recording"
+        // then. The helper must not be asked to switch mid-stop.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let coordinator = h.coordinator
+        var fireSwitch = true
+        h.client.onStop = {
+            if fireSwitch { fireSwitch = false; try? await coordinator.switchMicrophone(to: "mic-2") }
+        }
+
+        await h.coordinator.stopRecording()
+
+        #expect(h.client.micUpdates.isEmpty, "a switch reached the helper while it was stopping")
+    }
+
     @Test func aSecondStopWhileOneIsInFlightIsIgnored() async throws {
         // A second Stop lands while the first is suspended on the helper: it must not reach the helper
         // (or start a second transcription). One-shot, so a missing guard fails cleanly, not recursively.
