@@ -400,6 +400,10 @@ struct InputLevelMonitorNonBlockingTests {
     func stopAndReleaseDuringAStuckStart() async {
         // The user clicks Start Recording while the meter's start is still stuck: the dialog must not
         // wait past its budget, and the meter must still let go of the mic once the start returns.
+        // Known, accepted overlap: after a timed-out release the dialog proceeds and the helper opens
+        // the mic, so this queued stopRunning() can run while the helper holds it. Harmless on a healthy
+        // mic (AVFoundation shares input devices); on a wedged one it is the same HAL condition the
+        // helper then faces anyway. The fix for that path is a deadline on the helper's calls (#194).
         let stuck = HangingStartSession()
         let m = monitor(RecordingFactory(["default": stuck]))
         m.start(deviceId: nil)

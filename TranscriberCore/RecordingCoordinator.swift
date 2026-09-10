@@ -285,7 +285,9 @@ public final class RecordingCoordinator {
             // Every path into a live recording (start, crash restart, Flow A/B re-attach) marks its mic
             // first, so `before` is always set here. Should a future path forget, keep the target marked
             // rather than clear: "nothing is recording" mid-recording would let meters open its mic.
-            if appState.isRecording, case .some(deviceId) = recordingMicrophone.current,   // still exactly what we wrote
+            // `case .some(deviceId)` is an expression pattern — an equality test against the parameter,
+            // not a new binding: the marker must still hold exactly the mic we wrote.
+            if appState.isRecording, case .some(deviceId) = recordingMicrophone.current,
                case .some(let marked) = before {
                 recordingMicrophone.set(marked)
             }

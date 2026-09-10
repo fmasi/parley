@@ -100,6 +100,9 @@ public final class InputLevelMonitor: NSObject {
     public private(set) var status: LevelMeterStatus = .off
     public var isMonitoring: Bool { status == .live }
 
+    /// Where every session of this monitor delivers its buffers. Deliberately ONE queue: only the
+    /// lifecycle calls (which can block) need a queue per session. During an A→B switch both sessions
+    /// may deliver here briefly; receiveLevel's generation check drops the old one's levels.
     private let processingQueue = DispatchQueue(label: "input-level-monitor")
     private let makeSession: (String?, UInt64, InputLevelMonitor) -> LevelMeterSession?
     /// The physical device a selection means (`nil` → whatever the default is now). Runs on the

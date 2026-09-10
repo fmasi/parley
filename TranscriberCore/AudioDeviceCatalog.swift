@@ -127,6 +127,10 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             }
         }
 
+        let began = Date()
+        // Strong on purpose: a scan must finish and answer every waiter even if its callers moved on.
+        // For the shared catalog that costs nothing; a scan stuck for good keeps its catalog alive,
+        // which only matters for short-lived (test) instances — and every test releases its gate.
         queue.async { [self] in
             let found = scan()
             lock.lock()
@@ -135,6 +139,11 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             let ready = Array(waiters.values)
             waiters = [:]
             lock.unlock()
+            // Close the loop on the "still running" warning, so the log shows the device recovered.
+            let took = Date().timeIntervalSince(began)
+            if took >= stuckAfter {
+                Logger.audio.info("Audio input scan finished after \(took, privacy: .public)s — the mic list is current again")
+            }
             // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
             // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
             ready.forEach { $0(found) }
