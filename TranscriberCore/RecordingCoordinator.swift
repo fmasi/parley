@@ -270,6 +270,8 @@ public final class RecordingCoordinator {
         guard !recoveryInFlight else { throw MicSwitchError.recoveryInProgress }
         // Stop is already running (the phase flips only once the helper's stop returns): the recording
         // is ending, so there is nothing to switch — and the helper must not get a switch mid-stop.
+        // Returns rather than throws, unlike mid-recovery: the caller then saves the pick as the
+        // preference for the next recording, which is what the user asked for. Intentional.
         guard !stopInFlight else { return }
         // Three states: `.none` = nothing marked (not expected mid-recording — see the restore below),
         // `.some(nil)` = recording on the system default, `.some(id)` = recording on that device.

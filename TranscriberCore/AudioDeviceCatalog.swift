@@ -80,10 +80,11 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             let once = ResumeOnce(continuation)
             let token = addWaiter { once.resume(($0, true)) }
             startScanIfIdle()
+            let lastKnown = latestDevices   // the fallback if the catalog is gone by the deadline
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
                 // Weak, so a catalog isn't kept alive for `timeout` after its caller moved on. The caller
                 // must still be resumed whatever happens — never leave the continuation hanging.
-                guard let self else { once.resume((Self.systemDefaultOnly, false)); return }
+                guard let self else { once.resume((lastKnown, false)); return }
                 // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
                 // per dialog opened while it hangs. A scan finishing between the removal and the resume
                 // below makes this report a fresh list as stale — the safe direction (the dialog keeps
