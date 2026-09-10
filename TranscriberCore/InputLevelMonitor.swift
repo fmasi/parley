@@ -258,7 +258,8 @@ public final class InputLevelMonitor: NSObject {
             slot.session = session
 
             // 4. Start it. Say so if that is slow — decided ON the publish executor, where `.live` is also
-            // set, so a start that finishes just as this fires can never be left showing "not responding".
+            // set, so a start that finishes just as this fires is never LEFT showing "not responding". It
+            // can flash it for one frame (the check may run just before markStarted()); `.live` follows.
             weak var monitor = self
             DispatchQueue.global().asyncAfter(deadline: .now() + unresponsiveAfter) {
                 publish {
