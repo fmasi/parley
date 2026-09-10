@@ -196,6 +196,8 @@ public final class RecordingCoordinator {
         // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
         // — both keep recording silently. Only a fatal give-up escalates.
         // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
+        // This supersedes any `mirrorMicSwitches` handler left by a re-attached recording (Flow A/B):
+        // the coordinator owns the handler for the recordings it starts.
         captureClient.onMicDeviceChanged = { [weak self] deviceId in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
@@ -284,6 +286,12 @@ public final class RecordingCoordinator {
                 try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
             } catch {
                 Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .public)")
+                // The switch itself worked; only a crash restart would now resume on the mic the user
+                // left (possibly the dead one they switched away from). Say so rather than stay silent.
+                notify(
+                    "Microphone Switched",
+                    "If the recording is interrupted, it may resume on the previous microphone — the recovery file could not be updated."
+                )
             }
         }
     }
@@ -427,6 +435,9 @@ public final class RecordingCoordinator {
 
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
+            // stop() failed, so unlike the success path there is no "helper has let go" moment to wait
+            // for: release the marker best-effort. The realistic causes (XPC crash, fatal failure) mean
+            // the helper is already gone and holds no mic.
             clearHelperMic()
             // council FV2 defense-in-depth: stop() can throw (e.g. the helper already cleared
             // isCapturing on a fatal failure that raced this stop). If a live chunked pipeline still

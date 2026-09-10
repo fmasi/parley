@@ -39,6 +39,7 @@ public final class RecordingMicrophone: @unchecked Sendable {
     public static let shared = RecordingMicrophone()
     private let lock = NSLock()
     private var device: String?? = .none
+    /// Touched only on the main actor.
     private let observers = NSHashTable<AnyObject>.weakObjects()
     public init() {}
     /// The recording is capturing from `deviceId` (`nil` = the system default).
@@ -51,16 +52,16 @@ public final class RecordingMicrophone: @unchecked Sendable {
 
     /// Tell `observer` (held weakly) about every change from now on.
     @MainActor public func addObserver(_ observer: RecordingMicrophoneObserver) {
-        lock.lock(); observers.add(observer); lock.unlock()
+        observers.add(observer)   // main-actor only, like update(): no lock needed
     }
 
     /// Main-actor only, so observers are told synchronously and stay exactly in step with `current`.
+    /// The lock guards `device` alone — the one piece of state read from other threads.
     @MainActor private func update(_ value: String??) {
         lock.lock()
         device = value
-        let targets = observers.allObjects
         lock.unlock()
-        for case let observer as RecordingMicrophoneObserver in targets {
+        for case let observer as RecordingMicrophoneObserver in observers.allObjects {
             observer.recordingMicrophoneChanged(to: value)
         }
     }

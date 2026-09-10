@@ -356,6 +356,29 @@ private struct Harness {
         #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-2")
     }
 
+    @Test func switchThatCannotUpdateTheSentinelSaysSo() async throws {
+        // The switch works, but the recovery file can't be rewritten (disk full, permissions): a crash
+        // restart would resume on the mic the user left. That must not happen silently.
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let sentinelFile = h.tmp.appendingPathComponent("recording.json").path
+        let fm = FileManager.default
+        try fm.setAttributes([.posixPermissions: 0o444], ofItemAtPath: sentinelFile)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: h.tmp.path)
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: h.tmp.path)
+            try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: sentinelFile)
+        }
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.recordingMic.current == .some("mic-2"), "the switch itself should still have gone through")
+        #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1")   // precondition: write failed
+        #expect(h.notified.value.map { $0.title } == ["Microphone Switched"], "a stale recovery mic went unreported")
+    }
+
     @Test func failedManualSwitchKeepsThePreviousMicMarked() async throws {
         let h = try Harness()
         _ = try h.writeSentinel(micDeviceUID: "mic-1")
