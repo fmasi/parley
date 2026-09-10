@@ -272,7 +272,10 @@ public final class RecordingCoordinator {
         // is ending, so there is nothing to switch — and the helper must not get a switch mid-stop.
         // Returns rather than throws, unlike mid-recovery: the caller then saves the pick as the
         // preference for the next recording, which is what the user asked for. Intentional.
-        guard !stopInFlight else { return }
+        guard !stopInFlight else {
+            Logger.state.info("Mic switch requested while Stop is in flight — not switching; the pick is kept as the next-recording preference")
+            return
+        }
         // Three states: `.none` = nothing marked (not expected mid-recording — see the restore below),
         // `.some(nil)` = recording on the system default, `.some(id)` = recording on that device.
         let before = recordingMicrophone.current

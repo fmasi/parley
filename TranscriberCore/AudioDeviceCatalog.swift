@@ -88,13 +88,15 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
                 // must still be resumed whatever happens — never leave the continuation hanging.
                 guard let self else { once.resume((lastKnown, false)); return }
                 // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
-                // per dialog opened while it hangs. A scan finishing between the removal and the resume
-                // below makes this report a fresh list as stale — the safe direction (the dialog keeps
-                // the user's mic). Don't fold both into one lock hold: resuming under the lock is worse.
+                // per dialog opened while it hangs, and snapshot the list in the SAME lock hold — so the
+                // caller gets exactly the list as it stood when the deadline decided. Resume outside the
+                // lock (resuming under it is worse). A scan finishing just after this still leaves the
+                // caller with isFresh = false — the safe direction: the dialog keeps the user's mic.
                 lock.lock()
                 waiters[token] = nil
+                let snapshot = latest
                 lock.unlock()
-                once.resume((latestDevices, false))
+                once.resume((snapshot, false))
             }
         }
     }
