@@ -485,6 +485,24 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("mic-7"))
     }
 
+    @Test func failedSwitchKeepsAMicTheHelperReportedMeanwhile() async throws {
+        // The helper auto-switches to mic-3 while our switch to mic-2 is in flight, then our switch fails.
+        // The restore must NOT overwrite the helper's own report with the pre-switch mic: it only puts
+        // back `before` when the marker still holds exactly the mic we wrote.
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let recordingMic = h.recordingMic
+        h.client.onUpdateMicrophone = { await MainActor.run { recordingMic.set("mic-3") } }
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some("mic-3"), "the restore overwrote the helper's own report")
+    }
+
     @Test func switchWhenTheRecordingAlreadyEndedTouchesNothing() async throws {
         let h = try Harness()   // idle: the recording ended while the switcher was open
 

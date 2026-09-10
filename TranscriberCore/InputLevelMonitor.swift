@@ -38,7 +38,9 @@ public protocol RecordingMicrophoneObserver: AnyObject {
 /// Design boundary: it stops meters OPENING the recording's mic, not one already running on it — e.g.
 /// Settings metering mic A when a recording starts on A. That is the meter/helper coexistence that
 /// worked for months on healthy mics; the hazard is a wedged one (a lid-closed built-in, #193), where
-/// the meter already reads "Not responding". Revisit before adding a third picker. Set by `RecordingCoordinator` and by the relaunch re-attach paths; the
+/// the meter already reads "Not responding". Revisit before adding a third picker.
+///
+/// Set by `RecordingCoordinator` and by the relaunch re-attach paths; the
 /// coordinator mirrors it for the menu's mic label, so every writer keeps that label right too.
 public final class RecordingMicrophone: @unchecked Sendable {
     public static let shared = RecordingMicrophone()
