@@ -282,6 +282,10 @@ public final class RecordingCoordinator {
             }
             throw error
         }
+        // The recording ended normally while the helper was switching (Stop during the switch): there
+        // is no recovery file to update any more, and nothing to warn about. Stop deletes the sentinel
+        // and leaves the recording phase in one synchronous step, so this check can't fall between.
+        guard appState.isRecording else { return }
         // The switch itself worked. If the recovery file can't record it — unwritable, or missing
         // (deleted mid-recording) — a crash restart would resume on the mic the user left, possibly the
         // dead one they switched away from. Say so rather than stay silent.

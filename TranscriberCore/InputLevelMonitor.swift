@@ -33,7 +33,12 @@ public protocol RecordingMicrophoneObserver: AnyObject {
 
 /// The microphone the recording is capturing from, process-wide, so no level meter opens it while the
 /// capture helper holds it: opening a mic the helper has running is the exact `startRunning()` that
-/// hung on 2026-09-10 (#192). Set by `RecordingCoordinator` and by the relaunch re-attach paths; the
+/// hung on 2026-09-10 (#192).
+///
+/// Design boundary: it stops meters OPENING the recording's mic, not one already running on it — e.g.
+/// Settings metering mic A when a recording starts on A. That is the meter/helper coexistence that
+/// worked for months on healthy mics; the hazard is a wedged one (a lid-closed built-in, #193), where
+/// the meter already reads "Not responding". Revisit before adding a third picker. Set by `RecordingCoordinator` and by the relaunch re-attach paths; the
 /// coordinator mirrors it for the menu's mic label, so every writer keeps that label right too.
 public final class RecordingMicrophone: @unchecked Sendable {
     public static let shared = RecordingMicrophone()
