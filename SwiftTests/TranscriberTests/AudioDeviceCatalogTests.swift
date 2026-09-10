@@ -109,8 +109,9 @@ struct AudioDeviceCatalogTests {
         // scanning one after another (and block again on the gate) — so the count must stay at 1.
         gate.release.signal()
         #expect(eventually { c.latestDevices == withUSB })
-        Thread.sleep(forTimeInterval: 0.2)
-        #expect(gate.scans == 1, "refreshes made during the stuck scan ran their own scans afterwards")
+        // An un-coalesced refresh would now start a scan of its own, which counts itself on ENTRY —
+        // before blocking on the gate — so it would show up here within moments.
+        #expect(!eventually(within: 0.5) { gate.scans > 1 }, "refreshes made during the stuck scan ran their own scans afterwards")
 
         gate.release.signal()
         c.refresh()

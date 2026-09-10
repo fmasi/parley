@@ -264,6 +264,8 @@ public final class RecordingCoordinator {
     public func switchMicrophone(to deviceId: String?) async throws {
         guard appState.isRecording else { return }
         guard !recoveryInFlight else { throw MicSwitchError.recoveryInProgress }
+        // Three states: `.none` = nothing marked (not expected mid-recording — see the restore below),
+        // `.some(nil)` = recording on the system default, `.some(id)` = recording on that device.
         let before = recordingMicrophone.current
         setHelperMic(deviceId)
         do {

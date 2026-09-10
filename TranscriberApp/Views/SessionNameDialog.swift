@@ -16,13 +16,14 @@ struct SessionNameDialog: View {
     /// Kept so the field can say where its pre-filled value came from.
     private let suggestedName: String
 
-    let onStart: (String, String?) -> Void  // (sessionName, micDeviceId?)
+    /// Main-actor: the window controller's wrapper checks its panel is still live (#192).
+    let onStart: @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     let onCancel: () -> Void
 
     init(
         suggestedName: String,
         initialDeviceId: String?,
-        onStart: @escaping (String, String?) -> Void,
+        onStart: @escaping @MainActor (String, String?) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.suggestedName = suggestedName

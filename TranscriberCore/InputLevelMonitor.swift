@@ -138,6 +138,8 @@ public final class InputLevelMonitor: NSObject {
         self.makeSession = { deviceId, generation, monitor in
             monitor.makeCaptureSession(deviceId: deviceId, generation: generation)
         }
+        // Deliberately on the session queue, not main: the default-device lookup reads the HAL too. The
+        // capture helper's MicCaptureSession resolves devices the same way, on its configQueue.
         self.physicalDevice = { deviceId in deviceId ?? AVCaptureDevice.default(for: .audio)?.uniqueID }
         self.publish = { DispatchQueue.main.async(execute: $0) }
         self.pendingStarts = .shared
@@ -206,7 +208,11 @@ public final class InputLevelMonitor: NSObject {
 
             // 2. Another start on this device still in flight — stuck, or just another picker opening it:
             // wait for it rather than open the device a second time. Sleeping, never parked in the HAL;
-            // "not responding" once the wait runs long; given up the moment this start is superseded.
+            // "not responding" once the wait runs long. The loop exits only when the claim succeeds, this
+            // slot is superseded (a new start, or stop() — which the picker's onDisappear calls), or the
+            // monitor is gone; so behind a start stuck for good it polls for as long as its picker is
+            // showing that mic, and at most ~50 ms after it stops. Each new slot waits on its own, so
+            // re-picking the stuck mic shows "not responding" again after `unresponsiveAfter`.
             let waitBegan = Date()
             var saidNotResponding = false
             while !pending.claim(key) {

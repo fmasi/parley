@@ -13,7 +13,7 @@ final class SessionNameWindowController {
     func show(
         suggestedName: String?,
         lastMicrophoneDeviceId: String?,
-        onStart: @escaping (String, String?) -> Void  // (sessionName, micDeviceId?)
+        onStart: @escaping @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     ) {
         panel?.close()
         panel = nil
@@ -32,7 +32,7 @@ final class SessionNameWindowController {
         scan: (devices: [AudioInputDevice], isFresh: Bool),
         suggestedName: String?,
         lastMicrophoneDeviceId: String?,
-        onStart: @escaping (String, String?) -> Void  // (sessionName, micDeviceId?)
+        onStart: @escaping @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     ) {
         let initialDeviceId = AudioDeviceEnumerator.resolveDeviceId(
             lastUsed: lastMicrophoneDeviceId, available: scan.devices, listIsFresh: scan.isFresh
@@ -61,6 +61,8 @@ final class SessionNameWindowController {
         let dialog = SessionNameDialog(
             suggestedName: suggestedName ?? "",
             initialDeviceId: initialDeviceId,
+            // Sync and main-actor (its type says so), so isLive() is called directly here; the switcher's
+            // onSwitch is async and needs MainActor.run for the same check.
             onStart: { name, deviceId in
                 guard isLive() else { return }   // cancelled while the meter was releasing the mic
                 closePanel()
