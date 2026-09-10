@@ -508,6 +508,34 @@ struct InputLevelMonitorNonBlockingTests {
         #expect(fast.starts == 1)
     }
 
+    @Test("a recording that switches to the mic while a picker waits for it is still never metered")
+    func recordingSwitchDuringTheWaitIsHonoured() {
+        // Settings shows mic A, waiting behind a slow start on A; meanwhile the recording switches to A.
+        // When the wait ends, the picker must see A is now the recording's mic — not open it.
+        let slow = HangingStartSession()
+        let fast = InstantSession()
+        let sessions = SessionSequence([slow, fast])
+        let registry = PendingStartRegistry()
+        let recording = RecordingMicrophone()
+        let q = DispatchQueue(label: "test.publish")
+        let first = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { _ in },
+                                      pendingStarts: registry, recordingMicrophone: recording)
+        let second = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { q.async(execute: $0) },
+                                       pendingStarts: registry, recordingMicrophone: recording, unresponsiveAfter: 0.1)
+        first.start(deviceId: "A")
+        guard slow.entered.wait(timeout: .now() + 2) == .success else {
+            slow.release.signal(); Issue.record("first start never began"); return
+        }
+        second.start(deviceId: "A")
+        #expect(eventually { q.sync { second.status } == .notResponding })   // it is waiting in the loop
+
+        recording.set("A")        // the recording switches to A mid-wait
+        slow.release.signal()     // the first start returns; the second's wait ends
+        #expect(eventually { q.sync { second.status } == .inUseByRecording }, "the waiting picker ignored the recording's switch")
+        #expect(sessions.handedOut == 1, "a session was built on the recording's mic")
+        #expect(fast.starts == 0)
+    }
+
     @Test("a start that has not returned in time says the mic is not responding, then recovers")
     func slowStartReportsNotResponding() {
         let slow = HangingStartSession()

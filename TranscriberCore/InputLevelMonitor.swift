@@ -193,14 +193,20 @@ public final class InputLevelMonitor: NSObject {
             // `self` is only ever held briefly below — never across a wait or the blocking start — so a
             // monitor dropped meanwhile can still deinit and retire the session.
 
+            /// Whether the recording is capturing this physical device right now.
+            func isRecordingMic(_ key: String) -> Bool {
+                guard case .some(let recordingDevice) = recording.current,
+                      let recordingPhysical = physicalDevice(recordingDevice) else { return false }
+                return recordingPhysical == key
+            }
+
             // 1. Which physical device, and may we meter it at all?
             let key: String? = {
                 guard let m = self, m.isCurrent(slot.generation) else { return nil }   // superseded
                 guard let key = physicalDevice(deviceId) else {
                     m.report(.unavailable, for: slot.generation); return nil
                 }
-                if case .some(let recordingDevice) = recording.current,
-                   let recordingPhysical = physicalDevice(recordingDevice), recordingPhysical == key {
+                if isRecordingMic(key) {
                     m.report(.inUseByRecording, for: slot.generation); return nil
                 }
                 return key
@@ -230,6 +236,10 @@ public final class InputLevelMonitor: NSObject {
             // 3. Build it — on this queue, never the caller's.
             let session: LevelMeterSession? = {
                 guard let m = self, m.isCurrent(slot.generation) else { return nil }
+                // Again: the recording may have switched to this very mic while step 2 waited.
+                if isRecordingMic(key) {
+                    m.report(.inUseByRecording, for: slot.generation); return nil
+                }
                 guard let made = makeSession(deviceId, slot.generation, m) else {
                     m.report(.unavailable, for: slot.generation); return nil
                 }

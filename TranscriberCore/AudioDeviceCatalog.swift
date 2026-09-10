@@ -70,7 +70,7 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     /// Rescan in the background; returns at once. While a scan is still running — possibly stuck on a
     /// wedged device — further calls join it rather than park another thread in the same HAL wait.
     public func refresh() {
-        refresh(then: nil)
+        startScanIfIdle()
     }
 
     /// A fresh scan — or, if it has not finished within `timeout`, the last known list with
@@ -78,38 +78,38 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     public func refreshed(timeout: TimeInterval) async -> (devices: [AudioInputDevice], isFresh: Bool) {
         await withCheckedContinuation { continuation in
             let once = ResumeOnce(continuation)
-            let token = refresh(then: { once.resume(($0, true)) })
+            let token = addWaiter { once.resume(($0, true)) }
+            startScanIfIdle()
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
                 // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
                 // per dialog opened while it hangs. A scan finishing between the removal and the resume
                 // below makes this report a fresh list as stale — the safe direction (the dialog keeps
                 // the user's mic). Don't fold both into one lock hold: resuming under the lock is worse.
-                if let token {
-                    lock.lock()
-                    waiters[token] = nil
-                    lock.unlock()
-                }
+                lock.lock()
+                waiters[token] = nil
+                lock.unlock()
                 once.resume((latestDevices, false))
             }
         }
     }
 
-    /// Returns the waiter's token, if one was given.
-    @discardableResult
-    private func refresh(then waiter: (([AudioInputDevice]) -> Void)?) -> UInt64? {
+    /// Register a caller for the next scan result.
+    private func addWaiter(_ waiter: @escaping ([AudioInputDevice]) -> Void) -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        nextWaiterToken &+= 1
+        waiters[nextWaiterToken] = waiter
+        return nextWaiterToken
+    }
+
+    /// Start a scan unless one is already running; a running one will serve every waiter.
+    private func startScanIfIdle() {
         lock.lock()
-        var token: UInt64?
-        if let waiter {
-            nextWaiterToken &+= 1
-            token = nextWaiterToken
-            waiters[nextWaiterToken] = waiter
-        }
         let begin = !scanning
         scanning = true
         if begin { scanSerial &+= 1 }
         let serial = scanSerial
         lock.unlock()
-        guard begin else { return token }
+        guard begin else { return }
 
         DispatchQueue.global().asyncAfter(deadline: .now() + stuckAfter) { [self] in
             lock.lock()
@@ -135,6 +135,5 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
                 MainActor.assumeIsolated { self?.devices = found }
             }
         }
-        return token
     }
 }
