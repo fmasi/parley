@@ -309,6 +309,7 @@ public final class RecordingCoordinator {
     /// For a recording no coordinator started — the relaunch re-attach (Flow A/B): mirror the helper's
     /// auto-switches into `recordingMicrophone`, so level meters stay off the mic actually being
     /// captured and the menu's label follows (#192). A coordinator does this itself in startRecording.
+    @MainActor
     public static func mirrorMicSwitches(
         of client: any RecordingCaptureClient,
         while appState: AppState,
@@ -323,6 +324,7 @@ public final class RecordingCoordinator {
 
     /// One mirrored report, on the main actor: applied only while a recording is running — a late
     /// report after it ended is ignored. Split out so that rule is testable without timing.
+    @MainActor
     static func applyMirroredMicSwitch(
         to deviceId: String?, while appState: AppState, into recordingMicrophone: RecordingMicrophone
     ) {

@@ -226,7 +226,8 @@ public final class InputLevelMonitor: NSObject {
             var saidNotResponding = false
             while !pending.claim(key) {
                 // The exit that bounds this: stop() or a new start() bumps the generation, so the thread
-                // is released as soon as the picker closes or the user picks another mic.
+                // is released as soon as the picker closes or the user picks another mic. No release on
+                // this exit: nothing was claimed — claim() has returned false every time so far.
                 guard let m = self, m.isCurrent(slot.generation) else { return }
                 if !saidNotResponding, Date().timeIntervalSince(waitBegan) >= unresponsiveAfter {
                     m.report(.notResponding, for: slot.generation)

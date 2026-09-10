@@ -2,12 +2,6 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-/// Carries a non-Sendable value across a thread boundary in a test.
-private final class Carry<T>: @unchecked Sendable {
-    let value: T
-    init(_ value: T) { self.value = value }
-}
-
 /// A device scan that blocks until released — a DiscoverySession stuck behind a wedged device's HAL
 /// lock. `entered` fires once a scan is actually in progress.
 private final class GatedScan: @unchecked Sendable {

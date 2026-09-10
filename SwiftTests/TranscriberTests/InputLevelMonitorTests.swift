@@ -140,12 +140,6 @@ struct InputLevelMonitorTests {
 // lifecycle call that simply does not return.
 
 
-/// Carries a non-Sendable value across a thread boundary in a test.
-private final class Carry<T>: @unchecked Sendable {
-    let value: T
-    init(_ value: T) { self.value = value }
-}
-
 /// `startRunning()` blocks until released — the 2026-09-10 CoreAudio HAL wait. `entered` fires once
 /// the call is actually in progress, so a test can pin WHICH path it exercises.
 private final class HangingStartSession: LevelMeterSession, @unchecked Sendable {
