@@ -485,6 +485,22 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("mic-7"))
     }
 
+    @Test func failedSwitchFromSystemDefaultRestoresSystemDefault() async throws {
+        // The restore's `before` can be `.some(nil)` — recording on the system default. A failed switch
+        // must put exactly that back (not "nothing marked", not the attempted mic).
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: nil)
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set(nil)
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some(nil), "the system-default recording lost its marker")
+        #expect(h.coordinator.helperMicKnown && h.coordinator.helperMicId == nil)
+    }
+
     @Test func failedSwitchKeepsAMicTheHelperReportedMeanwhile() async throws {
         // The helper auto-switches to mic-3 while our switch to mic-2 is in flight, then our switch fails.
         // The restore must NOT overwrite the helper's own report with the pre-switch mic: it only puts
