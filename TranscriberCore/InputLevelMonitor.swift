@@ -25,20 +25,52 @@ public final class PendingStartRegistry: @unchecked Sendable {
     func contains(_ key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return keys.contains(key) }
 }
 
+/// Told about every change to a `RecordingMicrophone`, on the main actor.
+@MainActor
+public protocol RecordingMicrophoneObserver: AnyObject {
+    func recordingMicrophoneChanged(to device: String??)
+}
+
 /// The microphone the recording is capturing from, process-wide, so no level meter opens it while the
 /// capture helper holds it: opening a mic the helper has running is the exact `startRunning()` that
-/// hung on 2026-09-10 (#192). Kept by `RecordingCoordinator`.
+/// hung on 2026-09-10 (#192). Set by `RecordingCoordinator` and by the relaunch re-attach paths; the
+/// coordinator mirrors it for the menu's mic label, so every writer keeps that label right too.
 public final class RecordingMicrophone: @unchecked Sendable {
     public static let shared = RecordingMicrophone()
     private let lock = NSLock()
     private var device: String?? = .none
+    private let observers = NSHashTable<AnyObject>.weakObjects()
     public init() {}
     /// The recording is capturing from `deviceId` (`nil` = the system default).
-    public func set(_ deviceId: String?) { lock.lock(); device = .some(deviceId); lock.unlock() }
+    public func set(_ deviceId: String?) { update(.some(deviceId)) }
     /// Nothing is recording.
-    public func clear() { lock.lock(); device = .none; lock.unlock() }
+    public func clear() { update(.none) }
     /// `.none` when nothing is recording; `.some(nil)` when recording on the system default.
     public var current: String?? { lock.lock(); defer { lock.unlock() }; return device }
+
+    /// Tell `observer` (held weakly) about every change from now on.
+    public func addObserver(_ observer: RecordingMicrophoneObserver) {
+        lock.lock(); observers.add(observer); lock.unlock()
+    }
+
+    private func update(_ value: String??) {
+        lock.lock()
+        device = value
+        let targets = observers.allObjects
+        lock.unlock()
+        // Every writer is main-actor code, so this normally notifies synchronously, keeping observers
+        // exactly in step with `current`; anything else is hopped onto main.
+        let notify = { @MainActor in
+            for case let observer as RecordingMicrophoneObserver in targets {
+                observer.recordingMicrophoneChanged(to: value)
+            }
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { notify() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { notify() } }
+        }
+    }
 }
 
 /// What the meter is doing, so the picker can say why it is flat.
@@ -136,6 +168,7 @@ public final class InputLevelMonitor: NSObject {
     /// Start monitoring the given device. Pass `nil` for system default.
     /// If already monitoring, stops the previous session first. Returns immediately; `status` becomes
     /// `.live` only once the new session is actually running.
+    @MainActor
     public func start(deviceId: String?) {
         let slot: Slot
         let old: Slot?
@@ -201,6 +234,7 @@ public final class InputLevelMonitor: NSObject {
 
     /// Stop monitoring and reset level to zero. Returns immediately: the blocking `stopRunning()` is
     /// queued behind the session's own start, on that session's queue.
+    @MainActor
     public func stop() {
         retire(detach())
         status = .off

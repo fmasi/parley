@@ -24,11 +24,13 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     private let scan: @Sendable () -> [AudioInputDevice]
     private let publish: (@escaping () -> Void) -> Void
     private let queue = DispatchQueue(label: "audio-device-catalog")
-    /// Guards the three below. A leaf lock: never held across a scan.
+    /// Guards the state below. A leaf lock: never held across a scan.
     private let lock = NSLock()
     @ObservationIgnored private var latest: [AudioInputDevice]
     @ObservationIgnored private var scanning = false
-    @ObservationIgnored private var waiters: [([AudioInputDevice]) -> Void] = []
+    /// Callers awaiting the current scan, by token, so one that gives up can take itself off.
+    @ObservationIgnored private var waiters: [UInt64: ([AudioInputDevice]) -> Void] = [:]
+    @ObservationIgnored private var nextWaiterToken: UInt64 = 0
     @ObservationIgnored private var scanSerial: UInt64 = 0
     /// A scan still running after this long is logged: the list then stays at its last known state.
     private let stuckAfter: TimeInterval
@@ -55,6 +57,12 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
         self.publish = publish
     }
 
+    /// Callers still waiting on the current scan. Test hook for the no-pile-up guarantee.
+    var waiterCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return waiters.count
+    }
+
     /// The last known list, readable from any thread.
     public var latestDevices: [AudioInputDevice] {
         lock.lock(); defer { lock.unlock() }
@@ -72,22 +80,36 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     public func refreshed(timeout: TimeInterval) async -> (devices: [AudioInputDevice], isFresh: Bool) {
         await withCheckedContinuation { continuation in
             let once = ResumeOnce(continuation)
-            refresh(then: { once.resume(($0, true)) })
+            let token = refresh(then: { once.resume(($0, true)) })
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
+                // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
+                // per dialog opened while it hangs.
+                if let token {
+                    lock.lock()
+                    waiters[token] = nil
+                    lock.unlock()
+                }
                 once.resume((latestDevices, false))
             }
         }
     }
 
-    private func refresh(then waiter: (([AudioInputDevice]) -> Void)?) {
+    /// Returns the waiter's token, if one was given.
+    @discardableResult
+    private func refresh(then waiter: (([AudioInputDevice]) -> Void)?) -> UInt64? {
         lock.lock()
-        if let waiter { waiters.append(waiter) }
+        var token: UInt64?
+        if let waiter {
+            nextWaiterToken &+= 1
+            token = nextWaiterToken
+            waiters[nextWaiterToken] = waiter
+        }
         let begin = !scanning
         scanning = true
         if begin { scanSerial &+= 1 }
         let serial = scanSerial
         lock.unlock()
-        guard begin else { return }
+        guard begin else { return token }
 
         DispatchQueue.global().asyncAfter(deadline: .now() + stuckAfter) { [self] in
             lock.lock()
@@ -103,11 +125,12 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             lock.lock()
             latest = found
             scanning = false
-            let ready = waiters
-            waiters = []
+            let ready = Array(waiters.values)
+            waiters = [:]
             lock.unlock()
             ready.forEach { $0(found) }
             publish { [weak self] in self?.devices = found }
         }
+        return token
     }
 }

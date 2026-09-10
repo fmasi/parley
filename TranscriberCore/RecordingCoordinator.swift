@@ -44,19 +44,17 @@ public final class RecordingCoordinator {
     /// auto-switch. Valid only when `helperMicKnown` is true. `nil` = helper on system default;
     /// non-nil = helper on this specific device. Both cleared when recording stops.
     public private(set) var helperMicId: String? = nil
-    /// Mirrors the mic being recorded, process-wide, so no level meter opens it while the helper holds
-    /// it (#192). Updated only through `setHelperMic` / `clearHelperMic`.
+    /// The mic being recorded, process-wide, so no level meter opens it while the helper holds it
+    /// (#192). The single source of truth: `helperMicKnown`/`helperMicId` mirror it (see
+    /// `recordingMicrophoneChanged`), so a writer outside the coordinator — the relaunch re-attach
+    /// paths, which run before any coordinator exists — keeps the menu's mic label right too.
     private let recordingMicrophone: RecordingMicrophone
 
     private func setHelperMic(_ deviceId: String?) {
-        helperMicKnown = true
-        helperMicId = deviceId
         recordingMicrophone.set(deviceId)
     }
 
     private func clearHelperMic() {
-        helperMicKnown = false
-        helperMicId = nil
         recordingMicrophone.clear()
     }
 
@@ -80,6 +78,8 @@ public final class RecordingCoordinator {
         self.notify = notify
         self.notifyCritical = notifyCritical
         self.presentTranscript = presentTranscript
+        recordingMicrophone.addObserver(self)
+        recordingMicrophoneChanged(to: recordingMicrophone.current)   // a re-attach may have marked it already
     }
 
     // MARK: - Pure decision helpers (unit-tested)
@@ -262,17 +262,15 @@ public final class RecordingCoordinator {
     public func switchMicrophone(to deviceId: String?) async throws {
         guard appState.isRecording else { return }
         guard !recoveryInFlight else { throw MicSwitchError.recoveryInProgress }
-        let before = (known: helperMicKnown, id: helperMicId, marked: recordingMicrophone.current)
+        let before = recordingMicrophone.current
         setHelperMic(deviceId)
         do {
             try await captureClient.updateMicrophone(deviceId: deviceId)
         } catch {
             // Put back exactly what was there — unless, during the await, the recording ended (stop
             // already released the mic) or the helper reported a different mic of its own.
-            if appState.isRecording, helperMicKnown, helperMicId == deviceId {
-                helperMicKnown = before.known
-                helperMicId = before.id
-                if case .some(let marked) = before.marked { recordingMicrophone.set(marked) } else { recordingMicrophone.clear() }
+            if appState.isRecording, recordingMicrophone.current == .some(deviceId) {
+                if case .some(let marked) = before { recordingMicrophone.set(marked) } else { recordingMicrophone.clear() }
             }
             throw error
         }
@@ -661,5 +659,17 @@ public final class RecordingCoordinator {
             liveBaseName: orphanBase, outputDir: outputDir
         ))
         return (orphan.index, orphanBase)
+    }
+}
+
+extension RecordingCoordinator: RecordingMicrophoneObserver {
+    public func recordingMicrophoneChanged(to device: String??) {
+        if case .some(let id) = device {
+            helperMicKnown = true
+            helperMicId = id
+        } else {
+            helperMicKnown = false
+            helperMicId = nil
+        }
     }
 }

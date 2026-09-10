@@ -1,6 +1,8 @@
+import Foundation
 import Testing
 @testable import TranscriberCore
 
+@MainActor
 struct InputLevelMonitorTests {
 
     @Test func initialLevelIsZero() {
@@ -201,19 +203,14 @@ private final class RecordingFactory: @unchecked Sendable {
     var threads: [Thread] { lock.lock(); defer { lock.unlock() }; return _threads }
 }
 
+/// `start()`/`stop()` are main-actor API, called from SwiftUI — so the suite runs on the main actor.
+/// Whether they return promptly is tested separately, off the main actor (below).
+@MainActor
 @Suite("InputLevelMonitor never blocks its caller (#192)")
 struct InputLevelMonitorNonBlockingTests {
 
-    /// Runs `body` on its own thread; true if it returned within `seconds`. Bounded so a regression
-    /// fails the test instead of hanging the whole suite the way it hung the app.
-    private func returnsPromptly(within seconds: Double = 2, _ body: @escaping @Sendable () -> Void) -> Bool {
-        let done = DispatchSemaphore(value: 0)
-        Thread.detachNewThread { body(); done.signal() }
-        return done.wait(timeout: .now() + seconds) == .success
-    }
-
     /// Polls `condition` for up to `seconds`.
-    private func eventually(within seconds: Double = 2, _ condition: () -> Bool) -> Bool {
+    private nonisolated func eventually(within seconds: Double = 2, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if condition() { return true }
@@ -222,34 +219,18 @@ struct InputLevelMonitorNonBlockingTests {
         return condition()
     }
 
-    private func monitor(_ factory: RecordingFactory, publish q: DispatchQueue? = nil) -> InputLevelMonitor {
-        InputLevelMonitor(
+    private nonisolated func monitor(_ factory: RecordingFactory, publish q: DispatchQueue? = nil) -> InputLevelMonitor {
+        let publish: (@escaping () -> Void) -> Void
+        if let q {
+            publish = { q.async(execute: $0) }
+        } else {
+            publish = { _ in }
+        }
+        return InputLevelMonitor(
             makeSession: { id, gen, _ in factory.make(id, gen) },
-            publish: q.map { q in { q.async(execute: $0) } } ?? { _ in },
+            publish: publish,
             pendingStarts: PendingStartRegistry()
         )
-    }
-
-    @Test("start() returns even when startRunning() never does")
-    func startDoesNotBlockWhenStartRunningHangs() {
-        let hang = HangingStartSession()
-        let m = Carry(monitor(RecordingFactory(["default": hang])))
-        let ok = returnsPromptly { m.value.start(deviceId: nil) }
-        hang.release.signal()   // let the hung call finish so no thread outlives the test
-        #expect(ok, "start() blocked its caller — on the main thread this is the 2026-09-10 UI freeze")
-    }
-
-    @Test("stop() returns even when stopRunning() never does")
-    func stopDoesNotBlockWhenStopRunningHangs() {
-        let hang = HangingStopSession()
-        let m = Carry(monitor(RecordingFactory(["default": hang])))
-        m.value.start(deviceId: nil)
-        guard hang.started.wait(timeout: .now() + 2) == .success else {
-            Issue.record("start never began — stop() would have nothing to stop"); return
-        }
-        let ok = returnsPromptly { m.value.stop() }
-        hang.release.signal()
-        #expect(ok, "stop() blocked its caller — closing the picker would freeze the app")
     }
 
     @Test("the session is built off the calling thread, not just started off it")
@@ -512,5 +493,58 @@ struct InputLevelMonitorNonBlockingTests {
         let m = monitor(RecordingFactory([:]), publish: q)
         m.start(deviceId: "gone")
         #expect(eventually { q.sync { m.status } == .unavailable })
+    }
+}
+
+/// The two "returns promptly" tests, kept OFF the main actor. They hand `start()`/`stop()` to the main
+/// actor — where production calls them — and AWAIT the result, never blocking the main thread
+/// themselves. A call that never returns fails after a bounded wait instead of hanging the suite, and
+/// time spent queued behind other main-actor tests doesn't count, so a busy parallel run can't flake it.
+@Suite("InputLevelMonitor's main-actor API returns promptly (#192)")
+struct InputLevelMonitorPromptnessTests {
+
+    /// How long `body` took once it ran on the main actor, or nil if it had not finished within `seconds`.
+    private func durationOnMain(
+        within seconds: Double = 30, _ body: @escaping @MainActor () -> Void
+    ) async -> TimeInterval? {
+        await withCheckedContinuation { continuation in
+            let once = ResumeOnce<TimeInterval?>(continuation)
+            Task { @MainActor in
+                let began = Date()
+                body()
+                once.resume(Date().timeIntervalSince(began))
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { once.resume(nil) }
+        }
+    }
+
+    private func monitor(_ factory: RecordingFactory) -> InputLevelMonitor {
+        InputLevelMonitor(
+            makeSession: { id, gen, _ in factory.make(id, gen) },
+            publish: { _ in },
+            pendingStarts: PendingStartRegistry()
+        )
+    }
+
+    @Test("start() returns even when startRunning() never does")
+    func startDoesNotBlockWhenStartRunningHangs() async {
+        let hang = HangingStartSession()
+        let m = Carry(monitor(RecordingFactory(["default": hang])))
+        let took = await durationOnMain { m.value.start(deviceId: nil) }
+        hang.release.signal()   // let the hung call finish so no thread outlives the test
+        #expect(took.map { $0 < 1 } == true, "start() blocked its caller — on the main thread this is the 2026-09-10 UI freeze")
+    }
+
+    @Test("stop() returns even when stopRunning() never does")
+    func stopDoesNotBlockWhenStopRunningHangs() async {
+        let hang = HangingStopSession()
+        let m = Carry(monitor(RecordingFactory(["default": hang])))
+        _ = await durationOnMain { m.value.start(deviceId: nil) }
+        guard hang.started.wait(timeout: .now() + 5) == .success else {
+            Issue.record("start never began — stop() would have nothing to stop"); return
+        }
+        let took = await durationOnMain { m.value.stop() }
+        hang.release.signal()
+        #expect(took.map { $0 < 1 } == true, "stop() blocked its caller — closing the picker would freeze the app")
     }
 }

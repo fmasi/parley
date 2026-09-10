@@ -141,4 +141,13 @@ struct AudioDeviceCatalogTests {
         #expect(!scan.isFresh, "a stale list reported as fresh would make the dialog drop the user's mic")
         #expect(waited < 5, "waited \(waited)s — opening the mic switcher would hang behind the scan")
     }
+
+    @Test("callers that gave up on a stuck scan leave nothing behind")
+    func timedOutWaitersAreDropped() async {
+        let gate = GatedScan(withUSB)
+        let c = catalog(gate)
+        for _ in 0..<5 { _ = await c.refreshed(timeout: 0.05) }
+        #expect(c.waiterCount == 0, "each dialog opened during a stuck scan left a waiter behind for good")
+        gate.release.signal()
+    }
 }
