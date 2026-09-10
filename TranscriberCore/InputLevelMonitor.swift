@@ -129,14 +129,15 @@ public final class InputLevelMonitor: NSObject {
         /// Confined to `queue`.
         var session: LevelMeterSession?
         private let lock = NSLock()
-        private var started = false
+        private var settled = false
         init(generation: UInt64) {
             self.generation = generation
             // Numbered, so several pickers' sessions are told apart in a sample or crash report.
             self.queue = DispatchQueue(label: "input-level-monitor.session.\(generation)")
         }
-        var hasStarted: Bool { lock.lock(); defer { lock.unlock() }; return started }
-        func markStarted() { lock.lock(); defer { lock.unlock() }; started = true }
+        /// The slot reached a final status (live, in use, unavailable): the watchdog leaves it alone.
+        var isSettled: Bool { lock.lock(); defer { lock.unlock() }; return settled }
+        func markSettled() { lock.lock(); defer { lock.unlock() }; settled = true }
     }
 
     public override init() {
@@ -195,8 +196,22 @@ public final class InputLevelMonitor: NSObject {
         let recording = recordingMicrophone
         let unresponsiveAfter = self.unresponsiveAfter
         slot.queue.async { [weak self] in
-            // `self` is only ever held briefly below — never across a wait or the blocking start — so a
-            // monitor dropped meanwhile can still deinit and retire the session.
+            // `self` is only ever held briefly below — never across a wait or a blocking device call — so
+            // a monitor dropped meanwhile can still deinit and retire the session.
+
+            // Say so if getting this mic going is slow. Armed NOW, so it covers every device read below —
+            // the default-device lookup, building the input, waiting for another start, the start itself —
+            // each of which can hang on a wedged device. Decided ON the publish executor and only while
+            // the slot hasn't settled, so a quick "In use"/"Unavailable" is never overwritten, and a start
+            // that finishes as this fires is never LEFT showing "not responding" (it can flash it for one
+            // frame; `.live` follows).
+            weak var monitor = self
+            DispatchQueue.global().asyncAfter(deadline: .now() + unresponsiveAfter) {
+                publish {
+                    guard let monitor, monitor.isCurrent(slot.generation), !slot.isSettled else { return }
+                    monitor.status = .notResponding
+                }
+            }
 
             /// Whether the recording is capturing this physical device right now.
             func isRecordingMic(_ key: String) -> Bool {
@@ -205,40 +220,34 @@ public final class InputLevelMonitor: NSObject {
                 return recordingPhysical == key
             }
 
+            /// Report a final status — the watchdog will not override it.
+            func settle(_ final: LevelMeterStatus, _ m: InputLevelMonitor) {
+                slot.markSettled()
+                m.report(final, for: slot.generation)
+            }
+
             // 1. Which physical device, and may we meter it at all?
             let key: String? = {
                 guard let m = self, m.isCurrent(slot.generation) else { return nil }   // superseded
-                guard let key = physicalDevice(deviceId) else {
-                    m.report(.unavailable, for: slot.generation); return nil
-                }
-                if isRecordingMic(key) {
-                    m.report(.inUseByRecording, for: slot.generation); return nil
-                }
+                guard let key = physicalDevice(deviceId) else { settle(.unavailable, m); return nil }
+                if isRecordingMic(key) { settle(.inUseByRecording, m); return nil }
                 return key
             }()
             guard let key else { return }
 
             // 2. Another start on this device still in flight — stuck, or just another picker opening it:
             // wait for it rather than open the device a second time. Sleeping, never parked in the HAL;
-            // "not responding" once the wait runs long. The loop exits only when the claim succeeds, this
-            // slot is superseded (a new start, or stop() — which the picker's onDisappear calls), or the
-            // monitor is gone; so behind a start stuck for good it polls for as long as its picker is
-            // showing that mic, and at most ~50 ms after it stops. Each new slot waits on its own, so
-            // re-picking the stuck mic shows "not responding" again after `unresponsiveAfter`.
+            // the watchdog above says "not responding" if the wait runs long. The loop exits only when
+            // the claim succeeds, this slot is superseded (a new start, or stop() — which the picker's
+            // onDisappear calls), or the monitor is gone; so behind a start stuck for good it polls for as
+            // long as its picker is showing that mic, and at most ~50 ms after it stops.
             // THREAD BUDGET: one sleeping GCD thread per picker showing a stuck mic — in practice at most
             // two pickers are ever open (Settings plus one dialog). See CLAUDE.md (InputLevelMonitor) and
             // #192 before adding another picker.
-            let waitBegan = Date()
-            var saidNotResponding = false
             while !pending.claim(key) {
-                // The exit that bounds this: stop() or a new start() bumps the generation, so the thread
-                // is released as soon as the picker closes or the user picks another mic. No release on
-                // this exit: nothing was claimed — claim() has returned false every time so far.
-                guard let m = self, m.isCurrent(slot.generation) else { return }
-                if !saidNotResponding, Date().timeIntervalSince(waitBegan) >= unresponsiveAfter {
-                    m.report(.notResponding, for: slot.generation)
-                    saidNotResponding = true
-                }
+                // The exit that bounds this. No release on it: nothing was claimed — claim() has returned
+                // false every time so far.
+                guard self?.isCurrent(slot.generation) == true else { return }
                 Thread.sleep(forTimeInterval: 0.05)
             }
 
@@ -246,29 +255,16 @@ public final class InputLevelMonitor: NSObject {
             let session: LevelMeterSession? = {
                 guard let m = self, m.isCurrent(slot.generation) else { return nil }
                 // Again: the recording may have switched to this very mic while step 2 waited.
-                if isRecordingMic(key) {
-                    m.report(.inUseByRecording, for: slot.generation); return nil
-                }
-                guard let made = makeSession(deviceId, slot.generation, m) else {
-                    m.report(.unavailable, for: slot.generation); return nil
-                }
+                if isRecordingMic(key) { settle(.inUseByRecording, m); return nil }
+                guard let made = makeSession(deviceId, slot.generation, m) else { settle(.unavailable, m); return nil }
                 return m.isCurrent(slot.generation) ? made : nil               // superseded while building
             }()
             guard let session else { pending.release(key); return }
             slot.session = session
 
-            // 4. Start it. Say so if that is slow — decided ON the publish executor, where `.live` is also
-            // set, so a start that finishes just as this fires is never LEFT showing "not responding". It
-            // can flash it for one frame (the check may run just before markStarted()); `.live` follows.
-            weak var monitor = self
-            DispatchQueue.global().asyncAfter(deadline: .now() + unresponsiveAfter) {
-                publish {
-                    guard let monitor, monitor.isCurrent(slot.generation), !slot.hasStarted else { return }
-                    monitor.status = .notResponding
-                }
-            }
+            // 4. Start it.
             session.startRunning()   // may block for a long time, or forever — only this queue waits
-            slot.markStarted()
+            slot.markSettled()
             // The registry tracks starts IN FLIGHT, not sessions: once this start has returned, another
             // picker may open the same mic — two live meters on one device are normal (Settings plus a
             // dialog). So a new slot can start before a superseded one's queued stopRunning() has run;

@@ -25,6 +25,8 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
 
     /// The last scanned list, for views. Main-actor: only ever written there — the compiler holds us to it.
     @MainActor public private(set) var devices: [AudioInputDevice] = [AudioInputDevice(id: AudioInputDevice.systemDefaultID, name: "System Default")]
+    /// The scan whose list `devices` holds, so an older scan's publish never overwrites a newer one.
+    @ObservationIgnored @MainActor private var publishedSerial: UInt64 = 0
 
     private let scan: @Sendable () -> [AudioInputDevice]
     private let queue = DispatchQueue(label: "audio-device-catalog")
@@ -136,9 +138,14 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
             // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
             ready.forEach { $0(found) }
-            // A compiler-checked hop to the main actor. Ordering is safe: scans are serialized, so
-            // there is one publish per finished scan.
-            Task { @MainActor [weak self] in self?.devices = found }
+            // A compiler-checked hop to the main actor. A scan can finish before the previous one's
+            // publish has run, so each publish carries its scan's serial and only a newer one lands —
+            // correct whatever order the tasks run in.
+            Task { @MainActor [weak self] in
+                guard let self, serial > self.publishedSerial else { return }
+                self.publishedSerial = serial
+                self.devices = found
+            }
         }
     }
 }

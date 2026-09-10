@@ -530,6 +530,36 @@ struct InputLevelMonitorNonBlockingTests {
         #expect(fast.starts == 0)
     }
 
+    @Test("a mic whose input build hangs says not responding too — not only a slow start")
+    func stuckBuildSaysNotResponding() {
+        // Building the AVCaptureDeviceInput (and the default-device lookup) read the HAL as well; a hang
+        // there must not leave the picker on a silent meter with no explanation.
+        let buildGate = DispatchSemaphore(value: 0)
+        let q = DispatchQueue(label: "test.publish")
+        let m = InputLevelMonitor(
+            makeSession: { _, _, _ in buildGate.wait(); return InstantSession() },
+            publish: { q.async(execute: $0) }, pendingStarts: PendingStartRegistry(), unresponsiveAfter: 0.1
+        )
+        m.start(deviceId: "A")
+        #expect(eventually { q.sync { m.status } == .notResponding }, "a hung build left the picker on a silent meter")
+        buildGate.signal()
+        #expect(eventually { q.sync { m.status } == .live }, "the meter never came back once the build returned")
+    }
+
+    @Test("a quick In use is never overwritten by the not-responding watchdog")
+    func settledStatusSurvivesTheWatchdog() {
+        let recording = RecordingMicrophone()
+        recording.set("A")
+        let q = DispatchQueue(label: "test.publish")
+        let m = InputLevelMonitor(makeSession: { _, _, _ in InstantSession() }, publish: { q.async(execute: $0) },
+                                  pendingStarts: PendingStartRegistry(), recordingMicrophone: recording,
+                                  unresponsiveAfter: 0.1)
+        m.start(deviceId: "A")
+        #expect(eventually { q.sync { m.status } == .inUseByRecording })
+        Thread.sleep(forTimeInterval: 0.4)   // well past the watchdog's 0.1 s
+        #expect(q.sync { m.status } == .inUseByRecording, "the watchdog overwrote a settled status")
+    }
+
     @Test("a start that has not returned in time says the mic is not responding, then recovers")
     func slowStartReportsNotResponding() {
         let slow = HangingStartSession()
