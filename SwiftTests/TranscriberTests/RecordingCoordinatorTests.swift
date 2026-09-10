@@ -379,6 +379,20 @@ private struct Harness {
         #expect(h.notified.value.map { $0.title } == ["Recovery File Not Updated"], "a stale recovery mic went unreported")
     }
 
+    @Test func switchWithTheRecoveryFileMissingSaysSo() async throws {
+        // The sentinel was deleted mid-recording: the switch works, but a crash restart has nothing to
+        // resume from on the new mic. That must not go unreported either.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)   // precondition: no recovery file
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.recordingMic.current == .some("mic-2"))
+        #expect(h.notified.value.map { $0.title } == ["Recovery File Not Updated"])
+    }
+
     @Test func failedManualSwitchKeepsThePreviousMicMarked() async throws {
         let h = try Harness()
         _ = try h.writeSentinel(micDeviceUID: "mic-1")

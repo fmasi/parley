@@ -282,20 +282,28 @@ public final class RecordingCoordinator {
             }
             throw error
         }
-        if var sentinel = RecordingSentinel.read(directory: sentinelDirectory) {
-            sentinel.micDeviceUID = deviceId
-            do {
-                try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
-            } catch {
-                Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .public)")
-                // The switch itself worked; only a crash restart would now resume on the mic the user
-                // left (possibly the dead one they switched away from). Say so rather than stay silent.
-                notify(
-                    "Recovery File Not Updated",
-                    "The microphone switch worked, but if the recording is interrupted it may resume on the previous microphone."
-                )
-            }
+        // The switch itself worked. If the recovery file can't record it — unwritable, or missing
+        // (deleted mid-recording) — a crash restart would resume on the mic the user left, possibly the
+        // dead one they switched away from. Say so rather than stay silent.
+        guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory) else {
+            Logger.state.error("Could not record the switched mic: the recovery file is missing during a live recording")
+            warnRecoveryNotUpdated()
+            return
         }
+        sentinel.micDeviceUID = deviceId
+        do {
+            try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+        } catch {
+            Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .public)")
+            warnRecoveryNotUpdated()
+        }
+    }
+
+    private func warnRecoveryNotUpdated() {
+        notify(
+            "Recovery File Not Updated",
+            "The microphone switch worked, but if the recording is interrupted it may resume on the previous microphone."
+        )
     }
 
     /// For a recording no coordinator started — the relaunch re-attach (Flow A/B): mirror the helper's
