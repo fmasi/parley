@@ -131,9 +131,9 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
             // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
             ready.forEach { $0(found) }
-            DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated { self?.devices = found }
-            }
+            // A compiler-checked hop to the main actor. Ordering is safe: scans are serialized, so
+            // there is one publish per finished scan.
+            Task { @MainActor [weak self] in self?.devices = found }
         }
     }
 }
