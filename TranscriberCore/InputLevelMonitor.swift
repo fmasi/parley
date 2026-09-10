@@ -265,6 +265,9 @@ public final class InputLevelMonitor: NSObject {
                 guard let made = makeSession(deviceId, slot.generation, m) else { settle(.unavailable, m); return nil }
                 return m.isCurrent(slot.generation) ? made : nil               // superseded while building
             }()
+            // EVERY nil from step 3 — superseded, "In use" on the re-check, "Unavailable" — lands here, so
+            // the claim taken in step 2 is always given back. A new early return inside that closure must
+            // return nil, never exit the block, or the device stays claimed.
             guard let session else { pending.release(key); return }
             slot.session = session
 
