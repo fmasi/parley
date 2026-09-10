@@ -42,33 +42,26 @@ public final class RecordingMicrophone: @unchecked Sendable {
     private let observers = NSHashTable<AnyObject>.weakObjects()
     public init() {}
     /// The recording is capturing from `deviceId` (`nil` = the system default).
-    public func set(_ deviceId: String?) { update(.some(deviceId)) }
+    @MainActor public func set(_ deviceId: String?) { update(.some(deviceId)) }
     /// Nothing is recording.
-    public func clear() { update(.none) }
-    /// `.none` when nothing is recording; `.some(nil)` when recording on the system default.
+    @MainActor public func clear() { update(.none) }
+    /// `.none` when nothing is recording; `.some(nil)` when recording on the system default. Readable
+    /// from any thread (level meters check it on their session queues); written only on the main actor.
     public var current: String?? { lock.lock(); defer { lock.unlock() }; return device }
 
     /// Tell `observer` (held weakly) about every change from now on.
-    public func addObserver(_ observer: RecordingMicrophoneObserver) {
+    @MainActor public func addObserver(_ observer: RecordingMicrophoneObserver) {
         lock.lock(); observers.add(observer); lock.unlock()
     }
 
-    private func update(_ value: String??) {
+    /// Main-actor only, so observers are told synchronously and stay exactly in step with `current`.
+    @MainActor private func update(_ value: String??) {
         lock.lock()
         device = value
         let targets = observers.allObjects
         lock.unlock()
-        // Every writer is main-actor code, so this normally notifies synchronously, keeping observers
-        // exactly in step with `current`; anything else is hopped onto main.
-        let notify = { @MainActor in
-            for case let observer as RecordingMicrophoneObserver in targets {
-                observer.recordingMicrophoneChanged(to: value)
-            }
-        }
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { notify() }
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated { notify() } }
+        for case let observer as RecordingMicrophoneObserver in targets {
+            observer.recordingMicrophoneChanged(to: value)
         }
     }
 }
@@ -80,7 +73,8 @@ public enum LevelMeterStatus: Equatable, Sendable {
     case live
     /// The recording is capturing this mic; metering it too is what froze the app (#192).
     case inUseByRecording
-    /// The device has not started in time, or a start on it is already stuck.
+    /// The device has not started in time — or another start on it (stuck, possibly for good, or just
+    /// another picker opening it) has kept it busy for too long. Clears by itself if that start finishes.
     case notResponding
     /// No such device, or it could not be opened.
     case unavailable
@@ -124,13 +118,17 @@ public final class InputLevelMonitor: NSObject {
     /// One session's lifecycle. One queue PER SESSION: a session whose `startRunning()` never returns
     /// wedges only its own queue, so the user can still pick another mic and have it start.
     private final class Slot: @unchecked Sendable {
-        let queue = DispatchQueue(label: "input-level-monitor.session")
+        let queue: DispatchQueue
         let generation: UInt64
         /// Confined to `queue`.
         var session: LevelMeterSession?
         private let lock = NSLock()
         private var started = false
-        init(generation: UInt64) { self.generation = generation }
+        init(generation: UInt64) {
+            self.generation = generation
+            // Numbered, so several pickers' sessions are told apart in a sample or crash report.
+            self.queue = DispatchQueue(label: "input-level-monitor.session.\(generation)")
+        }
         var hasStarted: Bool { lock.lock(); defer { lock.unlock() }; return started }
         func markStarted() { lock.lock(); started = true; lock.unlock() }
     }
@@ -189,33 +187,49 @@ public final class InputLevelMonitor: NSObject {
         let recording = recordingMicrophone
         let unresponsiveAfter = self.unresponsiveAfter
         slot.queue.async { [weak self] in
-            // Setup is scoped so `self` is NOT held across the blocking call below: a monitor dropped
-            // while its start hangs must still be able to deinit and retire the session.
-            let prepared: (session: LevelMeterSession, key: String)? = {
-                guard let self, self.isCurrent(slot.generation) else { return nil }   // superseded: don't open it
+            // `self` is only ever held briefly below — never across a wait or the blocking start — so a
+            // monitor dropped meanwhile can still deinit and retire the session.
+
+            // 1. Which physical device, and may we meter it at all?
+            let key: String? = {
+                guard let m = self, m.isCurrent(slot.generation) else { return nil }   // superseded
                 guard let key = physicalDevice(deviceId) else {
-                    self.report(.unavailable, for: slot.generation); return nil
+                    m.report(.unavailable, for: slot.generation); return nil
                 }
                 if case .some(let recordingDevice) = recording.current, physicalDevice(recordingDevice) == key {
-                    self.report(.inUseByRecording, for: slot.generation); return nil
+                    m.report(.inUseByRecording, for: slot.generation); return nil
                 }
-                guard pending.claim(key) else {                                     // already stuck elsewhere
-                    self.report(.notResponding, for: slot.generation); return nil
-                }
-                guard let made = makeSession(deviceId, slot.generation, self) else {
-                    pending.release(key)
-                    self.report(.unavailable, for: slot.generation); return nil
-                }
-                guard self.isCurrent(slot.generation) else {                        // superseded while building
-                    pending.release(key); return nil
-                }
-                return (made, key)
+                return key
             }()
-            guard let prepared else { return }
-            slot.session = prepared.session
+            guard let key else { return }
 
-            // Say so if the start is slow. Decided ON the publish executor, where `.live` is also set,
-            // so a start that finishes just as this fires can never be left showing "not responding".
+            // 2. Another start on this device still in flight — stuck, or just another picker opening it:
+            // wait for it rather than open the device a second time. Sleeping, never parked in the HAL;
+            // "not responding" once the wait runs long; given up the moment this start is superseded.
+            let waitBegan = Date()
+            var saidNotResponding = false
+            while !pending.claim(key) {
+                guard let m = self, m.isCurrent(slot.generation) else { return }
+                if !saidNotResponding, Date().timeIntervalSince(waitBegan) >= unresponsiveAfter {
+                    m.report(.notResponding, for: slot.generation)
+                    saidNotResponding = true
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+
+            // 3. Build it — on this queue, never the caller's.
+            let session: LevelMeterSession? = {
+                guard let m = self, m.isCurrent(slot.generation) else { return nil }
+                guard let made = makeSession(deviceId, slot.generation, m) else {
+                    m.report(.unavailable, for: slot.generation); return nil
+                }
+                return m.isCurrent(slot.generation) ? made : nil               // superseded while building
+            }()
+            guard let session else { pending.release(key); return }
+            slot.session = session
+
+            // 4. Start it. Say so if that is slow — decided ON the publish executor, where `.live` is also
+            // set, so a start that finishes just as this fires can never be left showing "not responding".
             weak var monitor = self
             DispatchQueue.global().asyncAfter(deadline: .now() + unresponsiveAfter) {
                 publish {
@@ -223,12 +237,12 @@ public final class InputLevelMonitor: NSObject {
                     monitor.status = .notResponding
                 }
             }
-            prepared.session.startRunning()   // may block for a long time, or forever — only this queue waits
+            session.startRunning()   // may block for a long time, or forever — only this queue waits
             slot.markStarted()
-            pending.release(prepared.key)
+            pending.release(key)
             // Superseded while starting: retire() already queued this session's stop behind us.
-            guard let self, self.isCurrent(slot.generation) else { return }
-            self.report(.live, for: slot.generation)
+            guard let m = self, m.isCurrent(slot.generation) else { return }
+            m.report(.live, for: slot.generation)
         }
     }
 

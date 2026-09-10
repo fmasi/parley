@@ -88,7 +88,9 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             let token = refresh(then: { once.resume(($0, true)) })
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
                 // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
-                // per dialog opened while it hangs.
+                // per dialog opened while it hangs. A scan finishing between the removal and the resume
+                // below makes this report a fresh list as stale — the safe direction (the dialog keeps
+                // the user's mic). Don't fold both into one lock hold: resuming under the lock is worse.
                 if let token {
                     lock.lock()
                     waiters[token] = nil

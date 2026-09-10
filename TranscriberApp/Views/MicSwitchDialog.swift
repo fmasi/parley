@@ -71,6 +71,8 @@ struct MicSwitchDialog: View {
             // device's HAL IO (#192). Bounded: a wedged meter must not hold up the switch.
             _ = await levelMonitor.stopAndRelease(timeout: 1)
             do {
+                // Success: onSwitch closes the panel. isSwitching stays true on purpose — the button
+                // stays disabled until the view is torn down, instead of flickering back to "Switch".
                 try await onSwitch(target)
             } catch {
                 errorMessage = error.localizedDescription

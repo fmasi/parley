@@ -407,6 +407,27 @@ private struct Harness {
         #expect(h.coordinator.helperMicId == "reattached-mic")
     }
 
+    @Test func reattachedRecordingMirrorsHelperAutoSwitches() async throws {
+        // Flow A/B: no coordinator started this recording, so the app wires the helper's mic-change
+        // report through mirrorMicSwitches — meters and the menu label must follow an auto-switch.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        RecordingCoordinator.mirrorMicSwitches(of: h.client, while: h.appState, into: h.recordingMic)
+
+        h.client.onMicDeviceChanged?("mic-7")
+        var waited = 0
+        while h.recordingMic.current != .some("mic-7"), waited < 200 {
+            try await Task.sleep(nanoseconds: 5_000_000); waited += 1
+        }
+        #expect(h.recordingMic.current == .some("mic-7"))
+        #expect(h.coordinator.helperMicId == "mic-7", "the menu's mic label did not follow the auto-switch")
+
+        h.appState.phase = .idle
+        h.client.onMicDeviceChanged?("mic-8")   // a late report after the recording ended is ignored
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(h.recordingMic.current == .some("mic-7"))
+    }
+
     @Test func switchWhenTheRecordingAlreadyEndedTouchesNothing() async throws {
         let h = try Harness()   // idle: the recording ended while the switcher was open
 

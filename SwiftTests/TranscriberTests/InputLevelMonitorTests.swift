@@ -181,6 +181,21 @@ private final class InstantSession: LevelMeterSession, @unchecked Sendable {
     func stopRunning() { lock.lock(); _stops += 1; lock.unlock() }
 }
 
+/// Hands out the given sessions in order, one per build.
+private final class SessionSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: [LevelMeterSession]
+    private var _handedOut = 0
+    init(_ sessions: [LevelMeterSession]) { remaining = sessions }
+    var handedOut: Int { lock.lock(); defer { lock.unlock() }; return _handedOut }
+    func next() -> LevelMeterSession? {
+        lock.lock(); defer { lock.unlock() }
+        guard !remaining.isEmpty else { return nil }
+        _handedOut += 1
+        return remaining.removeFirst()
+    }
+}
+
 /// A session factory keyed by device id that records how, where and with which generation it was called.
 private final class RecordingFactory: @unchecked Sendable {
     private let lock = NSLock()
@@ -296,7 +311,8 @@ struct InputLevelMonitorNonBlockingTests {
         let registry = PendingStartRegistry()
         let q = DispatchQueue(label: "test.publish")
         let first = InputLevelMonitor(makeSession: { id, g, _ in factory.make(id, g) }, publish: { _ in }, pendingStarts: registry)
-        let second = InputLevelMonitor(makeSession: { id, g, _ in factory.make(id, g) }, publish: { q.async(execute: $0) }, pendingStarts: registry)
+        let second = InputLevelMonitor(makeSession: { id, g, _ in factory.make(id, g) }, publish: { q.async(execute: $0) },
+                                       pendingStarts: registry, unresponsiveAfter: 0.1)
 
         first.start(deviceId: "dead")
         guard dead.entered.wait(timeout: .now() + 2) == .success else {
@@ -306,6 +322,7 @@ struct InputLevelMonitorNonBlockingTests {
         #expect(eventually { q.sync { second.status } == .notResponding }, "the second picker was not told the mic is stuck")
         #expect(dead.starts == 1, "a second startRunning() was issued on a device already hung in one")
         #expect(factory.calls("dead") == 1, "a second session was built on a device already hung in one")
+        second.stop()   // it would otherwise take its turn on the (fake, single-use) session once released
         dead.release.signal()
     }
 
@@ -452,7 +469,8 @@ struct InputLevelMonitorNonBlockingTests {
         let first = InputLevelMonitor(makeSession: { id, g, _ in factory.make(id, g) }, physicalDevice: toPhysical,
                                       publish: { _ in }, pendingStarts: registry)
         let second = InputLevelMonitor(makeSession: { id, g, _ in factory.make(id, g) }, physicalDevice: toPhysical,
-                                       publish: { q.async(execute: $0) }, pendingStarts: registry)
+                                       publish: { q.async(execute: $0) }, pendingStarts: registry,
+                                       unresponsiveAfter: 0.1)
         first.start(deviceId: nil)   // hangs on the built-in mic
         guard dead.entered.wait(timeout: .now() + 2) == .success else {
             dead.release.signal(); Issue.record("start never began"); return
@@ -460,7 +478,34 @@ struct InputLevelMonitorNonBlockingTests {
         second.start(deviceId: "builtin")
         #expect(eventually { q.sync { second.status } == .notResponding })
         #expect(factory.calls("builtin") == 0, "opened the stuck mic again under its other name")
+        second.stop()
         dead.release.signal()
+    }
+
+    @Test("a second picker on a mic another is still starting waits for it, then goes live")
+    func secondPickerWaitsForTheFirstStartThenGoesLive() {
+        // Two pickers opening the same mic at once (Settings plus a dialog) — or the switcher reopened
+        // while the first start is slow: the second must not open the device again, and must not be
+        // left saying "not responding" for good once the first start finishes.
+        let slow = HangingStartSession()
+        let fast = InstantSession()
+        let sessions = SessionSequence([slow, fast])
+        let registry = PendingStartRegistry()
+        let q = DispatchQueue(label: "test.publish")
+        let first = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { _ in }, pendingStarts: registry)
+        let second = InputLevelMonitor(makeSession: { _, _, _ in sessions.next() }, publish: { q.async(execute: $0) },
+                                       pendingStarts: registry, unresponsiveAfter: 0.1)
+        first.start(deviceId: "A")
+        guard slow.entered.wait(timeout: .now() + 2) == .success else {
+            slow.release.signal(); Issue.record("first start never began"); return
+        }
+        second.start(deviceId: "A")
+        #expect(eventually { q.sync { second.status } == .notResponding })
+        #expect(sessions.handedOut == 1, "the second picker opened the mic while another start on it was in flight")
+
+        slow.release.signal()
+        #expect(eventually { q.sync { second.status } == .live }, "the second picker never recovered once the first start finished")
+        #expect(fast.starts == 1)
     }
 
     @Test("a start that has not returned in time says the mic is not responding, then recovers")

@@ -288,6 +288,22 @@ public final class RecordingCoordinator {
         }
     }
 
+    /// For a recording no coordinator started — the relaunch re-attach (Flow A/B): mirror the helper's
+    /// auto-switches into `recordingMicrophone`, so level meters stay off the mic actually being
+    /// captured and the menu's label follows (#192). A coordinator does this itself in startRecording.
+    public static func mirrorMicSwitches(
+        of client: any RecordingCaptureClient,
+        while appState: AppState,
+        into recordingMicrophone: RecordingMicrophone = .shared
+    ) {
+        client.onMicDeviceChanged = { deviceId in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                recordingMicrophone.set(deviceId)
+            }
+        }
+    }
+
     public enum MicSwitchError: Error, LocalizedError {
         case recoveryInProgress
         public var errorDescription: String? {

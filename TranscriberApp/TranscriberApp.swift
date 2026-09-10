@@ -374,12 +374,7 @@ struct TranscriberApp: App {
     ) {
         // Mirror helper auto-switches into the recording-mic record, as the coordinator does for a
         // recording it started, so level meters stay off the mic actually being captured (#192).
-        captureClient.onMicDeviceChanged = { deviceId in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                RecordingMicrophone.shared.set(deviceId)
-            }
-        }
+        RecordingCoordinator.mirrorMicSwitches(of: captureClient, while: appState)
         captureClient.onServiceCrash = {
             Task { @MainActor in
                 guard appState.isRecording else { return }
