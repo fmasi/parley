@@ -25,6 +25,7 @@ private final class GatedScan: @unchecked Sendable {
 @Suite("AudioDeviceCatalog never scans devices on its caller (#192)")
 struct AudioDeviceCatalogTests {
 
+    // `id: nil` is AudioInputDevice.systemDefaultID — pinned by AudioDeviceEnumeratorTests.systemDefaultIDIsNil.
     private let systemDefaultOnly = [AudioInputDevice(id: nil, name: "System Default")]
     private let withUSB = [AudioInputDevice(id: nil, name: "System Default"), AudioInputDevice(id: "usb-1", name: "USB Mic")]
 

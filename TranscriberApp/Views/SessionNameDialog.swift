@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 import TranscriberCore
 
 struct SessionNameDialog: View {
@@ -88,7 +89,11 @@ struct SessionNameDialog: View {
         Task {
             // Let go of the mic before the capture helper opens it, so the two never contend for the
             // device's HAL IO (#192). Bounded: a wedged meter must not hold up the recording.
-            _ = await levelMonitor.stopAndRelease(timeout: 1)
+            if await !levelMonitor.stopAndRelease(timeout: 1) {
+                // Known, accepted overlap (#192): the meter's start is still stuck. Logged so a future
+                // hang report can be traced to it.
+                Logger.state.warning("Level meter did not release the mic within 1 s — proceeding with the recording start anyway")
+            }
             onStart(sessionName, deviceId)
         }
     }

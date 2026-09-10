@@ -24,7 +24,7 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     }()
 
     /// The last scanned list, for views. Main-actor: only ever written there — the compiler holds us to it.
-    @MainActor public private(set) var devices: [AudioInputDevice] = [AudioInputDevice(id: AudioInputDevice.systemDefaultID, name: "System Default")]
+    @MainActor public private(set) var devices: [AudioInputDevice] = AudioDeviceCatalog.systemDefaultOnly
     /// The scan whose list `devices` holds, so an older scan's publish never overwrites a newer one.
     @ObservationIgnored @MainActor private var publishedSerial: UInt64 = 0
 

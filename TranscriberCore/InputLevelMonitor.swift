@@ -44,7 +44,8 @@ public final class RecordingMicrophone: @unchecked Sendable {
     public static let shared = RecordingMicrophone()
     private let lock = NSLock()
     private var device: String?? = .none
-    /// Touched only on the main actor.
+    /// Touched only on the main actor — protected by that isolation (addObserver/update are
+    /// @MainActor), NOT by `lock`. Any future off-main path to it must hop to the main actor first.
     private let observers = NSHashTable<AnyObject>.weakObjects()
     public init() {}
     /// The recording is capturing from `deviceId` (`nil` = the system default).
