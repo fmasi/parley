@@ -199,7 +199,8 @@ public final class InputLevelMonitor: NSObject {
                 guard let key = physicalDevice(deviceId) else {
                     m.report(.unavailable, for: slot.generation); return nil
                 }
-                if case .some(let recordingDevice) = recording.current, physicalDevice(recordingDevice) == key {
+                if case .some(let recordingDevice) = recording.current,
+                   let recordingPhysical = physicalDevice(recordingDevice), recordingPhysical == key {
                     m.report(.inUseByRecording, for: slot.generation); return nil
                 }
                 return key

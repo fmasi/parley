@@ -308,10 +308,18 @@ public final class RecordingCoordinator {
     ) {
         client.onMicDeviceChanged = { deviceId in
             Task { @MainActor in
-                guard appState.isRecording else { return }
-                recordingMicrophone.set(deviceId)
+                RecordingCoordinator.applyMirroredMicSwitch(to: deviceId, while: appState, into: recordingMicrophone)
             }
         }
+    }
+
+    /// One mirrored report, on the main actor: applied only while a recording is running — a late
+    /// report after it ended is ignored. Split out so that rule is testable without timing.
+    static func applyMirroredMicSwitch(
+        to deviceId: String?, while appState: AppState, into recordingMicrophone: RecordingMicrophone
+    ) {
+        guard appState.isRecording else { return }
+        recordingMicrophone.set(deviceId)
     }
 
     public enum MicSwitchError: Error, LocalizedError {

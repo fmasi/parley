@@ -445,9 +445,10 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("mic-7"))
         #expect(h.coordinator.helperMicId == "mic-7", "the menu's mic label did not follow the auto-switch")
 
+        // A late report after the recording ended is ignored — checked on the handler itself, so this
+        // negative doesn't depend on how soon the hop to the main actor runs.
         h.appState.phase = .idle
-        h.client.onMicDeviceChanged?("mic-8")   // a late report after the recording ended is ignored
-        try await Task.sleep(nanoseconds: 100_000_000)
+        RecordingCoordinator.applyMirroredMicSwitch(to: "mic-8", while: h.appState, into: h.recordingMic)
         #expect(h.recordingMic.current == .some("mic-7"))
     }
 
