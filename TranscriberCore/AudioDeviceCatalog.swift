@@ -9,6 +9,11 @@ import os
 /// (redrawn every tick of the live recording timer) and in the dialogs' window controllers, all on the
 /// main thread. Views now read `devices`; code that needs a fresh list awaits `refreshed(timeout:)`,
 /// which never waits longer than it is told.
+///
+/// A scan that NEVER returns (a HAL lock held for good) leaves the list at its last known state until
+/// the HAL lets go by itself — e.g. the device is physically removed — or the app is relaunched. That
+/// is deliberate: a retry would park another thread in the same HAL wait, the pile-up this type exists
+/// to prevent. Callers stay bounded, and the stuck scan is logged after `stuckAfter`.
 @Observable
 public final class AudioDeviceCatalog: @unchecked Sendable {
     /// Starts its first scan as soon as it is first touched.

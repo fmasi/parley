@@ -139,7 +139,6 @@ struct InputLevelMonitorTests {
 // `__psynch_mutexwait`), so the UI never came back. The fakes below reproduce that hang exactly: a
 // lifecycle call that simply does not return.
 
-import Foundation
 
 /// Carries a non-Sendable value across a thread boundary in a test.
 private final class Carry<T>: @unchecked Sendable {
@@ -360,7 +359,6 @@ struct InputLevelMonitorNonBlockingTests {
     }
 
     @Test("stopAndRelease() returns once stopRunning() has actually let the device go")
-    @MainActor
     func stopAndReleaseWaitsForTheDevice() async {
         let session = InstantSession()
         let m = monitor(RecordingFactory(["default": session]))
@@ -372,7 +370,6 @@ struct InputLevelMonitorNonBlockingTests {
     }
 
     @Test("stopAndRelease() gives up after its timeout instead of waiting on a wedged device")
-    @MainActor
     func stopAndReleaseIsBounded() async {
         let hang = HangingStopSession()
         let m = monitor(RecordingFactory(["default": hang]))
@@ -389,7 +386,6 @@ struct InputLevelMonitorNonBlockingTests {
     }
 
     @Test("stopAndRelease() with nothing running returns at once")
-    @MainActor
     func stopAndReleaseWhenIdle() async {
         let m = monitor(RecordingFactory([:]))
         #expect(await m.stopAndRelease(timeout: 2))

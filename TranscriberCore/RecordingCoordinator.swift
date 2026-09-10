@@ -269,8 +269,12 @@ public final class RecordingCoordinator {
         } catch {
             // Put back exactly what was there — unless, during the await, the recording ended (stop
             // already released the mic) or the helper reported a different mic of its own.
-            if appState.isRecording, recordingMicrophone.current == .some(deviceId) {
-                if case .some(let marked) = before { recordingMicrophone.set(marked) } else { recordingMicrophone.clear() }
+            // Every path into a live recording (start, crash restart, Flow A/B re-attach) marks its mic
+            // first, so `before` is always set here. Should a future path forget, keep the target marked
+            // rather than clear: "nothing is recording" mid-recording would let meters open its mic.
+            if appState.isRecording, recordingMicrophone.current == .some(deviceId),
+               case .some(let marked) = before {
+                recordingMicrophone.set(marked)
             }
             throw error
         }

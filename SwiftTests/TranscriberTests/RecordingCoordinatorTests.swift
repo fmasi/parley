@@ -448,6 +448,19 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("sentinel-mic"))
     }
 
+    @Test func failedSwitchNeverClearsTheMarkerMidRecording() async throws {
+        // A recording whose mic was (wrongly) never marked: a failed switch must not leave the app
+        // believing nothing is recording — meters would then open the recording's mic.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current != .none, "a live recording was left with no mic marked")
+    }
+
     @Test func switchDuringCrashRecoveryIsRefused() async throws {
         let h = try Harness()
         h.appState.phase = .recording(since: Date())
