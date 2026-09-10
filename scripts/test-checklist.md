@@ -168,3 +168,6 @@ lands. Verify the error message is the readable one.
       **In use**, and the one you left shows a live meter.
 - [ ] With the lid closed, pick the built-in mic in the switcher: within ~2 s it reads **Not
       responding** (or stays flat), and you can still pick another mic and switch.
+      Known gap: SWITCHING TO the not-responding mic itself can leave the dialog on "Switching…" for
+      a long time (the app stays responsive) — the helper waits on the same stuck device and the
+      call has no deadline yet (#194). Don't switch to a mic that says Not responding.

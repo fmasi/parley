@@ -508,8 +508,11 @@ private struct Harness {
     }
 
     @Test func failedSwitchNeverClearsTheMarkerMidRecording() async throws {
-        // A recording whose mic was (wrongly) never marked: a failed switch must not leave the app
-        // believing nothing is recording — meters would then open the recording's mic.
+        // A recording whose mic was (wrongly) never marked — no path does this today; every way into a
+        // live recording marks its mic first. A failed switch must not leave the app believing nothing
+        // is recording: meters would then open the recording's mic. With no previous mic to restore,
+        // the attempted one stays marked. Known, accepted limitation: the menu label then names that
+        // mic until the recording ends or the user switches again. Keeping the meters safe wins.
         let h = try Harness()
         h.appState.phase = .recording(since: Date())
         h.client.updateMicError = FakeCaptureError()
@@ -517,7 +520,8 @@ private struct Harness {
         await #expect(throws: FakeCaptureError.self) {
             try await h.coordinator.switchMicrophone(to: "mic-2")
         }
-        #expect(h.recordingMic.current != .none, "a live recording was left with no mic marked")
+        #expect(h.recordingMic.current == .some("mic-2"), "a live recording was left with no mic marked")
+        #expect(h.coordinator.helperMicId == "mic-2")   // the accepted label limitation, pinned
     }
 
     @Test func switchDuringCrashRecoveryIsRefused() async throws {
