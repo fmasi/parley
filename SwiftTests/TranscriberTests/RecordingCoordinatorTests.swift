@@ -376,7 +376,7 @@ private struct Harness {
 
         #expect(h.recordingMic.current == .some("mic-2"), "the switch itself should still have gone through")
         #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1")   // precondition: write failed
-        #expect(h.notified.value.map { $0.title } == ["Microphone Switched"], "a stale recovery mic went unreported")
+        #expect(h.notified.value.map { $0.title } == ["Recovery File Not Updated"], "a stale recovery mic went unreported")
     }
 
     @Test func failedManualSwitchKeepsThePreviousMicMarked() async throws {

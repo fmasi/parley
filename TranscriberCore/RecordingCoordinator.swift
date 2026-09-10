@@ -291,8 +291,8 @@ public final class RecordingCoordinator {
                 // The switch itself worked; only a crash restart would now resume on the mic the user
                 // left (possibly the dead one they switched away from). Say so rather than stay silent.
                 notify(
-                    "Microphone Switched",
-                    "If the recording is interrupted, it may resume on the previous microphone — the recovery file could not be updated."
+                    "Recovery File Not Updated",
+                    "The microphone switch worked, but if the recording is interrupted it may resume on the previous microphone."
                 )
             }
         }

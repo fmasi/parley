@@ -214,6 +214,8 @@ public final class InputLevelMonitor: NSObject {
             // monitor is gone; so behind a start stuck for good it polls for as long as its picker is
             // showing that mic, and at most ~50 ms after it stops. Each new slot waits on its own, so
             // re-picking the stuck mic shows "not responding" again after `unresponsiveAfter`.
+            // Cost: one sleeping GCD thread per picker showing a stuck mic — in practice at most two
+            // pickers are ever open (Settings plus one dialog).
             let waitBegan = Date()
             var saidNotResponding = false
             while !pending.claim(key) {
@@ -247,6 +249,11 @@ public final class InputLevelMonitor: NSObject {
             }
             session.startRunning()   // may block for a long time, or forever — only this queue waits
             slot.markStarted()
+            // The registry tracks starts IN FLIGHT, not sessions: once this start has returned, another
+            // picker may open the same mic — two live meters on one device are normal (Settings plus a
+            // dialog). So a new slot can start before a superseded one's queued stopRunning() has run;
+            // that brief overlap is the same harmless case. The hazard (#192) is the recording's mic,
+            // which RecordingMicrophone keeps every meter off.
             pending.release(key)
             // Superseded while starting: retire() already queued this session's stop behind us.
             guard let m = self, m.isCurrent(slot.generation) else { return }
