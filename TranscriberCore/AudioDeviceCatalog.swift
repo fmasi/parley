@@ -23,11 +23,10 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
         return catalog
     }()
 
-    /// The last scanned list, for views. Written only through `publish` (main in production).
-    public private(set) var devices: [AudioInputDevice]
+    /// The last scanned list, for views. Main-actor: only ever written there — the compiler holds us to it.
+    @MainActor public private(set) var devices: [AudioInputDevice] = [AudioInputDevice(id: AudioInputDevice.systemDefaultID, name: "System Default")]
 
     private let scan: @Sendable () -> [AudioInputDevice]
-    private let publish: (@escaping () -> Void) -> Void
     private let queue = DispatchQueue(label: "audio-device-catalog")
     /// Guards the state below. A leaf lock: never held across a scan.
     private let lock = NSLock()
@@ -43,23 +42,17 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
     private static let systemDefaultOnly = [AudioInputDevice(id: AudioInputDevice.systemDefaultID, name: "System Default")]
 
     public convenience init() {
-        self.init(
-            scan: { AudioDeviceEnumerator.availableDevices() },
-            publish: { DispatchQueue.main.async(execute: $0) }
-        )
+        self.init(scan: { AudioDeviceEnumerator.availableDevices() })
     }
 
-    /// Test seam: substitute the device scan and the executor `devices` is published on.
+    /// Test seam: substitute the device scan.
     init(
         scan: @escaping @Sendable () -> [AudioInputDevice],
-        publish: @escaping (@escaping () -> Void) -> Void,
         stuckAfter: TimeInterval = 5
     ) {
         self.stuckAfter = stuckAfter
-        self.devices = Self.systemDefaultOnly
         self.latest = Self.systemDefaultOnly
         self.scan = scan
-        self.publish = publish
     }
 
     /// Callers still waiting on the current scan. Test hook for the no-pile-up guarantee.
@@ -138,7 +131,9 @@ public final class AudioDeviceCatalog: @unchecked Sendable {
             // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
             // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
             ready.forEach { $0(found) }
-            publish { [weak self] in self?.devices = found }
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.devices = found }
+            }
         }
         return token
     }

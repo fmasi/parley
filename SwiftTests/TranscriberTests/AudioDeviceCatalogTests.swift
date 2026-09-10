@@ -51,11 +51,12 @@ struct AudioDeviceCatalogTests {
         return condition()
     }
 
-    private func catalog(_ gate: GatedScan, publish q: DispatchQueue = DispatchQueue(label: "test.publish")) -> AudioDeviceCatalog {
-        AudioDeviceCatalog(scan: { gate.scan() }, publish: { q.async(execute: $0) })
+    private func catalog(_ gate: GatedScan) -> AudioDeviceCatalog {
+        AudioDeviceCatalog(scan: { gate.scan() })
     }
 
     @Test("before any scan it offers System Default, without touching a device")
+    @MainActor
     func startsWithSystemDefault() {
         let gate = GatedScan(withUSB)
         let c = catalog(gate)
@@ -84,14 +85,17 @@ struct AudioDeviceCatalogTests {
         #expect(gate.threads.allSatisfy { $0 !== caller }, "the device scan ran on the caller's thread")
     }
 
-    @Test("a finished scan reaches views and latestDevices")
-    func finishedScanIsPublished() {
+    @Test("a finished scan reaches views (on the main actor) and latestDevices")
+    func finishedScanIsPublished() async throws {
         let gate = GatedScan(withUSB)
         gate.release.signal()
-        let q = DispatchQueue(label: "test.publish")
-        let c = catalog(gate, publish: q)
+        let c = catalog(gate)
         c.refresh()
-        #expect(eventually { q.sync { c.devices } == withUSB })
+        var polls = 0
+        while await MainActor.run(body: { c.devices }) != withUSB, polls < 400 {
+            try await Task.sleep(nanoseconds: 5_000_000); polls += 1
+        }
+        #expect(await MainActor.run { c.devices } == withUSB)
         #expect(c.latestDevices == withUSB)
     }
 
