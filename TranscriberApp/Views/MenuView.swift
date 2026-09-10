@@ -148,6 +148,9 @@ struct MenuView: View {
         // made mid-session (#150). Notifications only — the full checkAll() would also
         // hit screen-recording/calendar APIs on every open for no benefit here.
         .task { await permissionManager.refreshNotifications() }
+        // Likewise rescan mics on every open — in the background, so `activeMicName` stays current
+        // without `body` ever touching a device (#192).
+        .onAppear { AudioDeviceCatalog.shared.refresh() }
     }
 
     // MARK: - Panel sections
@@ -371,23 +374,21 @@ struct MenuView: View {
         // `helperMicKnown` is false until the helper reports back; when true, `helperMicId` wins
         // (nil = system default, non-nil = specific device). The coordinator owns both flags now.
         let id: String? = coordinator.helperMicKnown ? coordinator.helperMicId : selectedMicId
-        return AudioDeviceEnumerator.availableDevices()
+        // The cached list: this runs in `body`, and a device scan here froze the app (#192).
+        return AudioDeviceCatalog.shared.devices
             .first(where: { $0.id == id })?.name
             ?? "System Default"
     }
 
     private func openMicPicker() {
         // Mid-recording the switch is applied to the live capture; when idle it only updates the
-        // remembered selection. Everything else about the two cases is identical, so decide once
-        // here (at show time, as before) instead of duplicating the whole call.
-        let isRecording = appState.isRecording
+        // remembered selection. The coordinator decides which AT THE CLICK — a recording can end while
+        // the dialog is open — and a no-op when idle.
         MicSwitchWindowController.shared.show(
             currentDeviceId: selectedMicId,
             buttonLabel: "Switch"
         ) { newDeviceId in
-            if isRecording {
-                try await captureClient.updateMicrophone(deviceId: newDeviceId)
-            }
+            try await coordinator.switchMicrophone(to: newDeviceId)
             await MainActor.run {
                 selectedMicId = newDeviceId
             }

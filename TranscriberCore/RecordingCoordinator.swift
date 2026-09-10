@@ -44,6 +44,21 @@ public final class RecordingCoordinator {
     /// auto-switch. Valid only when `helperMicKnown` is true. `nil` = helper on system default;
     /// non-nil = helper on this specific device. Both cleared when recording stops.
     public private(set) var helperMicId: String? = nil
+    /// Mirrors the mic being recorded, process-wide, so no level meter opens it while the helper holds
+    /// it (#192). Updated only through `setHelperMic` / `clearHelperMic`.
+    private let recordingMicrophone: RecordingMicrophone
+
+    private func setHelperMic(_ deviceId: String?) {
+        helperMicKnown = true
+        helperMicId = deviceId
+        recordingMicrophone.set(deviceId)
+    }
+
+    private func clearHelperMic() {
+        helperMicKnown = false
+        helperMicId = nil
+        recordingMicrophone.clear()
+    }
 
     public init(
         appState: AppState,
@@ -53,8 +68,10 @@ public final class RecordingCoordinator {
         sentinelDirectory: URL? = nil,
         notify: @escaping @MainActor (String, String) -> Void,
         notifyCritical: @escaping @MainActor (String, String) -> Void,
-        presentTranscript: @escaping @MainActor (URL, Config) -> Void
+        presentTranscript: @escaping @MainActor (URL, Config) -> Void,
+        recordingMicrophone: RecordingMicrophone = .shared
     ) {
+        self.recordingMicrophone = recordingMicrophone
         self.appState = appState
         self.captureClient = captureClient
         self.transcriptionRunner = transcriptionRunner
@@ -182,8 +199,7 @@ public final class RecordingCoordinator {
         captureClient.onMicDeviceChanged = { [weak self] deviceId in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
-                self.helperMicKnown = true
-                self.helperMicId = deviceId
+                self.setHelperMic(deviceId)
             }
         }
         captureClient.onFatalFailure = { [weak self] _ in
@@ -205,14 +221,14 @@ public final class RecordingCoordinator {
             )
             try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
 
+            // Before the helper opens the mic, so no meter opens it meanwhile (#192).
+            setHelperMic(microphoneDeviceId)
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: naming.baseName,
                 microphoneDeviceId: microphoneDeviceId,
                 systemAudioSource: configManager.config.systemAudioSource
             )
-            helperMicKnown = true
-            helperMicId = microphoneDeviceId
 
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient,
@@ -228,9 +244,52 @@ public final class RecordingCoordinator {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
         } catch {
+            clearHelperMic()
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
             notify("Recording Failed", error.localizedDescription)
+        }
+    }
+
+    /// The mid-recording Change Microphone switch. Marks the new mic as the recording's BEFORE the
+    /// helper opens it, so no level meter opens it meanwhile (#192); on failure the previous mic stays
+    /// marked. Also records it in the sentinel, so a crash restart resumes on the mic the user switched
+    /// TO — not the one the recording began on, which may be the very mic they left (a lid-closed
+    /// built-in delivering zeros, #193).
+    ///
+    /// Not recording (it ended while the dialog was open): nothing to switch live. Mid crash recovery:
+    /// refused, because the restart is about to rewrite the sentinel from its own copy.
+    public func switchMicrophone(to deviceId: String?) async throws {
+        guard appState.isRecording else { return }
+        guard !recoveryInFlight else { throw MicSwitchError.recoveryInProgress }
+        let before = (known: helperMicKnown, id: helperMicId, marked: recordingMicrophone.current)
+        setHelperMic(deviceId)
+        do {
+            try await captureClient.updateMicrophone(deviceId: deviceId)
+        } catch {
+            // Put back exactly what was there — unless, during the await, the recording ended (stop
+            // already released the mic) or the helper reported a different mic of its own.
+            if appState.isRecording, helperMicKnown, helperMicId == deviceId {
+                helperMicKnown = before.known
+                helperMicId = before.id
+                if case .some(let marked) = before.marked { recordingMicrophone.set(marked) } else { recordingMicrophone.clear() }
+            }
+            throw error
+        }
+        if var sentinel = RecordingSentinel.read(directory: sentinelDirectory) {
+            sentinel.micDeviceUID = deviceId
+            do {
+                try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+            } catch {
+                Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    public enum MicSwitchError: Error, LocalizedError {
+        case recoveryInProgress
+        public var errorDescription: String? {
+            "The recording is recovering from an interruption. Try again in a moment."
         }
     }
 
@@ -244,11 +303,10 @@ public final class RecordingCoordinator {
             return
         }
         Logger.state.info("Recording stopped")
-        helperMicKnown = false
-        helperMicId = nil
         do {
             let sentinel = RecordingSentinel.read(directory: sentinelDirectory)
             let paths = try await captureClient.stop()
+            clearHelperMic()   // only now has the helper let go of the mic (#192)
             RecordingSentinel.delete(directory: sentinelDirectory)
 
             transcriptionRunner.stopChunkRotation()
@@ -351,6 +409,7 @@ public final class RecordingCoordinator {
 
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
+            clearHelperMic()
             // council FV2 defense-in-depth: stop() can throw (e.g. the helper already cleared
             // isCapturing on a fatal failure that raced this stop). If a live chunked pipeline still
             // holds transcribed chunks, salvage them into a transcript instead of discarding the
@@ -374,7 +433,12 @@ public final class RecordingCoordinator {
         // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
         // flags on every exit so a deferred stop never leaks into the next recovery.
         recoveryInFlight = true
-        defer { recoveryInFlight = false; stopRequestedDuringRecovery = false }
+        defer {
+            recoveryInFlight = false
+            stopRequestedDuringRecovery = false
+            // Every give-up path ends the recording without stopRecording(); release the mic record.
+            if appState.isIdle { clearHelperMic() }
+        }
         // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
         // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
         // crash loop (interruptions within the decay window) still trips the cap.
@@ -446,6 +510,9 @@ public final class RecordingCoordinator {
         }
 
         do {
+            // The restart resumes on this mic: mark it before the helper opens it (#192). If the restart
+            // fails, the defer above releases it once the phase has gone idle.
+            setHelperMic(sentinel.micDeviceUID)
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,

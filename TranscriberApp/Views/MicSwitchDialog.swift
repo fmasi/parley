@@ -5,23 +5,21 @@ struct MicSwitchDialog: View {
     @State private var selectedDeviceId: String?
     @State private var errorMessage: String?
     @State private var isSwitching = false
+    @State private var levelMonitor = InputLevelMonitor()
 
     let currentDeviceId: String?
-    let devices: [AudioInputDevice]
     let buttonLabel: String
     let onSwitch: (String?) async throws -> Void
     let onCancel: () -> Void
 
     init(
         currentDeviceId: String?,
-        devices: [AudioInputDevice],
         buttonLabel: String,
         onSwitch: @escaping (String?) async throws -> Void,
         onCancel: @escaping () -> Void
     ) {
         self._selectedDeviceId = State(initialValue: currentDeviceId)
         self.currentDeviceId = currentDeviceId
-        self.devices = devices
         self.buttonLabel = buttonLabel
         self.onSwitch = onSwitch
         self.onCancel = onCancel
@@ -34,8 +32,9 @@ struct MicSwitchDialog: View {
 
             MicrophonePicker(
                 selectedDeviceId: $selectedDeviceId,
-                devices: devices
+                levelMonitor: levelMonitor
             )
+            .disabled(isSwitching)   // a new pick would reopen a mic while the helper opens one
 
             if let errorMessage {
                 // Recoverable failure — orange per the reserved-red policy.
@@ -66,12 +65,17 @@ struct MicSwitchDialog: View {
     private func performSwitch() {
         isSwitching = true
         errorMessage = nil
+        let target = selectedDeviceId   // what was chosen at the click, not after the release wait
         Task {
+            // Let go of the mic before the capture helper opens it, so the two never contend for the
+            // device's HAL IO (#192). Bounded: a wedged meter must not hold up the switch.
+            _ = await levelMonitor.stopAndRelease(timeout: 1)
             do {
-                try await onSwitch(selectedDeviceId)
+                try await onSwitch(target)
             } catch {
                 errorMessage = error.localizedDescription
                 isSwitching = false
+                levelMonitor.start(deviceId: target)   // the dialog stays open: meter back on
             }
         }
     }

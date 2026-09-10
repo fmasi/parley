@@ -36,6 +36,8 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     ) async throws
 
     func stop() async throws -> AudioPaths
+    /// Switch the live capture to another microphone (`nil` = system default).
+    func updateMicrophone(deviceId: String?) async throws
 
     /// Drain the helper's diagnostics, flush the anomaly-gated `<sessionId>.diag.jsonl`, and
     /// build the transcript provenance stamp (#95).

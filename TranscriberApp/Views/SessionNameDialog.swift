@@ -8,27 +8,26 @@ struct SessionNameDialog: View {
     /// the calendar attribution stays gone rather than flickering back if they
     /// happen to retype the suggestion exactly.
     @State private var userHasEdited = false
+    @State private var isStarting = false
+    @State private var levelMonitor = InputLevelMonitor()
     @FocusState private var focused: Bool
 
     /// The calendar-suggested name this dialog opened with ("" if none).
     /// Kept so the field can say where its pre-filled value came from.
     private let suggestedName: String
 
-    let devices: [AudioInputDevice]
     let onStart: (String, String?) -> Void  // (sessionName, micDeviceId?)
     let onCancel: () -> Void
 
     init(
         suggestedName: String,
         initialDeviceId: String?,
-        devices: [AudioInputDevice],
         onStart: @escaping (String, String?) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.suggestedName = suggestedName
         self._name = State(initialValue: suggestedName)
         self._selectedDeviceId = State(initialValue: initialDeviceId)
-        self.devices = devices
         self.onStart = onStart
         self.onCancel = onCancel
     }
@@ -60,8 +59,9 @@ struct SessionNameDialog: View {
 
             MicrophonePicker(
                 selectedDeviceId: $selectedDeviceId,
-                devices: devices
+                levelMonitor: levelMonitor
             )
+            .disabled(isStarting)
 
             HStack {
                 Spacer()
@@ -70,6 +70,7 @@ struct SessionNameDialog: View {
                 Button("Start Recording") { start() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(isStarting)
             }
         }
         .padding(20)
@@ -79,10 +80,16 @@ struct SessionNameDialog: View {
     }
 
     private func start() {
-        onStart(
-            name.trimmingCharacters(in: .whitespaces),
-            selectedDeviceId
-        )
+        guard !isStarting else { return }   // Return in the field and the button both land here
+        isStarting = true
+        let sessionName = name.trimmingCharacters(in: .whitespaces)
+        let deviceId = selectedDeviceId
+        Task {
+            // Let go of the mic before the capture helper opens it, so the two never contend for the
+            // device's HAL IO (#192). Bounded: a wedged meter must not hold up the recording.
+            _ = await levelMonitor.stopAndRelease(timeout: 1)
+            onStart(sessionName, deviceId)
+        }
     }
 }
 

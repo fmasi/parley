@@ -55,4 +55,35 @@ struct AudioDeviceEnumeratorTests {
         )
         #expect(resolved == nil)
     }
+
+    // MARK: - #192: a list that may be stale
+
+    private let available = [
+        AudioInputDevice(id: nil, name: "System Default"),
+        AudioInputDevice(id: "usb-mic", name: "USB Mic"),
+    ]
+
+    @Test func freshScanStillDropsAnUnpluggedMic() {
+        #expect(AudioDeviceEnumerator.resolveDeviceId(lastUsed: "unplugged-mic", available: available, listIsFresh: true) == nil)
+        #expect(AudioDeviceEnumerator.resolveDeviceId(lastUsed: "usb-mic", available: available, listIsFresh: true) == "usb-mic")
+    }
+
+    @Test func staleListKeepsTheLastUsedMic() {
+        // The scan didn't finish in time: the mic may well be there. Dropping it would silently record
+        // on System Default instead.
+        let staleList = [AudioInputDevice(id: nil, name: "System Default")]
+        #expect(AudioDeviceEnumerator.resolveDeviceId(lastUsed: "usb-mic", available: staleList, listIsFresh: false) == "usb-mic")
+        #expect(AudioDeviceEnumerator.resolveDeviceId(lastUsed: nil, available: staleList, listIsFresh: false) == nil)
+    }
+
+    @Test func listingAddsARowForAnUnlistedSelection() {
+        let listed = AudioDeviceEnumerator.listing(available, keeping: "iphone-mic")
+        #expect(listed.count == 3)
+        #expect(listed.last == AudioInputDevice(id: "iphone-mic", name: AudioDeviceEnumerator.placeholderName))
+    }
+
+    @Test func listingLeavesAListedOrDefaultSelectionAlone() {
+        #expect(AudioDeviceEnumerator.listing(available, keeping: "usb-mic") == available)
+        #expect(AudioDeviceEnumerator.listing(available, keeping: nil) == available)
+    }
 }

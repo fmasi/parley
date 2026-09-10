@@ -82,7 +82,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberCore/VadSpeechMap.swift` -- wraps FluidAudio VadManager to produce SpeechRegion map with probabilities for quality filtering
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
-- `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams
+- `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams; every device call runs on a per-session queue, never the caller's (#192)
+- `TranscriberCore/AudioDeviceCatalog.swift` -- cached input-device list for views, scanned in the background and coalesced; `refreshed(timeout:)` for a bounded fresh scan (#192) — never call `AudioDeviceEnumerator.availableDevices()` on main
+- `TranscriberCore/ResumeOnce.swift` -- resumes a continuation exactly once when work races a deadline
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
 - `TranscriberCore/PathDisplay.swift` -- prefix-anchored `~` abbreviation of filesystem paths for display (shared by Setup + Settings)
@@ -123,7 +125,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 963 tests across 115 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
+# 1002 tests across 117 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -167,12 +169,12 @@ fault outright.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 67 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 68 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 67 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 68 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

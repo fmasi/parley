@@ -35,7 +35,6 @@ struct SettingsView: View {
     @State private var summaryContextOverheadPercent: String = ""
     @State private var summaryMaxOutputTokens: String = ""
     @State private var settingsMicId: String?
-    @State private var settingsMicDevices: [AudioInputDevice] = []
 
     init(configManager: ConfigManager, permissionManager: PermissionManager) {
         self.configManager = configManager
@@ -88,7 +87,7 @@ struct SettingsView: View {
         // under a TabView those only fire on first visit, so the archive
         // figure would read a false "0 MiB" and the mic list would be empty
         // until the user happened onto the Audio tab.
-        .onAppear { settingsMicDevices = AudioDeviceEnumerator.availableDevices() }
+        .onAppear { AudioDeviceCatalog.shared.refresh() }   // background scan, never on main (#192)
         .task {
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
@@ -190,8 +189,7 @@ struct SettingsView: View {
     private var audioSections: some View {
         Section("Microphone") {
             MicrophonePicker(
-                selectedDeviceId: $settingsMicId,
-                devices: settingsMicDevices
+                selectedDeviceId: $settingsMicId
             )
             Text("Sessions will start with this microphone unless changed.")
                 .font(.caption)
