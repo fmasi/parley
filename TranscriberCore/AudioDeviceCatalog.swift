@@ -1,0 +1,164 @@
+import Foundation
+import Observation
+import os
+
+/// The audio-input device list, scanned OFF the calling thread and cached (#192, gotcha #68).
+///
+/// `AudioDeviceEnumerator.availableDevices()` runs an `AVCaptureDevice.DiscoverySession`, which reads the
+/// CoreAudio HAL — the same HAL whose locks a wedged device holds. It used to run in the menu's `body`
+/// (redrawn every tick of the live recording timer) and in the dialogs' window controllers, all on the
+/// main thread. Views now read `devices`; code that needs a fresh list awaits `refreshed(timeout:)`,
+/// which never waits longer than it is told.
+///
+/// A scan that NEVER returns (a HAL lock held for good) leaves the list at its last known state until
+/// the HAL lets go by itself — e.g. the device is physically removed — or the app is relaunched. That
+/// is deliberate: a retry would park another thread in the same HAL wait, the pile-up this type exists
+/// to prevent. Callers stay bounded, and the stuck scan is logged after `stuckAfter`.
+@Observable
+public final class AudioDeviceCatalog: @unchecked Sendable {
+    /// Starts its first scan as soon as it is first touched.
+    public static let shared: AudioDeviceCatalog = {
+        let catalog = AudioDeviceCatalog()
+        catalog.refresh()
+        return catalog
+    }()
+
+    /// The last scanned list, for views. Main-actor: only ever written there — the compiler holds us to it.
+    @MainActor public private(set) var devices: [AudioInputDevice] = AudioDeviceCatalog.systemDefaultOnly
+    /// The scan whose list `devices` holds, so an older scan's publish never overwrites a newer one.
+    @ObservationIgnored @MainActor private var publishedSerial: UInt64 = 0
+
+    private let scan: @Sendable () -> [AudioInputDevice]
+    private let queue = DispatchQueue(label: "audio-device-catalog")
+    /// Guards the state below. A leaf lock: never held across a scan.
+    private let lock = NSLock()
+    @ObservationIgnored private var latest: [AudioInputDevice]
+    @ObservationIgnored private var scanning = false
+    /// Callers awaiting the current scan, by token, so one that gives up can take itself off.
+    @ObservationIgnored private var waiters: [UInt64: ([AudioInputDevice]) -> Void] = [:]
+    @ObservationIgnored private var nextWaiterToken: UInt64 = 0
+    @ObservationIgnored private var scanSerial: UInt64 = 0
+    /// A scan still running after this long is logged: the list then stays at its last known state.
+    private let stuckAfter: TimeInterval
+
+    private static let systemDefaultOnly = [AudioInputDevice(id: AudioInputDevice.systemDefaultID, name: "System Default")]
+
+    public convenience init() {
+        self.init(scan: { AudioDeviceEnumerator.availableDevices() })
+    }
+
+    /// Test seam: substitute the device scan.
+    init(
+        scan: @escaping @Sendable () -> [AudioInputDevice],
+        stuckAfter: TimeInterval = 5
+    ) {
+        self.stuckAfter = stuckAfter
+        self.latest = Self.systemDefaultOnly
+        self.scan = scan
+    }
+
+    /// Callers still waiting on the current scan. Test hook for the no-pile-up guarantee.
+    var waiterCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return waiters.count
+    }
+
+    /// The last known list, readable from any thread.
+    public var latestDevices: [AudioInputDevice] {
+        lock.lock(); defer { lock.unlock() }
+        return latest
+    }
+
+    /// Rescan in the background; returns at once. While a scan is still running — possibly stuck on a
+    /// wedged device — further calls join it rather than park another thread in the same HAL wait.
+    public func refresh() {
+        startScanIfIdle()
+    }
+
+    /// A fresh scan — or, if it has not finished within `timeout`, the last known list with
+    /// `isFresh == false`, so callers don't treat a device missing from it as unplugged.
+    public func refreshed(timeout: TimeInterval) async -> (devices: [AudioInputDevice], isFresh: Bool) {
+        await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            let token = addWaiter { once.resume(($0, true)) }
+            startScanIfIdle()
+            let lastKnown = latestDevices   // the fallback if the catalog is gone by the deadline
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                // Weak, so a catalog isn't kept alive for `timeout` after its caller moved on. The caller
+                // must still be resumed whatever happens — never leave the continuation hanging.
+                guard let self else { once.resume((lastKnown, false)); return }
+                // Past its deadline: take the waiter off, so a scan stuck for good doesn't collect one
+                // per dialog opened while it hangs, and snapshot the list in the SAME lock hold — so the
+                // caller gets exactly the list as it stood when the deadline decided. Resume outside the
+                // lock (resuming under it is worse). A scan finishing just after this still leaves the
+                // caller with isFresh = false — the safe direction: the dialog keeps the user's mic.
+                lock.lock()
+                waiters[token] = nil
+                let snapshot = latest
+                lock.unlock()
+                once.resume((snapshot, false))
+            }
+        }
+    }
+
+    /// Register a caller for the next scan result.
+    private func addWaiter(_ waiter: @escaping ([AudioInputDevice]) -> Void) -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        nextWaiterToken &+= 1
+        waiters[nextWaiterToken] = waiter
+        return nextWaiterToken
+    }
+
+    /// Start a scan unless one is already running; a running one will serve every waiter.
+    private func startScanIfIdle() {
+        lock.lock()
+        let begin = !scanning
+        if begin {   // joining a running scan writes nothing
+            scanning = true
+            scanSerial &+= 1
+        }
+        let serial = scanSerial
+        lock.unlock()
+        guard begin else { return }
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + stuckAfter) { [weak self] in
+            guard let self else { return }   // a catalog that's gone has no scan to report on
+            lock.lock()
+            let stuck = scanning && scanSerial == serial
+            lock.unlock()
+            if stuck {
+                Logger.audio.error("Audio input scan still running after \(self.stuckAfter, privacy: .public)s — a device is not responding; the mic list stays at its last known state")
+            }
+        }
+
+        let began = Date()
+        // Strong on purpose: a scan must finish and answer every waiter even if its callers moved on.
+        // For the shared catalog that costs nothing; a scan stuck for good keeps its catalog alive,
+        // which only matters for short-lived (test) instances — and every test releases its gate.
+        queue.async { [self] in
+            let found = scan()
+            lock.lock()
+            latest = found
+            scanning = false
+            let ready = Array(waiters.values)
+            waiters = [:]
+            lock.unlock()
+            // Close the loop on the "still running" warning, so the log shows the device recovered.
+            let took = Date().timeIntervalSince(began)
+            if took >= stuckAfter {
+                Logger.audio.info("Audio input scan finished after \(took, privacy: .public)s — the mic list is current again")
+            }
+            // Waiters get `found` itself, synchronously; `devices` is only published after (async, on
+            // main). A waiter must use its argument — reading `devices` from inside one sees the old list.
+            ready.forEach { $0(found) }
+            // A compiler-checked hop to the main actor. A scan can finish before the previous one's
+            // publish has run, so each publish carries its scan's serial and only a newer one lands —
+            // correct whatever order the tasks run in.
+            Task { @MainActor [weak self] in
+                guard let self, serial > self.publishedSerial else { return }
+                self.publishedSerial = serial
+                self.devices = found
+            }
+        }
+    }
+}

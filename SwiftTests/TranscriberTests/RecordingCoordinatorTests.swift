@@ -20,6 +20,20 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     var startCalls: [StartCall] = []
     var startError: Error?
+    /// Runs inside start(), i.e. at the moment the helper would be opening the mic.
+    var onStart: (() -> Void)?
+    /// Runs inside stop(), i.e. while the helper still holds the mic (and the coordinator is suspended).
+    var onStop: (() async -> Void)?
+    var micUpdates: [String?] = []
+    var updateMicError: Error?
+    /// Runs inside updateMicrophone(), i.e. at the moment the helper would be opening the new mic.
+    var onUpdateMicrophone: (() async -> Void)?
+
+    func updateMicrophone(deviceId: String?) async throws {
+        micUpdates.append(deviceId)
+        await onUpdateMicrophone?()
+        if let updateMicError { throw updateMicError }
+    }
     var stopCalls = 0
     var stopError: Error?
     var stopResult: AudioPaths?
@@ -39,11 +53,13 @@ private final class FakeCaptureClient: RecordingCaptureClient {
             microphoneDeviceId: microphoneDeviceId,
             systemAudioSource: systemAudioSource
         ))
+        onStart?()
         if let startError { throw startError }
     }
 
     func stop() async throws -> AudioPaths {
         stopCalls += 1
+        await onStop?()
         if let stopError { throw stopError }
         guard let stopResult else { throw CocoaError(.fileNoSuchFile) }
         return stopResult
@@ -84,10 +100,12 @@ private struct Harness {
     let notified: Box<[(title: String, body: String)]> = Box([])
     let criticals: Box<[(title: String, body: String)]> = Box([])
     let presented: Box<[URL]> = Box([])
+    let recordingMic: RecordingMicrophone
 
     final class Box<T> { var value: T; init(_ value: T) { self.value = value } }
 
-    init() throws {
+    init(recordingMic: RecordingMicrophone = RecordingMicrophone()) throws {
+        self.recordingMic = recordingMic
         tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("coordinator-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -103,7 +121,8 @@ private struct Harness {
             sentinelDirectory: tmp,
             notify: { notified.value.append(($0, $1)) },
             notifyCritical: { criticals.value.append(($0, $1)) },
-            presentTranscript: { url, _ in presented.value.append(url) }
+            presentTranscript: { url, _ in presented.value.append(url) },
+            recordingMicrophone: recordingMic
         )
     }
 
@@ -280,6 +299,341 @@ private struct Harness {
         #expect(h.client.startCalls.count == 1)
         #expect(h.client.startCalls[0].baseName.hasSuffix("-Test-0"))
         #expect(h.client.startCalls[0].microphoneDeviceId == "mic-1")
+    }
+
+    // #192: level meters read `RecordingMicrophone` to stay off the mic the helper is capturing.
+
+    @Test func startMarksTheRecordingMicBeforeTheHelperOpensIt() async throws {
+        let h = try Harness()
+        let recordingMic = h.recordingMic
+        var seenAtStart: String??
+        h.client.onStart = { seenAtStart = recordingMic.current }
+
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+
+        #expect(seenAtStart == .some("mic-1"), "a meter could open the mic while the helper was opening it")
+        #expect(h.recordingMic.current == .some("mic-1"))
+        h.client.onMicDeviceChanged?("mic-2")   // helper auto-switched
+        await Task.yield(); await Task.yield()
+        #expect(h.recordingMic.current == .some("mic-2"))
+    }
+
+    @Test func failedStartReleasesTheRecordingMic() async throws {
+        let h = try Harness()
+        h.client.startError = FakeCaptureError()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        #expect(h.recordingMic.current == .none, "a failed start left the mic marked in use — its meter stays off for good")
+    }
+
+    @Test func recordingThatDiesInRecoveryReleasesTheRecordingMic() async throws {
+        let h = try Harness()
+        h.recordingMic.set("mic-1")
+        _ = try h.writeSentinel()
+        h.client.startError = FakeCaptureError()   // restart fails → recording ends without stopRecording()
+
+        await h.coordinator.handleXPCCrash()
+
+        #expect(h.appState.isIdle)
+        #expect(h.recordingMic.current == .none, "the dead recording's mic stayed marked in use")
+    }
+
+    @Test func manualSwitchMarksTheNewMicBeforeTheHelperOpensIt() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let recordingMic = h.recordingMic
+        var seenAtSwitch: String??
+        h.client.onUpdateMicrophone = { seenAtSwitch = recordingMic.current }
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.client.micUpdates == ["mic-2"])
+        #expect(seenAtSwitch == .some("mic-2"), "a meter could open the new mic while the helper was opening it")
+        #expect(h.recordingMic.current == .some("mic-2"), "the switcher would meter the mic being recorded")
+        #expect(h.coordinator.helperMicId == "mic-2")
+        // A crash restart must resume on the mic the user switched to, not the one they left.
+        #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-2")
+    }
+
+    @Test func switchThatCannotUpdateTheSentinelSaysSo() async throws {
+        // The switch works, but the recovery file can't be rewritten (disk full, permissions): a crash
+        // restart would resume on the mic the user left. That must not happen silently.
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let sentinelFile = h.tmp.appendingPathComponent("recording.json").path
+        let fm = FileManager.default
+        try fm.setAttributes([.posixPermissions: 0o444], ofItemAtPath: sentinelFile)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: h.tmp.path)
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: h.tmp.path)
+            try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: sentinelFile)
+        }
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.recordingMic.current == .some("mic-2"), "the switch itself should still have gone through")
+        #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1")   // precondition: write failed
+        #expect(h.notified.value.map { $0.title } == ["Recovery File Not Updated"], "a stale recovery mic went unreported")
+    }
+
+    @Test func successfulSwitchWhileTheRecordingEndsRaisesNoFalseAlarm() async throws {
+        // Stop lands while the helper is switching; the switch then succeeds. The recording ended
+        // normally — its recovery file is gone for a good reason — so no "Recovery File Not Updated".
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let appState = h.appState
+        let tmp = h.tmp
+        h.client.onUpdateMicrophone = {   // what Stop does, in the same synchronous step
+            RecordingSentinel.delete(directory: tmp)
+            appState.phase = .transcribing(progress: "Transcribing…")
+        }
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.notified.value.isEmpty, "a clean Stop during the switch raised a false recovery warning")
+    }
+
+    @Test func switchWithTheRecoveryFileMissingSaysSo() async throws {
+        // The sentinel was deleted mid-recording: the switch works, but a crash restart has nothing to
+        // resume from on the new mic. That must not go unreported either.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)   // precondition: no recovery file
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.recordingMic.current == .some("mic-2"))
+        #expect(h.notified.value.map { $0.title } == ["Recovery File Not Updated"])
+    }
+
+    @Test func failedManualSwitchKeepsThePreviousMicMarked() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some("mic-1"))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1")
+    }
+
+    @Test func crashRestartMarksTheMicItResumedOn() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.recordingMic.set("mic-2")   // stale: the restart below resumes on the sentinel's mic
+        h.appState.phase = .recording(since: Date())
+        let recordingMic = h.recordingMic
+        var seenAtRestart: String??
+        h.client.onStart = { seenAtRestart = recordingMic.current }
+
+        await h.coordinator.handleXPCCrash()
+
+        #expect(h.client.startCalls.last?.microphoneDeviceId == "mic-1")
+        #expect(seenAtRestart == .some("mic-1"), "a meter could open the mic while the restart was opening it")
+        #expect(h.recordingMic.current == .some("mic-1"), "meters could open the mic the restart resumed on")
+    }
+
+    @Test func aMicMarkedOutsideTheCoordinatorShowsInItsLabelState() async throws {
+        // Flow A/B re-attach and its crash handler write RecordingMicrophone directly (no coordinator
+        // exists yet at launch); the menu's mic label reads the coordinator — it must follow.
+        let h = try Harness()
+        h.recordingMic.set("mic-9")
+        #expect(h.coordinator.helperMicKnown)
+        #expect(h.coordinator.helperMicId == "mic-9")
+        h.recordingMic.set(nil)   // helper auto-switched to the system default
+        #expect(h.coordinator.helperMicKnown)
+        #expect(h.coordinator.helperMicId == nil)
+        h.recordingMic.clear()
+        #expect(h.coordinator.helperMicKnown == false)
+    }
+
+    @Test func aCoordinatorCreatedAfterAReattachPicksUpTheMarkedMic() async throws {
+        let recordingMic = RecordingMicrophone()
+        recordingMic.set("reattached-mic")   // launch recovery ran before the menu built its coordinator
+        let h = try Harness(recordingMic: recordingMic)
+        #expect(h.coordinator.helperMicKnown)
+        #expect(h.coordinator.helperMicId == "reattached-mic")
+    }
+
+    @Test func reattachedRecordingMirrorsHelperAutoSwitches() async throws {
+        // Flow A/B: no coordinator started this recording, so the app wires the helper's mic-change
+        // report through mirrorMicSwitches — meters and the menu label must follow an auto-switch.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        RecordingCoordinator.mirrorMicSwitches(of: h.client, while: h.appState, into: h.recordingMic)
+
+        h.client.onMicDeviceChanged?("mic-7")
+        var waited = 0
+        while h.recordingMic.current != .some("mic-7"), waited < 200 {
+            try await Task.sleep(nanoseconds: 5_000_000); waited += 1
+        }
+        #expect(h.recordingMic.current == .some("mic-7"))
+        #expect(h.coordinator.helperMicId == "mic-7", "the menu's mic label did not follow the auto-switch")
+
+        // A late report after the recording ended is ignored — checked on the handler itself, so this
+        // negative doesn't depend on how soon the hop to the main actor runs.
+        h.appState.phase = .idle
+        RecordingCoordinator.applyMirroredMicSwitch(to: "mic-8", while: h.appState, into: h.recordingMic)
+        #expect(h.recordingMic.current == .some("mic-7"))
+    }
+
+    @Test func failedSwitchFromSystemDefaultRestoresSystemDefault() async throws {
+        // The restore's `before` can be `.some(nil)` — recording on the system default. A failed switch
+        // must put exactly that back (not "nothing marked", not the attempted mic).
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: nil)
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set(nil)
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some(nil), "the system-default recording lost its marker")
+        #expect(h.coordinator.helperMicKnown && h.coordinator.helperMicId == nil)
+    }
+
+    @Test func failedSwitchKeepsAMicTheHelperReportedMeanwhile() async throws {
+        // The helper auto-switches to mic-3 while our switch to mic-2 is in flight, then our switch fails.
+        // The restore must NOT overwrite the helper's own report with the pre-switch mic: it only puts
+        // back `before` when the marker still holds exactly the mic we wrote.
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let recordingMic = h.recordingMic
+        h.client.onUpdateMicrophone = { await MainActor.run { recordingMic.set("mic-3") } }
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some("mic-3"), "the restore overwrote the helper's own report")
+    }
+
+    @Test func switchWhenTheRecordingAlreadyEndedTouchesNothing() async throws {
+        let h = try Harness()   // idle: the recording ended while the switcher was open
+
+        try await h.coordinator.switchMicrophone(to: "mic-2")
+
+        #expect(h.client.micUpdates.isEmpty)
+        #expect(h.recordingMic.current == .none, "an idle app marked a mic in use — its meter would stay off")
+        #expect(h.coordinator.helperMicKnown == false)
+    }
+
+    @Test func failedSwitchAfterTheRecordingEndedDuringItLeavesNothingMarked() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        let coordinator = h.coordinator
+        h.client.onUpdateMicrophone = { await coordinator.stopRecording() }   // the real Stop, mid-switch
+        h.client.updateMicError = FakeCaptureError()   // "No capture in progress"
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.client.stopCalls == 1)
+        #expect(h.recordingMic.current == .none, "restoring the pre-switch mic resurrected it after the recording ended")
+        #expect(h.coordinator.helperMicKnown == false)
+        #expect(h.coordinator.helperMicId == nil)
+    }
+
+    @Test func failedSwitchInAReattachedRecordingKeepsItsMicMarked() async throws {
+        // Flow A: the coordinator never started this recording, so helperMicKnown is false — but the
+        // re-attach marked the sentinel's mic. A failed switch must restore THAT, not "system default".
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("sentinel-mic")
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some("sentinel-mic"))
+    }
+
+    @Test func failedSwitchNeverClearsTheMarkerMidRecording() async throws {
+        // A recording whose mic was (wrongly) never marked — no path does this today; every way into a
+        // live recording marks its mic first. A failed switch must not leave the app believing nothing
+        // is recording: meters would then open the recording's mic. With no previous mic to restore,
+        // the attempted one stays marked. Known, accepted limitation: the menu label then names that
+        // mic until the recording ends or the user switches again. Keeping the meters safe wins.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.client.updateMicError = FakeCaptureError()
+
+        await #expect(throws: FakeCaptureError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.recordingMic.current == .some("mic-2"), "a live recording was left with no mic marked")
+        #expect(h.coordinator.helperMicId == "mic-2")   // the accepted label limitation, pinned
+    }
+
+    @Test func switchDuringCrashRecoveryIsRefused() async throws {
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.recoveryInFlight = true   // the restart will rewrite the sentinel from its own copy
+
+        await #expect(throws: RecordingCoordinator.MicSwitchError.self) {
+            try await h.coordinator.switchMicrophone(to: "mic-2")
+        }
+        #expect(h.client.micUpdates.isEmpty)
+    }
+
+    @Test func aSwitchWhileStopIsInFlightNeverReachesTheHelper() async throws {
+        // The user taps Switch while Stop is waiting on the helper — the phase still reads "recording"
+        // then. The helper must not be asked to switch mid-stop.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.recordingMic.set("mic-1")
+        let coordinator = h.coordinator
+        var fireSwitch = true
+        h.client.onStop = {
+            if fireSwitch { fireSwitch = false; try? await coordinator.switchMicrophone(to: "mic-2") }
+        }
+
+        await h.coordinator.stopRecording()
+
+        #expect(h.client.micUpdates.isEmpty, "a switch reached the helper while it was stopping")
+    }
+
+    @Test func aSecondStopWhileOneIsInFlightIsIgnored() async throws {
+        // A second Stop lands while the first is suspended on the helper: it must not reach the helper
+        // (or start a second transcription). One-shot, so a missing guard fails cleanly, not recursively.
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        let coordinator = h.coordinator
+        var fireSecondStop = true
+        h.client.onStop = {
+            if fireSecondStop { fireSecondStop = false; await coordinator.stopRecording() }
+        }
+
+        await h.coordinator.stopRecording()
+
+        #expect(h.client.stopCalls == 1, "a second Stop reached the helper while the first was in flight")
+        #expect(h.coordinator.stopInFlight == false, "the in-flight flag leaked past the stop")
+    }
+
+    @Test func stopKeepsTheMicMarkedUntilTheHelperHasLetGo() async throws {
+        let h = try Harness()
+        h.recordingMic.set("mic-1")
+        let recordingMic = h.recordingMic
+        var seenDuringStop: String??
+        h.client.onStop = { seenDuringStop = recordingMic.current }
+        // stopResult nil → stop() throws: the failure path must release the mic too.
+
+        await h.coordinator.stopRecording()
+
+        #expect(seenDuringStop == .some("mic-1"), "the mic was released while the helper still held it")
+        #expect(h.recordingMic.current == .none)
     }
 
     @Test func crashWithoutSentinelEscalatesCritically() async throws {

@@ -143,3 +143,34 @@ lands. Verify the error message is the readable one.
 - [ ] Regression: a normal dual-stream call still archives with L=mic / R=system as before.
 - [ ] Regression: a genuine rate mismatch (system 24 kHz vs mic 48 kHz — the 2026-08-04 chipmunk
       shape) must STILL refuse to archive and keep both WAVs.
+
+## Mic switcher mid-recording (#192) — added 2026-09-10
+
+- [ ] Start a recording, then open **Change Microphone**. The dialog must appear and stay responsive
+      — previously the whole app froze here permanently and had to be force-quit.
+- [ ] The exact 2026-09-10 condition: lid closed, recording on the built-in mic, open the switcher,
+      pick another mic (e.g. the iPhone) and switch. UI stays responsive throughout, and the level
+      meter shows the NEW mic's level.
+- [ ] In the picker, flip quickly between two mics a few times — the meter follows the selection
+      and never sticks on a previous one.
+- [ ] Cancel the switcher while the meter is running: the dialog closes immediately.
+- [ ] Regression: the session-name dialog's level meter (before recording) still moves with your voice.
+- [ ] After switching mid-recording, stop: the new mic's audio is in the transcript.
+- [ ] Open **Settings → Audio** while recording: the mic list and meter appear, and the recording
+      keeps going (Settings uses the same picker — it could freeze the same way).
+- [ ] Plug in (or connect) a mic, then open the menu: the Microphone row and the switcher list show
+      it within a moment of opening.
+- [ ] The switcher and the New Recording dialog open within about a second, every time — never a
+      beach ball.
+- [ ] Mid-recording, the switcher's meter next to the CURRENT mic reads **In use** (it no longer opens
+      the mic being recorded); pick another mic and its meter moves.
+- [ ] Cancel wins: press **Start Recording** and immediately **Cancel** (or close the panel) —
+      no recording starts. Same in the switcher: **Switch** then immediately **Cancel** — the mic
+      does not change. (This guard lives in the app target, which has no unit tests.)
+- [ ] Switch to a second mic, then open the switcher again: the mic you switched TO now reads
+      **In use**, and the one you left shows a live meter.
+- [ ] With the lid closed, pick the built-in mic in the switcher: within ~2 s it reads **Not
+      responding** (or stays flat), and you can still pick another mic and switch.
+      Known gap: SWITCHING TO the not-responding mic itself can leave the dialog on "Switching…" for
+      a long time (the app stays responsive) — the helper waits on the same stuck device and the
+      call has no deadline yet (#194). Don't switch to a mic that says Not responding.

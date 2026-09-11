@@ -3,9 +3,23 @@ import TranscriberCore
 
 struct MicrophonePicker: View {
     @Binding var selectedDeviceId: String?
-    let devices: [AudioInputDevice]
+    /// Supplied when the host must control the meter — a dialog releases the mic before the capture
+    /// helper opens it.
+    private let externalMonitor: InputLevelMonitor?
 
-    @State private var levelMonitor = InputLevelMonitor()
+    @State private var ownMonitor = InputLevelMonitor()
+    private var levelMonitor: InputLevelMonitor { externalMonitor ?? ownMonitor }
+
+    /// Live from the background-scanned catalog (#192), so a mic that appears after the dialog opened is
+    /// listed, plus a row for the selection if the scan has not found it (yet).
+    private var devices: [AudioInputDevice] {
+        AudioDeviceEnumerator.listing(AudioDeviceCatalog.shared.devices, keeping: selectedDeviceId)
+    }
+
+    init(selectedDeviceId: Binding<String?>, levelMonitor: InputLevelMonitor? = nil) {
+        self._selectedDeviceId = selectedDeviceId
+        self.externalMonitor = levelMonitor
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -23,9 +37,7 @@ struct MicrophonePicker: View {
                 }
                 .labelsHidden()
 
-                // Level meter — matches System Settings style
-                LevelMeterView(level: levelMonitor.level)
-                    .frame(width: 80, height: 6)
+                meter
             }
         }
         .onAppear {
@@ -37,6 +49,33 @@ struct MicrophonePicker: View {
         .onChange(of: selectedDeviceId) { _, newValue in
             levelMonitor.start(deviceId: newValue)
         }
+    }
+}
+
+extension MicrophonePicker {
+    /// The level bar, or why there is none.
+    @ViewBuilder fileprivate var meter: some View {
+        switch levelMonitor.status {
+        case .inUseByRecording:
+            meterCaption("In use", color: .secondary)
+                .help("This microphone is being recorded. Its level isn't shown here, so the two never compete for it.")
+        case .notResponding:
+            meterCaption("Not responding", color: .orange)
+                .help("This microphone isn't responding. Pick another one.")
+        case .unavailable:
+            meterCaption("Unavailable", color: .secondary)
+        case .off, .starting, .live:
+            // Level meter — matches System Settings style
+            LevelMeterView(level: levelMonitor.level)
+                .frame(width: 80, height: 6)
+        }
+    }
+
+    private func meterCaption(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(color)
+            .frame(minWidth: 80, alignment: .leading)
     }
 }
 

@@ -236,6 +236,7 @@ struct TranscriberApp: App {
         if isAlive {
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             appState.phase = .recording(since: sentinel.startedAt)
+            RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
             captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
             setupCrashHandler(captureClient: captureClient, appState: appState)
             return
@@ -334,6 +335,7 @@ struct TranscriberApp: App {
                 )
                 try RecordingSentinel.write(newSentinel)
                 appState.phase = .recording(since: sentinel.startedAt)
+                RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
                 appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
                 captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
                 setupCrashHandler(captureClient: captureClient, appState: appState)
@@ -370,6 +372,9 @@ struct TranscriberApp: App {
         captureClient: AudioCaptureClient,
         appState: AppState
     ) {
+        // Mirror helper auto-switches into the recording-mic record, as the coordinator does for a
+        // recording it started, so level meters stay off the mic actually being captured (#192).
+        RecordingCoordinator.mirrorMicSwitches(of: captureClient, while: appState)
         captureClient.onServiceCrash = {
             Task { @MainActor in
                 guard appState.isRecording else { return }
@@ -392,6 +397,7 @@ struct TranscriberApp: App {
                 newSentinel.chunkIndex = idx
 
                 do {
+                    RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // before the helper opens it (#192)
                     try await captureClient.start(
                         outputDirectory: outputDir,
                         baseName: baseName,
@@ -416,6 +422,7 @@ struct TranscriberApp: App {
                     Logger.state.error("Recovery crash handler failed: \(error, privacy: .public)")
                     appState.criticalError = "Recording failed — capture crashed and could not restart."
                     appState.phase = .idle
+                    RecordingMicrophone.shared.clear()
                     RecordingSentinel.delete()
                     CriticalAlertController.shared.show(
                         title: "Recording Failed",
