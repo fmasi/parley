@@ -99,6 +99,9 @@ never main (gotcha #68: HAL calls can block indefinitely — a wedged sensor wed
   process objects of the **watched set** (≤ a few; §2). Added when recording starts / the watched set
   grows, removed when recording ends. Needed because during a recording Parley's own helper holds the
   device, so the device-level signal cannot see the call app let go. No general reconcile diff.
+  **If Task 0 shows these don't fire on release:** while recording with a non-empty watched set only,
+  re-read the watched apps' `IsRunningInput` on a 10 s one-shot timer, re-armed after each read.
+  Never armed while idle — the idle budget is unchanged; the stop prompt stays a firm feature.
 - **Scan:** any wake schedules one **leading-edge coalesced scan** (fires on the first event, folds
   further events within 250 ms). The scan reads the process list, `IsRunningInput` per process, and
   `BundleID` + `PID` for processes capturing. It reads live state, so listener storms are harmless.
