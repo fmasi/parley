@@ -9,57 +9,32 @@ import os
 
 struct MenuView: View {
     @Bindable var appState: AppState
-    let captureClient: AudioCaptureClient
-    let transcriptionRunner: TranscriptionRunner
+    /// Owns the recording lifecycle + crash recovery (moved out of this view, #139 PR-6); owned by
+    /// `TranscriberApp` since the #118 hoist, so it has one lifetime for the whole app.
+    let coordinator: RecordingCoordinator
+    /// The one way anything starts a recording (#118). Owns the remembered mic pick.
+    let launcher: RecordingLauncher
     let configManager: ConfigManager
-    let calendarService: CalendarService
     let updater: SPUUpdater
     /// Read for the ongoing notifications-off signal (#150); refreshed on panel open.
     let permissionManager: PermissionManager
-    @State private var selectedMicId: String?
-    /// Owns the recording lifecycle + crash recovery (moved out of this view, #139 PR-6).
-    /// `@State`-held so it has exactly the lifetime the old `@State` counters had.
-    @State private var coordinator: RecordingCoordinator
     /// Closes the window-style MenuBarExtra panel (macOS 14+ honors dismiss here).
     @Environment(\.dismiss) private var dismissPanel
 
     init(
         appState: AppState,
-        captureClient: AudioCaptureClient,
-        transcriptionRunner: TranscriptionRunner,
+        coordinator: RecordingCoordinator,
+        launcher: RecordingLauncher,
         configManager: ConfigManager,
-        calendarService: CalendarService,
         updater: SPUUpdater,
         permissionManager: PermissionManager
     ) {
         self.appState = appState
-        self.captureClient = captureClient
-        self.transcriptionRunner = transcriptionRunner
+        self.coordinator = coordinator
+        self.launcher = launcher
         self.configManager = configManager
-        self.calendarService = calendarService
         self.updater = updater
         self.permissionManager = permissionManager
-        self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
-        // The coordinator owns orchestration; the app-target UI side effects it needs
-        // (notifications, the critical panel, the rename dialog + auto-summary) are injected here.
-        self._coordinator = State(initialValue: RecordingCoordinator(
-            appState: appState,
-            captureClient: captureClient,
-            transcriptionRunner: transcriptionRunner,
-            configManager: configManager,
-            notify: { title, body in
-                MenuView.postNotification(title: title, body: body)
-            },
-            notifyCritical: { title, body in
-                MenuView.sendCriticalNotification(title: title, body: body)
-            },
-            presentTranscript: { jsonPath, config in
-                RenameWindowController.shared.show(jsonPath: jsonPath) {
-                    // Auto-summarize after rename completes (so summary has real speaker names)
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
-                }
-            }
-        ))
     }
 
     var body: some View {
@@ -347,21 +322,7 @@ struct MenuView: View {
         if appState.isRecording {
             await coordinator.stopRecording()
         } else if appState.isIdle {
-            await promptAndStartRecording()
-        }
-    }
-
-    private func promptAndStartRecording() async {
-        let suggestedName = await calendarService.currentEventTitle(
-            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
-        )
-        SessionNameWindowController.shared.show(
-            suggestedName: suggestedName,
-            lastMicrophoneDeviceId: selectedMicId
-        ) { sessionName, micDeviceId in
-            selectedMicId = micDeviceId
-            let coordinator = coordinator
-            Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            await launcher.promptAndStart()
         }
     }
 
@@ -373,7 +334,7 @@ struct MenuView: View {
         // Prefer the helper-reported device (post auto-switch) over the user's configured preference.
         // `helperMicKnown` is false until the helper reports back; when true, `helperMicId` wins
         // (nil = system default, non-nil = specific device). The coordinator owns both flags now.
-        let id: String? = coordinator.helperMicKnown ? coordinator.helperMicId : selectedMicId
+        let id: String? = coordinator.helperMicKnown ? coordinator.helperMicId : launcher.selectedMicId
         // The cached list: this runs in `body`, and a device scan here froze the app (#192).
         return AudioDeviceCatalog.shared.devices
             .first(where: { $0.id == id })?.name
@@ -385,12 +346,12 @@ struct MenuView: View {
         // remembered selection. The coordinator decides which AT THE CLICK — a recording can end while
         // the dialog is open — and a no-op when idle.
         MicSwitchWindowController.shared.show(
-            currentDeviceId: selectedMicId,
+            currentDeviceId: launcher.selectedMicId,
             buttonLabel: "Switch"
         ) { newDeviceId in
             try await coordinator.switchMicrophone(to: newDeviceId)
             await MainActor.run {
-                selectedMicId = newDeviceId
+                launcher.selectedMicId = newDeviceId
             }
         }
     }
