@@ -54,12 +54,4 @@ struct MeetingSenseDeciderTests {
         let atBoundary = MeetingSenseDecider.defaultCooldown
         #expect(MeetingSenseDecider.decide(signal: meeting, mode: .prompt, secondsSinceLastAction: atBoundary) == .prompt)
     }
-
-    @Test("known conferencing apps are in the match set; ambiguous browsers are not")
-    func meetingAppsSetIsConferencingOnly() {
-        #expect(MeetingApps.bundleIDs.contains("us.zoom.xos"))
-        #expect(MeetingApps.bundleIDs.contains("com.microsoft.teams2"))
-        #expect(!MeetingApps.bundleIDs.contains("com.google.Chrome"))
-        #expect(!MeetingApps.bundleIDs.contains("com.apple.Safari"))
-    }
 }

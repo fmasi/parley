@@ -74,22 +74,3 @@ public enum MeetingSenseDecider {
         return .prompt
     }
 }
-
-/// Bundle identifiers treated as "a meeting is happening", used by the app-layer sensor to compute
-/// `MeetingSignal.meetingAppRunning`. Kept in core as reviewable, testable data.
-///
-/// Native conferencing apps are high-precision. Browser-based calls (Google Meet in Chrome/Safari)
-/// are deliberately NOT matched by bundle id here — a running browser says nothing about whether a
-/// call is active — so they're covered only when the mic-active gate fires while a browser is
-/// frontmost, which the sensor may add later as a separate, lower-confidence heuristic.
-public enum MeetingApps {
-    public static let bundleIDs: Set<String> = [
-        "us.zoom.xos",                 // Zoom
-        "com.microsoft.teams",         // Microsoft Teams (classic)
-        "com.microsoft.teams2",        // Microsoft Teams (new)
-        "com.cisco.webexmeetingsapp",  // Cisco Webex Meetings
-        "com.webex.meetingmanager",    // Cisco Webex (alt bundle)
-        "com.hnc.Discord",             // Discord
-        "com.tinyspeck.slackmacgap",   // Slack (huddles)
-    ]
-}
