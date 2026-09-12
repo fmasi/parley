@@ -64,6 +64,15 @@ public enum MeetingApps {
         ("org.mozilla.firefox", firefox),        // TODO(Task 0): verify on device
     ]
 
+    /// The app names the Settings disclosure claims support for, in table order and deduped (several
+    /// bundle-ID families map to one app). The caption is the feature's honesty, so it is DERIVED from
+    /// `families` rather than hand-copied beside it: add, rename or drop a row and the copy follows, and
+    /// `MeetingAppsTests` fails if this list and the table ever disagree.
+    public static var supportedDisplayNames: [String] {
+        var seen: Set<String> = []
+        return families.compactMap { seen.insert($0.app.displayName).inserted ? $0.app.displayName : nil }
+    }
+
     public static func classify(bundleID: String) -> MeetingApp? {
         guard !bundleID.isEmpty, !bundleID.hasPrefix(ownPrefix) else { return nil }
         return families.first { bundleID == $0.prefix || bundleID.hasPrefix($0.prefix + ".") }?.app

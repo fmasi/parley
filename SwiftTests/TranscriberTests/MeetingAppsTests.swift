@@ -41,4 +41,18 @@ struct MeetingAppsTests {
         // A prefix match needs the dot: "us.zoomfoo" is not Zoom.
         #expect(MeetingApps.classify(bundleID: "us.zoomfoo") == nil)
     }
+
+    /// The Settings disclosure caption is built from this list, so drift between the copy and the table
+    /// would make the feature's privacy statement false. Pinned here because the view that renders it
+    /// lives in the app target and cannot be tested.
+    @Test("the disclosure list is derived from the table, deduped, in table order")
+    func supportedDisplayNamesTracksTheTable() {
+        #expect(MeetingApps.supportedDisplayNames == [
+            "Zoom", "Teams", "Webex", "Discord", "Slack", "Chrome", "Safari", "Arc", "Edge", "Firefox",
+        ])
+        // Claims exactly the apps the classifier can return — no app unclaimed, none invented.
+        #expect(Set(MeetingApps.supportedDisplayNames) == Set(MeetingApps.families.map(\.app.displayName)))
+        // One name per app, however many bundle-ID families map to it (Teams and Safari have two each).
+        #expect(MeetingApps.supportedDisplayNames.count == Set(MeetingApps.supportedDisplayNames).count)
+    }
 }
