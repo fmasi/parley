@@ -41,6 +41,10 @@ public final class RecordingCoordinator {
     /// window — a double-tap, or a future programmatic caller — is ignored rather than reaching the
     /// helper and the transcription pipeline twice. Internal for tests.
     var stopInFlight = false
+    /// True while startRecording() is between its guard and the phase flip (it suspends on the helper's
+    /// start). With three entry points (menu, island, banner) two starts could otherwise interleave
+    /// across that await → two sentinels, two helper starts. Internal for tests.
+    var startInFlight = false
     /// True once the helper has reported which device it is actually capturing on (post auto-switch).
     /// When false, `helperMicId` is meaningless and the UI falls back to the user's selection.
     public private(set) var helperMicKnown: Bool = false
@@ -176,7 +180,16 @@ public final class RecordingCoordinator {
 
     // MARK: - Recording lifecycle
 
-    public func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+    /// Returns whether a recording was started. Refused (false) unless the phase is `.idle` and no other
+    /// start is in flight — the only guard between the user's click and the helper opening the mic.
+    @discardableResult
+    public func startRecording(sessionName: String, microphoneDeviceId: String?) async -> Bool {
+        guard appState.isIdle, !startInFlight else {
+            Logger.state.info("Start ignored — phase \(String(describing: self.appState.phase), privacy: .public), startInFlight=\(self.startInFlight, privacy: .public)")
+            return false
+        }
+        startInFlight = true
+        defer { startInFlight = false }
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
 
@@ -249,11 +262,13 @@ public final class RecordingCoordinator {
             lastCrashAt = nil
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
+            return true
         } catch {
             clearHelperMic()
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
             notify("Recording Failed", error.localizedDescription)
+            return false
         }
     }
 
