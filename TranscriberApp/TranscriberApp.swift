@@ -89,6 +89,9 @@ struct TranscriberApp: App {
     @State private var launchGate = LaunchGate()
     @State private var coordinator: RecordingCoordinator
     @State private var launcher: RecordingLauncher
+    /// Meeting sensing (#118): senses nothing until `activate()`, which runs only after both launch
+    /// gates below.
+    @State private var meetingPresenter: MeetingPromptPresenter
     private let captureClient = AudioCaptureClient()
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
@@ -144,9 +147,15 @@ struct TranscriberApp: App {
             }
         )
         _coordinator = State(initialValue: recordingCoordinator)
-        _launcher = State(initialValue: RecordingLauncher(
+        let recordingLauncher = RecordingLauncher(
             coordinator: recordingCoordinator, configManager: configManager, calendarService: calendarService
-        ))
+        )
+        _launcher = State(initialValue: recordingLauncher)
+        let presenter = MeetingPromptPresenter(
+            appState: state, configManager: configManager, coordinator: recordingCoordinator,
+            launcher: recordingLauncher, calendarService: calendarService
+        )
+        _meetingPresenter = State(initialValue: presenter)
 
         // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
         // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
@@ -162,11 +171,31 @@ struct TranscriberApp: App {
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
 
-        // Crash recovery: check sentinel before anything else
+        // Crash recovery: check the sentinel before anything else.
         let client = captureClient
         let runner = transcriptionRunner
-        Task { @MainActor in
+        let gate = launchGate
+        let cm = configManager
+        let recoveryTask = Task { @MainActor in
             await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
+        }
+        // The permission gate stays INDEPENDENT of recovery. Flow B can spend minutes transcribing a
+        // crashed session, and until the gate runs `permissionsReady` is false — which is what decides
+        // whether the menu shows MenuView or SetupRequiredPanel, and whether the Setup window appears
+        // at all on a first launch. Serializing it behind recovery would hide the app's own UI for the
+        // length of a recovery, on exactly the path this app is built around.
+        Task { @MainActor in
+            await gate.checkAndGate(configManager: cm)
+        }
+        // Sensing, and only sensing, waits for recovery: a relaunch mid-recording re-attaches inside
+        // recoverIfNeeded, and a sensor started before that would show the engine an `.idle` phase with
+        // a call in progress — i.e. offer to record what is already being recorded (spec §1 Lifecycle).
+        Task { @MainActor in
+            await recoveryTask.value
+            // And for the gate — Setup may still be open (permissionsReady flips from its Continue
+            // button), so this waits for the flag rather than for checkAndGate's return.
+            await Self.waitUntilReady(gate)
+            presenter.activate()
         }
 
         Task.detached(priority: .background) {
@@ -205,12 +234,6 @@ struct TranscriberApp: App {
             }
         }
 
-        let gate = launchGate
-        let cm = configManager
-        Task { @MainActor in
-            await gate.checkAndGate(configManager: cm)
-        }
-
         if !LaunchAgentManager.isInstalled() {
             try? LaunchAgentManager.install()
         }
@@ -237,6 +260,17 @@ struct TranscriberApp: App {
             instanceLockFD = fd  // held for the process lifetime; intentionally never closed
         case .unavailable:
             Logger.state.error("Single-instance lock unavailable — proceeding unguarded (#109).")
+        }
+    }
+
+    /// Suspends until the launch gate reports permissions ready. `checkAndGate` returns immediately
+    /// when setup is still open, so this is what keeps sensing from starting behind the setup window.
+    @MainActor
+    private static func waitUntilReady(_ gate: LaunchGate) async {
+        while !gate.permissionsReady {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                withObservationTracking { _ = gate.permissionsReady } onChange: { continuation.resume() }
+            }
         }
     }
 
@@ -496,6 +530,7 @@ struct TranscriberApp: App {
                     appState: appState,
                     coordinator: coordinator,
                     launcher: launcher,
+                    presenter: meetingPresenter,
                     configManager: configManager,
                     updater: updaterController.updater,
                     permissionManager: launchGate.permissionManager

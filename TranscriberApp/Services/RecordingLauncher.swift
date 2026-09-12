@@ -8,9 +8,21 @@ import os
 @MainActor
 @Observable
 final class RecordingLauncher {
-    /// The user's mic pick for the next recording (nil = system default). Observable: the menu's mic
-    /// label reads it.
-    var selectedMicId: String?
+    /// The user's pick for this session, if they have made one. Two levels on purpose: `.none` = no
+    /// in-session pick, `.some(nil)` = they picked the system default.
+    private var userPick: String??
+    /// The mic the next recording uses (nil = system default). Observable: the menu's mic label reads
+    /// it. An in-session pick wins; with none, the answer is whatever Settings last saved — without
+    /// that fallback this would be seeded once per process, and a mic changed in Settings → Save would
+    /// not reach the menu until the app relaunched (the regression the #118 hoist introduced, since
+    /// `MenuView.init` used to re-seed on every panel re-creation).
+    var selectedMicId: String? {
+        get {
+            if case .some(let picked) = userPick { return picked }
+            return configManager.config.lastMicrophoneDeviceId
+        }
+        set { userPick = .some(newValue) }
+    }
     private let coordinator: RecordingCoordinator
     private let configManager: ConfigManager
     private let calendarService: CalendarService
@@ -19,7 +31,6 @@ final class RecordingLauncher {
         self.coordinator = coordinator
         self.configManager = configManager
         self.calendarService = calendarService
-        self.selectedMicId = configManager.config.lastMicrophoneDeviceId
     }
 
     /// The naming panel flow (moved verbatim from MenuView.promptAndStartRecording).

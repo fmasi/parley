@@ -14,6 +14,8 @@ struct MenuView: View {
     let coordinator: RecordingCoordinator
     /// The one way anything starts a recording (#118). Owns the remembered mic pick.
     let launcher: RecordingLauncher
+    /// Meeting sensing (#118): the banner's Record/Stop answer the standing offer through it.
+    let presenter: MeetingPromptPresenter
     let configManager: ConfigManager
     let updater: SPUUpdater
     /// Read for the ongoing notifications-off signal (#150); refreshed on panel open.
@@ -25,6 +27,7 @@ struct MenuView: View {
         appState: AppState,
         coordinator: RecordingCoordinator,
         launcher: RecordingLauncher,
+        presenter: MeetingPromptPresenter,
         configManager: ConfigManager,
         updater: SPUUpdater,
         permissionManager: PermissionManager
@@ -32,6 +35,7 @@ struct MenuView: View {
         self.appState = appState
         self.coordinator = coordinator
         self.launcher = launcher
+        self.presenter = presenter
         self.configManager = configManager
         self.updater = updater
         self.permissionManager = permissionManager
@@ -44,6 +48,10 @@ struct MenuView: View {
             if appState.criticalError != nil || appState.interruptionWarning != nil
                 || appState.truncatedErrorMessage != nil {
                 alertBanners
+            }
+
+            if let detected = appState.detectedMeeting {
+                meetingBanner(detected)
             }
 
             if permissionManager.notificationWarning.shouldWarn {
@@ -241,6 +249,43 @@ struct MenuView: View {
             dismissPanel()
             PrivacyPane.notifications.open()
         }
+    }
+
+    /// Backup surface for a standing meeting-sensing offer (#118): the island may have been collapsed,
+    /// or left unanswered. Same one-click Record/Stop as the island. Quiet style, like
+    /// `notificationWarningRow` — the island is the attention-grabbing surface, this is the fallback.
+    private func meetingBanner(_ detected: DetectedMeeting) -> some View {
+        // Red is reserved for the actionable rows (recordButton's rule); a queued start is an
+        // informational wait, so it gets the same quiet treatment as notificationWarningRow.
+        let (message, action, icon, tint): (String, String?, String, Color) = {
+            switch detected.kind {
+            case .start: return ("\(detected.app.displayName) call in progress", "Record", "waveform.badge.mic", .red)
+            case .queued: return ("Will start when the previous recording finishes processing", nil, "clock", .secondary)
+            case .stop: return ("\(detected.app.displayName) released the microphone", "Stop", "stop.circle", .red)
+            }
+        }()
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: icon).foregroundStyle(tint).font(.footnote)
+            Text(message)
+                .foregroundStyle(detected.kind == .queued ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let action {
+                Button(action) {
+                    dismissPanel()
+                    switch detected.kind {
+                    case .start: presenter.record(detected.app)
+                    case .stop: presenter.stop()
+                    case .queued: break
+                    }
+                }
+                .controlSize(.small)
+                .tint(.red)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quinary))
     }
 
     /// The primary action. Red is reserved for exactly this (and criticals).
