@@ -347,12 +347,12 @@ struct MenuView: View {
         if appState.isRecording {
             await coordinator.stopRecording()
         } else if appState.isIdle {
-            promptAndStartRecording()
+            await promptAndStartRecording()
         }
     }
 
-    private func promptAndStartRecording() {
-        let suggestedName = calendarService.currentEventTitle(
+    private func promptAndStartRecording() async {
+        let suggestedName = await calendarService.currentEventTitle(
             lookaheadMinutes: configManager.config.calendarLookaheadMinutes
         )
         SessionNameWindowController.shared.show(
