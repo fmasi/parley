@@ -113,10 +113,12 @@ Then fill this table in before judging anything below it.
       `com.apple.WebKit.GPU`), and that the helper resolves to the right family so one call never shows
       as two apps.
 - [ ] **Per-process listeners fire on RELEASE.** While recording, leave the call and watch for a wake.
-      **If no wake arrives, the stop offer can never come** — and the agreed fallback (a 10 s one-shot
-      re-read, re-armed after each scan, only while `running && !watchedBundleIDs.isEmpty`, never while
-      idle, never a repeating timer) is **NOT implemented**: it exists only as a TODO at
-      `TranscriberApp/Services/MeetingSensor.swift:191`. This must be decided before merge.
+      The stop offer no longer depends on the answer: the fallback **is implemented** — a 10 s one-shot
+      re-read (`MeetingSensor.releaseRecheck`), armed at the end of each scan only while a watch is armed
+      (so only during a recording with a meeting app in it), replacing rather than accumulating timers,
+      never armed when idle. What this test decides is whether that fallback can be **deleted**: note
+      whether a wake arrives on release with no timer due, and how quickly. The tell in the log is a
+      `Meeting sensor scan:` line arriving well inside the 10 s cadence, right after you leave the call.
 - [ ] **Listener churn does not leak.** Across a long recording with app churn (quit and relaunch
       Chrome/Zoom repeatedly), Parley's RSS and its process-listener count return to roughly where they
       started, and the log shows no storm of
@@ -264,13 +266,16 @@ Mid-recording (the path with per-process listeners armed — what the teardown e
 - [ ] **Off withdraws a live stop offer** — with sensing on: record, end the call, let the stop offer
       appear, then toggle off + Save. The island withdraws immediately and **the recording keeps
       running** (turning the feature off must never stop a recording).
-- [ ] **Back on mid-recording** → `Meeting sensor started`; ending the call should still produce a stop
-      offer after the debounce. The path is the engine's, not the sensor's: turning the mode off fed an
-      empty snapshot which cleared `s.capturing`, so when sensing comes back the call app reads as newly
-      `started`, rejoins `s.watched` and a fresh `.watch` is emitted
-      (`MeetingSenseEngine.swift:145-160`). Do **not** expect the sensor to have kept the old watch —
-      the off path deliberately calls `setWatched([])` before `stop()` so a restart cannot re-arm from
-      stale bundle IDs (`MeetingPromptPresenter.swift:154-159`).
+- [ ] **Back on mid-recording** → `Meeting sensor started`; ending the call must still produce a stop
+      offer after the debounce. **Both** watch mirrors are cleared when the mode goes off: the sensor's by
+      the presenter (`setWatched([])` before `stop()`, so a restart cannot re-arm from stale bundle IDs —
+      `MeetingPromptPresenter.swift:154-159`) and the engine's own `watchedBundleIDs` by its `mode == .off`
+      tail (`MeetingSenseEngine.swift:124-135`). That second clear is what makes this work: when sensing
+      comes back, the first scan's IDs are no longer a subset of the mirror, so a fresh `.watch` is emitted
+      and the per-process listeners re-arm. Emission is gated on `watchedBundleIDs`, *not* on the call app
+      rejoining `s.watched` — with the mirror left standing (the bug fixed here, now pinned by
+      `MeetingSenseEngineStopTests.modeOffThenOnMidRecordingRearmsWatch`) no `.watch` was emitted for the
+      rest of the recording and the stop offer never came. A missing stop offer falsifies it.
 - [ ] **No listener leak across off/on cycles** — after several cycles the
       `Meeting sensor started — N input device listener(s)` count returns to the same N, with no
       `listener add failed` errors.
@@ -282,7 +287,9 @@ Mid-recording (the path with per-process listeners armed — what the teardown e
 - [ ] **Scan cost WITH A WATCH ARMED** — this is the measurement that matters and the one the ~5 ms
       budget does *not* cover. With no watch, the scan short-circuits on `IsRunningInput`; **with a watch
       armed it reads a bundle ID from every process on the machine, and that is the path that runs for
-      the entire duration of a recording.** Record the `scan` signpost interval
+      the entire duration of a recording** — and now runs at least every ~10 s while a watch is armed (the
+      release fallback), so measure the aggregate cost over a recording, not just one scan. Record the
+      `scan` signpost interval
       (`subsystem == "eu.fmasi.parley"`, `category == "meeting-sensor"`) in both states, plus the
       first-scan cost (~50 ms one-time HAL client init is expected).
 - [ ] **Measure on an M1 Air** if one is available. If not, record the M5 Pro figures and mark the M1

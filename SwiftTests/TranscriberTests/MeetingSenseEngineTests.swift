@@ -239,6 +239,23 @@ struct MeetingSenseEngineStopTests {
         #expect(!actions.contains(.offerStart(chrome, expand: false)))
     }
 
+    @Test("mode off then back on mid-recording re-arms the watch, so the stop offer still comes")
+    func modeOffThenOnMidRecordingRearmsWatch() {
+        // The blocker this test exists for: with the watch mirror left standing while the mode was off,
+        // the next snapshot found the IDs already "watched", emitted no `.watch`, and the sensor held no
+        // per-process listeners for the rest of the recording — the stop offer could never arrive.
+        var s = recordingWithZoom()
+        s.mode = .off
+        s.snap([], at: 2)                                   // the presenter's teardown snapshot
+        #expect(s.state.watchedBundleIDs.isEmpty)           // the engine's mirror follows the sensor's
+        s.mode = .prompt
+        // The sensor restarts and its first scan still sees Zoom holding the mic.
+        #expect(s.snap(["us.zoom.xos"], at: 3) == [.watch(bundleIDs: ["us.zoom.xos"])])
+        // And the whole point of re-arming: ending the call still offers to stop.
+        #expect(s.snap([], at: 10) == [.scheduleScan(after: debounce)])
+        #expect(s.snap([], at: 10 + debounce) == [.offerStop(zoom)])
+    }
+
     @Test("phase leaves recording: clears watched, withdraws the stop offer, releases the listeners")
     func leavingRecordingClears() {
         var s = recordingWithZoom()

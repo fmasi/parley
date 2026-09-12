@@ -126,7 +126,18 @@ final class MeetingIslandController {
     /// Top-centre of the screen with the menu bar focus, just below the menu bar. The arithmetic
     /// (including the notched/non-notched reasoning) lives in `MeetingIslandPlacement`.
     private func reposition() {
-        guard let panel, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let panel, let screen = Self.offerScreen() else { return }
         panel.setFrame(MeetingIslandPlacement.panelFrame(visibleFrame: screen.visibleFrame), display: true)
+    }
+
+    /// The screen the offer should appear on. NOT `NSScreen.main`, which is documented as "the screen
+    /// containing the key window": Parley is inactive and owns no key window exactly when an offer
+    /// appears, so on a multi-monitor setup it can resolve to the built-in display while the call is on
+    /// the external one. The pointer is the best available proxy for where the user is looking. Falls
+    /// back to the old behaviour when no screen contains it (pointer on a disconnected screen's old
+    /// coordinates, or between two frames).
+    private static func offerScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens.first
     }
 }

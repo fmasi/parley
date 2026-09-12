@@ -50,6 +50,9 @@ final class MeetingSensor {
     private static let system = AudioObjectID(kAudioObjectSystemObject)
     /// How long wakes fold together before one scan runs.
     private static let coalesceWindow: TimeInterval = 0.25
+    /// Release fallback: how long between re-reads of the watched apps' `IsRunningInput` while a watch is
+    /// armed (i.e. only during a recording with a meeting app in it). See the arming site in `scan()`.
+    private static let releaseRecheck: TimeInterval = 10
 
     init(onSnapshot: @escaping @Sendable (CaptureSnapshot) -> Void) {
         self.onSnapshot = onSnapshot
@@ -92,6 +95,11 @@ final class MeetingSensor {
     }
 
     /// The engine's `.scheduleScan(after:)`: a one-shot that runs an ordinary scan. Replaces any pending one.
+    ///
+    /// It fires `wake()`, not `scan()`, so the scan lands one coalescing window later: the engine's 30 s
+    /// stop debounce is 30.25 s in practice (and the 10 s release re-read below, 10.25 s). Deliberate —
+    /// the deadline is a floor, not a promise, and routing every scan through `wake()` keeps a timer and a
+    /// HAL wake that land together from running two scans.
     func scheduleScan(after seconds: TimeInterval) {
         queue.async {
             self.oneShot?.cancel()
@@ -188,11 +196,19 @@ final class MeetingSensor {
             [\(capturing.sorted().joined(separator: ", "), privacy: .private)]
             """)
         onSnapshot(CaptureSnapshot(capturingBundleIDs: capturing))
-        // TODO(Task 0): if the spike shows per-process `IsRunningInput` listeners never fire on release
-        // in a release build, the agreed fallback is armed HERE and only here: when
-        // `running && !watchedBundleIDs.isEmpty` (i.e. only while recording with a watched app),
-        // re-arm a 10 s one-shot re-read after each scan — never while idle, and never a repeating
-        // timer. That is one guarded `queue.asyncAfter` at this point, nothing else.
+        // Release fallback. The per-process `IsRunningInput` listeners are the intended release signal,
+        // but nothing proves they fire on release in a release build, and during a recording Parley's own
+        // helper holds the device, so the device-level signal cannot see the call app let go either. With
+        // no wake, the stop offer could never come — so while, and ONLY while, a watch is armed (which is
+        // only ever during a recording with a meeting app in it) re-read on a 10 s one-shot.
+        //
+        // Why this can never cost anything when idle: an empty watch set arms nothing, and the watch set
+        // is empty except between the engine's `.watch(ids)` and its `.watch([])` on leaving `.recording`.
+        // `scheduleScan` REPLACES the pending one-shot rather than adding one, so timers never accumulate;
+        // when the recording ends, the last armed one-shot fires once more, finds the watch empty and
+        // re-arms nothing. (`running` is already guarded at the top of this scan, and `stop()` cancels the
+        // one-shot outright.) Delete this block if the device test shows the listeners do fire.
+        if !watchedBundleIDs.isEmpty { scheduleScan(after: Self.releaseRecheck) }
     }
 
     // MARK: - Listener reconciliation (on queue)

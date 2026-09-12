@@ -124,6 +124,14 @@ public enum MeetingSenseEngine {
         if mode == .off {
             withdrawStart(&s, &out)
             withdrawStop(&s, &out)
+            // The sensor's watch is torn down from the presenter when the mode goes off, so the engine's
+            // mirror of it must follow — the engine owns the watch set, and an owner that keeps a copy
+            // of state it just had destroyed is the bug this line fixes: a stale mirror makes the first
+            // snapshot after sensing comes back read as "already watched", so no `.watch` is emitted, the
+            // sensor holds no per-process listeners for the rest of the recording, and the stop offer can
+            // never arrive. `s.watched` (which *apps* belong to this recording) deliberately stays: it is
+            // recording history, not a mirror of sensor state, and leaving `.recording` is what clears it.
+            s.watchedBundleIDs = []
         }
         return (s, out)
     }

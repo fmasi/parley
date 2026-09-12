@@ -3,10 +3,14 @@ import Foundation
 /// A meeting-capable app family. Helpers (`com.google.Chrome.helper`, `us.zoom.xos.helper`) resolve to
 /// the family the user sees, so one call never looks like two apps.
 public struct MeetingApp: Hashable, Sendable {
+    /// Currently **unused metadata**: nothing in production reads `kind`, and the engine makes no
+    /// distinction — a browser gets exactly the same one-offer-per-episode rule and the same expansion
+    /// cooldown as a native app. Kept because the copy and the tests speak in these terms, and because a
+    /// confidence-based rule is the obvious first move if browsers turn out to prompt too often.
     public enum Kind: Hashable, Sendable {
         /// A dedicated conferencing app — high confidence that mic use means a call.
         case native
-        /// A browser — lower confidence (dictation, voice search). Prompts once, then the cooldown.
+        /// A browser — lower confidence (dictation, voice search also hold the mic).
         case browser
     }
     public let id: String

@@ -56,7 +56,15 @@ final class RecordingLauncher {
     /// unchanged. Returns whether the coordinator started (false = not idle / start in flight).
     func quickStart(app: MeetingApp, calendarTitle: String?) async -> Bool {
         let name = calendarTitle ?? "\(app.displayName) call"
-        Logger.state.info("Quick start from meeting sensing — \(app.displayName, privacy: .public)")
-        return await coordinator.startRecording(sessionName: name, microphoneDeviceId: selectedMicId)
+        // Logged after the outcome so a refusal can never leave a "Quick start" line with no counter-entry.
+        // The app name is `.private`, like every other bundle ID this feature logs: "which meeting app
+        // this user is on" is exactly what an airgapped product must not write into the unified log in
+        // the clear (gotcha #56). `started` stays public — it is what triage needs.
+        let started = await coordinator.startRecording(sessionName: name, microphoneDeviceId: selectedMicId)
+        Logger.state.info("""
+            Quick start from meeting sensing — \(app.displayName, privacy: .private), \
+            started: \(started, privacy: .public)
+            """)
+        return started
     }
 }

@@ -254,9 +254,14 @@ final class MeetingPromptPresenter {
         case .start(let app):
             queuedStart = nil
             let title = calendarTitle
-            Task { [launcher] in
+            Task { [launcher, appState] in
                 let started = await launcher.quickStart(app: app, calendarTitle: title)
-                if !started { Logger.state.warning("Queued start refused (not idle / start in flight)") }
+                guard !started else { return }
+                Logger.state.warning("Queued start refused (not idle / start in flight)")
+                // Nothing else would clear it: no phase flip follows a refusal, so the engine emits no
+                // withdrawal and the `.queued` banner would sit there with a dead button until the call
+                // app released the mic.
+                appState.detectedMeeting = nil
             }
         }
     }
