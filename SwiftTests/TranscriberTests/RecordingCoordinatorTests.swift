@@ -22,6 +22,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var startError: Error?
     /// Runs inside start(), i.e. at the moment the helper would be opening the mic.
     var onStart: (() -> Void)?
+    /// Awaited inside start() — lets a test hold the coordinator at its `await captureClient.start`.
+    var onStartAsync: (() async -> Void)?
     /// Runs inside stop(), i.e. while the helper still holds the mic (and the coordinator is suspended).
     var onStop: (() async -> Void)?
     var micUpdates: [String?] = []
@@ -54,6 +56,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
             systemAudioSource: systemAudioSource
         ))
         onStart?()
+        await onStartAsync?()
         if let startError { throw startError }
     }
 
@@ -278,6 +281,29 @@ private struct Harness {
 }
 
 // MARK: - Lifecycle orchestration (fake capture client)
+
+/// A one-shot latch: `wait()` suspends until `open()`; `untilWaiterArrives()` resumes once someone waits.
+private actor Latch {
+    private var opened = false
+    private var waiterArrived = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var arrival: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        waiterArrived = true
+        arrival?.resume(); arrival = nil
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        opened = true
+        waiters.forEach { $0.resume() }; waiters = []
+    }
+    func untilWaiterArrives() async {
+        if waiterArrived { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+}
 
 @MainActor
 @Suite struct RecordingCoordinatorLifecycleTests {
@@ -822,6 +848,41 @@ private struct Harness {
         #expect(h.runner.chunkRotator != nil)  // chunked pipeline is live
         #expect(h.runner.chunkProcessor != nil)
         #expect(h.notified.value.isEmpty)
+    }
+
+    @Test func concurrentStartsYieldExactlyOneStart() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let latch = Latch()
+        h.client.onStartAsync = { await latch.wait() }
+
+        async let first = h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil)
+        await latch.untilWaiterArrives()                       // `first` is parked inside the helper start
+        #expect(h.coordinator.startInFlight)
+        let second = await h.coordinator.startRecording(sessionName: "B", microphoneDeviceId: nil)
+        #expect(second == false, "a second start must be refused while one is in flight")
+        await latch.open()
+        #expect(await first == true)
+        #expect(h.client.startCalls.count == 1)
+        #expect(h.appState.isRecording)
+        #expect(h.coordinator.startInFlight == false)
+    }
+
+    @Test func startIsRefusedUnlessIdle() async throws {
+        let h = try Harness()
+        h.appState.phase = .transcribing(progress: "Transcribing…")
+        #expect(await h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil) == false)
+        #expect(h.client.startCalls.isEmpty)
+        h.appState.phase = .recording(since: Date())
+        #expect(await h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil) == false)
+        #expect(h.client.startCalls.isEmpty)
     }
 
     @Test func crashCallbacksAreNoOpsWhenNotRecording() async throws {

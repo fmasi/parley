@@ -2,6 +2,22 @@ import Foundation
 import Observation
 import os
 
+/// A meeting the sensor noticed and the user has not answered yet. Drives the menu-bar icon and the
+/// in-menu banner — the backup surfaces behind the island (#118).
+public struct DetectedMeeting: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        /// "Zoom call in progress" + Record.
+        case start
+        /// The user chose Record while transcribing; starts when the phase becomes idle.
+        case queued
+        /// "Zoom released the microphone" + Stop.
+        case stop
+    }
+    public let app: MeetingApp
+    public let kind: Kind
+    public init(app: MeetingApp, kind: Kind) { self.app = app; self.kind = kind }
+}
+
 @MainActor
 @Observable
 public final class AppState {
@@ -26,6 +42,8 @@ public final class AppState {
     /// Non-nil when recording failed unrecoverably (e.g. XPC crash with failed retry).
     /// Shown as a critical alert in the menu. Stays until user explicitly dismisses.
     public var criticalError: String?
+    /// Non-nil while a meeting-sensing offer is standing (start, queued, or stop).
+    public var detectedMeeting: DetectedMeeting?
 
     public var errorMessage: String? {
         didSet {
@@ -64,7 +82,7 @@ public final class AppState {
         if criticalError != nil { return "exclamationmark.triangle.fill" }
         if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
-        case .idle: return "mic"
+        case .idle: return detectedMeeting != nil ? "mic.badge.plus" : "mic"
         case .recording:
             if interruptionWarning != nil { return "exclamationmark.bubble" }
             return "microphone.and.signal.meter.fill"

@@ -87,6 +87,11 @@ final class ManifestHealthStore {
 struct TranscriberApp: App {
     @State private var appState = AppState()
     @State private var launchGate = LaunchGate()
+    @State private var coordinator: RecordingCoordinator
+    @State private var launcher: RecordingLauncher
+    /// Meeting sensing (#118): senses nothing until `activate()`, which runs only after both launch
+    /// gates below.
+    @State private var meetingPresenter: MeetingPromptPresenter
     private let captureClient = AudioCaptureClient()
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
@@ -119,6 +124,39 @@ struct TranscriberApp: App {
         // instance sees no rival and proceeds.
         Self.yieldIfDuplicateInstance()
 
+        // Recording orchestration lives here, not in MenuView: `MenuBarExtra(systemImage:
+        // appState.menuBarIcon)` re-evaluates the scene on every icon change and used to construct a
+        // throwaway coordinator each time (#118 hoist). Nothing in recovery depends on it — Flow A/B
+        // use the static setupCrashHandler. Built after the CLI check so a CLI invocation never
+        // constructs UI objects. `_appState.wrappedValue`, not `appState`: the wrapper's accessor is a
+        // computed property, so reading it here — before `_coordinator`/`_launcher` are initialized —
+        // would be "self used before all stored properties are initialized".
+        let state = _appState.wrappedValue
+        let recordingCoordinator = RecordingCoordinator(
+            appState: state,
+            captureClient: captureClient,
+            transcriptionRunner: transcriptionRunner,
+            configManager: configManager,
+            notify: { title, body in MenuView.postNotification(title: title, body: body) },
+            notifyCritical: { title, body in MenuView.sendCriticalNotification(title: title, body: body) },
+            presentTranscript: { jsonPath, config in
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    // Auto-summarize after rename completes (so summary has real speaker names)
+                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                }
+            }
+        )
+        _coordinator = State(initialValue: recordingCoordinator)
+        let recordingLauncher = RecordingLauncher(
+            coordinator: recordingCoordinator, configManager: configManager, calendarService: calendarService
+        )
+        _launcher = State(initialValue: recordingLauncher)
+        let presenter = MeetingPromptPresenter(
+            appState: state, configManager: configManager, coordinator: recordingCoordinator,
+            launcher: recordingLauncher, calendarService: calendarService
+        )
+        _meetingPresenter = State(initialValue: presenter)
+
         // Runs the check-on-launch + 24h background cadence configured via SUScheduledCheckInterval
         // in Info.plist. Deferred to here (not the property initializer above) so CLI invocations
         // never start Sparkle's updater at all.
@@ -133,12 +171,31 @@ struct TranscriberApp: App {
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
 
-        // Crash recovery: check sentinel before anything else
+        // Crash recovery: check the sentinel before anything else.
         let client = captureClient
-        let state = appState
         let runner = transcriptionRunner
-        Task { @MainActor in
+        let gate = launchGate
+        let cm = configManager
+        let recoveryTask = Task { @MainActor in
             await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
+        }
+        // The permission gate stays INDEPENDENT of recovery. Flow B can spend minutes transcribing a
+        // crashed session, and until the gate runs `permissionsReady` is false — which is what decides
+        // whether the menu shows MenuView or SetupRequiredPanel, and whether the Setup window appears
+        // at all on a first launch. Serializing it behind recovery would hide the app's own UI for the
+        // length of a recovery, on exactly the path this app is built around.
+        Task { @MainActor in
+            await gate.checkAndGate(configManager: cm)
+        }
+        // Sensing, and only sensing, waits for recovery: a relaunch mid-recording re-attaches inside
+        // recoverIfNeeded, and a sensor started before that would show the engine an `.idle` phase with
+        // a call in progress — i.e. offer to record what is already being recorded (spec §1 Lifecycle).
+        Task { @MainActor in
+            await recoveryTask.value
+            // And for the gate — Setup may still be open (permissionsReady flips from its Continue
+            // button), so this waits for the flag rather than for checkAndGate's return.
+            await Self.waitUntilReady(gate)
+            presenter.activate()
         }
 
         Task.detached(priority: .background) {
@@ -177,12 +234,6 @@ struct TranscriberApp: App {
             }
         }
 
-        let gate = launchGate
-        let cm = configManager
-        Task { @MainActor in
-            await gate.checkAndGate(configManager: cm)
-        }
-
         if !LaunchAgentManager.isInstalled() {
             try? LaunchAgentManager.install()
         }
@@ -209,6 +260,17 @@ struct TranscriberApp: App {
             instanceLockFD = fd  // held for the process lifetime; intentionally never closed
         case .unavailable:
             Logger.state.error("Single-instance lock unavailable — proceeding unguarded (#109).")
+        }
+    }
+
+    /// Suspends until the launch gate reports permissions ready. `checkAndGate` returns immediately
+    /// when setup is still open, so this is what keeps sensing from starting behind the setup window.
+    @MainActor
+    private static func waitUntilReady(_ gate: LaunchGate) async {
+        while !gate.permissionsReady {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                withObservationTracking { _ = gate.permissionsReady } onChange: { continuation.resume() }
+            }
         }
     }
 
@@ -466,10 +528,10 @@ struct TranscriberApp: App {
             if launchGate.permissionsReady {
                 MenuView(
                     appState: appState,
-                    captureClient: captureClient,
-                    transcriptionRunner: transcriptionRunner,
+                    coordinator: coordinator,
+                    launcher: launcher,
+                    presenter: meetingPresenter,
                     configManager: configManager,
-                    calendarService: calendarService,
                     updater: updaterController.updater,
                     permissionManager: launchGate.permissionManager
                 )

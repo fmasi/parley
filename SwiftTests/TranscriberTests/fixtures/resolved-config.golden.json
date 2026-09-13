@@ -7,6 +7,7 @@
     "chunk_processing_qos": "utility",
     "engine": "<os-resolved: speechAnalyzer on macOS 26+, else fluidAudio>",
     "launch_on_startup": true,
+    "meeting_sensing": "prompt",
     "merge_chunked_audio": true,
     "model_update_check_enabled": false,
     "output_format": "txt",
