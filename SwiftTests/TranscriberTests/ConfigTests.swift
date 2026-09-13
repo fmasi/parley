@@ -429,4 +429,25 @@ struct ConfigTests {
         #expect(decoded.calendarLookaheadMinutes == 5)
     }
 
+    // MARK: - meetingSensing (#118)
+
+    @Test func meetingSensingDefaultsToPromptAndRoundTrips() throws {
+        #expect(Config.default.meetingSensing == .prompt)
+        var config = Config.default
+        config.meetingSensing = .off
+        let data = try JSONEncoder().encode(config)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"meeting_sensing\":\"off\""))
+        #expect(try JSONDecoder().decode(Config.self, from: data).meetingSensing == .off)
+    }
+
+    @Test func meetingSensingMissingKeyDecodesAsPrompt() throws {
+        // A config.json written before this key existed: default ON (D6).
+        let legacy = """
+        {"recording_directory":"/tmp/r","silence_timeout_minutes":5,"silence_detection_enabled":true,
+         "output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false}
+        """.data(using: .utf8)!
+        #expect(try JSONDecoder().decode(Config.self, from: legacy).meetingSensing == .prompt)
+    }
+
 }

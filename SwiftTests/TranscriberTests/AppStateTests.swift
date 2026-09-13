@@ -235,4 +235,19 @@ struct AppStateTests {
         let state = AppState()
         #expect(state.criticalError == nil)
     }
+
+    // MARK: - Detected meeting (#118)
+
+    @Test func detectedMeetingChangesTheIdleIcon() {
+        let state = AppState()
+        let zoom = MeetingApps.classify(bundleID: "us.zoom.xos")!
+        #expect(state.menuBarIcon == "mic")
+        state.detectedMeeting = DetectedMeeting(app: zoom, kind: .start)
+        #expect(state.menuBarIcon == "mic.badge.plus")
+        state.phase = .recording(since: Date())
+        #expect(state.menuBarIcon == "microphone.and.signal.meter.fill", "recording icon wins")
+        state.phase = .idle
+        state.detectedMeeting = nil
+        #expect(state.menuBarIcon == "mic")
+    }
 }

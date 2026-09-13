@@ -107,6 +107,13 @@ struct SetupView: View {
             Text("Private, on-device meeting transcription.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            // The feature ships on (spec D6): say so here, before it ever acts, and say
+            // where to turn it off.
+            Text("When a meeting app starts using your mic, Parley offers to record — and to stop when the call ends. It only checks which app, never listens. Turn it off any time in Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 4)

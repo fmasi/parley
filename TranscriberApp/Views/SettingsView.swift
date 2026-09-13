@@ -68,7 +68,11 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            tabPage(height: 420) { generalSections }
+            // 420 before Meeting Detection: the new section's toggle plus its
+            // disclosure caption need roughly 60pt more, or the one control that turns
+            // the feature off sits below the fold. ESTIMATED by counting rows, not
+            // measured on screen — confirm at the next device check and adjust.
+            tabPage(height: 480) { generalSections }
                 .tabItem { Label("General", systemImage: "gearshape") }
             tabPage(height: 560) { audioSections }
                 .tabItem { Label("Audio", systemImage: "waveform") }
@@ -150,6 +154,32 @@ struct SettingsView: View {
                         config.launchOnStartup = !enabled
                     }
                 }
+        }
+
+        // Default ON (spec D6), so the opt-out is one plainly-labelled toggle and the
+        // caption states exactly what the detector reads: process bundle IDs from the
+        // local Core Audio HAL, never audio. The app list is derived from
+        // MeetingApps.supportedDisplayNames, never hand-copied — a caption that is the
+        // feature's honesty must not be able to drift from the table it describes.
+        Section("Meeting Detection") {
+            Toggle("Offer to record when a meeting starts, and to stop when it ends", isOn: Binding(
+                // A switch, not `== .prompt`: a third mode added later must fail to
+                // compile here rather than display as "off" and be silently written
+                // back as `.off` the first time the user touches the toggle.
+                get: {
+                    switch config.meetingSensing {
+                    case .prompt: return true
+                    case .off: return false
+                    }
+                },
+                set: { config.meetingSensing = $0 ? .prompt : .off }
+            ))
+            // No scoping word before the browsers ("calls in Chrome…"): `MeetingApp.Kind`
+            // is not consumed by the engine, so a browser raises the same offer as Zoom —
+            // dictation and voice search included. The copy must describe what ships.
+            Text("Parley checks which app is using the microphone — on this Mac only; it never listens. Works with \(MeetingApps.supportedDisplayNames.formatted(.list(type: .and))). When it offers, it also looks up the meeting's name if you've granted Calendar access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
 
         Section("Recordings") {
