@@ -124,6 +124,15 @@ Then fill this table in before judging anything below it.
       Meet/Zoom call in Safari and check whether `com.apple.Safari` is ever reported capturing. If it
       never is, delete that row rather than leave an unverified entry implying coverage it does not
       provide — and confirm the `com.apple.WebKit.GPU` row alone produces exactly one "Safari" offer.
+- [ ] **`com.apple.WebKit.GPU` is a false-positive source broader than the other browser rows.** It is
+      the *shared* GPU process for every WKWebView-embedding app, not just Safari — an Electron app, a
+      Catalyst app, or any Mac app that opens a WKWebView and joins a WebRTC call can match this row,
+      unlike the other browser rows above whose helpers are at least scoped to one browser family. Join
+      a call in a WKWebView-embedding app that is **not** Safari (Slack huddles in the desktop app,
+      Discord's desktop app, or any Electron app with a call) and record: does `com.apple.WebKit.GPU`
+      show as capturing, and does an offer appear labelled **"Safari"**? If so, that is a confirmed
+      false positive — the row may need narrowing (e.g. matched only alongside other Safari-specific
+      signals) or the display name may need to stop claiming "Safari" specifically.
 - [ ] **Per-process listeners fire on RELEASE.** While recording, leave the call and watch for a wake.
       The stop offer no longer depends on the answer: the fallback **is implemented** — a 10 s one-shot
       re-read (`MeetingSensor.releaseRecheck`), armed at the end of each scan only while a watch is armed

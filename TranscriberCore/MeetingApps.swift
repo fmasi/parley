@@ -45,20 +45,22 @@ public enum MeetingApps {
     /// (family prefix, app). A bundle ID matches a row when it equals the prefix or starts with
     /// `prefix + "."` — so `us.zoom.xos.helper` is Zoom but `us.zoomfoo` is not.
     ///
-    /// Rows marked `TODO(Task 0)` were written from the spec, not from a device: the on-device spike
-    /// that reads the bundle IDs Core Audio actually reports for a process holding the mic has not run
-    /// yet. Browsers and Zoom/Teams route audio through helper processes whose exact IDs must be
-    /// confirmed (and any missing helper added) before this table can be trusted in the field.
+    /// Every row here is unverified: all of them were written from the spec, not from a device, and
+    /// all carry `TODO(Task 0)` for that reason — none should be read as confirmed just because its
+    /// comment doesn't spell out a helper-process detail. The on-device spike that reads the bundle IDs
+    /// Core Audio actually reports for a process holding the mic has not run yet. Browsers and
+    /// Zoom/Teams route audio through helper processes whose exact IDs must additionally be confirmed
+    /// (and any missing helper added) before this table can be trusted in the field.
     static let families: [(prefix: String, app: MeetingApp)] = [
         ("us.zoom", zoom),                       // TODO(Task 0): verify on device
         ("com.microsoft.teams", teams),          // classic + its helpers — TODO(Task 0): verify on device
         // New Teams needs its own row: the match rule wants the prefix or a dot after it, and the "2"
         // is neither — "com.microsoft.teams" alone never reaches "com.microsoft.teams2".
         ("com.microsoft.teams2", teams),         // new Teams + its helpers — TODO(Task 0): verify on device
-        ("com.cisco.webexmeetingsapp", webex),
-        ("com.webex.meetingmanager", webex),
-        ("com.hnc.Discord", discord),
-        ("com.tinyspeck.slackmacgap", slack),
+        ("com.cisco.webexmeetingsapp", webex),   // TODO(Task 0): verify on device
+        ("com.webex.meetingmanager", webex),     // TODO(Task 0): verify on device
+        ("com.hnc.Discord", discord),            // TODO(Task 0): verify on device
+        ("com.tinyspeck.slackmacgap", slack),    // TODO(Task 0): verify on device
         ("com.google.Chrome", chrome),           // TODO(Task 0): verify on device
         // Safari/WebKit media runs in the GPU process, which carries no Safari identity of its own.
         ("com.apple.WebKit.GPU", safari),        // TODO(Task 0): verify on device
