@@ -34,10 +34,22 @@ final class RecordingLauncher {
     }
 
     /// The naming panel flow (moved verbatim from MenuView.promptAndStartRecording).
-    func promptAndStart() async {
-        let suggestedName = await calendarService.currentEventTitle(
-            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
-        )
+    ///
+    /// `suggestedName` is a title the caller already holds. Meeting sensing warms the calendar lookup
+    /// when the offer appears — on a 10 s budget, because nothing is waiting on it — so "Name it
+    /// first…" must reuse that answer rather than ask again. A second lookup here would not merely
+    /// duplicate work: `CalendarService` serializes lookups, so it would queue behind the warm call
+    /// while its own 1 s deadline was already running, and could return nil having never reached
+    /// EventKit — leaving the naming dialog blank under an island that was showing the title. Passing
+    /// nil (the menu path, and the case where the warm lookup came back empty) keeps the original
+    /// behaviour exactly: look it up here, bounded at 1 s.
+    func promptAndStart(suggestedName: String? = nil) async {
+        var suggestedName = suggestedName
+        if suggestedName == nil {
+            suggestedName = await calendarService.currentEventTitle(
+                lookaheadMinutes: configManager.config.calendarLookaheadMinutes
+            )
+        }
         SessionNameWindowController.shared.show(
             suggestedName: suggestedName,
             lastMicrophoneDeviceId: selectedMicId

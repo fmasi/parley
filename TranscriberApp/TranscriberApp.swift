@@ -265,11 +265,26 @@ struct TranscriberApp: App {
 
     /// Suspends until the launch gate reports permissions ready. `checkAndGate` returns immediately
     /// when setup is still open, so this is what keeps sensing from starting behind the setup window.
+    ///
+    /// Cancellation is checked, because the flag is not guaranteed to arrive: a user who closes Setup
+    /// without granting leaves `permissionsReady` false forever, and an unguarded loop would then hold
+    /// the gate and the presenter for the life of the process. Returning on cancellation is the right
+    /// outcome there — permissions were refused, so sensing must not activate.
+    ///
+    /// What this does NOT do, deliberately: resume a wait that is *already* suspended when cancellation
+    /// arrives. `withObservationTracking` wakes only on the flag changing, and giving the continuation a
+    /// second wake path needs shared mutable state between the body and an `onCancel` handler — more
+    /// machinery than a launch-path helper earns, when nothing in the app cancels this task today. The
+    /// guard is here so a caller that does cancel (an app-quit path, a test) gets a clean exit instead
+    /// of an unkillable task.
     @MainActor
     private static func waitUntilReady(_ gate: LaunchGate) async {
-        while !gate.permissionsReady {
+        while !gate.permissionsReady, !Task.isCancelled {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                withObservationTracking { _ = gate.permissionsReady } onChange: { continuation.resume() }
+                let once = ResumeOnce(continuation)
+                withObservationTracking { _ = gate.permissionsReady } onChange: { once.resume(()) }
+                // Cancelled before the tracking armed: resume now, or this wait would never be woken.
+                if Task.isCancelled { once.resume(()) }
             }
         }
     }

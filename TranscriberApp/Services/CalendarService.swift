@@ -17,6 +17,18 @@ final class CalendarService {
     /// dedicated queue also keeps a multi-second blocking call off the cooperative thread pool.
     private let queue = DispatchQueue(label: "calendar-lookup")
 
+    /// Bounded by `timeout`: past the deadline the caller gets nil and records with no suggested name.
+    ///
+    /// **Concurrent callers queue, and their deadlines do not.** `queue` is serial, so a lookup started
+    /// while another is still running does not begin its EventKit work until the first finishes — while
+    /// its own timeout has been counting from the moment it was *called*. A short-deadline lookup queued
+    /// behind a long one can therefore return nil having never queried the store at all, and the query
+    /// it leaves behind still runs to completion for a result nobody reads. This is why a caller who
+    /// already holds a title passes it on rather than asking again
+    /// (`RecordingLauncher.promptAndStart(suggestedName:)`): meeting sensing's warm lookup takes 10 s,
+    /// and the 1 s lookup behind it is the one that would lose. A generation counter that dropped
+    /// superseded work was considered and deliberately not built — `events(matching:)` cannot be
+    /// cancelled, so it would save no time, only bookkeeping.
     func currentEventTitle(lookaheadMinutes: Int = 10, timeout: TimeInterval = 1) async -> String? {
         // Touched only on `queue` below — never on main, and never from two contexts at once.
         nonisolated(unsafe) let store = self.store

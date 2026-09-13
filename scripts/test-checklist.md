@@ -111,7 +111,19 @@ Then fill this table in before judging anything below it.
 - [ ] **Helper processes.** Browsers and Zoom/Teams route mic capture through helper processes; confirm
       whether the capturing ID is the app's own or a helper (e.g. `com.google.Chrome.helper`,
       `com.apple.WebKit.GPU`), and that the helper resolves to the right family so one call never shows
-      as two apps.
+      as two apps. Two specifics to settle explicitly, both raised in the PR #199 review:
+- [ ] **Chrome's helper suffix varies by version.** Web audio renders in
+      `com.google.Chrome.helper.renderer`, while capture may be attributed to plain
+      `com.google.Chrome.helper` — and which one holds the HAL input has moved between Chrome releases.
+      Record the exact string the harness prints, not the family you infer from it. The
+      `com.google.Chrome` prefix row covers every `com.google.Chrome.*` helper, so any of those match;
+      what would *not* match is a helper bundled under an unrelated identifier, which is the finding to
+      watch for.
+- [ ] **Is `com.apple.Safari` dead weight?** Safari 17+ holds the microphone in `com.apple.WebKit.GPU`,
+      not in the main app, so the `com.apple.Safari` row may never match anything in the field. Join a
+      Meet/Zoom call in Safari and check whether `com.apple.Safari` is ever reported capturing. If it
+      never is, delete that row rather than leave an unverified entry implying coverage it does not
+      provide — and confirm the `com.apple.WebKit.GPU` row alone produces exactly one "Safari" offer.
 - [ ] **Per-process listeners fire on RELEASE.** While recording, leave the call and watch for a wake.
       The stop offer no longer depends on the answer: the fallback **is implemented** — a 10 s one-shot
       re-read (`MeetingSensor.releaseRecheck`), armed at the end of each scan only while a watch is armed

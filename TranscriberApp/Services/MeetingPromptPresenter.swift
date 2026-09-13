@@ -39,6 +39,12 @@ final class MeetingPromptPresenter {
     private let launcher: RecordingLauncher
     private let calendarService: CalendarService
     private let island = MeetingIslandController()
+    /// Implicitly unwrapped, not a `let`, and it has to be: the sensor is built from a closure that
+    /// captures `self` (weakly, but capture is capture), and Swift will not let an initializer hand
+    /// `self` to a closure while a stored property is still uninitialized — "variable 'self.sensor'
+    /// used before being initialized". Tried during the PR #199 review; the only ways out restructure
+    /// `MeetingSensor` to take its callback after construction, which buys less than it costs. Assigned
+    /// in `init` and never reassigned, so the runtime guarantee is the same.
     private var sensor: MeetingSensor!
     private var state = MeetingSenseState()
     private var mode: MeetingSenseMode = .off
@@ -111,7 +117,12 @@ final class MeetingPromptPresenter {
 
     func nameFirst() {
         island.hide()   // the banner stays until the recording starts
-        Task { [launcher] in await launcher.promptAndStart() }
+        // The warmed title, read here exactly as the Record path reads it above: the naming dialog has
+        // to be seeded with the title the island was showing, not with whatever a second lookup
+        // returns. nil (the warm call found nothing, or has not landed yet) falls through to the
+        // launcher's own bounded lookup — the behaviour this path had before.
+        let title = calendarTitle
+        Task { [launcher] in await launcher.promptAndStart(suggestedName: title) }
     }
 
     func notNow() { feed(.notNow) }

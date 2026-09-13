@@ -208,6 +208,18 @@ final class MeetingSensor {
         // when the recording ends, the last armed one-shot fires once more, finds the watch empty and
         // re-arms nothing. (`running` is already guarded at the top of this scan, and `stop()` cancels the
         // one-shot outright.) Delete this block if the device test shows the listeners do fire.
+        //
+        // How this composes with the engine's own `scheduleScan` (PR #199 review): both go through the
+        // single `oneShot` slot, which `scheduleScan` cancels and replaces on this serial queue, so no
+        // interleaving of the two can accumulate timers. During the 30 s stop debounce the engine's
+        // request lands *after* this re-arm — it travels out through `onSnapshot`, the main actor and
+        // back — so it replaces the 10 s one-shot and the next scan is the debounce deadline. Were that
+        // ordering ever to invert, the early scan would find the elapsed time short of the debounce and
+        // the engine would simply re-issue a nearer deadline: self-correcting either way. After
+        // `.offerStop` the engine issues nothing more, so this re-arm alone keeps a ~10 s cadence until
+        // the user answers or the recording ends; those scans are no-ops for the engine (the offer is
+        // already out). That standing cadence is the cost of the fallback, not a leak — it is bounded by
+        // the recording, and an idle app arms nothing because the watch set is empty.
         if !watchedBundleIDs.isEmpty { scheduleScan(after: Self.releaseRecheck) }
     }
 
