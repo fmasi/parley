@@ -154,9 +154,14 @@ public enum MeetingSenseEngine {
         let released = Set(s.capturing.keys).subtracting(nowCapturing.keys)
         s.capturing = nowCapturing
         s.lastSnapshot = snapshot.capturingBundleIDs
-        // An episode ends when the app lets go of the mic; the next acquisition is a new episode.
-        s.suppressed.subtract(released)
         guard mode == .prompt else { return }
+        // An episode ends when the app lets go of the mic; the next acquisition is a new episode.
+        //
+        // Below the mode guard on purpose (PR #199 review): the empty snapshot the presenter feeds when
+        // sensing is switched off is a teardown, not a release. Clearing suppression on it meant a user
+        // who answered "Not now" and then toggled sensing off→on in Settings was immediately re-offered
+        // for the same still-running call — the call had not changed, so neither should the answer.
+        s.suppressed.subtract(released)
 
         if s.phase == .recording {
             s.watched.formUnion(started)
@@ -188,6 +193,15 @@ public enum MeetingSenseEngine {
         }
 
         // Idle or transcribing: start offers.
+        //
+        // The other half of the rule above: while the mode was off no release was observed, so a
+        // suppression can outlive the call it was about. An app that is not capturing in this snapshot
+        // has finished its episode, whatever we missed — without this, one "Not now" plus a settings
+        // toggle would silence that app until it next released the mic with sensing on. Deliberately
+        // scoped to the non-recording path: "Keep recording" suppresses apps that have *already*
+        // released, and clearing that would re-fire the stop offer at the next debounce deadline.
+        s.suppressed.formIntersection(nowCapturing.keys)
+
         var justWithdrew = false
         if let pending = s.pendingStart, nowCapturing[pending] == nil {
             withdrawStart(&s, &out)

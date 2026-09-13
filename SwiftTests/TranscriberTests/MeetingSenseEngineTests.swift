@@ -115,6 +115,38 @@ struct MeetingSenseEngineStartTests {
         #expect(s.snap(["us.zoom.xos"], at: 4) == [.offerStart(zoom, expand: false)])   // new episode
     }
 
+    @Test("Not now survives a sensing off→on toggle while the same call is still running")
+    func notNowSurvivesModeToggle() {
+        // Dismissing an offer is an answer about the call, not about the setting: toggling sensing off
+        // and on again must not re-offer for a call that never stopped. The teardown snapshot the
+        // presenter feeds on mode-off is empty, so without the mode guard it read as "Zoom released the
+        // mic" and cleared the suppression.
+        var s = Sim()
+        s.snap(["us.zoom.xos"], at: 0)
+        s.step(.notNow, at: 1)
+        s.mode = .off
+        s.snap([], at: 2)                                   // the presenter's teardown snapshot
+        #expect(s.state.suppressed == [zoom])               // the call did not end; the answer stands
+        s.mode = .prompt
+        #expect(s.snap(["us.zoom.xos"], at: 3) == [])       // still the same episode: quiet
+    }
+
+    @Test("suppression does not outlive a call that ended while sensing was off")
+    func suppressionEndsWithTheCallEvenWhenSensingWasOff() {
+        // The other half of the rule above: while the mode is off no release is observed, so the
+        // suppression has to be re-checked against the first snapshot after sensing comes back — an app
+        // that is not capturing then has finished its episode, and its next call must prompt again.
+        var s = Sim()
+        s.snap(["us.zoom.xos"], at: 0)
+        s.step(.notNow, at: 1)
+        s.mode = .off
+        s.snap([], at: 2)                                   // teardown snapshot; the call ends unseen
+        s.mode = .prompt
+        s.snap([], at: 3)                                   // first scan after re-arming: nobody capturing
+        #expect(s.state.suppressed.isEmpty)
+        #expect(s.snap(["us.zoom.xos"], at: 4) == [.offerStart(zoom, expand: false)])   // new episode
+    }
+
     @Test("mode off withdraws a pending offer and never offers")
     func modeOffWithdraws() {
         var s = Sim()

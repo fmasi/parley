@@ -133,6 +133,11 @@ Then fill this table in before judging anything below it.
       show as capturing, and does an offer appear labelled **"Safari"**? If so, that is a confirmed
       false positive — the row may need narrowing (e.g. matched only alongside other Safari-specific
       signals) or the display name may need to stop claiming "Safari" specifically.
+      **The remedy, so the answer is actionable and not just recorded:** if a non-Safari WKWebView app
+      triggers the row, add a *separate* `com.apple.WebKit.GPU` row mapping to `nil` (classified as
+      "not a meeting app", i.e. suppressed) ahead of the Safari row, rather than leaving it mapped to
+      `safari`; and if the Safari test above shows Safari's own audio never goes through the GPU
+      process, simply delete the row instead.
 - [ ] **Per-process listeners fire on RELEASE.** While recording, leave the call and watch for a wake.
       The stop offer no longer depends on the answer: the fallback **is implemented** — a 10 s one-shot
       re-read (`MeetingSensor.releaseRecheck`), armed at the end of each scan only while a watch is armed

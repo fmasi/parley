@@ -185,7 +185,7 @@ final class MeetingPromptPresenter {
             queuedStart = nil
             calendarTitle = nil
         case .offerStop(let app):
-            showStopOffer(app)
+            presentStopOffer(app)
         case .withdrawStop:
             island.hide()
             appState.detectedMeeting = nil
@@ -236,8 +236,26 @@ final class MeetingPromptPresenter {
         }
     }
 
-    private func showStopOffer(_ app: MeetingApp) {
-        let session = RecordingSentinel.read()?.sessionName ?? "this recording"
+    /// The stop offer's subtitle names the recording, and that name lives in the sentinel on disk — so
+    /// it is read *before* the island is built, off the main actor, the same shape as `warmCalendar`
+    /// and for the same reason (PR #199 review). The file is tiny and the read is normally sub-millisecond,
+    /// but "normally" on a disk busy with transcription is not a promise, and this lands at exactly the
+    /// moment the stop island appears. Nothing is waiting on it: the offer arrives 30 s after the call
+    /// ended, so one hop costs nothing.
+    private func presentStopOffer(_ app: MeetingApp) {
+        Task { [weak self] in
+            let name = await Task.detached(priority: .userInitiated) {
+                RecordingSentinel.read()?.sessionName
+            }.value
+            // The offer may have been withdrawn while the read ran — the call came back, or the
+            // recording ended. `stopOffered` is the engine's own record of an offer still standing.
+            guard let self, self.state.stopOffered else { return }
+            self.showStopOffer(app, sessionName: name)
+        }
+    }
+
+    private func showStopOffer(_ app: MeetingApp, sessionName: String?) {
+        let session = sessionName ?? "this recording"
         island.show(MeetingIslandOffer(
             title: MeetingOfferText.stopTitle,
             subtitle: MeetingOfferText.stopSubtitle(app: app, sessionName: session),
