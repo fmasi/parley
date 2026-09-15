@@ -228,8 +228,6 @@ public enum TranscriptRediarizer {
         // transcript's own contents to anything reading it back, including the stepper's pre-fill.
         // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
         // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
-        // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
-        // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
         // Built from `labelPrefix(for:)` so the channel-prefix format lives in one place. Note this
         // is a runtime string comparison, NOT a compile-time guarantee: if `tagWithSourcePrefix`
         // ever stops using "<Prefix><Unknown>", this silently over-counts again, so the two must

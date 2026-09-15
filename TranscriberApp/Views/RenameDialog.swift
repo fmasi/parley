@@ -59,8 +59,11 @@ struct RenameDialog: View {
     }
 
     private func detectedCount(for channel: String) -> Int {
-        let prefix = channel == "local" ? "Local " : "Remote "
-        return max(1, speakers.filter { $0.id.hasPrefix(prefix) }.count)
+        // `channel(of:)`, not the label prefix — the same reason `channels` above uses it. On a
+        // transcript whose speakers have been renamed, a prefix test matches nothing, the count
+        // floors to 1, and the stepper pre-fills 1 however many speakers were actually detected:
+        // wrong on exactly the recordings #205 made Re-detect reachable for again.
+        max(1, speakers.filter { self.channel(of: $0) == channel }.count)
     }
 
     /// Manual override for the diarizer's speaker count (#67).
