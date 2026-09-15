@@ -119,7 +119,11 @@ public enum TranscriptRediarizer {
         // Resolving the channel can concatenate hundreds of MB on a multi-chunk recording; without
         // a check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
-        let diarization = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
+        let raw = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
+        // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
+        // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
+        // are both in hand, rather than hoping the clusterer honours the request.
+        let diarization = SpeakerCountEnforcer.enforce(raw, to: speakerCount)
         try Task.checkCancellation()
         let speechMap = try? await VadSpeechMap().analyze(audioPath: channelAudio)
 
