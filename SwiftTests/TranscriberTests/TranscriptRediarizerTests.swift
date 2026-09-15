@@ -233,7 +233,7 @@ struct TranscriptRediarizerNameClearingTests {
         ]
         let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
         #expect(names(out, "speaker_names") == ["Local Speaker 1": "Fred"])
-        #expect(names(out, "speaker_names_previous") == ["Remote Speaker 1": "Paul"])
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Remote Speaker 1": "Paul"])
         // Everything else in the metadata is none of this function's business.
         #expect(out["audio_paths"] as? [String] == ["/tmp/a.m4a"])
     }
@@ -242,10 +242,10 @@ struct TranscriptRediarizerNameClearingTests {
     func stashMergesWithExistingHistory() {
         let metadata: [String: Any] = [
             "speaker_names": ["Remote Speaker 1": "Paul"],
-            "speaker_names_previous": ["Local Speaker 1": "Fred"],
+            TranscriptRediarizer.previousNamesKey: ["Local Speaker 1": "Fred"],
         ]
         let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
-        #expect(names(out, "speaker_names_previous")
+        #expect(names(out, TranscriptRediarizer.previousNamesKey)
                 == ["Local Speaker 1": "Fred", "Remote Speaker 1": "Paul"])
     }
 
@@ -256,10 +256,10 @@ struct TranscriptRediarizerNameClearingTests {
         // useful one to keep.
         let metadata: [String: Any] = [
             "speaker_names": ["Remote Speaker 1": "Anna"],
-            "speaker_names_previous": ["Remote Speaker 1": "Paul"],
+            TranscriptRediarizer.previousNamesKey: ["Remote Speaker 1": "Paul"],
         ]
         let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
-        #expect(names(out, "speaker_names_previous") == ["Remote Speaker 1": "Anna"])
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Remote Speaker 1": "Anna"])
     }
 
     @Test("clearing the last name removes speaker_names rather than leaving an empty map")
@@ -267,7 +267,7 @@ struct TranscriptRediarizerNameClearingTests {
         let metadata: [String: Any] = ["speaker_names": ["Local Speaker 1": "Fred"]]
         let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "local")
         #expect(out["speaker_names"] == nil)
-        #expect(names(out, "speaker_names_previous") == ["Local Speaker 1": "Fred"])
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Local Speaker 1": "Fred"])
     }
 
     @Test("a channel with no names is left exactly as it was")
@@ -277,14 +277,14 @@ struct TranscriptRediarizerNameClearingTests {
         #expect(names(out, "speaker_names") == ["Local Speaker 1": "Fred"])
         // No empty stash either: a key that appears only when nothing was stashed is noise in a
         // file people read.
-        #expect(out["speaker_names_previous"] == nil)
+        #expect(out[TranscriptRediarizer.previousNamesKey] == nil)
     }
 
     @Test("metadata with no speaker_names at all is untouched")
     func missingSpeakerNamesIsANoOp() {
         let out = TranscriptRediarizer.clearingChannelNames(in: ["duration": 12.0], source: "local")
         #expect(out["speaker_names"] == nil)
-        #expect(out["speaker_names_previous"] == nil)
+        #expect(out[TranscriptRediarizer.previousNamesKey] == nil)
         #expect(out["duration"] as? Double == 12.0)
     }
 

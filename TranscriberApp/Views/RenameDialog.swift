@@ -132,6 +132,11 @@ struct RenameDialog: View {
     /// person's name and carries no prefix, so fall back to the channel its samples were taken
     /// from. Without the fallback a renamed speaker looks like it belongs to no channel, and the
     /// warning below would miss exactly the names it exists to protect.
+    /// Precondition: every `SpeakerEntry` in `speakers` has at least one sample. `parseSpeakers`
+    /// populates them before building the entry, so the `nil` return below is unreachable today —
+    /// but a future path that builds entries straight from the JSON would make those speakers
+    /// invisible to the whole Re-detect UI (no channel section, not counted by the stepper), with
+    /// nothing on screen to say so.
     private func channel(of speaker: SpeakerEntry) -> String? {
         if speaker.id.hasPrefix("Local ") { return "local" }
         if speaker.id.hasPrefix("Remote ") { return "remote" }
