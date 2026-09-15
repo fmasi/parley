@@ -47,9 +47,13 @@ struct RenameDialog: View {
     /// Channels present in this recording, in display order.
     private var channels: [String] {
         var seen: [String] = []
-        for id in speakers.map(\.id) {
-            let channel = id.hasPrefix("Local ") ? "local" : (id.hasPrefix("Remote ") ? "remote" : "")
-            if !channel.isEmpty, !seen.contains(channel) { seen.append(channel) }
+        // Via `channel(of:)`, not the label prefix: once a speaker has been renamed its label is
+        // "Jacques", not "Remote Speaker 1", so a prefix test finds no channels at all and the
+        // Re-detect controls disappear entirely — on precisely the transcripts someone has already
+        // invested naming effort in, which are the ones most worth re-detecting.
+        for speaker in speakers {
+            guard let channel = channel(of: speaker) else { continue }
+            if !seen.contains(channel) { seen.append(channel) }
         }
         return seen
     }
