@@ -221,3 +221,43 @@ struct SpeakerCountEnforcerCompositionTests {
         #expect(folded.count == labeled.count)
     }
 }
+
+// MARK: - The label coupling, pinned
+
+/// `TranscriptRediarizer` excludes "<Prefix> <Unknown>" when counting real speakers, and that is a
+/// runtime string comparison against whatever `tagWithSourcePrefix` emits. Nothing in the compiler
+/// ties the two together, so this test is the tie: if the emitted format ever changes, the build
+/// goes red here instead of the speaker count silently going up by one.
+@Suite("Unknown label format is the one the count excludes")
+struct UnknownLabelCouplingTests {
+
+    @Test("tagWithSourcePrefix emits exactly the string the speaker count subtracts")
+    func emittedFormatMatchesTheExclusion() {
+        var segs = [
+            LabeledSegment(start: 0, end: 1, speaker: SpeakerAssignment.unknownSpeaker, text: "Oui.", source: "remote"),
+            LabeledSegment(start: 1, end: 2, speaker: SpeakerAssignment.unknownSpeaker, text: "Right.", source: "local"),
+        ]
+        SpeakerAssignment.tagWithSourcePrefix(&segs)
+
+        // The two strings TranscriptRediarizer builds as `labelPrefix(for:) + unknownSpeaker`.
+        #expect(segs[0].speaker == "Remote " + SpeakerAssignment.unknownSpeaker)
+        #expect(segs[1].speaker == "Local " + SpeakerAssignment.unknownSpeaker)
+    }
+}
+
+@Suite("SpeakerCountEnforcer: exact-count boundary")
+struct SpeakerCountEnforcerBoundaryTests {
+    @Test("asking for exactly the number already found changes nothing")
+    func exactCountIsANoOp() {
+        let input = DiarizationResult(
+            segments: [
+                DiarizedSegment(start: 0, end: 100, speaker: "S1"),
+                DiarizedSegment(start: 100, end: 150, speaker: "S2"),
+            ],
+            speakerDatabase: ["S1": [1, 0], "S2": [0, 1]])
+        let out = SpeakerCountEnforcer.enforce(input, to: 2)
+        // Pins the `>` in `speech.count > speakerCount`: a future `>=` would start merging here.
+        #expect(Set(out.segments.map { $0.speaker }) == ["S1", "S2"])
+        #expect(out.segments.count == input.segments.count)
+    }
+}

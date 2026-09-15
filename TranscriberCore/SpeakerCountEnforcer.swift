@@ -80,6 +80,10 @@ public enum SpeakerCountEnforcer {
             // The surviving cluster keeps its own embedding rather than a blend: it is the longer,
             // better-estimated voice, and averaging in a fragment's unreliable embedding would drag
             // the reference toward a vector the diarizer itself could not place.
+            // Unreachable in the current loop — `victim` leaves `live` on the next line and so can
+            // never be a candidate again. Kept as belt-and-braces against a future edit that builds
+            // `candidates` from something other than `live`, where a stale embedding would quietly
+            // pull a later merge toward a cluster that no longer exists.
             embeddings[victim] = nil
             live.removeAll { $0 == victim }
         }
@@ -121,6 +125,11 @@ public enum SpeakerCountEnforcer {
         // "Local Speaker 1" / "Remote Speaker 1", the same shape the rename dialog and
         // `speaker_names` expect. A different string here would render as a speaker the rest of the
         // pipeline does not recognise.
+        // `first`, not the most dominant: this runs only after `enforce(to: 1)`, which leaves at
+        // most one attributed label, so first IS the only one. If a caller ever folds at a stated
+        // count of 1 over an array that still holds two attributed speakers, document order would
+        // decide which one absorbs the unattributed speech — arbitrary, and worth a dominance test
+        // at that point rather than now, where it cannot arise.
         let target = named.first ?? "Speaker 1"
         guard labeled.contains(where: { $0.speaker == SpeakerAssignment.unknownSpeaker }) else { return labeled }
         var out = labeled
