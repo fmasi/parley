@@ -170,7 +170,11 @@ struct RenameDialog: View {
             "Working out the speakers again produces a new set of voices, and Parley will not guess "
             + "which new speaker each existing name belongs to — guessing wrong would put the wrong "
             + "name on the wrong words. You can name them again straight afterwards, and the old "
-            + "names are kept in the transcript's metadata. Names on the other side are unaffected."
+            // Name the OPPOSITE channel explicitly: when the channel being re-detected is the remote
+            // one, `side` above is already "the other side", and a fixed "the other side" here
+            // contradicted the title in the one sentence meant to reassure — at the exact moment
+            // the user is deciding whether to discard naming work.
+            + "names are kept in the transcript's metadata. Names on \(channel == "local" ? "the other side" : "this side") are unaffected."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Re-detect")
         alert.addButton(withTitle: "Cancel")

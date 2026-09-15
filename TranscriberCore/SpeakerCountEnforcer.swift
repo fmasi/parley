@@ -98,6 +98,31 @@ public enum SpeakerCountEnforcer {
     }
 
     /// The surviving cluster a doomed one should join.
+    /// Fold segments the assigner could not attribute ("Unknown") into the stated speaker.
+    ///
+    /// `SpeakerAssignment` labels a segment "Unknown" when it overlaps no diarization turn, or when
+    /// the VAD quality gate rejects the overlap it found. That is an *absence of attribution*, not a
+    /// person — but it reaches the rename dialog as a row of its own, so a user who answered "1
+    /// speaker" is shown two speakers and reasonably concludes the answer was ignored. Device-observed
+    /// on an 82-minute call: one real cluster plus 113s of "Right." / "Oui." backchannels.
+    ///
+    /// Only safe at a stated count of 1, where the attribution is unambiguous: if one person is on
+    /// this channel, every word on it is theirs. At 2+ we genuinely cannot say which of them spoke,
+    /// and inventing an answer is the silent-wrong-answer failure this product exists to avoid.
+    public static func foldUnattributed(_ labeled: [LabeledSegment], statedCount: Int) -> [LabeledSegment] {
+        guard statedCount == 1 else { return labeled }
+        let named = labeled.map(\.speaker).filter { $0 != SpeakerAssignment.unknownSpeaker }
+        // No attributed speaker at all: name the channel's single speaker rather than leaving every
+        // segment under a label that reads as a failure.
+        let target = named.first ?? "Speaker 1"
+        guard labeled.contains(where: { $0.speaker == SpeakerAssignment.unknownSpeaker }) else { return labeled }
+        var out = labeled
+        for i in out.indices where out[i].speaker == SpeakerAssignment.unknownSpeaker {
+            out[i].speaker = target
+        }
+        return out
+    }
+
     private static func destination(
         for victim: String,
         among candidates: [String],

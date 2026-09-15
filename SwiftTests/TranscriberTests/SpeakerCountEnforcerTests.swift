@@ -147,3 +147,42 @@ struct SpeakerCountEnforcerTests {
         #expect(out.segments.count == 3)
     }
 }
+
+// MARK: - Unattributed segments (#201 follow-up, device-found 2026-09-15)
+
+@Suite("SpeakerCountEnforcer.foldUnattributed")
+struct SpeakerCountEnforcerFoldTests {
+
+    private func seg(_ speaker: String, _ start: Double = 0) -> LabeledSegment {
+        LabeledSegment(start: start, end: start + 1, speaker: speaker, text: "x", source: "remote")
+    }
+
+    @Test("a stated count of 1 absorbs Unknown into the one speaker")
+    func foldsAtOne() {
+        let input = [seg("Speaker 1"), seg(SpeakerAssignment.unknownSpeaker, 2), seg("Speaker 1", 4)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1)
+        #expect(Set(out.map(\.speaker)) == ["Speaker 1"])
+        #expect(out.count == input.count)  // no segment dropped
+    }
+
+    @Test("at 2 or more the Unknown label is left alone — we cannot say whose it was")
+    func leavesAloneAboveOne() {
+        let input = [seg("Speaker 1"), seg(SpeakerAssignment.unknownSpeaker, 2), seg("Speaker 2", 4)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 2)
+        #expect(out.map(\.speaker) == input.map(\.speaker))
+    }
+
+    @Test("all-Unknown at a stated 1 still yields a named speaker, not a failure label")
+    func namesAnAllUnknownChannel() {
+        let input = [seg(SpeakerAssignment.unknownSpeaker), seg(SpeakerAssignment.unknownSpeaker, 2)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1)
+        #expect(Set(out.map(\.speaker)) == ["Speaker 1"])
+    }
+
+    @Test("nothing to fold leaves the segments untouched")
+    func noUnknownIsANoOp() {
+        let input = [seg("Speaker 1"), seg("Speaker 1", 2)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1)
+        #expect(out.map(\.speaker) == input.map(\.speaker))
+    }
+}

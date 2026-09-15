@@ -212,6 +212,10 @@ public enum TranscriptRediarizer {
                 "Re-diarize produced no labels for \(source, privacy: .public) from \(transcriptSegments.count, privacy: .public) segments — refusing to write")
             throw RediarizeError.producedNoLabels(source)
         }
+        // Before the source prefix goes on, while labels are still raw: a stated count of 1 means
+        // every word on this channel belongs to that one person, including the ones the assigner
+        // could not tie to a diarization turn.
+        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount)
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 
@@ -222,7 +226,11 @@ public enum TranscriptRediarizer {
         // Persist what the diarizer actually PRODUCED, not what was requested. They diverge — on
         // 2026-09-02 a request for 2 could yield 1 — and a stored request would misreport the
         // transcript's own contents to anything reading it back, including the stepper's pre-fill.
-        let found = Set(labeled.map { $0.speaker }).count
+        // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
+        // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
+        let found = Set(labeled.map { $0.speaker })
+            .filter { !$0.hasSuffix(SpeakerAssignment.unknownSpeaker) }
+            .count
         metadata["speaker_count_\(source)"] = found
         json["metadata"] = metadata
 
