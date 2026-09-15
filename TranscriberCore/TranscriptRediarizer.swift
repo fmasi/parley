@@ -38,19 +38,72 @@ public enum TranscriptRediarizer {
         return kept.sorted { ($0["start"] as? Double ?? 0) < ($1["start"] as? Double ?? 0) }
     }
 
-    /// Drop `speaker_names` entries for labels the re-diarization no longer produces.
+    /// Metadata key holding the names a re-detect cleared, so a mistaken one is recoverable.
+    static let previousNamesKey = "speaker_names_previous"
+
+    private static func labelPrefix(for source: String) -> String {
+        source == "local" ? "Local " : "Remote "
+    }
+
+    /// The `speaker_names` entries belonging to one channel.
     ///
-    /// A stale entry is not merely untidy: speaker numbering is positional, so "Local Speaker 3"
-    /// surviving a run that yields two local speakers would either apply a name to nobody or —
-    /// if a later run produces three again — attach an old name to a different person.
-    /// Only the re-diarized channel is pruned; the other channel's names are none of our business.
-    public static func prunedSpeakerNames(
-        _ names: [String: String],
-        source: String,
-        survivingLabels: Set<String>
-    ) -> [String: String] {
-        let prefix = source == "local" ? "Local " : "Remote "
-        return names.filter { !$0.key.hasPrefix(prefix) || survivingLabels.contains($0.key) }
+    /// Speaker labels are channel-prefixed, so the prefix is the whole of the ownership test. The
+    /// dialog uses this to decide whether re-detecting has anything to destroy, and therefore
+    /// whether to ask first.
+    public static func channelNames(in metadata: [String: Any], source: String) -> [String: String] {
+        let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let prefix = labelPrefix(for: source)
+        return names.filter { $0.key.hasPrefix(prefix) }
+    }
+
+    /// The names stored for one channel in a transcript on disk.
+    ///
+    /// Only used to decide whether a re-detect has anything to destroy, and therefore whether to
+    /// ask first — an unreadable file yields no names, because the re-diarize that follows will
+    /// fail on its own read and report it properly.
+    public static func channelNames(inTranscriptAt url: URL, source: String) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = json["metadata"] as? [String: Any]
+        else { return [:] }
+        return channelNames(in: metadata, source: source)
+    }
+
+    /// Clear the re-diarized channel's speaker names, stashing them under `speaker_names_previous`.
+    ///
+    /// Names are NOT carried across a re-detect, and this is deliberate (#202). Speaker numbering
+    /// is positional: "Remote Speaker 1" after a fresh clustering is whichever cluster that run
+    /// happened to emit first, which can easily be a different person. Keeping a name because its
+    /// key survived therefore re-points it at a voice nobody chose it for — silent mislabelling of
+    /// a record this product asks people to rely on. Losing a name is recoverable in seconds from
+    /// the rows on screen; a name attached to the wrong voice is not recoverable at all, because
+    /// nothing about it looks wrong.
+    ///
+    /// The cleared map is stashed rather than discarded so a mistaken re-detect leaves a trail, and
+    /// it MERGES into any existing stash — overwriting would throw away the other channel's history
+    /// (the #162 mistake, in a new place). Where the same key appears twice the newer name wins: the
+    /// stash is a recovery aid, and the most recent answer is the one worth recovering.
+    ///
+    /// The other channel is untouched, and a channel with no names is left exactly as it was — no
+    /// empty stash key appears in a file people read.
+    public static func clearingChannelNames(in metadata: [String: Any], source: String) -> [String: Any] {
+        let cleared = channelNames(in: metadata, source: source)
+        guard !cleared.isEmpty else { return metadata }
+
+        var metadata = metadata
+        let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let prefix = labelPrefix(for: source)
+        let kept = names.filter { !$0.key.hasPrefix(prefix) }
+        if kept.isEmpty {
+            metadata["speaker_names"] = nil
+        } else {
+            metadata["speaker_names"] = kept
+        }
+
+        var previous = metadata[previousNamesKey] as? [String: String] ?? [:]
+        previous.merge(cleared) { _, newer in newer }
+        metadata[previousNamesKey] = previous
+        return metadata
     }
 
     // MARK: - Orchestration
@@ -163,10 +216,9 @@ public enum TranscriptRediarizer {
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 
         json["segments"] = mergeRelabeled(into: rawSegments, source: source, relabeled: labeled)
-        if let names = metadata["speaker_names"] as? [String: String] {
-            metadata["speaker_names"] = prunedSpeakerNames(
-                names, source: source, survivingLabels: Set(labeled.map { $0.speaker }))
-        }
+        // The channel's names go, they are not carried over — see `clearingChannelNames`. The
+        // dialog warns before reaching here, so this is never a surprise.
+        metadata = clearingChannelNames(in: metadata, source: source)
         // Persist what the diarizer actually PRODUCED, not what was requested. They diverge — on
         // 2026-09-02 a request for 2 could yield 1 — and a stored request would misreport the
         // transcript's own contents to anything reading it back, including the stepper's pre-fill.

@@ -121,8 +121,6 @@ transcribes into fluent, wrong text. Verify by ear and by log.
       local speakers.
 - [ ] Play a sample for each new speaker — audio must play and match the label.
 - [ ] Name them, Save, reopen the transcript: names stick and segments are attributed to both.
-- [ ] Re-detect a channel you had already named. Names for labels that no longer exist must be
-      dropped, not re-applied to a different person.
 - [ ] Re-detect on a multi-chunk (>30 min) recording: channel audio is concatenated across chunks
       and diarized once, so speaker numbering must stay consistent across the whole recording.
 - [ ] Re-detect on a recording whose archive is gone (storage quota evicted it): must show a clear
@@ -131,6 +129,37 @@ transcribes into fluent, wrong text. Verify by ear and by log.
 **Known gap:** a mic-only recording (phone on speakerphone, no system audio) still has no `.m4a`
 and its transcript does not reference the mic WAV — #183. Re-detect will fail on those until #183
 lands. Verify the error message is the readable one.
+
+## Re-detect: binding count + name safety (#201 / #202) — added 2026-09-15
+
+Both found on an 82-minute one-local/one-remote call. `RenameDialog` is app-target code and cannot
+be type-checked without Xcode on this machine, so **every item here is the only check these changes
+get** — run them all.
+- [ ] **A stated count of 1 is honoured (#201).** On a channel the diarizer split into two (the
+      classic case: one remote person plus a 20-30s fragment), set that channel's stepper to **1**
+      and press Re-detect. The rows must rebuild with exactly **one** speaker, the stepper must
+      settle on 1, and every line of that channel must still be present in the transcript — the
+      merge relabels turns, it never drops them. Log line to confirm:
+      `SpeakerCountEnforcer: merged N cluster(s) to honour the stated count of 1`.
+- [ ] **Count 2 and 3 still behave.** Re-detect the same channel at 2, then 3. Each must produce at
+      most the stated number of speakers, and never more.
+- [ ] **Re-detect warns before clearing names (#202).** Name at least one speaker on a channel and
+      Save. Reopen the rename dialog and press Re-detect on that channel. An alert must appear
+      saying the names on that side will be cleared, before any work starts (no spinner first).
+- [ ] **Cancel changes nothing.** Dismiss that alert with Cancel: no spinner, no rewrite, the rows
+      and names are exactly as they were. Reopen the transcript to confirm it is byte-for-byte
+      unchanged in substance — same speakers, same names.
+- [ ] **Confirming clears only that channel.** Press Re-detect again and confirm. Afterwards the
+      re-detected channel's rows show plain `Local Speaker N` / `Remote Speaker N` labels with empty
+      name fields, and **the other channel's names are still there**.
+- [ ] **The old names are recoverable.** In the transcript JSON, `metadata.speaker_names_previous`
+      contains the cleared name(s); the other channel's entries in `metadata.speaker_names` survive.
+- [ ] **Re-nameable afterwards.** Type new names into the rebuilt rows, Save, reopen: the names
+      stick and the segments are attributed to them.
+- [ ] **A second re-detect keeps the history.** Name the new speakers, re-detect again, confirm:
+      `speaker_names_previous` now holds the newer names and has not lost the other channel's.
+- [ ] **No warning when there is nothing to lose.** On a channel with no names at all, Re-detect
+      must run straight away with no alert.
 
 ## Mic-only recordings (#183) — added 2026-09-03
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AVFoundation
 import TranscriberCore
 import os
@@ -101,7 +102,7 @@ struct RenameDialog: View {
                         if rediarizing == channel {
                             ProgressView().controlSize(.small)
                         } else {
-                            Button("Re-detect") { rediarize(channel: channel, count: count) }
+                            Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
                                 .disabled(rediarizing != nil)
                         }
@@ -116,6 +117,61 @@ struct RenameDialog: View {
                 }
             }
         }
+    }
+
+    /// Which channel a row belongs to.
+    ///
+    /// The label prefix answers it until a speaker has been renamed — after that the label IS the
+    /// person's name and carries no prefix, so fall back to the channel its samples were taken
+    /// from. Without the fallback a renamed speaker looks like it belongs to no channel, and the
+    /// warning below would miss exactly the names it exists to protect.
+    private func channel(of speaker: SpeakerEntry) -> String? {
+        if speaker.id.hasPrefix("Local ") { return "local" }
+        if speaker.id.hasPrefix("Remote ") { return "remote" }
+        guard let isLocal = speaker.samples.first?.isLocal else { return nil }
+        return isLocal ? "local" : "remote"
+    }
+
+    /// Names a re-detect on this channel would destroy: those already written to the transcript,
+    /// plus any typed into a field but not yet saved. Both are lost, so both have to count.
+    private func hasNamesToLose(on channel: String) -> Bool {
+        let unsaved = speakers.contains { speaker in
+            guard self.channel(of: speaker) == channel else { return false }
+            let typed = speaker.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !typed.isEmpty && typed != speaker.id
+        }
+        if unsaved { return true }
+        // Reads the transcript on the main thread, deliberately: it happens once per button press,
+        // on a file the re-diarize is about to read anyway, and the answer gates a modal that must
+        // appear before any work starts.
+        return !TranscriptRediarizer.channelNames(inTranscriptAt: jsonPath, source: channel).isEmpty
+    }
+
+    /// Ask before clearing names (#202).
+    ///
+    /// Re-detecting produces a new set of clusters, and the names on this channel are dropped
+    /// rather than carried over — carrying them re-points a name at whatever cluster the new run
+    /// emits first, which can be a different person. That trade is defensible but it is not
+    /// guessable, so it is stated in plain words before anything is written. Cancel touches
+    /// nothing: the transcript is only rewritten inside `rediarize`.
+    private func confirmThenRediarize(channel: String, count: Int) {
+        guard hasNamesToLose(on: channel) else {
+            rediarize(channel: channel, count: count)
+            return
+        }
+        let side = channel == "local" ? "this side" : "the other side"
+        let alert = NSAlert()
+        alert.messageText = "Re-detecting will clear the names on \(side)"
+        alert.informativeText =
+            "Working out the speakers again produces a new set of voices, and Parley will not guess "
+            + "which new speaker each existing name belongs to — guessing wrong would put the wrong "
+            + "name on the wrong words. You can name them again straight afterwards, and the old "
+            + "names are kept in the transcript's metadata. Names on the other side are unaffected."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Re-detect")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        rediarize(channel: channel, count: count)
     }
 
     private func rediarize(channel: String, count: Int) {
