@@ -62,27 +62,6 @@ struct TranscriptRediarizerTests {
                 == ["Local Speaker 1", "Remote Speaker 1", "Local Speaker 2"])
     }
 
-    @Test("a stale speaker_names entry for a label that no longer exists is dropped")
-    func staleSpeakerNamesAreDropped() {
-        // The user named "Local Speaker 3" before re-diarizing; the new run produces only two
-        // local speakers. Leaving the stale mapping would re-apply a name to nobody, or worse,
-        // to a different person if the numbering shifts.
-        let names = ["Local Speaker 1": "Fred", "Local Speaker 3": "Ghost", "Remote Speaker 1": "Paul"]
-        let kept = TranscriptRediarizer.prunedSpeakerNames(
-            names, source: "local", survivingLabels: ["Local Speaker 1", "Local Speaker 2"]
-        )
-        #expect(kept == ["Local Speaker 1": "Fred", "Remote Speaker 1": "Paul"])
-    }
-
-    @Test("pruning never touches names belonging to the other channel")
-    func pruningIsScopedToTheRediarizedChannel() {
-        let names = ["Remote Speaker 2": "Someone", "Local Speaker 1": "Fred"]
-        let kept = TranscriptRediarizer.prunedSpeakerNames(
-            names, source: "local", survivingLabels: ["Local Speaker 1"]
-        )
-        #expect(kept["Remote Speaker 2"] == "Someone")
-    }
-
     /// `mergeRelabeled` is a pure replace, so an empty relabeling empties the channel. That is the
     /// correct behaviour for this function and a catastrophic one for a transcript, which is why
     /// `rediarize` refuses to call it with no labels (`RediarizeError.producedNoLabels`).
@@ -229,5 +208,93 @@ extension TranscriptRediarizerGuardTests {
         } catch {
             Issue.record("wrong error: \(error)")
         }
+    }
+}
+
+/// What happens to speaker NAMES when a channel is re-diarized (#202).
+///
+/// The old behaviour kept a name whose exact label survived the new clustering. That is silent
+/// mislabelling: "Remote Speaker 1" after a re-run is whichever cluster the new pass happened to
+/// emit first, which can be a different person. On a record this product positions as
+/// courtroom-grade, re-pointing a name at the wrong voice is far worse than losing the name — so
+/// the re-diarized channel's names are cleared outright and stashed for recovery.
+@Suite("TranscriptRediarizer speaker names")
+struct TranscriptRediarizerNameClearingTests {
+
+    private func names(_ metadata: [String: Any], _ key: String) -> [String: String]? {
+        metadata[key] as? [String: String]
+    }
+
+    @Test("clears the re-diarized channel's names and stashes them, leaving the other channel alone")
+    func clearsOnlyTheTargetChannel() {
+        let metadata: [String: Any] = [
+            "speaker_names": ["Remote Speaker 1": "Paul", "Local Speaker 1": "Fred"],
+            "audio_paths": ["/tmp/a.m4a"],
+        ]
+        let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
+        #expect(names(out, "speaker_names") == ["Local Speaker 1": "Fred"])
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Remote Speaker 1": "Paul"])
+        // Everything else in the metadata is none of this function's business.
+        #expect(out["audio_paths"] as? [String] == ["/tmp/a.m4a"])
+    }
+
+    @Test("stashing merges into an existing history instead of overwriting the other channel's")
+    func stashMergesWithExistingHistory() {
+        let metadata: [String: Any] = [
+            "speaker_names": ["Remote Speaker 1": "Paul"],
+            TranscriptRediarizer.previousNamesKey: ["Local Speaker 1": "Fred"],
+        ]
+        let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
+        #expect(names(out, TranscriptRediarizer.previousNamesKey)
+                == ["Local Speaker 1": "Fred", "Remote Speaker 1": "Paul"])
+    }
+
+    @Test("a second re-detect stashes the newer name for a repeated label")
+    func newerNameWinsInTheStash() {
+        // Re-detect #1 stashed "Paul" under this key; the user then named the new cluster "Anna"
+        // and re-detected again. The stash is a recovery aid, so the most recent answer is the
+        // useful one to keep.
+        let metadata: [String: Any] = [
+            "speaker_names": ["Remote Speaker 1": "Anna"],
+            TranscriptRediarizer.previousNamesKey: ["Remote Speaker 1": "Paul"],
+        ]
+        let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Remote Speaker 1": "Anna"])
+    }
+
+    @Test("clearing the last name removes speaker_names rather than leaving an empty map")
+    func emptyMapIsRemoved() {
+        let metadata: [String: Any] = ["speaker_names": ["Local Speaker 1": "Fred"]]
+        let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "local")
+        #expect(out["speaker_names"] == nil)
+        #expect(names(out, TranscriptRediarizer.previousNamesKey) == ["Local Speaker 1": "Fred"])
+    }
+
+    @Test("a channel with no names is left exactly as it was")
+    func noNamesIsANoOp() {
+        let metadata: [String: Any] = ["speaker_names": ["Local Speaker 1": "Fred"]]
+        let out = TranscriptRediarizer.clearingChannelNames(in: metadata, source: "remote")
+        #expect(names(out, "speaker_names") == ["Local Speaker 1": "Fred"])
+        // No empty stash either: a key that appears only when nothing was stashed is noise in a
+        // file people read.
+        #expect(out[TranscriptRediarizer.previousNamesKey] == nil)
+    }
+
+    @Test("metadata with no speaker_names at all is untouched")
+    func missingSpeakerNamesIsANoOp() {
+        let out = TranscriptRediarizer.clearingChannelNames(in: ["duration": 12.0], source: "local")
+        #expect(out["speaker_names"] == nil)
+        #expect(out[TranscriptRediarizer.previousNamesKey] == nil)
+        #expect(out["duration"] as? Double == 12.0)
+    }
+
+    @Test("names on a channel are reported so the dialog can warn before clearing them")
+    func channelNamesAreReportable() {
+        let metadata: [String: Any] = [
+            "speaker_names": ["Remote Speaker 1": "Paul", "Local Speaker 1": "Fred"]
+        ]
+        #expect(TranscriptRediarizer.channelNames(in: metadata, source: "remote")
+                == ["Remote Speaker 1": "Paul"])
+        #expect(TranscriptRediarizer.channelNames(in: [:], source: "remote").isEmpty)
     }
 }

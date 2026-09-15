@@ -33,7 +33,19 @@ else
     swift build
 fi
 
-BUILD_DIR=".build/arm64-apple-macosx/$CONFIG"
+# `swift build --show-bin-path` and NOT `swift package show-bin-path`: the latter does not exist on
+# this toolchain (`error: Unknown subcommand or plugin name 'show-bin-path'`, exit 64), which would
+# leave BUILD_DIR empty and fail the cp below with a far less obvious message. The query form costs
+# nothing — it returns in ~0.3s and does not build, and the real build has just run above anyway.
+# Ask SwiftPM where it put the products rather than hardcoding a layout. Xcode 27's SwiftPM
+# defaults to the "swiftbuild" build system, which writes to .build/out/Products/<Config>/ —
+# the old .build/arm64-apple-macosx/<config>/ path silently stops existing and the cp below
+# fails with "No such file or directory" after an otherwise successful build.
+if [[ "$CONFIG" == "release" ]]; then
+    BUILD_DIR="$(swift build -c release --show-bin-path)"
+else
+    BUILD_DIR="$(swift build --show-bin-path)"
+fi
 
 # ── Compute version from git ─────────────────────────────────────────────────
 GIT_DESCRIPTION="$(git describe --tags --always --dirty 2>/dev/null || echo 'unknown')"

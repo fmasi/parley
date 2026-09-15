@@ -749,12 +749,17 @@ public enum SpeakerAssignment {
             // Only genuine dual-stream sources get a side prefix (single-stream uses source "").
             guard source == "local" || source == "remote" else { continue }
             let label = source == "local" ? "Local" : "Remote"
-            if !speaker.isEmpty && speaker != "Unknown" {
+            // `unknownSpeaker`, not a second copy of the literal: TranscriptRediarizer excludes
+            // "<Prefix> <Unknown>" when counting real speakers, and that comparison is a runtime
+            // string match. With the literal repeated here, renaming the constant would leave this
+            // emitting the old word and the exclusion silently missing it — an over-count of
+            // speakers, which is the bug class #201/#202 came from.
+            if !speaker.isEmpty && speaker != unknownSpeaker {
                 segments[i].speaker = "\(label) \(speaker)"
             } else {
                 // Unknown/empty on a known channel: still attribute the SIDE so the segment is
                 // identifiable as `Local Unknown` / `Remote Unknown` rather than a bare `Unknown` (#71).
-                segments[i].speaker = "\(label) Unknown"
+                segments[i].speaker = "\(label) \(unknownSpeaker)"
             }
         }
     }
