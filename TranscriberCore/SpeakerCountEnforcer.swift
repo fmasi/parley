@@ -97,7 +97,6 @@ public enum SpeakerCountEnforcer {
             speakerDatabase: result.speakerDatabase.filter { !absorbed.contains($0.key) })
     }
 
-    /// The surviving cluster a doomed one should join.
     /// Fold segments the assigner could not attribute ("Unknown") into the stated speaker.
     ///
     /// `SpeakerAssignment` labels a segment "Unknown" when it overlaps no diarization turn, or when
@@ -123,6 +122,7 @@ public enum SpeakerCountEnforcer {
         return out
     }
 
+    /// The surviving cluster a doomed one should join.
     private static func destination(
         for victim: String,
         among candidates: [String],
