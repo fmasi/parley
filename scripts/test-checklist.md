@@ -132,6 +132,12 @@ lands. Verify the error message is the readable one.
 
 ## Re-detect: binding count + name safety (#201 / #202) — added 2026-09-15
 
+- [ ] **Re-detect is reachable on an ALREADY-NAMED transcript.** Open the rename dialog on a
+      recording whose speakers you have already named (the rows read "Jacques", not "Remote
+      Speaker 1"). The "Wrong number of speakers?" section must still be there. It used to vanish
+      outright, because the channel list was derived from the label prefix — so re-detect was
+      unreachable on exactly the transcripts someone had already invested naming effort in.
+
 Both found on an 82-minute one-local/one-remote call. `RenameDialog` is app-target code and cannot
 be type-checked without Xcode on this machine, so **every item here is the only check these changes
 get** — run them all.
