@@ -186,3 +186,38 @@ struct SpeakerCountEnforcerFoldTests {
         #expect(out.map(\.speaker) == input.map(\.speaker))
     }
 }
+
+// MARK: - The two steps together
+
+/// `enforce` and `foldUnattributed` run back to back in `TranscriptRediarizer`, and the device bug
+/// lived in the gap between them: enforcement collapsed the clusters to one, then the labels the
+/// assigner could not place surfaced as a second speaker anyway. Neither function's own tests could
+/// see that — only their composition can.
+@Suite("SpeakerCountEnforcer: enforce + fold compose")
+struct SpeakerCountEnforcerCompositionTests {
+
+    @Test("two clusters plus unattributable speech, stated as 1, yields exactly one speaker")
+    func collapsesToOneSpeakerEndToEnd() {
+        // Two clusters, the second tiny — the shape a 20-30s fragment produces.
+        let result = DiarizationResult(
+            segments: [
+                DiarizedSegment(start: 0, end: 300, speaker: "S1"),
+                DiarizedSegment(start: 300, end: 320, speaker: "S2"),
+            ],
+            speakerDatabase: ["S1": [1, 0, 0], "S2": [0.95, 0.05, 0]])
+
+        let enforced = SpeakerCountEnforcer.enforce(result, to: 1)
+        #expect(Set(enforced.segments.map { $0.speaker }).count == 1)
+
+        // The transcript still carries words the assigner could not tie to any turn.
+        let labeled = [
+            LabeledSegment(start: 10, end: 12, speaker: "Speaker 1", text: "yes", source: "remote"),
+            LabeledSegment(start: 305, end: 306, speaker: SpeakerAssignment.unknownSpeaker, text: "Oui.", source: "remote"),
+        ]
+        let folded = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: 1)
+
+        #expect(Set(folded.map { $0.speaker }).count == 1)
+        #expect(!folded.contains { $0.speaker == SpeakerAssignment.unknownSpeaker })
+        #expect(folded.count == labeled.count)
+    }
+}

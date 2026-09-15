@@ -228,11 +228,14 @@ public enum TranscriptRediarizer {
         // transcript's own contents to anything reading it back, including the stepper's pre-fill.
         // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
         // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
-        // The labels here are already source-prefixed, so the two strings excluded are exactly
-        // "Local Unknown" and "Remote Unknown" — named rather than matched loosely, so a change to
-        // `tagWithSourcePrefix`'s format breaks the build here instead of silently miscounting.
-        let unattributed = Set(["local", "remote"].map { "\($0 == "local" ? "Local" : "Remote") \(SpeakerAssignment.unknownSpeaker)" })
-        let found = Set(labeled.map { $0.speaker }).subtracting(unattributed).count
+        // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
+        // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
+        // Built from `labelPrefix(for:)` so the channel-prefix format lives in one place. Note this
+        // is a runtime string comparison, NOT a compile-time guarantee: if `tagWithSourcePrefix`
+        // ever stops using "<Prefix><Unknown>", this silently over-counts again, so the two must
+        // change together.
+        let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
+        let found = Set(labeled.map { $0.speaker }).subtracting([unattributed]).count
         metadata["speaker_count_\(source)"] = found
         json["metadata"] = metadata
 

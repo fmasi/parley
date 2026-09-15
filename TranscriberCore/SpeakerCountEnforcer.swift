@@ -62,10 +62,14 @@ public enum SpeakerCountEnforcer {
         var resolved = Dictionary(uniqueKeysWithValues: order.map { ($0, $0) })
 
         while live.count > speakerCount {
-            let victim = live.min { a, b in
+            // `live` cannot be empty here (the loop runs only while `live.count > speakerCount`,
+            // and speakerCount >= 1), but a bare `!` in release code makes a reader stop and prove
+            // that for themselves. Break instead — an unreachable branch that degrades to "leave
+            // the clusters alone" rather than to a crash.
+            guard let victim = live.min(by: { a, b in
                 let da = speech[a] ?? 0, db = speech[b] ?? 0
                 return da == db ? (rank[a] ?? 0) < (rank[b] ?? 0) : da < db
-            }!
+            }) else { break }
             let candidates = live.filter { $0 != victim }
             let target = destination(
                 for: victim, among: candidates, embeddings: embeddings, speech: speech, rank: rank)
@@ -113,6 +117,10 @@ public enum SpeakerCountEnforcer {
         let named = labeled.map(\.speaker).filter { $0 != SpeakerAssignment.unknownSpeaker }
         // No attributed speaker at all: name the channel's single speaker rather than leaving every
         // segment under a label that reads as a failure.
+        // "Speaker 1" is load-bearing, not arbitrary: `tagWithSourcePrefix` turns it into
+        // "Local Speaker 1" / "Remote Speaker 1", the same shape the rename dialog and
+        // `speaker_names` expect. A different string here would render as a speaker the rest of the
+        // pipeline does not recognise.
         let target = named.first ?? "Speaker 1"
         guard labeled.contains(where: { $0.speaker == SpeakerAssignment.unknownSpeaker }) else { return labeled }
         var out = labeled
@@ -130,10 +138,12 @@ public enum SpeakerCountEnforcer {
         speech: [String: Double],
         rank: [String: Int]
     ) -> String {
-        let dominant = candidates.max { a, b in
+        // Same reasoning as the `victim` guard: `candidates` is `live` minus one element and cannot
+        // be empty, but returning the victim unchanged is a survivable answer where a crash is not.
+        guard let dominant = candidates.max(by: { a, b in
             let da = speech[a] ?? 0, db = speech[b] ?? 0
             return da == db ? (rank[a] ?? 0) > (rank[b] ?? 0) : da < db
-        }!
+        }) else { return victim }
 
         guard let victimEmbedding = embeddings[victim], !victimEmbedding.isEmpty else {
             return dominant
