@@ -47,7 +47,11 @@ final class SetupWindowController {
         // Width is fixed (SetupView has no flexible-width content); only
         // height is meant to be resizable, down to a scrollable floor.
         newWindow.contentMinSize = NSSize(width: SetupView.preferredSize.width, height: 300)
-        newWindow.contentMaxSize = NSSize(width: SetupView.preferredSize.width, height: .greatestFiniteMagnitude)
+        // 10_000: contentMaxSize only exists to lock the width — height is
+        // effectively unbounded (AppKit clamps to the screen regardless) —
+        // but a large finite sentinel is safer than .greatestFiniteMagnitude
+        // in AppKit arithmetic that doesn't expect it.
+        newWindow.contentMaxSize = NSSize(width: SetupView.preferredSize.width, height: 10_000)
         newWindow.isReleasedWhenClosed = false
         // `center()` centers on the window's CURRENT frame, which would
         // still be `.zero` at this point without an explicit size — set the

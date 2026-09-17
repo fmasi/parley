@@ -48,6 +48,7 @@ against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
 - [ ] Drag the window taller: no dead space appears below the footer.
 - [ ] **Folder access denied.** With all permissions granted and the model ready, pick a folder you don't have access to (or revoke access after choosing) and click Continue. Expect: Continue fires (is not disabled), the denial message appears in the footer, and the Recordings card scrolls into view. Grant access in Settings and click Continue again — expect setup completes normally.
 - [ ] With an uncached model already selected, opening Setup scrolls the Transcription card into view automatically (Download button visible without manual scrolling).
+- [ ] **First-launch order.** On a fresh Setup (no permissions granted yet, model not cached), grant Microphone + Screen Recording. As soon as permissions complete, the Transcription card auto-scrolls into view (Download button visible) — not just when the model state itself changes.
 
 ## Settings window (NEW — tabbed)
 - [ ] Five tabs render with toolbar-style icons: General / Audio / Transcription / Summary / Permissions.

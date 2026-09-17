@@ -141,6 +141,16 @@ struct SetupView: View {
                     guard !ready else { return }
                     scrollToTranscriptionCardIfNeeded(scrollProxy, animated: true)
                 }
+                .onChange(of: permissionManager.allRequiredGranted) { _, granted in
+                    // Covers the common first-launch path: onAppear's scroll
+                    // no-ops while permissions are still ungranted (by
+                    // design, see scrollToTranscriptionCardIfNeeded), and
+                    // modelReady doesn't change when permissions do — so
+                    // without this, finishing permissions never reveals an
+                    // already-known-not-ready Transcription card.
+                    guard granted else { return }
+                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: true)
+                }
             }
 
             Divider()
