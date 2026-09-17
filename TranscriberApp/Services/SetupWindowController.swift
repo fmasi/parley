@@ -28,12 +28,13 @@ final class SetupWindowController {
             onReady()
         }
 
+        // Left at the AppKit default (true): the hosting view fills the
+        // window's content area and resizes with it. `.sizingOptions` alone
+        // (the old approach) was a no-op once the view became `contentView`,
+        // and disabling autoresizing-mask translation would pin the view to
+        // its initial size — leaving dead space below the footer if the user
+        // drags the (resizable) window taller.
         let hostingView = NSHostingView(rootView: view)
-        // `.sizingOptions` alone is a no-op once the view is `contentView`
-        // (AppKit drives the frame from the window's content rect instead).
-        // Disabling the autoresizing-mask translation lets Auto Layout size
-        // the window to the view's actual intrinsic content size below.
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
 
         let newWindow = NSWindow(
             contentRect: .zero,
@@ -43,15 +44,13 @@ final class SetupWindowController {
         )
         newWindow.title = "Parley Setup"
         newWindow.contentView = hostingView
-        newWindow.contentMinSize = NSSize(width: 460, height: 300)
+        newWindow.contentMinSize = NSSize(width: SetupView.preferredSize.width, height: 300)
         newWindow.isReleasedWhenClosed = false
-        // `center()` centers on the window's CURRENT frame, which is still
-        // `.zero` until Auto Layout resolves the hosting view's intrinsic
-        // size on the next layout pass. Set the known content size (must
-        // match SetupView's outer `.frame(width:height:)`) explicitly first
-        // so centering uses the real on-screen size, not a near-zero one
-        // that then grows from AppKit's bottom-left origin.
-        newWindow.setContentSize(NSSize(width: 460, height: 620))
+        // `center()` centers on the window's CURRENT frame, which would
+        // still be `.zero` at this point without an explicit size — set the
+        // shared preferred size (SetupView.preferredSize, so it can't drift
+        // out of sync with the view's own `.frame`) before centering.
+        newWindow.setContentSize(SetupView.preferredSize)
         newWindow.center()
         newWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

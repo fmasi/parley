@@ -3,6 +3,10 @@ import AppKit
 import TranscriberCore
 
 struct SetupView: View {
+    /// Single source of truth for the window's initial/minimum size, shared
+    /// with `SetupWindowController` so the two can't drift out of sync.
+    static let preferredSize = NSSize(width: 460, height: 620)
+
     @Bindable var permissionManager: PermissionManager
     let configManager: ConfigManager
     let onReady: () -> Void
@@ -119,8 +123,14 @@ struct SetupView: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 16)
         }
-        // Keep in sync with SetupWindowController's initial `setContentSize`.
-        .frame(width: 460, height: 620)
+        // minHeight (not height): with the window's `.resizable` style mask,
+        // a fixed height would leave dead space below the footer when the
+        // user drags the window taller than the preferred size, since the
+        // hosting view now resizes with the window (see SetupWindowController).
+        .frame(
+            minWidth: Self.preferredSize.width, maxWidth: Self.preferredSize.width,
+            minHeight: Self.preferredSize.height
+        )
     }
 
     // MARK: - Sections
