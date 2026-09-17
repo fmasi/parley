@@ -29,16 +29,21 @@ final class SetupWindowController {
         }
 
         let hostingView = NSHostingView(rootView: view)
-        hostingView.sizingOptions = [.intrinsicContentSize]
+        // `.sizingOptions` alone is a no-op once the view is `contentView`
+        // (AppKit drives the frame from the window's content rect instead).
+        // Disabling the autoresizing-mask translation lets Auto Layout size
+        // the window to the view's actual intrinsic content size below.
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
 
         let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 350),
-            styleMask: [.titled, .closable],
+            contentRect: .zero,
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         newWindow.title = "Parley Setup"
         newWindow.contentView = hostingView
+        newWindow.contentMinSize = NSSize(width: 460, height: 300)
         newWindow.isReleasedWhenClosed = false
         newWindow.center()
         newWindow.makeKeyAndOrderFront(nil)

@@ -33,64 +33,75 @@ struct SetupView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            hero
+        VStack(spacing: 0) {
+            // Scrollable so the footer (Continue) stays reachable even if the
+            // window is resized shorter than the content, or content grows
+            // (e.g. the download progress row) past the window's fixed height.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    hero
 
-            SetupCard(header: "Required to record") {
-                PermissionRow(
-                    tile: IconTile(systemImage: "mic.fill", color: .red),
-                    name: "Microphone",
-                    detail: "Record your voice during meetings",
-                    status: permissionManager.microphone,
-                    pane: .microphone,
-                    onGrant: { Task { await permissionManager.requestMicrophone() } }
-                )
-                Divider()
-                PermissionRow(
-                    tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
-                    name: "Screen Recording",
-                    detail: "Capture system audio from meeting apps",
-                    status: permissionManager.screenRecording,
-                    pane: .screenRecording,
-                    onGrant: { Task { await permissionManager.requestScreenRecording() } }
-                )
+                    SetupCard(header: "Required to record") {
+                        PermissionRow(
+                            tile: IconTile(systemImage: "mic.fill", color: .red),
+                            name: "Microphone",
+                            detail: "Record your voice during meetings",
+                            status: permissionManager.microphone,
+                            pane: .microphone,
+                            onGrant: { Task { await permissionManager.requestMicrophone() } }
+                        )
+                        Divider()
+                        PermissionRow(
+                            tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
+                            name: "Screen Recording",
+                            detail: "Capture system audio from meeting apps",
+                            status: permissionManager.screenRecording,
+                            pane: .screenRecording,
+                            onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                        )
+                    }
+
+                    SetupCard(header: "Optional") {
+                        PermissionRow(
+                            tile: IconTile(systemImage: "calendar", color: .orange),
+                            name: "Calendar",
+                            detail: "Suggest recording name from current meeting",
+                            status: permissionManager.calendar,
+                            pane: .calendar,
+                            onGrant: { Task { await permissionManager.requestCalendar() } }
+                        )
+                        Divider()
+                        PermissionRow(
+                            tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
+                            name: "Notifications",
+                            detail: "Alert you when transcription finishes",
+                            status: permissionManager.notifications,
+                            pane: .notifications,
+                            onGrant: { Task { await permissionManager.requestNotifications() } }
+                        )
+                    }
+
+                    SetupCard(header: "Recordings") {
+                        FolderPickerRow(
+                            directory: $recordingDirectory,
+                            denied: folderCheckDenied
+                        )
+                    }
+
+                    SetupCard(header: "Transcription") {
+                        engineRow
+                    }
+                }
+                .padding(28)
             }
 
-            SetupCard(header: "Optional") {
-                PermissionRow(
-                    tile: IconTile(systemImage: "calendar", color: .orange),
-                    name: "Calendar",
-                    detail: "Suggest recording name from current meeting",
-                    status: permissionManager.calendar,
-                    pane: .calendar,
-                    onGrant: { Task { await permissionManager.requestCalendar() } }
-                )
-                Divider()
-                PermissionRow(
-                    tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
-                    name: "Notifications",
-                    detail: "Alert you when transcription finishes",
-                    status: permissionManager.notifications,
-                    pane: .notifications,
-                    onGrant: { Task { await permissionManager.requestNotifications() } }
-                )
-            }
-
-            SetupCard(header: "Recordings") {
-                FolderPickerRow(
-                    directory: $recordingDirectory,
-                    denied: folderCheckDenied
-                )
-            }
-
-            SetupCard(header: "Transcription") {
-                engineRow
-            }
+            Divider()
 
             footer
+                .padding(.horizontal, 28)
+                .padding(.vertical, 16)
         }
-        .padding(28)
-        .frame(width: 460)
+        .frame(width: 460, height: 620)
     }
 
     // MARK: - Sections
