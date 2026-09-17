@@ -166,7 +166,7 @@ struct SetupView: View {
         // preferredSize (no dead space) and shorter (content scrolls,
         // footer stays reachable). A `minHeight` here would fight
         // `contentMinSize`'s shrink floor in SetupWindowController.
-        .frame(minWidth: Self.preferredSize.width, maxWidth: Self.preferredSize.width)
+        .frame(width: Self.preferredSize.width)
     }
 
     // MARK: - Sections
@@ -253,6 +253,15 @@ struct SetupView: View {
                         downloadTask?.cancel()
                         downloadTask = nil
                         downloadState = .idle
+                        // Switching to an engine with an uncached model makes
+                        // modelReady false, which the footer prioritizes over
+                        // a stale folder denial — hiding it behind "Download
+                        // the transcription model to continue." instead of
+                        // resurfacing it once the model's ready. Clear it so
+                        // the user re-hits (and re-sees) the folder problem
+                        // on their next Continue, rather than it reappearing
+                        // silently later.
+                        folderCheckDenied = false
                     }
                 }
 
@@ -314,6 +323,7 @@ struct SetupView: View {
     /// scroll position away from the Required card while they're still
     /// clicking Grant buttons there, down to a Transcription card they can't
     /// act on until permissions are done anyway.
+    @MainActor
     private func scrollToTranscriptionCardIfNeeded(_ proxy: ScrollViewProxy, animated: Bool) {
         guard !modelReady, permissionManager.allRequiredGranted else { return }
         if animated {
