@@ -3,6 +3,10 @@ import AppKit
 import TranscriberCore
 
 struct SetupView: View {
+    /// Single source of truth for the window's initial/minimum size, shared
+    /// with `SetupWindowController` so the two can't drift out of sync.
+    static let preferredSize = CGSize(width: 460, height: 620)
+
     @Bindable var permissionManager: PermissionManager
     let configManager: ConfigManager
     let onReady: () -> Void
@@ -21,6 +25,19 @@ struct SetupView: View {
     }
 
     private var canContinue: Bool {
+        // Deliberately NOT gated on folderCheckDenied: the only way to clear a
+        // denial is to grant folder access in System Settings and press
+        // Continue again (there's no "picked a different folder" event to
+        // reset it on otherwise). Gating here would strand the user behind a
+        // permanently disabled button. The footer message + scroll-into-view
+        // below give the denial visibility instead.
+        //
+        // This relies on the Continue action resetting folderCheckDenied to
+        // false before re-running verifyFolderAccess (see below) — that's
+        // what drives the true -> false -> true transition on repeated
+        // failures, keeping onChange(of: folderCheckDenied)'s scroll trigger
+        // alive across retries. If that reset were ever dropped, the scroll
+        // would silently stop firing after the first denial.
         permissionManager.allRequiredGranted && modelReady && !checkingFolder
     }
 
@@ -33,64 +50,123 @@ struct SetupView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            hero
+        VStack(spacing: 0) {
+            // Scrollable so the footer (Continue) stays reachable even if the
+            // window is resized shorter than the content, or content grows
+            // (e.g. the download progress row) past the window's fixed height.
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        hero
 
-            SetupCard(header: "Required to record") {
-                PermissionRow(
-                    tile: IconTile(systemImage: "mic.fill", color: .red),
-                    name: "Microphone",
-                    detail: "Record your voice during meetings",
-                    status: permissionManager.microphone,
-                    pane: .microphone,
-                    onGrant: { Task { await permissionManager.requestMicrophone() } }
-                )
-                Divider()
-                PermissionRow(
-                    tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
-                    name: "Screen Recording",
-                    detail: "Capture system audio from meeting apps",
-                    status: permissionManager.screenRecording,
-                    pane: .screenRecording,
-                    onGrant: { Task { await permissionManager.requestScreenRecording() } }
-                )
+                        SetupCard(header: "Required to record") {
+                            PermissionRow(
+                                tile: IconTile(systemImage: "mic.fill", color: .red),
+                                name: "Microphone",
+                                detail: "Record your voice during meetings",
+                                status: permissionManager.microphone,
+                                pane: .microphone,
+                                onGrant: { Task { await permissionManager.requestMicrophone() } }
+                            )
+                            Divider()
+                            PermissionRow(
+                                tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
+                                name: "Screen Recording",
+                                detail: "Capture system audio from meeting apps",
+                                status: permissionManager.screenRecording,
+                                pane: .screenRecording,
+                                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                            )
+                        }
+
+                        SetupCard(header: "Optional") {
+                            PermissionRow(
+                                tile: IconTile(systemImage: "calendar", color: .orange),
+                                name: "Calendar",
+                                detail: "Suggest recording name from current meeting",
+                                status: permissionManager.calendar,
+                                pane: .calendar,
+                                onGrant: { Task { await permissionManager.requestCalendar() } }
+                            )
+                            Divider()
+                            PermissionRow(
+                                tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
+                                name: "Notifications",
+                                detail: "Alert you when transcription finishes",
+                                status: permissionManager.notifications,
+                                pane: .notifications,
+                                onGrant: { Task { await permissionManager.requestNotifications() } }
+                            )
+                        }
+
+                        SetupCard(header: "Recordings") {
+                            FolderPickerRow(
+                                directory: $recordingDirectory,
+                                denied: folderCheckDenied
+                            )
+                        }
+                        .id("recordingsCard")
+
+                        SetupCard(header: "Transcription") {
+                            engineRow
+                        }
+                        .id("transcriptionCard")
+                    }
+                    .padding(28)
+                }
+                .onChange(of: folderCheckDenied) { _, denied in
+                    // The denial message lives in this card, below the fold in
+                    // the common case — scroll it into view instead of leaving
+                    // the user to wonder why Continue didn't do anything.
+                    // .top (not .center): at the window's minimum height the
+                    // Required/Optional cards would otherwise land entirely
+                    // above the fold, hiding permission state the user may
+                    // still need to check.
+                    guard denied else { return }
+                    withAnimation {
+                        scrollProxy.scrollTo("recordingsCard", anchor: .top)
+                    }
+                }
+                .onAppear {
+                    // onAppear fires before SwiftUI's layout pass completes, so
+                    // scrollTo has no registered position yet and would silently
+                    // no-op. The Task defers to the next main-actor iteration
+                    // (after layout), which is where ScrollViewProxy.scrollTo
+                    // expects to be called anyway — so this is both correct and safe.
+                    Task { @MainActor in
+                        scrollToTranscriptionCardIfNeeded(scrollProxy, animated: false)
+                    }
+                }
+                .onChange(of: modelReady) { _, ready in
+                    guard !ready else { return }
+                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: true)
+                }
+                .onChange(of: permissionManager.allRequiredGranted) { _, granted in
+                    // Covers the common first-launch path: onAppear's scroll
+                    // no-ops while permissions are still ungranted (by
+                    // design, see scrollToTranscriptionCardIfNeeded), and
+                    // modelReady doesn't change when permissions do — so
+                    // without this, finishing permissions never reveals an
+                    // already-known-not-ready Transcription card.
+                    guard granted else { return }
+                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: true)
+                }
             }
 
-            SetupCard(header: "Optional") {
-                PermissionRow(
-                    tile: IconTile(systemImage: "calendar", color: .orange),
-                    name: "Calendar",
-                    detail: "Suggest recording name from current meeting",
-                    status: permissionManager.calendar,
-                    pane: .calendar,
-                    onGrant: { Task { await permissionManager.requestCalendar() } }
-                )
-                Divider()
-                PermissionRow(
-                    tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
-                    name: "Notifications",
-                    detail: "Alert you when transcription finishes",
-                    status: permissionManager.notifications,
-                    pane: .notifications,
-                    onGrant: { Task { await permissionManager.requestNotifications() } }
-                )
-            }
-
-            SetupCard(header: "Recordings") {
-                FolderPickerRow(
-                    directory: $recordingDirectory,
-                    denied: folderCheckDenied
-                )
-            }
-
-            SetupCard(header: "Transcription") {
-                engineRow
-            }
+            Divider()
 
             footer
+                .padding(.horizontal, 28)
+                .padding(.vertical, 16)
         }
-        .padding(28)
-        .frame(width: 460)
+        // Width only — no height constraint here. The ScrollView already
+        // fills whatever height the window (resizable, see
+        // SetupWindowController) offers, with the footer pinned outside it,
+        // so the content is correct both when the window is taller than
+        // preferredSize (no dead space) and shorter (content scrolls,
+        // footer stays reachable). A `minHeight` here would fight
+        // `contentMinSize`'s shrink floor in SetupWindowController.
+        .frame(width: Self.preferredSize.width)
     }
 
     // MARK: - Sections
@@ -122,6 +198,9 @@ struct SetupView: View {
                         .foregroundStyle(.orange)
                 } else if !modelReady {
                     Label("Download the transcription model to continue.", systemImage: "arrow.down.circle")
+                        .foregroundStyle(.orange)
+                } else if folderCheckDenied {
+                    Label("Grant folder access above, then try again.", systemImage: "folder.badge.questionmark")
                         .foregroundStyle(.orange)
                 } else {
                     Label("Everything stays on this Mac.", systemImage: "lock.fill")
@@ -174,6 +253,15 @@ struct SetupView: View {
                         downloadTask?.cancel()
                         downloadTask = nil
                         downloadState = .idle
+                        // Switching to an engine with an uncached model makes
+                        // modelReady false, which the footer prioritizes over
+                        // a stale folder denial — hiding it behind "Download
+                        // the transcription model to continue." instead of
+                        // resurfacing it once the model's ready. Clear it so
+                        // the user re-hits (and re-sees) the folder problem
+                        // on their next Continue, rather than it reappearing
+                        // silently later.
+                        folderCheckDenied = false
                     }
                 }
 
@@ -222,6 +310,26 @@ struct SetupView: View {
                         .controlSize(.small)
                 }
             }
+        }
+    }
+
+    /// Mirrors the folderCheckDenied scroll trigger: the Transcription card
+    /// (Download button) can land below the fold at preferredSize.height,
+    /// especially with the download-progress row visible. Runs on first
+    /// appearance (a user can open Setup with an uncached model already
+    /// selected) and again if switching engines makes the model not-ready.
+    ///
+    /// Gated on `allRequiredGranted`: without it, this would yank the user's
+    /// scroll position away from the Required card while they're still
+    /// clicking Grant buttons there, down to a Transcription card they can't
+    /// act on until permissions are done anyway.
+    @MainActor
+    private func scrollToTranscriptionCardIfNeeded(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard !modelReady, permissionManager.allRequiredGranted else { return }
+        if animated {
+            withAnimation { proxy.scrollTo("transcriptionCard", anchor: .top) }
+        } else {
+            proxy.scrollTo("transcriptionCard", anchor: .top)
         }
     }
 
