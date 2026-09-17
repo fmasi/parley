@@ -292,8 +292,13 @@ struct SetupView: View {
     /// especially with the download-progress row visible. Runs on first
     /// appearance (a user can open Setup with an uncached model already
     /// selected) and again if switching engines makes the model not-ready.
+    ///
+    /// Gated on `allRequiredGranted`: without it, this would yank the user's
+    /// scroll position away from the Required card while they're still
+    /// clicking Grant buttons there, down to a Transcription card they can't
+    /// act on until permissions are done anyway.
     private func scrollToTranscriptionCardIfNeeded(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard !modelReady else { return }
+        guard !modelReady, permissionManager.allRequiredGranted else { return }
         if animated {
             withAnimation { proxy.scrollTo("transcriptionCard", anchor: .top) }
         } else {
