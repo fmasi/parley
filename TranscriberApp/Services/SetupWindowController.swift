@@ -44,7 +44,10 @@ final class SetupWindowController {
         )
         newWindow.title = "Parley Setup"
         newWindow.contentView = hostingView
+        // Width is fixed (SetupView has no flexible-width content); only
+        // height is meant to be resizable, down to a scrollable floor.
         newWindow.contentMinSize = NSSize(width: SetupView.preferredSize.width, height: 300)
+        newWindow.contentMaxSize = NSSize(width: SetupView.preferredSize.width, height: .greatestFiniteMagnitude)
         newWindow.isReleasedWhenClosed = false
         // `center()` centers on the window's CURRENT frame, which would
         // still be `.zero` at this point without an explicit size — set the

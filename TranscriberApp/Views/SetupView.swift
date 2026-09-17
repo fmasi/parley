@@ -123,14 +123,14 @@ struct SetupView: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 16)
         }
-        // minHeight (not height): with the window's `.resizable` style mask,
-        // a fixed height would leave dead space below the footer when the
-        // user drags the window taller than the preferred size, since the
-        // hosting view now resizes with the window (see SetupWindowController).
-        .frame(
-            minWidth: Self.preferredSize.width, maxWidth: Self.preferredSize.width,
-            minHeight: Self.preferredSize.height
-        )
+        // Width only — no height constraint here. The ScrollView already
+        // fills whatever height the window (resizable, see
+        // SetupWindowController) offers, with the footer pinned outside it,
+        // so the content is correct both when the window is taller than
+        // preferredSize (no dead space) and shorter (content scrolls,
+        // footer stays reachable). A `minHeight` here would fight
+        // `contentMinSize`'s shrink floor in SetupWindowController.
+        .frame(minWidth: Self.preferredSize.width, maxWidth: Self.preferredSize.width)
     }
 
     // MARK: - Sections
