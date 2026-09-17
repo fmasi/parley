@@ -21,6 +21,12 @@ struct SetupView: View {
     }
 
     private var canContinue: Bool {
+        // Deliberately NOT gated on folderCheckDenied: the only way to clear a
+        // denial is to grant folder access in System Settings and press
+        // Continue again (there's no "picked a different folder" event to
+        // reset it on otherwise). Gating here would strand the user behind a
+        // permanently disabled button. The footer message + scroll-into-view
+        // below give the denial visibility instead.
         permissionManager.allRequiredGranted && modelReady && !checkingFolder
     }
 
@@ -37,62 +43,74 @@ struct SetupView: View {
             // Scrollable so the footer (Continue) stays reachable even if the
             // window is resized shorter than the content, or content grows
             // (e.g. the download progress row) past the window's fixed height.
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    hero
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        hero
 
-                    SetupCard(header: "Required to record") {
-                        PermissionRow(
-                            tile: IconTile(systemImage: "mic.fill", color: .red),
-                            name: "Microphone",
-                            detail: "Record your voice during meetings",
-                            status: permissionManager.microphone,
-                            pane: .microphone,
-                            onGrant: { Task { await permissionManager.requestMicrophone() } }
-                        )
-                        Divider()
-                        PermissionRow(
-                            tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
-                            name: "Screen Recording",
-                            detail: "Capture system audio from meeting apps",
-                            status: permissionManager.screenRecording,
-                            pane: .screenRecording,
-                            onGrant: { Task { await permissionManager.requestScreenRecording() } }
-                        )
+                        SetupCard(header: "Required to record") {
+                            PermissionRow(
+                                tile: IconTile(systemImage: "mic.fill", color: .red),
+                                name: "Microphone",
+                                detail: "Record your voice during meetings",
+                                status: permissionManager.microphone,
+                                pane: .microphone,
+                                onGrant: { Task { await permissionManager.requestMicrophone() } }
+                            )
+                            Divider()
+                            PermissionRow(
+                                tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
+                                name: "Screen Recording",
+                                detail: "Capture system audio from meeting apps",
+                                status: permissionManager.screenRecording,
+                                pane: .screenRecording,
+                                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                            )
+                        }
+
+                        SetupCard(header: "Optional") {
+                            PermissionRow(
+                                tile: IconTile(systemImage: "calendar", color: .orange),
+                                name: "Calendar",
+                                detail: "Suggest recording name from current meeting",
+                                status: permissionManager.calendar,
+                                pane: .calendar,
+                                onGrant: { Task { await permissionManager.requestCalendar() } }
+                            )
+                            Divider()
+                            PermissionRow(
+                                tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
+                                name: "Notifications",
+                                detail: "Alert you when transcription finishes",
+                                status: permissionManager.notifications,
+                                pane: .notifications,
+                                onGrant: { Task { await permissionManager.requestNotifications() } }
+                            )
+                        }
+
+                        SetupCard(header: "Recordings") {
+                            FolderPickerRow(
+                                directory: $recordingDirectory,
+                                denied: folderCheckDenied
+                            )
+                        }
+                        .id("recordingsCard")
+
+                        SetupCard(header: "Transcription") {
+                            engineRow
+                        }
                     }
-
-                    SetupCard(header: "Optional") {
-                        PermissionRow(
-                            tile: IconTile(systemImage: "calendar", color: .orange),
-                            name: "Calendar",
-                            detail: "Suggest recording name from current meeting",
-                            status: permissionManager.calendar,
-                            pane: .calendar,
-                            onGrant: { Task { await permissionManager.requestCalendar() } }
-                        )
-                        Divider()
-                        PermissionRow(
-                            tile: IconTile(systemImage: "bell.badge.fill", color: .purple),
-                            name: "Notifications",
-                            detail: "Alert you when transcription finishes",
-                            status: permissionManager.notifications,
-                            pane: .notifications,
-                            onGrant: { Task { await permissionManager.requestNotifications() } }
-                        )
-                    }
-
-                    SetupCard(header: "Recordings") {
-                        FolderPickerRow(
-                            directory: $recordingDirectory,
-                            denied: folderCheckDenied
-                        )
-                    }
-
-                    SetupCard(header: "Transcription") {
-                        engineRow
+                    .padding(28)
+                }
+                .onChange(of: folderCheckDenied) { _, denied in
+                    // The denial message lives in this card, below the fold in
+                    // the common case — scroll it into view instead of leaving
+                    // the user to wonder why Continue didn't do anything.
+                    guard denied else { return }
+                    withAnimation {
+                        scrollProxy.scrollTo("recordingsCard", anchor: .center)
                     }
                 }
-                .padding(28)
             }
 
             Divider()
@@ -101,6 +119,7 @@ struct SetupView: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 16)
         }
+        // Keep in sync with SetupWindowController's initial `setContentSize`.
         .frame(width: 460, height: 620)
     }
 
@@ -133,6 +152,9 @@ struct SetupView: View {
                         .foregroundStyle(.orange)
                 } else if !modelReady {
                     Label("Download the transcription model to continue.", systemImage: "arrow.down.circle")
+                        .foregroundStyle(.orange)
+                } else if folderCheckDenied {
+                    Label("Grant folder access above, then try again.", systemImage: "folder.badge.questionmark")
                         .foregroundStyle(.orange)
                 } else {
                     Label("Everything stays on this Mac.", systemImage: "lock.fill")
