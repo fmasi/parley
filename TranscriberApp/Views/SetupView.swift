@@ -5,7 +5,7 @@ import TranscriberCore
 struct SetupView: View {
     /// Single source of truth for the window's initial/minimum size, shared
     /// with `SetupWindowController` so the two can't drift out of sync.
-    static let preferredSize = NSSize(width: 460, height: 620)
+    static let preferredSize = CGSize(width: 460, height: 620)
 
     @Bindable var permissionManager: PermissionManager
     let configManager: ConfigManager
@@ -31,6 +31,13 @@ struct SetupView: View {
         // reset it on otherwise). Gating here would strand the user behind a
         // permanently disabled button. The footer message + scroll-into-view
         // below give the denial visibility instead.
+        //
+        // This relies on the Continue action resetting folderCheckDenied to
+        // false before re-running verifyFolderAccess (see below) — that's
+        // what drives the true -> false -> true transition on repeated
+        // failures, keeping onChange(of: folderCheckDenied)'s scroll trigger
+        // alive across retries. If that reset were ever dropped, the scroll
+        // would silently stop firing after the first denial.
         permissionManager.allRequiredGranted && modelReady && !checkingFolder
     }
 
