@@ -121,7 +121,12 @@ struct SetupView: View {
                     }
                 }
                 .onAppear {
-                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: false)
+                    // onAppear fires on insertion, before SwiftUI's layout
+                    // pass has run — scrollTo has no registered position yet
+                    // and would silently no-op. Defer one run-loop tick.
+                    Task { @MainActor in
+                        scrollToTranscriptionCardIfNeeded(scrollProxy, animated: false)
+                    }
                 }
                 .onChange(of: modelReady) { _, ready in
                     guard !ready else { return }
