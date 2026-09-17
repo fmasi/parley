@@ -103,6 +103,7 @@ struct SetupView: View {
                         SetupCard(header: "Transcription") {
                             engineRow
                         }
+                        .id("transcriptionCard")
                     }
                     .padding(28)
                 }
@@ -110,10 +111,21 @@ struct SetupView: View {
                     // The denial message lives in this card, below the fold in
                     // the common case — scroll it into view instead of leaving
                     // the user to wonder why Continue didn't do anything.
+                    // .top (not .center): at the window's minimum height the
+                    // Required/Optional cards would otherwise land entirely
+                    // above the fold, hiding permission state the user may
+                    // still need to check.
                     guard denied else { return }
                     withAnimation {
-                        scrollProxy.scrollTo("recordingsCard", anchor: .center)
+                        scrollProxy.scrollTo("recordingsCard", anchor: .top)
                     }
+                }
+                .onAppear {
+                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: false)
+                }
+                .onChange(of: modelReady) { _, ready in
+                    guard !ready else { return }
+                    scrollToTranscriptionCardIfNeeded(scrollProxy, animated: true)
                 }
             }
 
@@ -265,6 +277,20 @@ struct SetupView: View {
                         .controlSize(.small)
                 }
             }
+        }
+    }
+
+    /// Mirrors the folderCheckDenied scroll trigger: the Transcription card
+    /// (Download button) can land below the fold at preferredSize.height,
+    /// especially with the download-progress row visible. Runs on first
+    /// appearance (a user can open Setup with an uncached model already
+    /// selected) and again if switching engines makes the model not-ready.
+    private func scrollToTranscriptionCardIfNeeded(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard !modelReady else { return }
+        if animated {
+            withAnimation { proxy.scrollTo("transcriptionCard", anchor: .top) }
+        } else {
+            proxy.scrollTo("transcriptionCard", anchor: .top)
         }
     }
 
