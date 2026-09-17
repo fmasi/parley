@@ -121,9 +121,11 @@ struct SetupView: View {
                     }
                 }
                 .onAppear {
-                    // onAppear fires on insertion, before SwiftUI's layout
-                    // pass has run — scrollTo has no registered position yet
-                    // and would silently no-op. Defer one run-loop tick.
+                    // onAppear fires before SwiftUI's layout pass completes, so
+                    // scrollTo has no registered position yet and would silently
+                    // no-op. The Task defers to the next main-actor iteration
+                    // (after layout), which is where ScrollViewProxy.scrollTo
+                    // expects to be called anyway — so this is both correct and safe.
                     Task { @MainActor in
                         scrollToTranscriptionCardIfNeeded(scrollProxy, animated: false)
                     }

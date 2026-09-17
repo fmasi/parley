@@ -56,7 +56,7 @@ final class SetupWindowController {
         newWindow.setContentSize(SetupView.preferredSize)
         newWindow.center()
         newWindow.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()  // macOS 14+ replacement for the deprecated ignoringOtherApps: form
 
         self.window = newWindow
     }
