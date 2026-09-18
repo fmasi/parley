@@ -122,6 +122,16 @@ public enum SummaryAPIKeyStore {
         }
     }
 
+    /// Like `load`, but preserves the distinction `load` intentionally collapses: a thrown
+    /// Keychain error is rethrown instead of becoming `""`. `load()`'s fail-closed "just treat it
+    /// as no key" posture is correct for the actual summary call sites, but a caller that might
+    /// turn "empty" into a *write* — SettingsView deciding whether to delete a stored key — needs
+    /// to tell "nothing stored" (`nil`) apart from "couldn't tell" (thrown), or a transient read
+    /// failure looks identical to the user having cleared the field.
+    public static func tryLoad(keychain: KeychainStoring = KeychainStore.shared) throws -> String? {
+        try keychain.get(service: service, account: account)
+    }
+
     /// Stores `value`, or deletes the item when `value` is empty (the user cleared the field).
     /// Best-effort: a Keychain write failure here has no good recovery at a UI call site, so it's
     /// not thrown — but it is logged, same posture as `ConfigManager.save()`, so a rejected write

@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import TranscriberCore
+import os
 
 private enum DownloadState: Equatable {
     case idle
@@ -37,6 +38,11 @@ struct SettingsView: View {
     // (slow first-unlock, iCloud Keychain sync, or an ad-hoc-signing Keychain access failure)
     // can't be mistaken for "user cleared the key" and delete a real stored key.
     @State private var apiKeyLoaded = false
+    // #48: true if the load itself threw rather than cleanly returning "nothing stored". A
+    // transient read failure would otherwise look exactly like "user cleared the field" once
+    // `apiKeyLoaded` flips true with `summaryApiKey` still "" — this keeps Save from treating an
+    // unreadable Keychain as permission to delete whatever's actually stored there.
+    @State private var apiKeyLoadFailed = false
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
     @State private var summaryContextOverheadPercent: String = ""
@@ -106,14 +112,23 @@ struct SettingsView: View {
             // view's @MainActor isolation, so a synchronous SecItemCopyMatching call would still
             // run on the main thread here. Hop to a detached task for the actual Keychain read;
             // only the state assignment needs to be back on the main actor.
-            let loadedApiKey = await Task.detached(priority: .userInitiated) {
-                SummaryAPIKeyStore.load()
-            }.value
-            // On a slow load (first-unlock, iCloud Keychain sync) the user may have already
-            // started typing a key by the time this returns — don't stomp it with the Keychain's
-            // (possibly stale, possibly empty) value.
-            if summaryApiKey.isEmpty {
-                summaryApiKey = loadedApiKey
+            //
+            // `tryLoad`, not `load`: `load()` collapses "nothing stored" and "the read failed" to
+            // the same `""`, which is exactly the ambiguity `save()` can't afford below — an
+            // unreadable Keychain must not look like "user cleared the field".
+            do {
+                let loadedApiKey = try await Task.detached(priority: .userInitiated) {
+                    try SummaryAPIKeyStore.tryLoad()
+                }.value
+                // On a slow load (first-unlock, iCloud Keychain sync) the user may have already
+                // started typing a key by the time this returns — don't stomp it with the
+                // Keychain's (possibly stale, possibly empty) value.
+                if summaryApiKey.isEmpty {
+                    summaryApiKey = loadedApiKey ?? ""
+                }
+            } catch {
+                apiKeyLoadFailed = true
+                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
             }
             apiKeyLoaded = true
             archiveUsageBytes = StorageManager.currentUsageBytes(
@@ -447,8 +462,10 @@ struct SettingsView: View {
             // #48: the key never goes into `config`/config.json — Keychain only.
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them.
-            if apiKeyLoaded {
+            // yet, and saving here would delete a real stored key out from under them. Likewise if
+            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
+            // "" then too, and that must not be read as "user cleared it" either.
+            if apiKeyLoaded && !apiKeyLoadFailed {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else if summaryEndpointMissing {
@@ -460,8 +477,10 @@ struct SettingsView: View {
             config.summary = summaryConfig(enabled: false)
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them.
-            if apiKeyLoaded {
+            // yet, and saving here would delete a real stored key out from under them. Likewise if
+            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
+            // "" then too, and that must not be read as "user cleared it" either.
+            if apiKeyLoaded && !apiKeyLoadFailed {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else {
@@ -473,8 +492,10 @@ struct SettingsView: View {
             config.summary = nil
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them.
-            if apiKeyLoaded {
+            // yet, and saving here would delete a real stored key out from under them. Likewise if
+            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
+            // "" then too, and that must not be read as "user cleared it" either.
+            if apiKeyLoaded && !apiKeyLoadFailed {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         }

@@ -101,6 +101,33 @@ struct KeychainStoreTests {
         #expect(store.storage.isEmpty)
     }
 
+    // MARK: - SummaryAPIKeyStore.tryLoad (#48 round 6: distinguishes "nothing stored" from "read failed")
+
+    @Test func tryLoadReturnsNilWhenNothingStored() throws {
+        let store = FakeKeychainStore()
+        #expect(try SummaryAPIKeyStore.tryLoad(keychain: store) == nil)
+    }
+
+    @Test func tryLoadReturnsTheStoredValue() throws {
+        let store = FakeKeychainStore()
+        SummaryAPIKeyStore.save("sk-real-key", keychain: store)
+        #expect(try SummaryAPIKeyStore.tryLoad(keychain: store) == "sk-real-key")
+    }
+
+    @Test func tryLoadRethrowsRatherThanCollapsingToEmptyString() {
+        struct AlwaysThrows: KeychainStoring, @unchecked Sendable {
+            func set(_ value: String, service: String, account: String) throws { throw KeychainError.unexpectedStatus(-1) }
+            func get(service: String, account: String) throws -> String? { throw KeychainError.unexpectedStatus(-1) }
+            func delete(service: String, account: String) throws { throw KeychainError.unexpectedStatus(-1) }
+        }
+        // Unlike `load()`, a read failure must surface as a thrown error, not silently become
+        // "" (Settings needs to tell "nothing stored" apart from "couldn't tell" — see round 6
+        // review fix on SettingsView.swift's .task).
+        #expect(throws: KeychainError.self) {
+            try SummaryAPIKeyStore.tryLoad(keychain: AlwaysThrows())
+        }
+    }
+
     @Test func summaryAPIKeyStoreUsesAFixedServiceAndAccount() {
         // Config.summary holds at most one active provider config at a time, so a single fixed
         // (service, account) pair is correct — pin it so a future change to per-provider keys is
