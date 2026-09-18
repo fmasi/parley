@@ -94,10 +94,16 @@ struct SettingsView: View {
             // seconds on a large archive, or hang until an SMB/network timeout on a non-local
             // directory. Runs detached so Settings opens and the Audio tab renders immediately,
             // with "Calculating…" shown until it resolves.
+            // withCheckedContinuation + DispatchQueue, not Task.detached: the recursive walk below
+            // is synchronous and can run long on a large or network-mounted archive, and Task.detached
+            // would tie up one of Swift's limited cooperative thread-pool threads for the duration
+            // (same reasoning as CalendarService.currentEventTitle, #215 review).
             let directory = URL(fileURLWithPath: config.recordingDirectory)
-            archiveUsageBytes = await Task.detached(priority: .utility) {
-                StorageManager.currentUsageBytes(in: directory)
-            }.value
+            archiveUsageBytes = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: StorageManager.currentUsageBytes(in: directory))
+                }
+            }
             // #150: refresh notification status on open so the Permissions tab (and
             // its notifications-off hint) reflects System Settings changes made after
             // launch, not the state captured at the last checkAll().

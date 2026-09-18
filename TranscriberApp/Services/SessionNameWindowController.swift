@@ -5,7 +5,11 @@ import os
 
 /// The calendar-suggested title, filled in late once the background lookup resolves (#197 — the
 /// lookup must never hold up the panel's appearance). `SessionNameDialog` observes it directly.
+/// `@MainActor`: always written from a main-actor `Task` (`SessionNameWindowController` is
+/// `@MainActor`) and always read from SwiftUI's body/`onChange`, so pin that as a compile-time
+/// guarantee rather than a call-site convention.
 @Observable
+@MainActor
 final class SessionNameSuggestion {
     var eventTitle: String?
 }

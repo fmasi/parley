@@ -87,9 +87,10 @@ struct SessionNameDialog: View {
         .onAppear { focused = true }
         .onChange(of: suggestion.eventTitle) { _, newTitle in
             // Late arrival from the background calendar lookup (#197): adopt it only if the field
-            // is still exactly what the user found it as — empty, or an earlier suggestion.
-            guard !userHasEdited, let newTitle, !newTitle.isEmpty else { return }
-            name = newTitle
+            // is still exactly what the user found it as — empty, or an earlier suggestion. The
+            // decision itself is a pure, unit-tested function (SessionNameSuggestionPolicyTests).
+            guard let adopted = SessionNameSuggestionPolicy.adopt(userHasEdited: userHasEdited, newTitle: newTitle) else { return }
+            name = adopted
             calendarSuggestionApplied = true
         }
     }
