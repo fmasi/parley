@@ -65,12 +65,16 @@ public enum MeetingSummarizer {
     /// failing silently (#134).
     public static func summarizeIfConfigured(
         transcriptPath: URL,
-        config: Config
+        config: Config,
+        keychain: KeychainStoring = KeychainStore.shared
     ) async -> SummaryOutcome {
         guard let summary = config.summary, summary.enabled, !summary.endpoint.isEmpty else {
             return .skipped
         }
-        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary), endpoint: summary.endpoint)
+        // #48: the API key no longer lives on `SummaryConfig` — it's fetched from the Keychain at
+        // the point of use instead of round-tripping through config.json.
+        let apiKey = SummaryAPIKeyStore.load(keychain: keychain)
+        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary, apiKey: apiKey), endpoint: summary.endpoint)
     }
 
     /// Run a summary with an explicit provider, translating success/failure into a `SummaryOutcome`.
@@ -134,13 +138,14 @@ public enum MeetingSummarizer {
         }
     }
 
-    /// Create the appropriate provider from config.
-    public static func createProvider(from summary: SummaryConfig) -> any SummaryProvider {
+    /// Create the appropriate provider from config. `apiKey` is passed in separately (#48) —
+    /// `SummaryConfig` no longer carries it; callers fetch it from `SummaryAPIKeyStore` first.
+    public static func createProvider(from summary: SummaryConfig, apiKey: String) -> any SummaryProvider {
         switch summary.provider {
         case .lmstudio:
             return LMStudioSummaryProvider(
                 endpoint: summary.endpoint,
-                apiKey: summary.apiKey,
+                apiKey: apiKey,
                 model: summary.model,
                 contextLength: summary.contextLength,
                 contextOverheadPercent: summary.contextOverheadPercent,
@@ -150,7 +155,7 @@ public enum MeetingSummarizer {
         case .openai:
             return OpenAISummaryProvider(
                 endpoint: summary.endpoint,
-                apiKey: summary.apiKey,
+                apiKey: apiKey,
                 model: summary.model,
                 requestTimeoutSeconds: summary.requestTimeoutSeconds
             )

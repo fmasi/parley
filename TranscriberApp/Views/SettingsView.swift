@@ -44,7 +44,8 @@ struct SettingsView: View {
         self._summaryEnabled = State(initialValue: s?.enabled ?? false)
         self._summaryProvider = State(initialValue: s?.provider ?? .openai)
         self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
-        self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
+        // #48: the key lives in the Keychain, not on `SummaryConfig` — load it separately.
+        self._summaryApiKey = State(initialValue: SummaryAPIKeyStore.load())
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
         self._summaryContextOverheadPercent = State(initialValue: s?.contextOverheadPercent.map(String.init) ?? "")
@@ -401,7 +402,6 @@ struct SettingsView: View {
             enabled: enabled,
             provider: summaryProvider,
             endpoint: trimmedSummaryEndpoint,
-            apiKey: summaryApiKey,
             model: summaryModel,
             contextLength: Int(summaryContextLength),
             contextOverheadPercent: Int(summaryContextOverheadPercent),
@@ -418,6 +418,8 @@ struct SettingsView: View {
     private func save() {
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
+            // #48: the key never goes into `config`/config.json — Keychain only.
+            SummaryAPIKeyStore.save(summaryApiKey)
         } else if summaryEndpointMissing {
             // The user wants summaries but hasn't supplied an endpoint. Persist
             // their typed provider/model/key with enabled:false rather than
@@ -425,9 +427,12 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
+            SummaryAPIKeyStore.save(summaryApiKey)
         } else {
-            // Summaries genuinely off: clear the block.
+            // Summaries genuinely off: clear the block, including the Keychain entry — matches
+            // the prior behavior where the whole `SummaryConfig` (apiKey included) was dropped.
             config.summary = nil
+            SummaryAPIKeyStore.save("")
         }
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
