@@ -343,6 +343,31 @@ struct ConfigManagerTests {
         #expect(rewritten.contains("sk-legacy-plaintext"))
     }
 
+    /// Covers the Keychain *read* failure path, not just the write-failure one above: a locked
+    /// Keychain, an ACL rejection, or a missing entitlement (unsigned/ad-hoc build) can make
+    /// `get()` itself throw, before `set()` is ever reached. The migration must treat that the
+    /// same as a write failure — leave config.json untouched — rather than, say, misreading the
+    /// thrown error as "nothing stored" and proceeding to overwrite a value that might actually
+    /// be there (the exact class of bug the shared do/catch in `migrateAPIKeyIfNeeded` closes).
+    @Test func migrationLeavesConfigJSONUntouchedWhenKeychainReadFails() throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let configFile = dir.appendingPathComponent("config.json")
+        try legacyConfigJSON(apiKey: "sk-legacy-plaintext").write(to: configFile, atomically: true, encoding: .utf8)
+        let originalContents = try String(contentsOf: configFile, encoding: .utf8)
+
+        let keychain = FakeKeychainStore()
+        keychain.getError = KeychainError.unexpectedStatus(-25308) // errSecInteractionNotAllowed
+        _ = ConfigManager(configDir: dir, keychainStore: keychain)
+
+        // config.json must be completely untouched — the read failure means we don't know
+        // whether the Keychain already has a value, so we must not write or strip anything.
+        let rewritten = try String(contentsOf: configFile, encoding: .utf8)
+        #expect(rewritten == originalContents)
+        #expect(rewritten.contains("sk-legacy-plaintext"))
+        #expect(keychain.setCallCount == 0)
+    }
+
     /// Guards against a real data-loss path: if the launch-time migration fails (Keychain write
     /// error) the plaintext key is left sitting in config.json, but `Config`/`SummaryConfig` have
     /// no `apiKey` field to carry it — so any ordinary `save()` (e.g. Settings' Save button,

@@ -17,6 +17,9 @@ final class FakeKeychainStore: KeychainStoring, @unchecked Sendable {
     /// When set, `set` throws this instead of storing — simulates a Keychain write failure so
     /// callers (e.g. `ConfigManager`'s migration) can be tested on that path.
     var setError: Error?
+    /// When set, `get` throws this instead of looking up — simulates a Keychain read failure
+    /// (locked, ACL rejection, entitlement missing) distinct from a clean "nothing stored".
+    var getError: Error?
 
     private static func key(_ service: String, _ account: String) -> String { "\(service)\u{0}\(account)" }
 
@@ -28,6 +31,7 @@ final class FakeKeychainStore: KeychainStoring, @unchecked Sendable {
 
     func get(service: String, account: String) throws -> String? {
         getCallCount += 1
+        if let getError { throw getError }
         return storage[Self.key(service, account)]
     }
 

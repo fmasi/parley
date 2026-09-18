@@ -126,6 +126,14 @@ struct SettingsView: View {
                 if summaryApiKey.isEmpty {
                     summaryApiKey = loadedApiKey ?? ""
                 }
+            } catch is CancellationError {
+                // The view was dismissed before the Keychain read finished (this `.task` is
+                // cancelled on disappear) — not a Keychain failure, and there's no view left to
+                // update state on. Stay on `Task.detached` rather than a structured `Task { }`
+                // here: a structured task would inherit this `.task`'s @MainActor isolation and
+                // put `SecItemCopyMatching` back on the main thread, reintroducing the exact
+                // blocking problem the detached hop exists to avoid.
+                return
             } catch {
                 apiKeyLoadFailed = true
                 Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
@@ -456,19 +464,23 @@ struct SettingsView: View {
         )
     }
 
+    // #48: only safe to touch the Keychain once the async load in `.task` has resolved, and its
+    // result is unambiguous. Before `apiKeyLoaded`, `summaryApiKey == ""` just means "haven't
+    // checked yet". After a failed load, `""` is still ambiguous (could be "nothing stored" or
+    // "couldn't tell") — UNLESS the user has since typed a real value, which is unambiguous
+    // regardless of what the load did. A single source of truth here (rather than duplicating
+    // this condition at each of the three `save()` call sites) means a future change to the
+    // condition can't land in only some of them and silently reopen the key-deletion bug this
+    // guard exists to close.
+    private var shouldSaveApiKey: Bool {
+        apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty)
+    }
+
     private func save() {
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
             // #48: the key never goes into `config`/config.json — Keychain only.
-            // Only touch the Keychain once the async load has actually resolved — before that,
-            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. If the load
-            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
-            // the user has since typed a real value into the field, which is unambiguous
-            // regardless of whether the original load ever succeeded: they explicitly want that
-            // value saved, and refusing to save it would leave them stuck with no visible way to
-            // fix a broken key until they restart the app.
-            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
+            if shouldSaveApiKey {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else if summaryEndpointMissing {
@@ -478,15 +490,7 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
-            // Only touch the Keychain once the async load has actually resolved — before that,
-            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. If the load
-            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
-            // the user has since typed a real value into the field, which is unambiguous
-            // regardless of whether the original load ever succeeded: they explicitly want that
-            // value saved, and refusing to save it would leave them stuck with no visible way to
-            // fix a broken key until they restart the app.
-            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
+            if shouldSaveApiKey {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else {
@@ -496,15 +500,7 @@ struct SettingsView: View {
             // the user actually cleared the field. Leaving a matching key in place means flipping
             // summaries back on later doesn't require re-typing it.
             config.summary = nil
-            // Only touch the Keychain once the async load has actually resolved — before that,
-            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. If the load
-            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
-            // the user has since typed a real value into the field, which is unambiguous
-            // regardless of whether the original load ever succeeded: they explicitly want that
-            // value saved, and refusing to save it would leave them stuck with no visible way to
-            // fix a broken key until they restart the app.
-            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
+            if shouldSaveApiKey {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         }
