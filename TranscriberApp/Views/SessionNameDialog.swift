@@ -51,6 +51,12 @@ struct SessionNameDialog: View {
                 // suggestion arrives — which would immediately flip userHasEdited back to true
                 // and hide the hint it just showed. A Binding's `set` only runs for user-driven
                 // edits from the TextField itself.
+                // INVARIANT: `name = adopted` in the onChange(of: suggestion.eventTitle) handler
+                // below relies on this Binding, not a plain .onChange(of: name), to leave
+                // userHasEdited untouched. Reverting to .onChange(of: name) here silently breaks
+                // that and the "Suggested from your calendar" hint stops showing — with no test
+                // failure, since SessionNameSuggestionPolicyTests only covers the pure decision,
+                // not this view's wiring.
                 TextField("e.g. Weekly standup", text: Binding(
                     get: { name },
                     set: { name = $0; userHasEdited = true }

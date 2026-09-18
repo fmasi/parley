@@ -145,6 +145,14 @@ struct MenuView: View {
                         // body, so it already runs on the main actor.
                         NSApplication.shared.terminate(nil)
                     }
+                    // Safety net: runLaunchctl has no timeout on Process.waitUntilExit(), so a
+                    // wedged launchctl would otherwise suspend the Task above forever — Quit
+                    // silently does nothing instead of the old sync path's at-least-visible UI
+                    // freeze. Bounded generously past any real launchctl unload.
+                    Task {
+                        try? await Task.sleep(for: .seconds(5))
+                        NSApplication.shared.terminate(nil)
+                    }
                 }
                 .keyboardShortcut("q")
             }

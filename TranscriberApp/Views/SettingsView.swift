@@ -108,6 +108,11 @@ struct SettingsView: View {
                     continuation.resume(returning: StorageManager.currentUsageBytes(in: directory))
                 }
             }
+            // withCheckedContinuation isn't cancellation-aware, so a Settings window closed while
+            // the scan above is still running would otherwise fall through to refreshing
+            // notification status against a view context that's already gone. Harmless (no crash),
+            // but skip the extra work.
+            guard !Task.isCancelled else { return }
             // #150: refresh notification status on open so the Permissions tab (and
             // its notifications-off hint) reflects System Settings changes made after
             // launch, not the state captured at the last checkAll().
