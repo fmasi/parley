@@ -185,8 +185,12 @@ struct TranscriberApp: App {
 
         if !LaunchAgentManager.isInstalled() {
             // Async (#197): `launchctl load` is a subprocess wait; off main so app launch never
-            // blocks on it.
-            Task.detached(priority: .utility) {
+            // blocks on it. Plain Task, not .detached: install() already hops the actual blocking
+            // wait onto DispatchQueue.global via withCheckedContinuation (LaunchAgentManager.
+            // runLaunchctl), so nothing here runs on the cooperative thread pool either way —
+            // .detached would only drop structured-task benefits for no benefit, and diverge from
+            // the plain Task {} used by both Quit paths that call the same manager.
+            Task(priority: .utility) {
                 try? await LaunchAgentManager.install()
             }
         }
