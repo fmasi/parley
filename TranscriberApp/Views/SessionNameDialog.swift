@@ -46,11 +46,18 @@ struct SessionNameDialog: View {
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 6) {
-                TextField("e.g. Weekly standup", text: $name)
+                // A custom Binding, not .onChange(of: name): onChange fires for ANY mutation,
+                // including the programmatic `name = adopted` below when a late calendar
+                // suggestion arrives — which would immediately flip userHasEdited back to true
+                // and hide the hint it just showed. A Binding's `set` only runs for user-driven
+                // edits from the TextField itself.
+                TextField("e.g. Weekly standup", text: Binding(
+                    get: { name },
+                    set: { name = $0; userHasEdited = true }
+                ))
                     .textFieldStyle(.roundedBorder)
                     .focused($focused)
                     .onSubmit { start() }
-                    .onChange(of: name) { _, _ in userHasEdited = true }
 
                 // Say where the pre-filled name came from; the hint steps
                 // aside as soon as the user types their own.

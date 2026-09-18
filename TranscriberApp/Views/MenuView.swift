@@ -141,7 +141,9 @@ struct MenuView: View {
                     // process before these lines finish — expected, see LaunchAgentManager.)
                     Task {
                         await LaunchAgentManager.uninstall()
-                        await MainActor.run { NSApplication.shared.terminate(nil) }
+                        // No MainActor.run needed: this Task is spawned from a @MainActor View
+                        // body, so it already runs on the main actor.
+                        NSApplication.shared.terminate(nil)
                     }
                 }
                 .keyboardShortcut("q")
