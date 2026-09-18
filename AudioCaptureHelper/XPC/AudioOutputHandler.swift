@@ -52,8 +52,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var totalMicFramesWritten: Int64 = 0
     private var totalSystemFramesWritten: Int64 = 0
     /// When this handler (and therefore the session — the same handler is reused across chunk
-    /// rotations, see `swapWriters`) started, for the finalize wall-clock comparison.
-    private let sessionStartTime = Date()
+    /// rotations, see `swapWriters`) started, for the finalize wall-clock comparison. A
+    /// `ContinuousClock` (monotonic) rather than `Date` (wall clock), so an NTP step-correction
+    /// mid-recording can't push `elapsed` ahead or behind and produce a false-positive/false-negative
+    /// frame-count-plausibility verdict.
+    private let sessionStartTime = ContinuousClock.now
 
     /// One-shot latch so a converter failure that repeats on every buffer (a format the converter
     /// can't handle) files one anomaly per session, not one per buffer (#196).
@@ -138,7 +141,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // session has actually been running. Catches gaps that padding itself skipped (an implausible
         // timeline delta) and anything else nobody has thought of yet — the same "don't need to know
         // the mechanism" property that makes PadRatioMonitor useful, at the whole-recording scope.
-        let elapsed = Date().timeIntervalSince(sessionStartTime)
+        let elapsedComponents = sessionStartTime.duration(to: .now).components
+        let elapsed = Double(elapsedComponents.seconds) + Double(elapsedComponents.attoseconds) / 1e18
         noteFrameCountMismatch(FrameCountPlausibility.check(
             track: "mic", framesWritten: totalMicFramesWritten,
             rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed

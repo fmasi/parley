@@ -75,7 +75,7 @@ public enum CaptureEventKind: String, Codable, Sendable {
 
     /// A timeline gap exceeded the 60 s pad cap and was clamped — the mic/system alignment for the
     /// rest of the chunk is desynced by the untruncated remainder (#196). Previously logged only.
-    /// Severity `.anomaly`. Deliberately NOT in `qualityCompromising` (PR #217 review): this is a
+    /// Severity `.anomaly`. Deliberately NOT in `qualityCompromising`: this is a
     /// symptom, not independently a bad recording — its consequence (a frame-count mismatch at
     /// finalize) is what `finalizeFrameCountMismatch` catches and IS in that set.
     case padCapExceeded

@@ -19,7 +19,12 @@ public struct LivenessGapDetector {
     public enum Verdict: Equatable {
         case healthy
         /// A gap crossed the threshold. Reports once per gap — cleared once delivery resumes (or
-        /// the gate closes), so a track that goes silent again later is reported again.
+        /// the gate closes), so a track that goes silent again later is reported again. A gate
+        /// close is deliberately treated the same as delivery resuming: it exists so a tap track's
+        /// idle→active transition (gate re-opens with a fresh gap) stays observable rather than
+        /// silently suppressed by a latch that never reset. The tradeoff: if the gate flaps closed
+        /// and back open while `lastArrivalNanos` is unchanged (delivery never actually resumed),
+        /// an already-reported gap is reported a second time.
         case gap(seconds: Double)
     }
 

@@ -184,7 +184,7 @@ public final class RecordingCoordinator {
         // full-rate buffers of exact digital zero — while the lid is closed. Warn BEFORE capture
         // starts, not only via the live exact-zero detector once the meeting is already underway.
         // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
-        // PR #217 review: `isLidClosed()`/`isBuiltInMicSelected(deviceId:)` are synchronous IOKit/
+        // `isLidClosed()`/`isBuiltInMicSelected(deviceId:)` are synchronous IOKit/
         // CoreAudio HAL lookups. Normally sub-millisecond, but a HAL daemon restart or sleep/wake
         // transition can occasionally stall them — hop to a detached task so a rare stall never
         // blocks the main actor. Both are pure/static with no actor isolation, so this is a pure
@@ -195,6 +195,12 @@ public final class RecordingCoordinator {
         if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
             appState.interruptionWarning = ClamshellMicGuard.warningMessage
         }
+        // Re-entrancy guard: the await above is a genuine suspension point (unlike the two
+        // synchronous IOKit/CoreAudio calls it replaced), so a second startRecording call fired
+        // during it — e.g. a double-tap of the record control before the UI disables it — must not
+        // race this one into writing a second sentinel / starting a second capture. Same
+        // "bail if the state moved" pattern already used by the callback guards below.
+        guard appState.isIdle else { return }
 
         let config = configManager.config
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
@@ -228,6 +234,17 @@ public final class RecordingCoordinator {
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
                 await self.handleXPCCrash()
+            }
+        }
+        // #193/#196 review fix: this was previously only wired by TranscriberApp's
+        // `setupCrashHandler`, which runs solely on the launch-time crash-recovery re-attach paths
+        // (Flow A/B) — a fresh recording started here never received it, so the exact-zero-mic,
+        // liveness-gap, and write-failure banners this PR adds could never appear during a normal
+        // recording. The recording is never stopped by this.
+        captureClient.onQualityAnomaly = { [weak self] _, message in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.interruptionWarning = message
             }
         }
 

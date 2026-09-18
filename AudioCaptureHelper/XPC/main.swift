@@ -27,7 +27,7 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         service.onFailFatally = { reason in client?.captureDidFailFatally(reason: reason) }
         service.onMicDeviceChanged = { deviceId in client?.micDeviceChanged?(to: deviceId) }
         service.onSystemAudioUnrecoverable = { client?.captureSystemAudioUnrecoverable(reason: $0) }
-        // PR #217 review: `onQualityAnomaly` can be invoked directly from the real-time audio
+        // `onQualityAnomaly` can be invoked directly from the real-time audio
         // queue (exact-zero mic detection) or from a write-failure path already in a degraded
         // I/O state. Never make the synchronous XPC reverse call from either — hop to a
         // background queue first so the audio callback path is never blocked on IPC scheduling.
