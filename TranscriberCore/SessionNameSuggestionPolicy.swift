@@ -16,7 +16,7 @@ public enum SessionNameSuggestionPolicy {
         // Whitespace-only titles are treated the same as empty: an all-space event title would
         // otherwise flash the "Suggested from your calendar" hint and fill the field with
         // invisible spaces even though `start()` trims the name before using it.
-        guard !userHasEdited, let newTitle, !newTitle.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        guard !userHasEdited, let newTitle, !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return newTitle
     }
 }

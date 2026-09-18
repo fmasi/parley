@@ -24,6 +24,9 @@ final class CalendarService {
                 // warn it's a Core Data stack init, ~50-200ms on Exchange-heavy accounts) — this
                 // trades that per-call overhead for correctness, since the lookup only runs once per
                 // Start Recording, not on a hot path.
+                // TODO: if Exchange/LDAP accounts regress (Apple's docs also discourage creating
+                // multiple EKEventStore instances at all, not just sharing one across threads),
+                // replace this with a dedicated actor holding one retained store instead.
                 let store = EKEventStore()
                 let calendars = calendarIDs.map { ids in ids.compactMap { store.calendar(withIdentifier: $0) } }
                 let now = Date()

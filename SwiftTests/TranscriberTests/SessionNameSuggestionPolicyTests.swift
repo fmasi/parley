@@ -31,4 +31,9 @@ struct SessionNameSuggestionPolicyTests {
         let result = SessionNameSuggestionPolicy.adopt(userHasEdited: false, newTitle: "   ")
         #expect(result == nil)
     }
+
+    @Test func ignoresNewlineOnlyTitle() {
+        let result = SessionNameSuggestionPolicy.adopt(userHasEdited: false, newTitle: "\n\n")
+        #expect(result == nil)
+    }
 }
