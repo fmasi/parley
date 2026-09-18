@@ -98,6 +98,10 @@ struct SettingsView: View {
             // is synchronous and can run long on a large or network-mounted archive, and Task.detached
             // would tie up one of Swift's limited cooperative thread-pool threads for the duration
             // (same reasoning as CalendarService.currentEventTitle).
+            // Reset to nil first: the Settings scene's @State survives window hide/show, so without
+            // this a reopen would show the PREVIOUS open's figure (stale, possibly for a since-changed
+            // recordingDirectory) instead of "Calculating…" while this recomputes.
+            archiveUsageBytes = nil
             let directory = URL(fileURLWithPath: config.recordingDirectory)
             archiveUsageBytes = await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async {
