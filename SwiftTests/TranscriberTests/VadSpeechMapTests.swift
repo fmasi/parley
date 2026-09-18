@@ -62,3 +62,22 @@ struct VadSpeechMapTests {
         #expect(abs(result - 0.5) < 0.001)
     }
 }
+
+/// `analyze(samples:)` (#204): lets a caller that already decoded the audio for another consumer
+/// (the diarizer, in `TranscriptRediarizer`) share that buffer instead of handing `analyze` a path
+/// and paying for a second decode of identical audio.
+@Suite("VadSpeechMap analyze(samples:)")
+struct VadSpeechMapAnalyzeSamplesTests {
+
+    /// CI (and most dev machines running this suite) has no cached VAD model, so this exercises
+    /// the real graceful-degradation branch shared with `analyze(audioPath:)` — not a stub. If a
+    /// machine DOES have the model cached, there is nothing to assert here (VAD would actually
+    /// run), so the test is a no-op rather than a false failure.
+    @Test("returns nil when the VAD model is not cached, matching analyze(audioPath:)")
+    func returnsNilWhenModelNotCached() async throws {
+        guard !VadSpeechMap.isModelCached() else { return }
+        let samples = [Float](repeating: 0, count: 1600)
+        let result = try await VadSpeechMap().analyze(samples: samples)
+        #expect(result == nil)
+    }
+}

@@ -111,4 +111,67 @@ struct AudioSourceResolverSplitTests {
         #expect(localFile.processingFormat.channelCount == 1)
         #expect(remoteFile.processingFormat.channelCount == 1)
     }
+
+    /// #204: `splitChannel` writes ONLY the requested side — the old path (`splitChannels`, both
+    /// sides, caller deletes the unwanted one) wasted half the decode and half the write for a
+    /// caller (re-detect) that only ever wanted one channel.
+    @Test func splitChannelWritesOnlyTheRequestedSide() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("split-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let aacPath = dir.appendingPathComponent("test.m4a")
+        try await Self.createTestStereoAac(at: aacPath)
+
+        let localPath = try await AudioSourceResolver.splitChannel(
+            stereoAac: aacPath, outputDirectory: dir, channel: .local)
+
+        #expect(FileManager.default.fileExists(atPath: localPath.path))
+        #expect(localPath.pathExtension == "wav")
+        let localFile = try AVAudioFile(forReading: localPath)
+        #expect(localFile.processingFormat.channelCount == 1)
+
+        // The remote side was never written — not even transiently and deleted.
+        let remotePath = dir.appendingPathComponent("test_split_system.wav")
+        #expect(!FileManager.default.fileExists(atPath: remotePath.path))
+    }
+
+    /// The two channels are genuinely different audio (440Hz vs 880Hz test tones), so a
+    /// `.remote`-only split must not silently hand back the local content.
+    @Test func splitChannelRemoteMatchesTheRemoteHalfOfSplitChannels() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("split-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let aacPath = dir.appendingPathComponent("test.m4a")
+        try await Self.createTestStereoAac(at: aacPath)
+
+        let bothDir = dir.appendingPathComponent("both", isDirectory: true)
+        try FileManager.default.createDirectory(at: bothDir, withIntermediateDirectories: true)
+        let both = try await AudioSourceResolver.splitChannels(stereoAac: aacPath, outputDirectory: bothDir)
+
+        let oneDir = dir.appendingPathComponent("one", isDirectory: true)
+        try FileManager.default.createDirectory(at: oneDir, withIntermediateDirectories: true)
+        let remoteOnly = try await AudioSourceResolver.splitChannel(
+            stereoAac: aacPath, outputDirectory: oneDir, channel: .remote)
+
+        let expected = try AVAudioFile(forReading: both.remote)
+        let got = try AVAudioFile(forReading: remoteOnly)
+        #expect(expected.length == got.length)
+        #expect(expected.processingFormat.sampleRate == got.processingFormat.sampleRate)
+
+        let expectedBuf = AVAudioPCMBuffer(pcmFormat: expected.processingFormat, frameCapacity: AVAudioFrameCount(expected.length))!
+        try expected.read(into: expectedBuf)
+        let gotBuf = AVAudioPCMBuffer(pcmFormat: got.processingFormat, frameCapacity: AVAudioFrameCount(got.length))!
+        try got.read(into: gotBuf)
+        let expectedPtr = expectedBuf.floatChannelData![0]
+        let gotPtr = gotBuf.floatChannelData![0]
+        var maxDiff: Float = 0
+        for i in 0..<Int(expectedBuf.frameLength) {
+            maxDiff = max(maxDiff, abs(expectedPtr[i] - gotPtr[i]))
+        }
+        #expect(maxDiff < 0.0001)
+    }
 }

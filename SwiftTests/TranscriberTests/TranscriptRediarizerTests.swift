@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import TranscriberCore
 
 /// Rewriting one channel's speakers after a re-diarization (#67).
@@ -296,5 +297,181 @@ struct TranscriptRediarizerNameClearingTests {
         #expect(TranscriptRediarizer.channelNames(in: metadata, source: "remote")
                 == ["Remote Speaker 1": "Paul"])
         #expect(TranscriptRediarizer.channelNames(in: [:], source: "remote").isEmpty)
+    }
+}
+
+/// `rediarize`'s `onProgress` plumbing for the `.samples` path (`.chunkedArchives` — the case
+/// with a decoded-buffer/progress callback to wire up at all) went unexercised by any test:
+/// `FakeDiarizer` used to silently drop the `progress` callback it was handed, so a regression in
+/// `rediarize`'s progress-forwarding closure (a divide-by-zero on `total == 0`, or reporting the
+/// wrong phase) wouldn't have been caught.
+@Suite(.serialized)
+struct TranscriptRediarizerProgressTests {
+
+    /// A single mic-only WAV chunk classifies as `.chunkedArchives` (not `.legacyDualStream`,
+    /// which has no per-chunk progress fraction at all — see `SpeakerSampleLocator.classify`),
+    /// so it exercises the `diarize(audio:numSpeakers:progress:)` branch this suite targets.
+    private func makeMicOnlyRecording() throws -> (transcript: URL, cleanup: () -> Void) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rediar-progress-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let wav = dir.appendingPathComponent("call-0_mic.wav")
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let frameCount = 16000
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount))!
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let file = try AVAudioFile(forWriting: wav, settings: format.settings)
+        try file.write(from: buffer)
+
+        let transcript = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = [
+            "metadata": ["audio_paths": [wav.path]],
+            "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "Local Speaker 1", "source": "local"]],
+        ]
+        try JSONSerialization.data(withJSONObject: doc).write(to: transcript)
+
+        return (transcript, { try? FileManager.default.removeItem(at: dir) })
+    }
+
+    /// Plain lock-protected accumulator rather than an actor: `onProgress` is a synchronous
+    /// `@Sendable` closure, and recording synchronously (no spawned `Task`) means the test doesn't
+    /// need to guess at a delay before every call has landed.
+    private final class ProgressLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [TranscriptRediarizer.Progress] = []
+        func record(_ p: TranscriptRediarizer.Progress) {
+            lock.lock(); defer { lock.unlock() }
+            stored.append(p)
+        }
+        var phases: [TranscriptRediarizer.Progress] {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    @Test("reports decodingAudio then detectingSpeakers, with the diarizer's own fraction forwarded")
+    func progressSequenceMatchesDiarizerCallback() async throws {
+        let (transcript, cleanup) = try makeMicOnlyRecording()
+        defer { cleanup() }
+
+        let log = ProgressLog()
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: transcript, source: "local", speakerCount: 1,
+            diarizer: FakeDiarizer(),
+            onProgress: { log.record($0) })
+
+        let phases = log.phases
+        #expect(phases.contains { $0.phase == .decodingAudio })
+        // FakeDiarizer.diarize(audio:numSpeakers:progress:) calls progress(1, 2) then
+        // progress(2, 2) — both should reach here as detectingSpeakers with the matching fraction.
+        #expect(phases.contains { $0.phase == .detectingSpeakers && $0.fraction == 0.5 })
+        #expect(phases.contains { $0.phase == .detectingSpeakers && $0.fraction == 1.0 })
+    }
+}
+
+/// `AudioDecode` mirrors FluidAudio's own decode algorithm rather than calling it directly (a
+/// Swift name collision makes the real `AudioConverter` class unreachable from this module — see
+/// the type's doc comment in `TranscriptRediarizer.swift`). That reimplementation is exactly the
+/// part of PR #218 flagged as needing a device A/B before merge, so this suite exists to catch a
+/// gross format mismatch (wrong frame count, wrong channel handling, wrong output rate) even
+/// though it can't substitute for the device comparison against FluidAudio's real converter.
+@Suite(.serialized)
+struct AudioDecodeTests {
+
+    private enum TestHelperError: Error { case cannotCreateBuffer }
+
+    /// A mono or stereo sine-wave WAV at an arbitrary sample rate, written to `url`.
+    private func writeTestWav(
+        at url: URL, durationSeconds: Double, sampleRate: Double, channels: UInt32
+    ) throws {
+        let frameCount = Int(sampleRate * durationSeconds)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false
+        )!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            throw TestHelperError.cannotCreateBuffer
+        }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        for channel in 0..<Int(channels) {
+            let ptr = buffer.floatChannelData![channel]
+            for i in 0..<frameCount {
+                let t = Double(i) / sampleRate
+                ptr[i] = Float(sin(2.0 * .pi * 440.0 * t))
+            }
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        try file.write(from: buffer)
+    }
+
+    private func tempWavURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("audiodecode-test-\(UUID().uuidString).wav")
+    }
+
+    @Test("a file already at 16kHz mono passes through with the same frame count")
+    func alreadyTargetRatePassesThroughFrameCount() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 1.0, sampleRate: 16000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        #expect(samples.count == 16000)
+    }
+
+    @Test("a 48kHz source is downsampled to land within tolerance of the 16kHz-equivalent frame count")
+    func downsamplesToTargetRate() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 2.0, sampleRate: 48000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // 2s at 16kHz == 32000 frames. AVAudioConverter's resampler can land a few dozen frames
+        // either side of the exact ratio — this checks it's in the right ballpark, not exact.
+        let expected = 32000
+        #expect(abs(samples.count - expected) < 200)
+    }
+
+    @Test("a stereo source is mixed down to mono — one sample per frame, not one per channel")
+    func stereoIsMixedToMono() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 1.0, sampleRate: 16000, channels: 2)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // Both channels carry the same 440Hz tone, so a correct mixdown lands at ~1 frame per
+        // input frame, not 2 (which is what a raw interleaved read gone wrong would produce).
+        #expect(abs(samples.count - 16000) < 200)
+    }
+
+    @Test("an empty (zero-frame) file decodes to an empty array rather than throwing")
+    func emptyFileDecodesToEmptyArray() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 0.0, sampleRate: 16000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        #expect(samples.isEmpty)
+    }
+
+    /// 44.1kHz -> 16kHz is a non-integer ratio (unlike the app's actual 48kHz -> 16kHz, which is
+    /// exactly 3:1) — the kind of source a USB headset or some capture hardware can hand the
+    /// pipeline. A resampling filter with nonzero internal latency can leave a few trailing
+    /// frames unflushed after a single `convert()` call even with output headroom to spare; a
+    /// truncated result here would mean `resample`'s drain loop regressed to trusting one call.
+    @Test("a non-integer-ratio source (44.1kHz) is not silently truncated at the tail")
+    func nonIntegerRatioDoesNotTruncate() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 5.0, sampleRate: 44100, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // 5s at 16kHz == 80000 frames. A resampler that silently dropped its final flush pass
+        // would come up short by however many frames its internal latency buffered — this
+        // tolerance is generous on the ratio itself but would still catch a dropped flush of any
+        // real size (a typical polyphase filter's latency is tens to low hundreds of frames).
+        let expected = 80000
+        #expect(abs(samples.count - expected) < 400)
     }
 }

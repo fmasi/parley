@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import os
 
@@ -113,6 +114,26 @@ public enum TranscriptRediarizer {
         public let segmentsRelabeled: Int
     }
 
+    /// A coarse phase report for a running `rediarize`, so a caller can show more than a bare
+    /// spinner on a call that can take minutes (#203). `fraction`, when present, is 0...1 within
+    /// the CURRENT phase — chunk-splitting is trivially countable (N of M chunks), and the
+    /// diarizer/VAD backend also reports its own chunk progress during `detectingSpeakers`.
+    public struct Progress: Sendable, Equatable {
+        public enum Phase: Sendable, Equatable {
+            /// Decoding the channel's audio to mono samples (the old "splitting + concatenating").
+            case decodingAudio
+            /// Running the diarizer (and VAD) over the decoded samples.
+            case detectingSpeakers
+        }
+        public let phase: Phase
+        public let fraction: Double?
+
+        public init(phase: Phase, fraction: Double? = nil) {
+            self.phase = phase
+            self.fraction = fraction
+        }
+    }
+
     public enum RediarizeError: LocalizedError {
         case unreadableTranscript
         case noAudioForChannel(String)
@@ -141,7 +162,8 @@ public enum TranscriptRediarizer {
         speakerCount: Int,
         diarizer: any DiarizationProvider,
         vadSpeechThreshold: Double = 0.5,
-        scratchDirectory: URL = FileManager.default.temporaryDirectory
+        scratchDirectory: URL = FileManager.default.temporaryDirectory,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         // Refuse before touching anything. A non-positive count is not merely ignored downstream:
         // `FluidAudioDiarizer` correctly treats <= 0 as "unforced", but we still pass
@@ -163,22 +185,62 @@ public enum TranscriptRediarizer {
         let audioPaths = (metadata["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
 
-        let (channelAudio, isTemporary) = try await resolveChannelAudio(
-            layout: layout, source: source, scratchDirectory: scratchDirectory)
-        defer { if isTemporary { try? FileManager.default.removeItem(at: channelAudio) } }
+        // Decode ONCE, at the target format (16 kHz mono Float), and share the same buffer with
+        // both the diarizer and VAD below (#204) — the old path decoded the channel's audio up to
+        // four separate times (split, concatenate, diarizer's own decode, VAD's own decode).
+        //
+        // `.legacyDualStream` is a single file with nothing to concatenate, so there is no
+        // decode-reuse to be had there: our own `AudioDecode` pass would just add a full extra
+        // in-memory copy (~3x the file's decoded size, once for the native-rate read and again
+        // for the resample) on top of what the diarizer and VAD already hold internally. Handing
+        // them the path instead lets them stream it with FluidAudio's own decoder, matching the
+        // pre-#204 memory profile for this case — and, as a side effect, keeps the `AudioDecode`
+        // reimplementation (see its doc comment) out of the picture entirely for single-file
+        // recordings, which is most of them.
+        onProgress?(Progress(phase: .decodingAudio))
+        let decoded = try await decodeChannelAudio(
+            layout: layout, source: source, scratchDirectory: scratchDirectory,
+            onProgress: onProgress)
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
-        // Resolving the channel can concatenate hundreds of MB on a multi-chunk recording; without
-        // a check here a cancel during that work goes unnoticed until a full diarize has also run.
+        // Decoding the channel can be the slowest phase on a multi-chunk recording; without a
+        // check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
-        let raw = try await diarizer.diarize(audioPath: channelAudio, numSpeakers: speakerCount)
+        onProgress?(Progress(phase: .detectingSpeakers))
+        let raw: DiarizationResult
+        let speechMap: [SpeechRegion]?
+        switch decoded {
+        case .samples(let samples):
+            raw = try await diarizer.diarize(
+                audio: samples, numSpeakers: speakerCount,
+                progress: { processed, total in
+                    guard total > 0 else { return }
+                    onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
+                })
+            // Same samples the diarizer just used — no second decode of the same audio. Checked
+            // here (not just after the switch below) so a cancel right after the diarizer finishes
+            // is caught before the VAD pass runs too — `try?` on the VAD call itself swallows a
+            // CancellationError thrown internally, so this is the only place that actually stops it.
+            try Task.checkCancellation()
+            speechMap = try? await VadSpeechMap().analyze(samples: samples)
+        case .path(let audioURL):
+            // No pre-decoded buffer to share here (see the comment above) — each backend decodes
+            // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
+            // available on this route either, but the coarser phase indicator still applies.
+            raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+            // Same reasoning as the `.samples` branch above: catches a cancel that arrives between
+            // the diarizer finishing and the VAD starting. The `try?` on the VAD call below is NOT
+            // just defensive error-swallowing — it's the other half of this design, absorbing a
+            // CancellationError that fires mid-VAD instead of surfacing it as a failure.
+            try Task.checkCancellation()
+            speechMap = try? await VadSpeechMap().analyze(audioPath: audioURL)
+        }
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
         // are both in hand, rather than hoping the clusterer honours the request.
         let diarization = SpeakerCountEnforcer.enforce(raw, to: speakerCount)
         try Task.checkCancellation()
-        let speechMap = try? await VadSpeechMap().analyze(audioPath: channelAudio)
 
         let transcriptSegments = rawSegments
             .filter { ($0["source"] as? String) == source }
@@ -270,14 +332,36 @@ public enum TranscriptRediarizer {
         return .needsSplit
     }
 
-    /// Produce a mono file holding just the requested channel, concatenating chunks when needed.
-    /// Returns `isTemporary: true` when the caller must clean the file up.
-    private static func resolveChannelAudio(
+    /// What `decodeChannelAudio` hands back: either pre-decoded samples ready to share between
+    /// the diarizer and VAD, or a path for them to decode themselves.
+    ///
+    /// Never returned from a `public` API — `private` keeps it out of the module's internal
+    /// namespace and signals that intent to future readers.
+    private enum DecodedChannelAudio {
+        case samples([Float])
+        case path(URL)
+    }
+
+    /// Decode the requested channel to mono Float samples at the diarizer/VAD target rate
+    /// (16 kHz), concatenating chunks in THAT domain when needed — about 3x smaller than the
+    /// 48kHz stereo Int16 source (matches `AudioDecode`'s own "3x smaller" note below), and it
+    /// lets the caller skip the old file-based concatenation step
+    /// entirely (#204). A stereo chunk is split down to just the wanted side first
+    /// (`AudioSourceResolver.splitChannel`), so neither the decode nor the write ever touches the
+    /// unwanted side.
+    ///
+    /// `.legacyDualStream` is a single file, so there's nothing to concatenate and therefore no
+    /// decode-reuse benefit to justify pre-decoding it into an extra in-memory copy — that case
+    /// hands back the path instead and lets the diarizer/VAD stream it themselves, same as before
+    /// #204.
+    private static func decodeChannelAudio(
         layout: AudioLayout,
         source: String,
-        scratchDirectory: URL
-    ) async throws -> (URL, Bool) {
+        scratchDirectory: URL,
+        onProgress: (@Sendable (Progress) -> Void)?
+    ) async throws -> DecodedChannelAudio {
         let wantsLocal = source == "local"
+
         switch layout {
         case .unavailable:
             throw RediarizeError.noAudioForChannel(source)
@@ -286,76 +370,264 @@ public enum TranscriptRediarizer {
             guard let url = wantsLocal ? local : remote,
                   FileManager.default.fileExists(atPath: url.path)
             else { throw RediarizeError.noAudioForChannel(source) }
-            return (url, false)
+            return .path(url)
 
         case .chunkedArchives(let chunks):
-            var channels: [URL] = []
-            // Every split file we create is a temp file we own. A throw from splitChannels on a
-            // later chunk, or from concatenate after the loop, used to leave the ones already
-            // produced behind — and on a multi-chunk recording those are hundreds of MB.
-            var temporaries: [URL] = []
-            var handedOff = false
-            defer {
-                if !handedOff {
-                    for t in temporaries { try? FileManager.default.removeItem(at: t) }
+            let existing = chunks.filter { FileManager.default.fileExists(atPath: $0.path) }
+            var combined: [Float] = []
+            for (index, chunk) in existing.enumerated() {
+                // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
+                // 10 should not wait for the remaining eight.
+                try Task.checkCancellation()
+                let role = channelRole(of: chunk, wantsLocal: wantsLocal)
+                // Reported AFTER this chunk is done (index + 1), not before: reporting before
+                // meant the bar topped out at (N-1)/N and never reached 1.0 before the phase
+                // switched to .detectingSpeakers — visibly "snapping" past the last chunk.
+                //
+                // Skipped only for a `.skip` chunk: reporting it too would let the fraction climb
+                // on a recording where EVERY chunk is `.skip` (e.g. re-diarizing the remote
+                // channel of a mic-only recording) — briefly showing "100%" before the empty-
+                // `combined` guard below throws `noAudioForChannel`, which reads as decode work
+                // that never actually happened.
+                defer {
+                    if role != .skip {
+                        onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(existing.count)))
+                    }
                 }
-            }
-            for chunk in chunks where FileManager.default.fileExists(atPath: chunk.path) {
-                switch channelRole(of: chunk, wantsLocal: wantsLocal) {
+                let decodedChunk: [Float]
+                switch role {
                 case .skip:
                     continue
                 case .useDirectly:
-                    channels.append(chunk)
+                    decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: chunk)
                 case .needsSplit:
-                    // Per-iteration: splitting one large archive is itself slow, so a cancel during
-                    // chunk 2 of 10 should not wait for the remaining eight.
-                    try Task.checkCancellation()
-                    let split = try await AudioSourceResolver.splitChannels(
-                        stereoAac: chunk, outputDirectory: scratchDirectory)
-                    let wanted = wantsLocal ? split.local : split.remote
-                    channels.append(wanted)
-                    temporaries.append(wanted)
-                    let discard = wantsLocal ? split.remote : split.local
-                    // Tracked BEFORE the attempt: if this removal fails, the defer and the
-                    // success-path cleanup both still know about the file. Untracked, a failed
-                    // delete stranded it permanently — hundreds of MB on a ten-chunk recording.
-                    temporaries.append(discard)
-                    do {
-                        try FileManager.default.removeItem(at: discard)
-                        temporaries.removeLast()
-                    } catch {
-                        // Not fatal, but on a long multi-chunk re-diarize a disk-full condition
-                        // would otherwise strand one large temp file per chunk with no trace.
-                        Logger.files.warning(
-                            "Re-diarize: could not remove the unused split channel: \(error.localizedDescription, privacy: .private)")
-                    }
+                    let channel: AudioSourceResolver.Channel = wantsLocal ? .local : .remote
+                    let split = try await AudioSourceResolver.splitChannel(
+                        stereoAac: chunk, outputDirectory: scratchDirectory, channel: channel)
+                    defer { try? FileManager.default.removeItem(at: split) }
+                    decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: split)
                 }
-            }
-            guard !channels.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
-            if channels.count == 1 {
-                // A single chunk needs no concatenation. Only a SPLIT file is ours to delete; an
-                // original mono fallback WAV must survive, so hand back whether it is temporary.
-                let single = channels[0]
-                let isTemporary = temporaries.contains(single)
-                // Anything else still tracked is a discard whose removal failed above. Setting
-                // `handedOff` suppresses the defer, so this is the last chance to clear it —
-                // without this, a failed discard removal in the single-chunk stereo case leaks
-                // permanently, which is exactly the hole the tracking was added to close.
-                for t in temporaries where t != single {
-                    try? FileManager.default.removeItem(at: t)
+                // `combined` accumulates every chunk in the recording — on a 90-minute call at
+                // 16kHz that's tens of millions of floats, and Swift's array growth doubles on
+                // each reallocation, so the final grow briefly touches ~2x the steady-state size.
+                // The first chunk's own length is the best estimate available here (chunk
+                // durations aren't threaded into this function), so use it to size the rest in one
+                // shot rather than free-growing through log2(chunkCount) reallocations.
+                //
+                // `existing.count` over-counts when some chunks are `.skip` (e.g. local-only WAVs
+                // while decoding the remote channel) — those never reach this line, so the
+                // reservation ends up sized for MORE chunks than will actually land in `combined`.
+                // That's a deliberate, harmless over-allocation (unused capacity costs nothing but
+                // address space), not a bug: computing the true non-skip count up front isn't worth
+                // it for what's already an estimate.
+                if combined.isEmpty {
+                    combined.reserveCapacity(decodedChunk.count * existing.count)
                 }
-                handedOff = isTemporary
-                return (single, isTemporary)
+                combined.append(contentsOf: decodedChunk)
             }
-            // Diarize the whole timeline at once rather than per chunk: one clustering pass over
-            // every chunk needs no cross-chunk reconciliation and cannot disagree with itself.
-            let joined = try await AudioConcatenator.concatenate(
-                sources: channels, outputDirectory: scratchDirectory,
-                outputName: "rediarize-\(source)")
-            for t in temporaries { try? FileManager.default.removeItem(at: t) }
-            temporaries = []
-            handedOff = true
-            return (joined.outputPath, true)
+            guard !combined.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
+            return .samples(combined)
         }
+    }
+}
+
+/// Decodes audio to mono Float32 samples at 16 kHz — the format the diarizer and VAD both want.
+///
+/// Deliberately NOT a call to FluidAudio's own `AudioConverter`, which does exactly this: that
+/// class's bare name collides with `TranscriberCore.AudioConverter` (an unrelated 48kHz/Int16
+/// capture-pipeline type in this same module, which always wins unqualified lookup), and the
+/// FluidAudio package separately ships a top-level `public struct FluidAudio`, so even the
+/// module-qualified spelling `FluidAudio.AudioConverter` resolves to a (nonexistent) member of
+/// THAT struct rather than the class. Neither collision has a source-level workaround, so this
+/// mirrors FluidAudio's own implementation instead (read at the file's native format in
+/// chunks, mix to mono Float32 if needed, then one `AVAudioConverter` pass to 16 kHz) — the same
+/// system `AVAudioConverter` API, called with the same target format, so the result matches what
+/// FluidAudio's own converter would have produced for the same file.
+///
+/// Not streaming end-to-end: the whole file is read into `monoSamples` at its NATIVE rate first,
+/// then resampled to 16 kHz in one pass — so a chunk's peak memory is roughly 2x its native-rate
+/// decoded size (the native-rate buffer plus `resample`'s same-size input copy and smaller output
+/// buffer, briefly coexisting). For a 5-minute 48 kHz chunk that's tens of MB, not gigabytes, and
+/// each chunk is freed before the next one is decoded (`decodeChannelAudio`'s loop), so this
+/// doesn't accumulate across a long recording — just worth naming so a future reader doesn't
+/// wonder why this isn't reading in 16kHz-sized pieces throughout.
+enum AudioDecode {
+    static let targetSampleRate: Double = 16000
+
+    enum DecodeError: Error {
+        case bufferAllocationFailed
+        case formatCreationFailed
+        case converterCreationFailed
+        case conversionFailed(Error?)
+    }
+
+    /// A one-shot latch for an `AVAudioConverterInputBlock`'s "have I already handed out the
+    /// buffer" check.
+    ///
+    /// Not a bare `var` captured by the closure: `AVAudioConverterInputBlock` is
+    /// `@escaping @Sendable`, and Swift 6's strict-concurrency checking flags a mutable capture
+    /// of a non-Sendable local inside a `@Sendable` closure as a potential data race — even though
+    /// the converter calls this block synchronously on the calling thread, so there's no actual
+    /// race. This project isn't built under strict concurrency today, so it isn't a current build
+    /// error, but a reference type marked `@unchecked Sendable` (its true safety comes from
+    /// AVAudioConverter's documented synchronous, single-threaded callback contract, not from
+    /// anything the compiler can verify) sidesteps the check now rather than leaving it as a
+    /// surprise refactor whenever that mode is turned on.
+    private final class InputProvidedOnce: @unchecked Sendable {
+        var provided = false
+    }
+
+    static func mono16kHzFloat(contentsOf url: URL) throws -> [Float] {
+        let audioFile = try AVAudioFile(forReading: url)
+        let format = audioFile.processingFormat
+        let chunkSize = max(4096, Int(format.sampleRate))
+        var monoSamples: [Float] = []
+        // Capacity at the file's NATIVE sample rate — the size of THIS intermediate buffer, not
+        // the smaller post-resample result (3x smaller for a 48kHz source going to 16kHz).
+        monoSamples.reserveCapacity(Int(audioFile.length))
+
+        while audioFile.framePosition < audioFile.length {
+            let remaining = Int(audioFile.length - audioFile.framePosition)
+            let framesToRead = AVAudioFrameCount(min(chunkSize, remaining))
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesToRead) else {
+                throw DecodeError.bufferAllocationFailed
+            }
+            try audioFile.read(into: buffer)
+            if buffer.frameLength == 0 { break }
+            monoSamples.append(contentsOf: try monoFloat32(from: buffer))
+        }
+
+        guard format.sampleRate != targetSampleRate else { return monoSamples }
+        return try resample(monoSamples, from: format.sampleRate, to: targetSampleRate)
+    }
+
+    /// Extract mono Float32 samples from a buffer, mixing channels down if the source isn't
+    /// already mono (our chunk files always are, by construction — this is a defensive fallback).
+    private static func monoFloat32(from buffer: AVAudioPCMBuffer) throws -> [Float] {
+        let format = buffer.format
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return [] }
+
+        if format.channelCount == 1, format.commonFormat == .pcmFormatFloat32, !format.isInterleaved {
+            guard let channelData = buffer.floatChannelData else { return [] }
+            return Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
+        }
+
+        guard let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: 1, interleaved: false
+        ) else { throw DecodeError.formatCreationFailed }
+        guard let converter = AVAudioConverter(from: format, to: monoFormat) else {
+            throw DecodeError.converterCreationFailed
+        }
+
+        let gate = InputProvidedOnce()
+        let inputBlock: AVAudioConverterInputBlock = { _, status in
+            if gate.provided {
+                status.pointee = .endOfStream
+                return nil
+            }
+            gate.provided = true
+            status.pointee = .haveData
+            return buffer
+        }
+
+        // Same reasoning as `resample`'s loop below: a single `convert()` call isn't guaranteed
+        // to flush every frame even though the sample rate is unchanged here (no resampling
+        // filter latency expected for a same-rate channel mixdown, but nothing in the API
+        // contract promises that), so this drains the same way rather than trusting one call.
+        var monoSamples: [Float] = []
+        monoSamples.reserveCapacity(frameCount)
+        while true {
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameCapacity) else {
+                throw DecodeError.bufferAllocationFailed
+            }
+            var error: NSError?
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            guard status != .error else { throw DecodeError.conversionFailed(error) }
+            if outputBuffer.frameLength > 0, let channelData = outputBuffer.floatChannelData {
+                monoSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+            }
+            if status == .endOfStream { break }
+            if status == .inputRanDry, outputBuffer.frameLength == 0 { break }
+        }
+        return monoSamples
+    }
+
+    private static func resample(_ samples: [Float], from inputRate: Double, to outputRate: Double) throws -> [Float] {
+        guard !samples.isEmpty else { return [] }
+
+        guard let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: inputRate, channels: 1, interleaved: false
+        ) else { throw DecodeError.formatCreationFailed }
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(samples.count)) else {
+            throw DecodeError.bufferAllocationFailed
+        }
+        inputBuffer.frameLength = AVAudioFrameCount(samples.count)
+        guard let channelData = inputBuffer.floatChannelData else {
+            throw DecodeError.bufferAllocationFailed
+        }
+        samples.withUnsafeBufferPointer { src in
+            channelData[0].update(from: src.baseAddress!, count: samples.count)
+        }
+
+        guard let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: outputRate, channels: 1, interleaved: false
+        ) else { throw DecodeError.formatCreationFailed }
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            throw DecodeError.converterCreationFailed
+        }
+        // Generous headroom over the exact ratio, so a single `convert()` call below has room to
+        // hold the whole result without needing a second call JUST because the buffer filled up.
+        let estimatedFrames = Double(samples.count) * outputRate / inputRate
+        let capacity = AVAudioFrameCount(estimatedFrames.rounded(.up)) + 4096
+
+        let gate = InputProvidedOnce()
+        let inputBlock: AVAudioConverterInputBlock = { _, status in
+            if gate.provided {
+                status.pointee = .endOfStream
+                return nil
+            }
+            gate.provided = true
+            status.pointee = .haveData
+            return inputBuffer
+        }
+
+        // A single `convert()` call is NOT guaranteed to flush every frame even with headroom to
+        // spare: a resampling filter with nonzero internal latency (typical for a non-integer
+        // ratio SRC, e.g. a 44.1kHz source) can return `.inputRanDry` after the input block
+        // signals `.endOfStream`, while still holding a few trailing frames it hasn't emitted yet
+        // — those only come out on a FOLLOW-UP call. Looping until the converter itself reports
+        // `.endOfStream` (fully drained) means those trailing frames are never silently dropped.
+        // The 48kHz→16kHz integer-ratio case this app actually exercises likely drains in one
+        // pass, but nothing here guarantees that, and a silently-shortened decode is exactly the
+        // kind of divergence from FluidAudio's own converter this whole type exists to avoid.
+        var outputSamples: [Float] = []
+        outputSamples.reserveCapacity(Int(capacity))
+        // Only the FIRST call needs a buffer sized for the whole result — every call after that
+        // is draining a resampling filter's internal latency, typically a few hundred frames at
+        // most, so allocating another `capacity`-sized buffer (which can be tens of MB for a long
+        // chunk) on each pass would just be discarded unread. A small fixed drain size keeps that
+        // allocation cheap without changing the loop's correctness.
+        let drainCapacity: AVAudioFrameCount = 4096
+        var isFirstPass = true
+        while true {
+            let bufferCapacity = isFirstPass ? capacity : drainCapacity
+            isFirstPass = false
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferCapacity) else {
+                throw DecodeError.bufferAllocationFailed
+            }
+            var error: NSError?
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            guard status != .error else { throw DecodeError.conversionFailed(error) }
+            if outputBuffer.frameLength > 0, let channelData = outputBuffer.floatChannelData {
+                outputSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+            }
+            if status == .endOfStream { break }
+            // `.inputRanDry` with nothing new produced means there was nothing left to flush
+            // either — without this the loop would spin forever on a converter that never
+            // reports `.endOfStream` once its own input block has signalled end-of-input.
+            if status == .inputRanDry, outputBuffer.frameLength == 0 { break }
+        }
+        return outputSamples
     }
 }
