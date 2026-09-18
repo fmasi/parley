@@ -272,6 +272,30 @@ struct ConfigManagerTests {
         #expect(SummaryAPIKeyStore.load(keychain: keychain) == "")
     }
 
+    /// `save()` only retries the migration when one is actually outstanding
+    /// (`migrationPending`), not on every call — otherwise every single save for the rest of the
+    /// app's lifetime would pay for an extra disk read + JSON parse to re-check a file that, once
+    /// migrated, structurally can never carry `api_key` again. This pins that gating: in the
+    /// common post-migration case, an ordinary save must not touch the Keychain at all.
+    @Test func saveDoesNotRecheckKeychainOnceMigrationIsNotPending() throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let configFile = dir.appendingPathComponent("config.json")
+        try legacyConfigJSON(apiKey: "sk-legacy-plaintext").write(to: configFile, atomically: true, encoding: .utf8)
+
+        let keychain = FakeKeychainStore()
+        let manager = ConfigManager(configDir: dir, keychainStore: keychain)
+        #expect(keychain.setCallCount == 1)
+        #expect(keychain.getCallCount == 1) // the one lookup inside the successful migration
+
+        // Several ordinary saves afterward must not touch the Keychain again.
+        manager.update { $0.silenceTimeoutMinutes = 3 }
+        manager.update { $0.silenceTimeoutMinutes = 4 }
+        manager.update { $0.silenceTimeoutMinutes = 5 }
+        #expect(keychain.setCallCount == 1)
+        #expect(keychain.getCallCount == 1)
+    }
+
     @Test func alreadyMigratedConfigRoundTripsCleanly() throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }

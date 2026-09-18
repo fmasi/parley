@@ -99,9 +99,15 @@ struct SettingsView: View {
             // view's @MainActor isolation, so a synchronous SecItemCopyMatching call would still
             // run on the main thread here. Hop to a detached task for the actual Keychain read;
             // only the state assignment needs to be back on the main actor.
-            summaryApiKey = await Task.detached(priority: .userInitiated) {
+            let loadedApiKey = await Task.detached(priority: .userInitiated) {
                 SummaryAPIKeyStore.load()
             }.value
+            // On a slow load (first-unlock, iCloud Keychain sync) the user may have already
+            // started typing a key by the time this returns — don't stomp it with the Keychain's
+            // (possibly stale, possibly empty) value.
+            if summaryApiKey.isEmpty {
+                summaryApiKey = loadedApiKey
+            }
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )
@@ -441,10 +447,13 @@ struct SettingsView: View {
             config.summary = summaryConfig(enabled: false)
             SummaryAPIKeyStore.save(summaryApiKey)
         } else {
-            // Summaries genuinely off: clear the block, including the Keychain entry — matches
-            // the prior behavior where the whole `SummaryConfig` (apiKey included) was dropped.
+            // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
+            // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
+            // behavior (which dropped the whole SummaryConfig, key included), only delete it when
+            // the user actually cleared the field. Leaving a matching key in place means flipping
+            // summaries back on later doesn't require re-typing it.
             config.summary = nil
-            SummaryAPIKeyStore.save("")
+            SummaryAPIKeyStore.save(summaryApiKey)
         }
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
