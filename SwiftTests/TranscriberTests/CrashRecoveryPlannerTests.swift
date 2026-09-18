@@ -200,6 +200,10 @@ struct CrashRecoveryPlannerTests {
         #expect(plan.newSentinel.micAudioPath == dir.appendingPathComponent("sess-1_mic.wav").path)
         #expect(plan.newSentinel.segment == sentinel.segment + 1)
         #expect(plan.newSentinel.chunkIndex == 1)  // stamped directly (#154 finding 6)
+        // Fields planRestart doesn't touch — incrementedSegment must carry them through unchanged.
+        #expect(plan.newSentinel.startedAt == sentinel.startedAt)
+        #expect(plan.newSentinel.sessionName == sentinel.sessionName)
+        #expect(plan.newSentinel.micDeviceUID == sentinel.micDeviceUID)
     }
 
     @Test func planRestartUsesDiskScanWhenItExceedsSentinelIndex() throws {

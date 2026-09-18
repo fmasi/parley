@@ -76,6 +76,12 @@ public enum CrashRecoveryPlanner {
     public static func planRestart(
         sentinel: RecordingSentinel, outputDirectory: URL
     ) -> (baseName: String, newSentinel: RecordingSentinel) {
+        // stripSegmentSuffix runs again inside safeRestartChunkIndex below on the same
+        // sentinel.systemAudioPath — redundant work, not a bug. The two results feed different
+        // things (sessionId here for baseName; the internal one for the disk scan), so there's no
+        // clean way to share them without changing safeRestartChunkIndex's signature. Don't
+        // "optimize" this by pre-stripping and passing the stripped id in — that's the real
+        // double-strip safeRestartChunkIndex's doc comment warns about.
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         let idx = safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDirectory)
         let baseName = "\(sessionId)-\(idx)"

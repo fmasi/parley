@@ -57,6 +57,12 @@ public enum ChunkedSessionRecovery {
             // Reachable if every orphan WAV produced no usable chunk. Not data-loss — the caller
             // deletes the sentinel regardless, so recovery is never re-attempted — but without
             // this, a stale session.json lingers on disk forever (#158).
+            //
+            // Safe only under the invariant that processLastChunk writes session.json to disk
+            // if and only if it appends to state.chunks. If a future change adds an error path
+            // that writes session.json (e.g. a partial flush) without appending, this delete
+            // would silently erase data that was just persisted — check this guard first if
+            // ChunkProcessor's write/append coupling ever changes.
             SessionState.delete(directory: outputDirectory)
             return nil
         }
