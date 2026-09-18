@@ -3,6 +3,13 @@ import SwiftUI
 import TranscriberCore
 import os
 
+/// The calendar-suggested title, filled in late once the background lookup resolves (#197 — the
+/// lookup must never hold up the panel's appearance). `SessionNameDialog` observes it directly.
+@Observable
+final class SessionNameSuggestion {
+    var eventTitle: String?
+}
+
 @MainActor
 final class SessionNameWindowController {
     static let shared = SessionNameWindowController()
@@ -11,26 +18,35 @@ final class SessionNameWindowController {
     private var pendingRequest: UUID?
 
     func show(
-        suggestedName: String?,
         lastMicrophoneDeviceId: String?,
+        calendarLookup: @escaping () async -> String? = { nil },
         onStart: @escaping @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     ) {
         panel?.close()
         panel = nil
         let request = UUID()
         pendingRequest = request
+        let suggestion = SessionNameSuggestion()
         Task {
             // Scan devices off the main thread, bounded: a wedged audio device must not freeze the app
             // (#192). Past the deadline the dialog opens with the last known list.
             let scan = await AudioDeviceCatalog.shared.refreshed(timeout: 1)
             guard pendingRequest == request else { return }   // superseded by a later show()
-            present(scan: scan, suggestedName: suggestedName, lastMicrophoneDeviceId: lastMicrophoneDeviceId, onStart: onStart)
+            present(scan: scan, suggestion: suggestion, lastMicrophoneDeviceId: lastMicrophoneDeviceId, onStart: onStart)
+        }
+        // Independent of the panel above: the calendar lookup (a synchronous, potentially
+        // multi-second EventKit query, #197) is never awaited before the panel appears. It fills
+        // `suggestion.eventTitle` in whenever it resolves; the dialog picks that up live.
+        Task {
+            let title = await calendarLookup()
+            guard pendingRequest == request else { return }   // superseded by a later show()
+            suggestion.eventTitle = title
         }
     }
 
     private func present(
         scan: (devices: [AudioInputDevice], isFresh: Bool),
-        suggestedName: String?,
+        suggestion: SessionNameSuggestion,
         lastMicrophoneDeviceId: String?,
         onStart: @escaping @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     ) {
@@ -59,7 +75,7 @@ final class SessionNameWindowController {
         }
 
         let dialog = SessionNameDialog(
-            suggestedName: suggestedName ?? "",
+            suggestion: suggestion,
             initialDeviceId: initialDeviceId,
             // Sync and main-actor (its type says so), so isLive() is called directly here; the switcher's
             // onSwitch is async and needs MainActor.run for the same check.

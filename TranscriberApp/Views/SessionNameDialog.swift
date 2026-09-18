@@ -9,26 +9,32 @@ struct SessionNameDialog: View {
     /// the calendar attribution stays gone rather than flickering back if they
     /// happen to retype the suggestion exactly.
     @State private var userHasEdited = false
+    /// Whether `name` currently holds the calendar's suggestion (vs. empty or user-typed), so the
+    /// hint below the field can say where it came from even though the lookup resolves late (#197).
+    @State private var calendarSuggestionApplied: Bool
     @State private var isStarting = false
     @State private var levelMonitor = InputLevelMonitor()
     @FocusState private var focused: Bool
 
-    /// The calendar-suggested name this dialog opened with ("" if none).
-    /// Kept so the field can say where its pre-filled value came from.
-    private let suggestedName: String
+    /// Filled in late by a background calendar lookup that this dialog never waits on before
+    /// appearing (#197). `name` adopts it once, the first time it resolves non-empty, unless the
+    /// user has already started typing.
+    private let suggestion: SessionNameSuggestion
 
     /// Main-actor: the window controller's wrapper checks its panel is still live (#192).
     let onStart: @MainActor (String, String?) -> Void  // (sessionName, micDeviceId?)
     let onCancel: () -> Void
 
     init(
-        suggestedName: String,
+        suggestion: SessionNameSuggestion,
         initialDeviceId: String?,
         onStart: @escaping @MainActor (String, String?) -> Void,
         onCancel: @escaping () -> Void
     ) {
-        self.suggestedName = suggestedName
-        self._name = State(initialValue: suggestedName)
+        self.suggestion = suggestion
+        let initialTitle = suggestion.eventTitle ?? ""
+        self._name = State(initialValue: initialTitle)
+        self._calendarSuggestionApplied = State(initialValue: !initialTitle.isEmpty)
         self._selectedDeviceId = State(initialValue: initialDeviceId)
         self.onStart = onStart
         self.onCancel = onCancel
@@ -48,7 +54,7 @@ struct SessionNameDialog: View {
 
                 // Say where the pre-filled name came from; the hint steps
                 // aside as soon as the user types their own.
-                if !suggestedName.isEmpty && !userHasEdited {
+                if calendarSuggestionApplied && !userHasEdited {
                     Label("Suggested from your calendar", systemImage: "calendar")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -79,6 +85,13 @@ struct SessionNameDialog: View {
         .frame(width: 380)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
         .onAppear { focused = true }
+        .onChange(of: suggestion.eventTitle) { _, newTitle in
+            // Late arrival from the background calendar lookup (#197): adopt it only if the field
+            // is still exactly what the user found it as — empty, or an earlier suggestion.
+            guard !userHasEdited, let newTitle, !newTitle.isEmpty else { return }
+            name = newTitle
+            calendarSuggestionApplied = true
+        }
     }
 
     private func start() {

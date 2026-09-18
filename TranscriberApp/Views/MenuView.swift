@@ -352,12 +352,12 @@ struct MenuView: View {
     }
 
     private func promptAndStartRecording() {
-        let suggestedName = calendarService.currentEventTitle(
-            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
-        )
+        let lookaheadMinutes = configManager.config.calendarLookaheadMinutes
+        let calendarService = calendarService
         SessionNameWindowController.shared.show(
-            suggestedName: suggestedName,
-            lastMicrophoneDeviceId: selectedMicId
+            lastMicrophoneDeviceId: selectedMicId,
+            // The panel appears immediately (#197); this fills the name field in once it resolves.
+            calendarLookup: { await calendarService.currentEventTitle(lookaheadMinutes: lookaheadMinutes) }
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator
