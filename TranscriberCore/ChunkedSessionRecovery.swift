@@ -53,7 +53,13 @@ public enum ChunkedSessionRecovery {
         // method's contract changes to enqueue background work.
         await processor.awaitAllProcessed()
         var state = await processor.getSessionState()
-        guard !state.chunks.isEmpty else { return nil }
+        guard !state.chunks.isEmpty else {
+            // Reachable if every orphan WAV produced no usable chunk. Not data-loss — the caller
+            // deletes the sentinel regardless, so recovery is never re-attempted — but without
+            // this, a stale session.json lingers on disk forever (#158).
+            SessionState.delete(directory: outputDirectory)
+            return nil
+        }
         if let provenance { state.provenance = provenance }
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
     }
