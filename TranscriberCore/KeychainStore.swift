@@ -36,7 +36,17 @@ public final class KeychainStore: KeychainStoring, @unchecked Sendable {
         let existing = SecItemCopyMatching(query as CFDictionary, nil)
         switch existing {
         case errSecSuccess:
-            let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            // Also (re-)assert kSecAttrAccessible on the update path, not just kSecValueData: if
+            // an item for this (service, account) ever existed with a different accessibility
+            // (e.g. the Security framework's WhenUnlocked default, from before this code ever
+            // ran), updating only the value would leave that stale accessibility in place — and
+            // the launch-agent relaunch path (RecordingCoordinator) could then silently fail to
+            // read the key before the session is unlocked.
+            let attrs: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            ]
+            let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
             guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
         case errSecItemNotFound:
             var add = query

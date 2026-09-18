@@ -148,14 +148,22 @@ struct ConfigManagerTests {
 
     // MARK: - #48 summary API key Keychain migration
 
-    /// A config.json written by a pre-#48 build, with a real plaintext key still in it.
-    private func legacyConfigJSON(apiKey: String) -> String {
-        """
-        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
-        "output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false,\
-        "summary":{"enabled":true,"provider":"openai","endpoint":"https://api.openai.com/v1",\
-        "api_key":"\(apiKey)","model":"gpt-4o-mini"}}
-        """
+    /// A config.json written by a pre-#48 build, with a real plaintext key still in it. Built via
+    /// `JSONSerialization` rather than string interpolation into a JSON literal, so a key
+    /// containing `"`, `\`, or any other JSON metacharacter still produces valid JSON instead of
+    /// corrupting the fixture.
+    private func legacyConfigJSON(apiKey: String) throws -> String {
+        let dict: [String: Any] = [
+            "recording_directory": "/tmp", "silence_timeout_minutes": 5,
+            "silence_detection_enabled": true, "output_format": "txt",
+            "launch_on_startup": true, "suppress_capture_warning": false,
+            "summary": [
+                "enabled": true, "provider": "openai",
+                "endpoint": "https://api.openai.com/v1",
+                "api_key": apiKey, "model": "gpt-4o-mini",
+            ],
+        ]
+        return String(data: try JSONSerialization.data(withJSONObject: dict), encoding: .utf8)!
     }
 
     @Test func migratesLegacyPlaintextAPIKeyToKeychainAndClearsIt() throws {
@@ -281,5 +289,37 @@ struct ConfigManagerTests {
         let rewritten = try String(contentsOf: configFile, encoding: .utf8)
         #expect(rewritten == originalContents)
         #expect(rewritten.contains("sk-legacy-plaintext"))
+    }
+
+    /// Guards against a real data-loss path: if the launch-time migration fails (Keychain write
+    /// error) the plaintext key is left sitting in config.json, but `Config`/`SummaryConfig` have
+    /// no `apiKey` field to carry it — so any ordinary `save()` (e.g. Settings' Save button,
+    /// touched for something unrelated) would silently and permanently wipe the only copy of the
+    /// key the moment it re-encodes and overwrites the file. `save()` must retry the migration
+    /// against the still-on-disk plaintext before every write, so a transient Keychain failure
+    /// doesn't turn into permanent loss the next time anything calls `save()`.
+    @Test func saveRetriesFailedMigrationBeforeOverwritingConfig() throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let configFile = dir.appendingPathComponent("config.json")
+        try legacyConfigJSON(apiKey: "sk-legacy-plaintext").write(to: configFile, atomically: true, encoding: .utf8)
+
+        let keychain = FakeKeychainStore()
+        keychain.setError = KeychainError.unexpectedStatus(-1)
+        let manager = ConfigManager(configDir: dir, keychainStore: keychain)
+
+        // Migration failed at launch: key is still nowhere but the plaintext file.
+        #expect(SummaryAPIKeyStore.load(keychain: keychain) == "")
+        #expect(try String(contentsOf: configFile, encoding: .utf8).contains("sk-legacy-plaintext"))
+
+        // The Keychain issue clears up (e.g. transient), and something unrelated triggers a save
+        // — this must not be the moment the plaintext key gets clobbered for good.
+        keychain.setError = nil
+        manager.update { $0.silenceTimeoutMinutes = 9 }
+
+        #expect(SummaryAPIKeyStore.load(keychain: keychain) == "sk-legacy-plaintext")
+        let rewritten = try String(contentsOf: configFile, encoding: .utf8)
+        #expect(!rewritten.contains("sk-legacy-plaintext"))
+        #expect(!rewritten.contains("api_key"))
     }
 }

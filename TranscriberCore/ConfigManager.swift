@@ -8,6 +8,7 @@ public final class ConfigManager {
 
     private let configDir: URL
     private let configFile: URL
+    private let keychainStore: KeychainStoring
 
     public private(set) var config: Config
 
@@ -15,6 +16,7 @@ public final class ConfigManager {
         let dir = configDir ?? AppPaths.dataDirectory
         self.configDir = dir
         self.configFile = dir.appendingPathComponent("config.json")
+        self.keychainStore = keychainStore
         // #48: move a legacy plaintext `summary.api_key` out of config.json and into the Keychain
         // before the file is ever decoded, so a config written by a pre-#48 build never leaves a
         // real credential sitting in plaintext on disk past this launch.
@@ -47,6 +49,13 @@ public final class ConfigManager {
         try? FileManager.default.createDirectory(
             at: configDir, withIntermediateDirectories: true
         )
+        // #48: if the launch-time migration above failed (e.g. a transient Keychain error), the
+        // on-disk file may still be carrying a plaintext `summary.api_key` that `Config` itself
+        // no longer has a field for. Retry the migration against the current file before every
+        // write, so an ordinary `save()` (e.g. from Settings) can't clobber that plaintext key
+        // with a freshly encoded `Config` before it's ever made it into the Keychain. Idempotent
+        // and near-free once migrated, so unconditional here is fine (see migrateAPIKeyIfNeeded).
+        Self.migrateAPIKeyIfNeeded(at: configFile, keychain: keychainStore)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else { return }
