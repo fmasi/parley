@@ -13,14 +13,19 @@ final class CalendarService {
         lookaheadMinutes: Int = 10,
         from calendars: [EKCalendar]? = nil
     ) async -> String? {
-        // EKCalendar isn't Sendable, but these are read-only lookup handles the caller already
-        // owns and never mutates concurrently — safe to hand to the background queue below.
-        nonisolated(unsafe) let calendars = calendars
+        // EKCalendar's thread-safety is unspecified by Apple, so don't hand the objects themselves
+        // across the queue hop — capture just their (Sendable) identifiers and re-resolve against
+        // the fresh, same-thread store below instead.
+        let calendarIDs = calendars?.map(\.calendarIdentifier)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                // A fresh store per lookup: cheap to create, and avoids sharing an EKEventStore
-                // across actor/thread boundaries.
+                // A fresh store per lookup, not a retained property: avoids sharing an EKEventStore
+                // across actor/thread boundaries. EKEventStore() isn't actually cheap (Apple's docs
+                // warn it's a Core Data stack init, ~50-200ms on Exchange-heavy accounts) — this
+                // trades that per-call overhead for correctness, since the lookup only runs once per
+                // Start Recording, not on a hot path.
                 let store = EKEventStore()
+                let calendars = calendarIDs.map { ids in ids.compactMap { store.calendar(withIdentifier: $0) } }
                 let now = Date()
                 // The predicate window must include both the lookback for in-progress events and
                 // the lookahead for imminent ones. EventKit needs at least a few hours back to

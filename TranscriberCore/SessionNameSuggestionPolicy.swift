@@ -1,3 +1,5 @@
+import Foundation
+
 /// Pure decision logic for whether a late-arriving calendar suggestion (#197) should replace the
 /// session name the user is currently looking at. Extracted out of `SessionNameDialog`'s
 /// `onChange(of: suggestion.eventTitle)` closure so the actual behavior is unit-testable without
@@ -11,7 +13,10 @@ public enum SessionNameSuggestionPolicy {
     ///     one-way latch, so a late suggestion never overwrites deliberate user input.
     ///   - newTitle: the calendar lookup's late-arriving result.
     public static func adopt(userHasEdited: Bool, newTitle: String?) -> String? {
-        guard !userHasEdited, let newTitle, !newTitle.isEmpty else { return nil }
+        // Whitespace-only titles are treated the same as empty: an all-space event title would
+        // otherwise flash the "Suggested from your calendar" hint and fill the field with
+        // invisible spaces even though `start()` trims the name before using it.
+        guard !userHasEdited, let newTitle, !newTitle.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return newTitle
     }
 }

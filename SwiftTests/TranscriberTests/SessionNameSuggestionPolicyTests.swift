@@ -26,4 +26,9 @@ struct SessionNameSuggestionPolicyTests {
         let result = SessionNameSuggestionPolicy.adopt(userHasEdited: true, newTitle: "")
         #expect(result == nil)
     }
+
+    @Test func ignoresWhitespaceOnlyTitle() {
+        let result = SessionNameSuggestionPolicy.adopt(userHasEdited: false, newTitle: "   ")
+        #expect(result == nil)
+    }
 }
