@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CoreFoundation
 @testable import TranscriberCore
 
 /// Fake XPC client. `ChunkRotator.rotate()` (the timer-driven path that calls this) is private
@@ -57,5 +58,26 @@ struct ChunkRotatorTests {
         #expect(plan.orphanBaseName == "meeting-1")
         #expect(plan.recoveryIndex == 2)
         #expect(rotator.currentBaseName == "meeting-2")
+    }
+
+    // MARK: - Run loop mode (#197)
+
+    /// Waiting for a real firing isn't practical here — `chunkDurationMinutes` is whole minutes,
+    /// far too long for a unit test — so this checks registration directly via CoreFoundation's
+    /// toll-free bridge (`Timer` <-> `CFRunLoopTimer`) instead of observing a fire.
+    @Test func startAddsTimerToMainRunLoopInCommonMode() {
+        let rotator = makeRotator()
+        rotator.start()
+        defer { rotator.stop() }
+
+        guard let timer = rotator.activeTimerForTesting else {
+            Issue.record("expected an active timer after start()")
+            return
+        }
+        let cfTimer = timer as CFRunLoopTimer
+        #expect(CFRunLoopContainsTimer(CFRunLoopGetMain(), cfTimer, .commonModes))
+        // And NOT solely relying on the default-mode registration `Timer.scheduledTimer` would have
+        // given it — `.common` is a superset that still includes `.defaultRunLoopMode`.
+        #expect(CFRunLoopContainsTimer(CFRunLoopGetMain(), cfTimer, .defaultMode))
     }
 }
