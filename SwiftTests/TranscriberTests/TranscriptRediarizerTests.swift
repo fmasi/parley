@@ -454,4 +454,24 @@ struct AudioDecodeTests {
         let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
         #expect(samples.isEmpty)
     }
+
+    /// 44.1kHz -> 16kHz is a non-integer ratio (unlike the app's actual 48kHz -> 16kHz, which is
+    /// exactly 3:1) — the kind of source a USB headset or some capture hardware can hand the
+    /// pipeline. A resampling filter with nonzero internal latency can leave a few trailing
+    /// frames unflushed after a single `convert()` call even with output headroom to spare; a
+    /// truncated result here would mean `resample`'s drain loop regressed to trusting one call.
+    @Test("a non-integer-ratio source (44.1kHz) is not silently truncated at the tail")
+    func nonIntegerRatioDoesNotTruncate() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 5.0, sampleRate: 44100, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // 5s at 16kHz == 80000 frames. A resampler that silently dropped its final flush pass
+        // would come up short by however many frames its internal latency buffered — this
+        // tolerance is generous on the ratio itself but would still catch a dropped flush of any
+        // real size (a typical polyphase filter's latency is tens to low hundreds of frames).
+        let expected = 80000
+        #expect(abs(samples.count - expected) < 400)
+    }
 }

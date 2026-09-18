@@ -318,6 +318,7 @@ struct RenameDialog: View {
                     speakerCounts[channel] = nil
                     rediarizing = nil
                     rediarizePhase = nil
+                    rediarizeFraction = nil
                     rediarizeStartedAt = nil
                 }
             } catch is CancellationError {

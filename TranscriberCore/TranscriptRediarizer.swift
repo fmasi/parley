@@ -486,9 +486,6 @@ enum AudioDecode {
         guard let converter = AVAudioConverter(from: format, to: monoFormat) else {
             throw DecodeError.converterCreationFailed
         }
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameCapacity) else {
-            throw DecodeError.bufferAllocationFailed
-        }
 
         var provided = false
         let inputBlock: AVAudioConverterInputBlock = { _, status in
@@ -500,11 +497,27 @@ enum AudioDecode {
             status.pointee = .haveData
             return buffer
         }
-        var error: NSError?
-        let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        guard status != .error else { throw DecodeError.conversionFailed(error) }
-        guard let channelData = outputBuffer.floatChannelData else { return [] }
-        return Array(UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+
+        // Same reasoning as `resample`'s loop below: a single `convert()` call isn't guaranteed
+        // to flush every frame even though the sample rate is unchanged here (no resampling
+        // filter latency expected for a same-rate channel mixdown, but nothing in the API
+        // contract promises that), so this drains the same way rather than trusting one call.
+        var monoSamples: [Float] = []
+        monoSamples.reserveCapacity(frameCount)
+        while true {
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameCapacity) else {
+                throw DecodeError.bufferAllocationFailed
+            }
+            var error: NSError?
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            guard status != .error else { throw DecodeError.conversionFailed(error) }
+            if outputBuffer.frameLength > 0, let channelData = outputBuffer.floatChannelData {
+                monoSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+            }
+            if status == .endOfStream { break }
+            if status == .inputRanDry, outputBuffer.frameLength == 0 { break }
+        }
+        return monoSamples
     }
 
     private static func resample(_ samples: [Float], from inputRate: Double, to outputRate: Double) throws -> [Float] {
@@ -530,13 +543,10 @@ enum AudioDecode {
         guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
             throw DecodeError.converterCreationFailed
         }
-        // Generous headroom over the exact ratio: a converter that under-allocates truncates
-        // trailing audio rather than erroring, which would silently shorten every decode.
+        // Generous headroom over the exact ratio, so a single `convert()` call below has room to
+        // hold the whole result without needing a second call JUST because the buffer filled up.
         let estimatedFrames = Double(samples.count) * outputRate / inputRate
         let capacity = AVAudioFrameCount(estimatedFrames.rounded(.up)) + 4096
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
-            throw DecodeError.bufferAllocationFailed
-        }
 
         var provided = false
         let inputBlock: AVAudioConverterInputBlock = { _, status in
@@ -548,10 +558,34 @@ enum AudioDecode {
             status.pointee = .haveData
             return inputBuffer
         }
-        var error: NSError?
-        let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        guard status != .error else { throw DecodeError.conversionFailed(error) }
-        guard let channelData = outputBuffer.floatChannelData else { return [] }
-        return Array(UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+
+        // A single `convert()` call is NOT guaranteed to flush every frame even with headroom to
+        // spare: a resampling filter with nonzero internal latency (typical for a non-integer
+        // ratio SRC, e.g. a 44.1kHz source) can return `.inputRanDry` after the input block
+        // signals `.endOfStream`, while still holding a few trailing frames it hasn't emitted yet
+        // — those only come out on a FOLLOW-UP call. Looping until the converter itself reports
+        // `.endOfStream` (fully drained) means those trailing frames are never silently dropped.
+        // The 48kHz→16kHz integer-ratio case this app actually exercises likely drains in one
+        // pass, but nothing here guarantees that, and a silently-shortened decode is exactly the
+        // kind of divergence from FluidAudio's own converter this whole type exists to avoid.
+        var outputSamples: [Float] = []
+        outputSamples.reserveCapacity(Int(capacity))
+        while true {
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
+                throw DecodeError.bufferAllocationFailed
+            }
+            var error: NSError?
+            let status = converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+            guard status != .error else { throw DecodeError.conversionFailed(error) }
+            if outputBuffer.frameLength > 0, let channelData = outputBuffer.floatChannelData {
+                outputSamples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
+            }
+            if status == .endOfStream { break }
+            // `.inputRanDry` with nothing new produced means there was nothing left to flush
+            // either — without this the loop would spin forever on a converter that never
+            // reports `.endOfStream` once its own input block has signalled end-of-input.
+            if status == .inputRanDry, outputBuffer.frameLength == 0 { break }
+        }
+        return outputSamples
     }
 }
