@@ -71,6 +71,13 @@ public actor VadSpeechMap {
             Logger.transcription.debug("VAD model not cached — skipping speech map analysis")
             return nil
         }
+        // `decodeChannelAudio` already throws `noAudioForChannel` before an empty `combined`
+        // would ever reach here on the production path, so this shouldn't fire in practice — but
+        // `mgr.process([])`'s behavior on an empty array isn't part of this type's contract with
+        // FluidAudio, and the `try?` at the call site would otherwise turn a thrown/crashing edge
+        // case into silent degradation with no signal at all. Nil here is the same graceful
+        // degradation as the model-not-cached case above, just for an input that can't hold one.
+        guard !samples.isEmpty else { return nil }
         let startTime = ContinuousClock.now
         let mgr = try await ensureLoaded()
         let results = try await mgr.process(samples)

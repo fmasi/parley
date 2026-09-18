@@ -403,6 +403,13 @@ public enum TranscriptRediarizer {
                 // The first chunk's own length is the best estimate available here (chunk
                 // durations aren't threaded into this function), so use it to size the rest in one
                 // shot rather than free-growing through log2(chunkCount) reallocations.
+                //
+                // `existing.count` over-counts when some chunks are `.skip` (e.g. local-only WAVs
+                // while decoding the remote channel) — those never reach this line, so the
+                // reservation ends up sized for MORE chunks than will actually land in `combined`.
+                // That's a deliberate, harmless over-allocation (unused capacity costs nothing but
+                // address space), not a bug: computing the true non-skip count up front isn't worth
+                // it for what's already an estimate.
                 if combined.isEmpty {
                     combined.reserveCapacity(decodedChunk.count * existing.count)
                 }
@@ -570,8 +577,17 @@ enum AudioDecode {
         // kind of divergence from FluidAudio's own converter this whole type exists to avoid.
         var outputSamples: [Float] = []
         outputSamples.reserveCapacity(Int(capacity))
+        // Only the FIRST call needs a buffer sized for the whole result — every call after that
+        // is draining a resampling filter's internal latency, typically a few hundred frames at
+        // most, so allocating another `capacity`-sized buffer (which can be tens of MB for a long
+        // chunk) on each pass would just be discarded unread. A small fixed drain size keeps that
+        // allocation cheap without changing the loop's correctness.
+        let drainCapacity: AVAudioFrameCount = 4096
+        var isFirstPass = true
         while true {
-            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
+            let bufferCapacity = isFirstPass ? capacity : drainCapacity
+            isFirstPass = false
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferCapacity) else {
                 throw DecodeError.bufferAllocationFailed
             }
             var error: NSError?
