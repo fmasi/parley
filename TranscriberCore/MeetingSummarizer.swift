@@ -128,7 +128,7 @@ public enum MeetingSummarizer {
             // the stop path tearing the task down) throws this distinct type — separate from
             // `URLError.cancelled` above — but it's the same "user did this on purpose" case, so it
             // gets the same non-`.failed` treatment (#191, same misdirection as #173's URLError case).
-            Logger.transcription.info("Summary cancelled — transcript is untouched")
+            Logger.transcription.info("Summary cancelled via task cancellation — transcript is untouched")
             return .cancelled
         } catch {
             // A non-SummaryError, non-URLError here is a file read/write failure (transcript
