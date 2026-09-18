@@ -97,6 +97,20 @@ Diarization is performed by `FluidAudioDiarizer` (pyannote segmentation + WeSpea
 
 ---
 
+## Capture Reliability Detectors
+
+The exact-zero-mic (#193), liveness-gap, and frame-count-plausibility (#196) detectors in the XPC capture helper have hardcoded thresholds and are **not configurable via `config.json`**.
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Exact-zero silence threshold | `ExactZeroRunMonitor.defaultThresholdSeconds` | `12` | Seconds of sustained exact-digital-zero mic samples before the live banner fires (e.g. lid closed on the built-in mic). |
+| Liveness gap threshold | `LivenessGapDetector.defaultGapThresholdSeconds` | `3` | Seconds a track (mic or system audio) can go without delivering a buffer before the 1 Hz off-audio-queue watchdog reports a gap. |
+| Frame-count tolerance ratio | `FrameCountPlausibility.defaultToleranceRatio` | `0.10` | Allowed fractional deviation between a track's total recorded frames and its expected count from wall-clock elapsed time, at finalize. |
+| Frame-count minimum elapsed | `FrameCountPlausibility.defaultMinimumElapsedSeconds` | `30` | Session must have run at least this long before the frame-count-vs-wall-clock check is judged (avoids false positives on very short sessions). |
+| Frame-count minimum deficit | `FrameCountPlausibility.defaultMinimumDeficitSeconds` | `15` | Minimum absolute shortfall (seconds of missing audio) before a tolerance-ratio breach is reported, so a technically-out-of-ratio but tiny gap doesn't fire. |
+
+---
+
 ## Speaker Reconciliation
 
 Speaker reconciliation is performed by `SpeakerReconciler` in `TranscriberCore/SpeakerReconciler.swift`. The cosine similarity threshold is **hardcoded at 0.65** and is not configurable via `config.json`.

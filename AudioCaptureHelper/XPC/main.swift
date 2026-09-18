@@ -27,6 +27,15 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         service.onFailFatally = { reason in client?.captureDidFailFatally(reason: reason) }
         service.onMicDeviceChanged = { deviceId in client?.micDeviceChanged?(to: deviceId) }
         service.onSystemAudioUnrecoverable = { client?.captureSystemAudioUnrecoverable(reason: $0) }
+        // `onQualityAnomaly` can be invoked directly from the real-time audio
+        // queue (exact-zero mic detection) or from a write-failure path already in a degraded
+        // I/O state. Never make the synchronous XPC reverse call from either — hop to a
+        // background queue first so the audio callback path is never blocked on IPC scheduling.
+        service.onQualityAnomaly = { kind, message in
+            DispatchQueue.global(qos: .utility).async {
+                client?.captureQualityAnomaly?(kind: kind, message: message)
+            }
+        }
 
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }

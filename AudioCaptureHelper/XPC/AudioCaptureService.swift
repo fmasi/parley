@@ -60,6 +60,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Invoked when the mic auto-switches during a session (route change, fallback, re-pin).
     /// Passes the resolved device UID (`nil` = system default) for menu-label refresh.
     var onMicDeviceChanged: ((String?) -> Void)?
+    /// Invoked for a live, user-facing capture-quality anomaly (exact-zero mic, a liveness gap, a
+    /// disk-full write failure) — surfaced WHILE the recording is still running, unlike the silent
+    /// diagnostic ring which is only read after the fact (#193/#196). `kind` is the
+    /// `CaptureEventKind` raw value; `message` is a human-readable description.
+    var onQualityAnomaly: ((String, String) -> Void)?
+
+    /// Off-audio-queue 1 Hz liveness watchdog (#196). Started once capture is up, stopped on every
+    /// teardown path.
+    private let livenessWatchdog = LivenessWatchdogDriver()
 
     private func record(
         _ kind: CaptureEventKind,
@@ -69,6 +78,29 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         diagnostics.record(CaptureEvent(
             timestamp: Date(), origin: .helper, kind: kind, severity: severity, detail: detail
         ))
+    }
+
+    /// Wire a `WavFileWriter`'s throwing-`FileHandle` write-failure surface (#196) to the diagnostic
+    /// ring and the live user-facing anomaly channel, instead of the legacy `FileHandle` API's
+    /// uncatchable Objective-C exception, which could abort the whole helper process mid-meeting.
+    private func wireWriteFailure(_ writer: WavFileWriter, track: String) {
+        writer.onWriteFailure = { [weak self] message in
+            self?.record(.writeFailure, .anomaly, ["track": track, "reason": message])
+            self?.onQualityAnomaly?(CaptureEventKind.writeFailure.rawValue, message)
+        }
+    }
+
+    /// Start the #196 off-audio-queue liveness watchdog. `handler`'s arrival getters are lock-guarded
+    /// and safe to call from the watchdog's own queue.
+    private func startLivenessWatchdog(handler: AudioOutputHandler, isUsingSystemTap: Bool) {
+        livenessWatchdog.lastMicArrivalNanos = { [weak handler] in handler?.lastMicBufferArrivalNanos() ?? 0 }
+        livenessWatchdog.lastSystemArrivalNanos = { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
+        livenessWatchdog.isUsingSystemTap = isUsingSystemTap
+        livenessWatchdog.onGap = { [weak self] kind, message in
+            self?.record(kind, .anomaly, ["reason": message])
+            self?.onQualityAnomaly?(kind.rawValue, message)
+        }
+        livenessWatchdog.start()
     }
 
     func startCapture(
@@ -119,12 +151,19 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             )
             let systemWriter = try WavFileWriter(path: sysPath)
             let micWriter = try WavFileWriter(path: micFilePath)
+            wireWriteFailure(systemWriter, track: "system")
+            wireWriteFailure(micWriter, track: "mic")
             let outputHandler = AudioOutputHandler(
                 systemWriter: systemWriter, micWriter: micWriter
             )
             outputHandler.diagnostics = diagnostics
             outputHandler.onStreamStopped = { [weak self] error in
                 self?.handleStreamStopped(error)
+            }
+            // Already recorded into `diagnostics` by AudioOutputHandler itself — this is purely the
+            // live, user-facing surface (#193/#196).
+            outputHandler.onLiveAnomaly = { [weak self] kind, message in
+                self?.onQualityAnomaly?(kind.rawValue, message)
             }
 
             self.stateLock.sync {
@@ -157,6 +196,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.record(.captureStart, .info, [
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
                     ])
+                    // So finalizeAll()'s frame-count-plausibility backstop can apply the same
+                    // gotcha-#66 gate the liveness watchdog already applies mid-recording.
+                    outputHandler.isUsingSystemTap = (source == .coreAudioTap)
                     switch source {
                     case .screenCaptureKit:
                         try await self.buildAndStartStream(handler: outputHandler)
@@ -168,6 +210,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     }
                     Logger.audio.info("Capture started — mic AVCaptureSession + system source \(source.rawValue, privacy: .public); awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
+                    self.startLivenessWatchdog(handler: outputHandler, isUsingSystemTap: source == .coreAudioTap)
                     reply(true, nil)
                 } catch {
                     self.cleanupAfterFailure()
@@ -205,6 +248,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
         Logger.audio.info("Stopping capture")
         record(.captureStop, .info)
+        livenessWatchdog.stop()
         // Stop mic + tap delivery before finalize so no buffer lands on the audio queue after the WAV
         // headers are sealed (a late buffer would be a no-op anyway — finalize is idempotent).
         micSess?.stop()
@@ -291,6 +335,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         do {
             let newSystemWriter = try WavFileWriter(path: newSysPath)
             let newMicWriter = try WavFileWriter(path: newMicPath)
+            wireWriteFailure(newSystemWriter, track: "system")
+            wireWriteFailure(newMicWriter, track: "mic")
 
             // Swap on the persistent audio queue for zero-gap guarantee, then update
             // state outside to avoid lock-order inversion with stopCapture.
@@ -328,6 +374,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
+        livenessWatchdog.stop()
 
         // Stop mic + tap delivery, then finalize synchronously on the persistent audio queue so WAV
         // headers are written before the XPC service exits (I5 fix).
@@ -358,6 +405,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     private func cleanupAfterFailure() {
+        livenessWatchdog.stop()
         // Snapshot and clear state under the lock, then run the blocking teardown (mic stopRunning,
         // writer finalize, file deletes) OUTSIDE the lock so we never hold stateLock across a blocking
         // call. Not called under stateLock, so the snapshot-then-act split is safe.
@@ -565,6 +613,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return (true, handlerToFinalize, micToStop, tapToStop)
         }
         guard won else { return }
+        livenessWatchdog.stop()
         record(.restartFailed, .anomaly, ["reason": reason])
         // Stop the decoupled mic + tap sessions too, otherwise they keep running after the system
         // stream is declared dead (council CONC-2). Stop before finalize so no buffer lands on the

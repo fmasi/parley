@@ -19,11 +19,40 @@ public final class WavFileWriter {
     private var lastSyncTime: ContinuousClock.Instant = .now
     private static let syncInterval: Duration = .milliseconds(500)
 
+    /// Invoked (at most once per writer) when a modern throwing `FileHandle` call fails — disk full
+    /// or another I/O error (#196). Before this conversion, the legacy `FileHandle` write/seek/sync
+    /// API raised an uncatchable Objective-C exception on the same fault, which could abort the
+    /// whole helper process mid-meeting. Now the failure is caught, logged, and surfaced here
+    /// instead of crashing; the caller (`AudioCaptureService`) wires this to the capture-quality
+    /// anomaly channel. Writing itself still silently drops the failed bytes — same behavior as
+    /// before for the file's contents, just without the process abort.
+    public var onWriteFailure: ((String) -> Void)?
+    private var writeFailureReported = false
+
+    private func noteWriteFailure(_ error: Error, context: String) {
+        Logger.files.error("WAV write failure (\(context, privacy: .public)): \(self.path, privacy: .sensitive): \(error, privacy: .public)")
+        guard !writeFailureReported else { return }
+        writeFailureReported = true
+        // `error.localizedDescription` is bridged from NSError for a POSIX write failure and can
+        // embed the file URL — which contains the user's session name — so it must never reach the
+        // user-visible menu-bar banner (onWriteFailure -> onQualityAnomaly -> interruptionWarning).
+        // The full error, path included, is already captured above in the private log.
+        onWriteFailure?("Recording write failed (\(context)) — the disk may be full or unavailable.")
+    }
+
     public init(path: String) throws {
         self.path = path
         FileManager.default.createFile(atPath: path, contents: nil)
-        fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-        writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
+        do {
+            fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+            try writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
+        } catch {
+            // Don't leave an empty/headerless stub file on disk if the very first write (the 44-byte
+            // header) fails — e.g. disk-full at the moment of creation. Nothing else owns this path
+            // yet (init hasn't returned), so nothing else will clean it up.
+            try? FileManager.default.removeItem(atPath: path)
+            throw error
+        }
         Logger.files.debug("WAV writer created: \(path, privacy: .sensitive)")
     }
 
@@ -44,7 +73,12 @@ public final class WavFileWriter {
         }
         let bytes = pcm.withUnsafeBytes { Data($0) }
         guard let toWrite = clampedData(bytes) else { return }
-        fileHandle.write(toWrite)
+        do {
+            try fileHandle.write(contentsOf: toWrite)
+        } catch {
+            noteWriteFailure(error, context: "append")
+            return
+        }
         dataByteCount += UInt32(toWrite.count)
         logFirstWrite()
         syncIfNeeded()
@@ -55,7 +89,12 @@ public final class WavFileWriter {
         guard !finalized else { return }
         let bytes = samples.withMemoryRebound(to: UInt8.self) { Data($0) }
         guard let toWrite = clampedData(bytes) else { return }
-        fileHandle.write(toWrite)
+        do {
+            try fileHandle.write(contentsOf: toWrite)
+        } catch {
+            noteWriteFailure(error, context: "appendInt16")
+            return
+        }
         dataByteCount += UInt32(toWrite.count)
         logFirstWrite()
         syncIfNeeded()
@@ -85,7 +124,11 @@ public final class WavFileWriter {
         let now = ContinuousClock.Instant.now
         guard now - lastSyncTime >= Self.syncInterval else { return }
         flushHeader()
-        fileHandle.synchronizeFile()
+        do {
+            try fileHandle.synchronize()
+        } catch {
+            noteWriteFailure(error, context: "synchronize")
+        }
         lastSyncTime = now
     }
 
@@ -95,9 +138,26 @@ public final class WavFileWriter {
     public func flushHeader() {
         guard !finalized else { return }
         let rate = sampleRate > 0 ? sampleRate : Self.fallbackSampleRate
-        fileHandle.seek(toFileOffset: 0)
-        writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
-        fileHandle.seekToEndOfFile()
+        do {
+            try fileHandle.seek(toOffset: 0)
+            // `seekToEnd` must run even if `writeHeader` throws, or the file
+            // pointer is left near offset 0 and the next append writes audio samples into the
+            // RIFF header area, overwriting it with PCM data. If `seekToEnd` itself fails (rare —
+            // a degraded volume) the same corruption risk applies on the NEXT write, at whatever
+            // offset writeHeader left the pointer at (byte 44 on the common case where writeHeader
+            // itself succeeded) — surface it exactly like any other write failure. The
+            // `onWriteFailure` latch is NOT yet spent here when `writeHeader` succeeded, so this
+            // reaches the user-visible banner before that next write makes the corruption worse.
+            defer {
+                do { try fileHandle.seekToEnd() } catch {
+                    Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")
+                    noteWriteFailure(error, context: "seekToEnd")
+                }
+            }
+            try writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
+        } catch {
+            noteWriteFailure(error, context: "flushHeader")
+        }
     }
 
     private func logFirstWrite() {
@@ -126,7 +186,13 @@ public final class WavFileWriter {
     public func finalize() {
         guard !finalized else { return }   // idempotent — a second finalize must not touch the closed fd
         flushHeader()                       // runs while `finalized` is still false
-        fileHandle.closeFile()
+        do {
+            try fileHandle.close()
+        } catch {
+            // Still mark finalized below — a close failure must not leave the writer thinking it can
+            // retry against what may now be an invalid descriptor (#196).
+            noteWriteFailure(error, context: "close")
+        }
         finalized = true
         Logger.files.info("WAV finalized: \(self.path, privacy: .sensitive), size: \(self.dataByteCount) bytes")
     }
@@ -170,7 +236,7 @@ public final class WavFileWriter {
 
     private static func le32(_ v: UInt32) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 4) }
 
-    private func writeHeader(sampleRate: UInt32, channels: UInt16, dataSize: UInt32) {
+    private func writeHeader(sampleRate: UInt32, channels: UInt16, dataSize: UInt32) throws {
         let blockAlign = channels * 2  // 16-bit samples
         let byteRate = sampleRate * UInt32(blockAlign)
         var h = Data()
@@ -181,7 +247,7 @@ public final class WavFileWriter {
         h += Self.le32(sampleRate);  h += Self.le32(byteRate)
         h += Self.le16(blockAlign);  h += Self.le16(16)
         h += "data".data(using: .ascii)!;  h += Self.le32(dataSize)
-        fileHandle.write(h)
+        try fileHandle.write(contentsOf: h)
     }
 
     private static func le16(_ v: UInt16) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 2) }
