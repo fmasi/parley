@@ -42,6 +42,12 @@ final class AudioCaptureClient {
     /// mic keeps recording on its own AVCaptureSession).
     var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
 
+    /// Invoked (reverse channel) for a live capture-quality anomaly detected WHILE the recording is
+    /// still running (#193/#196) — an exact-zero mic run, a liveness gap, or a disk-full write
+    /// failure. `kind` is the `CaptureEventKind` raw value, `message` a user-facing description.
+    /// The recording is NEVER stopped by this; it is a warning surface only.
+    var onQualityAnomaly: (@Sendable (String, String) -> Void)?
+
     func connect() {
         crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
@@ -130,6 +136,15 @@ final class AudioCaptureClient {
     func handleSystemAudioUnrecoverable(reason: String) {
         record(.systemAudioUnrecovered, .anomaly, ["reason": reason])
         onSystemAudioUnrecoverable?(reason)
+    }
+
+    /// Reverse-channel receipt of a live capture-quality anomaly (#193/#196). NOT re-recorded into
+    /// the app ring here — the helper already recorded the matching event into ITS OWN ring (origin
+    /// `.helper`), which `drainHelperDiagnostics()` merges in at session end; doing it again here
+    /// would double-count the same event under a different origin. This method is purely the live
+    /// user-facing surface.
+    func handleQualityAnomaly(kind: String, message: String) {
+        onQualityAnomaly?(kind, message)
     }
 
     /// Pull and clear the helper's diagnostic ring over XPC, merging its events into the app ring.
@@ -361,6 +376,13 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
         Task { @MainActor [weak client] in
             Logger.audio.warning("Helper reports system stream unrecoverable — remote side not captured: \(reason, privacy: .private)")
             client?.handleSystemAudioUnrecoverable(reason: reason)
+        }
+    }
+
+    func captureQualityAnomaly(kind: String, message: String) {
+        Task { @MainActor [weak client] in
+            Logger.audio.warning("Helper reports live capture-quality anomaly (\(kind, privacy: .public)): \(message, privacy: .private)")
+            client?.handleQualityAnomaly(kind: kind, message: message)
         }
     }
 }

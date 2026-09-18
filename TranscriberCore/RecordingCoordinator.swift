@@ -180,6 +180,17 @@ public final class RecordingCoordinator {
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
 
+        // Pre-flight (#193): the built-in mic stays the default input device — and keeps delivering
+        // full-rate buffers of exact digital zero — while the lid is closed. Warn BEFORE capture
+        // starts, not only via the live exact-zero detector once the meeting is already underway.
+        // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
+        if ClamshellMicGuard.shouldWarn(
+            lidClosed: ClamshellMicGuard.isLidClosed(),
+            isBuiltInMic: ClamshellMicGuard.isBuiltInMicSelected(deviceId: microphoneDeviceId)
+        ) {
+            appState.interruptionWarning = ClamshellMicGuard.warningMessage
+        }
+
         let config = configManager.config
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
 
