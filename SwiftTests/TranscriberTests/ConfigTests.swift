@@ -335,30 +335,46 @@ struct ConfigTests {
         config.summary = SummaryConfig(
             enabled: true,
             endpoint: "https://api.openai.com/v1",
-            apiKey: "sk-test",
             model: "gpt-4o-mini"
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(Config.self, from: data)
         #expect(decoded.summary?.enabled == true)
         #expect(decoded.summary?.endpoint == "https://api.openai.com/v1")
-        #expect(decoded.summary?.apiKey == "sk-test")
         #expect(decoded.summary?.model == "gpt-4o-mini")
     }
 
-    @Test func summaryConfigSnakeCaseKeys() throws {
+    // #48: `SummaryConfig` no longer has an `apiKey` field at all — the key lives in the
+    // Keychain (`SummaryAPIKeyStore`), never in config.json. Pin the negative: even a
+    // freshly-encoded config must not contain an `api_key` key, so a future regression that
+    // re-adds a plaintext field to `SummaryConfig` fails this test instead of shipping quietly.
+    @Test func summaryConfigNeverWritesAPIKeyToJSON() throws {
         var config = Config.default
         config.summary = SummaryConfig(
             enabled: true,
             endpoint: "http://localhost:11434/v1",
-            apiKey: "",
             model: "llama3"
         )
         let data = try JSONEncoder().encode(config)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let summaryJSON = json["summary"] as? [String: Any]
         #expect(summaryJSON != nil)
-        #expect(summaryJSON?["api_key"] != nil)
+        #expect(summaryJSON?["api_key"] == nil)
+    }
+
+    // A config.json written by a pre-#48 build still has a plaintext `api_key` on disk until
+    // `ConfigManager` migrates it away (ConfigManagerTests). `SummaryConfig` itself must decode
+    // that file without crashing or leaking the value anywhere — it's simply an unknown key to
+    // this decoder.
+    @Test func decodesLegacySummaryConfigWithPlaintextAPIKeyWithoutCrashing() throws {
+        let json = """
+        {"enabled":true,"provider":"openai","endpoint":"https://api.openai.com/v1",\
+        "api_key":"sk-legacy-plaintext","model":"gpt-4o-mini"}
+        """
+        let config = try JSONDecoder().decode(SummaryConfig.self, from: Data(json.utf8))
+        #expect(config.enabled == true)
+        #expect(config.endpoint == "https://api.openai.com/v1")
+        #expect(config.model == "gpt-4o-mini")
     }
 
     @Test func decodesLegacyConfigWithoutSummary() throws {
