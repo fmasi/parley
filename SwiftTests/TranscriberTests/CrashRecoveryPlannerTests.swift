@@ -175,4 +175,49 @@ struct CrashRecoveryPlannerTests {
 
         #expect(CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: dir) == 6)
     }
+
+    // MARK: - planRestart (#170 — the hoisted restart-naming sequence shared by every
+    // no-live-pipeline restart site: crash-relaunch Flow B, XPC-crash restart with no live
+    // rotator, and Flow A re-attach's crash handler. Confirms the refactor preserves the exact
+    // behavior each of the three call sites had inline before the hoist.)
+
+    @Test func planRestartNamesFromSessionIdAndSafeIndex() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("sess-0.wav").path,
+            micAudioPath: dir.appendingPathComponent("sess-0_mic.wav").path,
+            segment: 1, chunkIndex: 0
+        )
+
+        let plan = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: dir)
+
+        // No session.json, no WAVs on disk -> floors at sentinel.chunkIndex + 1 = 1.
+        #expect(plan.baseName == "sess-1")
+        #expect(plan.newSentinel.systemAudioPath == dir.appendingPathComponent("sess-1.wav").path)
+        #expect(plan.newSentinel.micAudioPath == dir.appendingPathComponent("sess-1_mic.wav").path)
+        #expect(plan.newSentinel.segment == sentinel.segment + 1)
+        #expect(plan.newSentinel.chunkIndex == 1)  // stamped directly (#154 finding 6)
+    }
+
+    @Test func planRestartUsesDiskScanWhenItExceedsSentinelIndex() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("sess-5.wav"), seconds: 1)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("sess-1.wav").path,
+            micAudioPath: dir.appendingPathComponent("sess-1_mic.wav").path,
+            segment: 3, chunkIndex: 1
+        )
+
+        let plan = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: dir)
+
+        #expect(plan.baseName == "sess-6")
+        #expect(plan.newSentinel.chunkIndex == 6)
+        #expect(plan.newSentinel.segment == 4)
+    }
 }

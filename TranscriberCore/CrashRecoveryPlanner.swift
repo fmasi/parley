@@ -52,11 +52,40 @@ public enum CrashRecoveryPlanner {
     /// the in-progress chunk's WAV on create (#135). This is the single collision guard shared by
     /// every restart site (crash-relaunch Flow B, XPC-crash restart, Flow A re-attach); call it,
     /// never re-derive the `max(nextFreeChunkIndex, chunkIndex + 1)` formula inline.
+    ///
+    /// `sentinel.systemAudioPath` must be the FULL absolute audio path (e.g.
+    /// `.../m-3.wav`), not a bare session ID — this strips the segment suffix internally via
+    /// `stripSegmentSuffix` (#158), so a caller that has already stripped it would double-strip.
     public static func safeRestartChunkIndex(sentinel: RecordingSentinel, outputDirectory: URL) -> Int {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         return max(
             nextFreeChunkIndex(outputDirectory: outputDirectory, sessionId: sessionId),
             sentinel.chunkIndex + 1
         )
+    }
+
+    /// The full restart-naming plan for a "no live pipeline" restart: derive the collision-free
+    /// base name for the new capture file and the sentinel to persist once capture is confirmed
+    /// running. Hoisted from three near-identical call sites — crash-relaunch Flow B
+    /// (`TranscriberApp.recoverIfNeeded`), the XPC-crash restart when no live rotator exists
+    /// (`RecordingCoordinator.handleXPCCrash`), and Flow A re-attach's crash handler
+    /// (`TranscriberApp.setupCrashHandler`) — so a future fix to the naming sequence lands once
+    /// instead of needing to land in all three (#170). Not used by the LIVE-pipeline restart case
+    /// (see `RecordingCoordinator.liveRestartPlan`), which derives its base name from the
+    /// rotator's own recovery plan instead of a disk scan.
+    public static func planRestart(
+        sentinel: RecordingSentinel, outputDirectory: URL
+    ) -> (baseName: String, newSentinel: RecordingSentinel) {
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        let idx = safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDirectory)
+        let baseName = "\(sessionId)-\(idx)"
+        var newSentinel = sentinel.incrementedSegment(
+            systemAudioPath: outputDirectory.appendingPathComponent(baseName + ".wav").path,
+            micAudioPath: outputDirectory.appendingPathComponent(baseName + "_mic.wav").path
+        )
+        // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
+        // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
+        newSentinel.chunkIndex = idx
+        return (baseName, newSentinel)
     }
 }

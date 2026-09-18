@@ -569,17 +569,11 @@ public final class RecordingCoordinator {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
             // chunk-index namespace, never the legacy segment counter — the two namespaces can
-            // collide. safeRestartChunkIndex owns the collision guard (see CrashRecoveryPlanner).
-            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
-            baseName = "\(sessionId)-\(idx)"
-            newSentinel = sentinel.incrementedSegment(
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-            )
-            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
-            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
-            newSentinel.chunkIndex = idx
+            // collide. CrashRecoveryPlanner.planRestart owns the collision guard + naming
+            // sequence, shared by every no-live-pipeline restart site (#170).
+            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            baseName = restart.baseName
+            newSentinel = restart.newSentinel
         }
 
         do {
