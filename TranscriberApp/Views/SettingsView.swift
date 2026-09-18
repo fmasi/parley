@@ -30,6 +30,13 @@ struct SettingsView: View {
     @State private var summaryProvider: SummaryProviderType = .openai
     @State private var summaryEndpoint: String = ""
     @State private var summaryApiKey: String = ""
+    // #48: true once the async Keychain load in the body-level `.task` has actually returned.
+    // `summaryApiKey` starts `""` and is only meaningfully "empty" once this is true — before
+    // that, `""` just means "haven't checked the Keychain yet". Gates every
+    // `SummaryAPIKeyStore.save()` call in `save()` so a Save pressed before the load resolves
+    // (slow first-unlock, iCloud Keychain sync, or an ad-hoc-signing Keychain access failure)
+    // can't be mistaken for "user cleared the key" and delete a real stored key.
+    @State private var apiKeyLoaded = false
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
     @State private var summaryContextOverheadPercent: String = ""
@@ -108,6 +115,7 @@ struct SettingsView: View {
             if summaryApiKey.isEmpty {
                 summaryApiKey = loadedApiKey
             }
+            apiKeyLoaded = true
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )
@@ -437,7 +445,12 @@ struct SettingsView: View {
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
             // #48: the key never goes into `config`/config.json — Keychain only.
-            SummaryAPIKeyStore.save(summaryApiKey)
+            // Only touch the Keychain once the async load has actually resolved — before that,
+            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
+            // yet, and saving here would delete a real stored key out from under them.
+            if apiKeyLoaded {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         } else if summaryEndpointMissing {
             // The user wants summaries but hasn't supplied an endpoint. Persist
             // their typed provider/model/key with enabled:false rather than
@@ -445,7 +458,12 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
-            SummaryAPIKeyStore.save(summaryApiKey)
+            // Only touch the Keychain once the async load has actually resolved — before that,
+            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
+            // yet, and saving here would delete a real stored key out from under them.
+            if apiKeyLoaded {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         } else {
             // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
             // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
@@ -453,7 +471,12 @@ struct SettingsView: View {
             // the user actually cleared the field. Leaving a matching key in place means flipping
             // summaries back on later doesn't require re-typing it.
             config.summary = nil
-            SummaryAPIKeyStore.save(summaryApiKey)
+            // Only touch the Keychain once the async load has actually resolved — before that,
+            // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
+            // yet, and saving here would delete a real stored key out from under them.
+            if apiKeyLoaded {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         }
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }
