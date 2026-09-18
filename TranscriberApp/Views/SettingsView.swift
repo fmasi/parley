@@ -23,7 +23,8 @@ struct SettingsView: View {
     @State private var statusClearTask: Task<Void, Never>?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
-    @State private var archiveUsageBytes: Int = 0
+    /// nil while the recursive archive scan (#197) is still running — shown as "Calculating…".
+    @State private var archiveUsageBytes: Int?
     @State private var updateCheckInFlight = false
     @State private var lastUpdateStatus: String?
     private let manifestHealth = ManifestHealthStore.shared
@@ -139,9 +140,30 @@ struct SettingsView: View {
                 Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
             }
             apiKeyLoaded = true
-            archiveUsageBytes = StorageManager.currentUsageBytes(
-                in: URL(fileURLWithPath: config.recordingDirectory)
-            )
+
+            // Recursive, per-file resource-value walk of the whole recordings root (#197): can take
+            // seconds on a large archive, or hang until an SMB/network timeout on a non-local
+            // directory. Runs detached so Settings opens and the Audio tab renders immediately,
+            // with "Calculating…" shown until it resolves.
+            // withCheckedContinuation + DispatchQueue, not Task.detached: the recursive walk below
+            // is synchronous and can run long on a large or network-mounted archive, and Task.detached
+            // would tie up one of Swift's limited cooperative thread-pool threads for the duration
+            // (same reasoning as CalendarService.currentEventTitle).
+            // Reset to nil first: the Settings scene's @State survives window hide/show, so without
+            // this a reopen would show the PREVIOUS open's figure (stale, possibly for a since-changed
+            // recordingDirectory) instead of "Calculating…" while this recomputes.
+            archiveUsageBytes = nil
+            let directory = URL(fileURLWithPath: config.recordingDirectory)
+            archiveUsageBytes = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: StorageManager.currentUsageBytes(in: directory))
+                }
+            }
+            // withCheckedContinuation isn't cancellation-aware, so a Settings window closed while
+            // the scan above is still running would otherwise fall through to refreshing
+            // notification status against a view context that's already gone. Harmless (no crash),
+            // but skip the extra work.
+            guard !Task.isCancelled else { return }
             // #150: refresh notification status on open so the Permissions tab (and
             // its notifications-off hint) reflects System Settings changes made after
             // launch, not the state captured at the last checkAll().
@@ -277,13 +299,19 @@ struct SettingsView: View {
             )
 
             let estimatedMiB = config.audioArchiveLimitHours * config.archiveBitrateKbps * 1000 / 8 * 3600 / 1_048_576
-            let usageMiB = archiveUsageBytes / 1_048_576
-            let usageHours = config.archiveBitrateKbps > 0
-                ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
-                : 0
-            Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let archiveUsageBytes {
+                let usageMiB = archiveUsageBytes / 1_048_576
+                let usageHours = config.archiveBitrateKbps > 0
+                    ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
+                    : 0
+                Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("≈ \(estimatedMiB) MiB at this quality. Calculating current usage…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text("When over the limit, the oldest audio is deleted first. Transcripts are never deleted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

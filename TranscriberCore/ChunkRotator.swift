@@ -42,6 +42,10 @@ public final class ChunkRotator {
         self.onChunkFinalized = onChunkFinalized
     }
 
+    /// Test seam (`@testable import`): the active rotation timer, so tests can confirm it was
+    /// added to the run loop in `.common` mode (#197) without waiting on a real firing.
+    var activeTimerForTesting: Timer? { timer }
+
     /// The base name for the current chunk's WAV files.
     public var currentBaseName: String { "\(sessionBaseName)-\(currentChunkIndex)" }
 
@@ -67,11 +71,16 @@ public final class ChunkRotator {
     /// Start the rotation timer.
     public func start() {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .sensitive)")
-        timer = Timer.scheduledTimer(withTimeInterval: chunkDuration, repeats: true) { [weak self] _ in
+        let newTimer = Timer(timeInterval: chunkDuration, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.rotate()
             }
         }
+        // `.common`, not `Timer.scheduledTimer`'s `.default`-only mode (#197): a modal panel
+        // (NSOpenPanel, NSAlert) or an open menu's tracking run loop would otherwise pause
+        // rotation entirely — meanwhile the chunk keeps growing and processing is delayed.
+        RunLoop.main.add(newTimer, forMode: .common)
+        timer = newTimer
     }
 
     /// Stop the timer. Does NOT finalize the current chunk.

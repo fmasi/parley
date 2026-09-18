@@ -7,6 +7,29 @@ import UserNotifications
 import Sparkle
 import os
 
+/// Shared by both Quit paths (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift):
+/// `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no timeout, so a
+/// safety-net Task races the graceful uninstall-then-terminate path and terminates unconditionally
+/// after a bound generous past any real unload. Racing a second `terminate(nil)` in is safe here
+/// specifically because this app has no `applicationShouldTerminate(_:)` override — termination is
+/// always immediate once requested, never deferred via `.terminateLater` — so there's no
+/// in-progress graceful-shutdown answer for the safety net to cut short.
+@MainActor
+func quitAfterUninstallingLaunchAgent() {
+    // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never blocks on it.
+    // (On a launchd-spawned instance, `unload` SIGTERMs this process before these lines finish —
+    // expected, see LaunchAgentManager.)
+    Task {
+        await LaunchAgentManager.uninstall()
+        // No MainActor.run needed: this function is @MainActor, so the Task already runs there.
+        NSApplication.shared.terminate(nil)
+    }
+    Task {
+        try? await Task.sleep(for: .seconds(5))
+        NSApplication.shared.terminate(nil)
+    }
+}
+
 struct MenuView: View {
     @Bindable var appState: AppState
     let captureClient: AudioCaptureClient
@@ -136,8 +159,7 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    LaunchAgentManager.uninstall()
-                    NSApplication.shared.terminate(nil)
+                    quitAfterUninstallingLaunchAgent()
                 }
                 .keyboardShortcut("q")
             }
@@ -352,12 +374,12 @@ struct MenuView: View {
     }
 
     private func promptAndStartRecording() {
-        let suggestedName = calendarService.currentEventTitle(
-            lookaheadMinutes: configManager.config.calendarLookaheadMinutes
-        )
+        let lookaheadMinutes = configManager.config.calendarLookaheadMinutes
+        let calendarService = calendarService
         SessionNameWindowController.shared.show(
-            suggestedName: suggestedName,
-            lastMicrophoneDeviceId: selectedMicId
+            lastMicrophoneDeviceId: selectedMicId,
+            // The panel appears immediately (#197); this fills the name field in once it resolves.
+            calendarLookup: { await calendarService.currentEventTitle(lookaheadMinutes: lookaheadMinutes) }
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator

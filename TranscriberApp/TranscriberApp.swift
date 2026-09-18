@@ -184,7 +184,15 @@ struct TranscriberApp: App {
         }
 
         if !LaunchAgentManager.isInstalled() {
-            try? LaunchAgentManager.install()
+            // Async (#197): `launchctl load` is a subprocess wait; off main so app launch never
+            // blocks on it. Plain Task, not .detached: install() already hops the actual blocking
+            // wait onto DispatchQueue.global via withCheckedContinuation (LaunchAgentManager.
+            // runLaunchctl), so nothing here runs on the cooperative thread pool either way —
+            // .detached would only drop structured-task benefits for no benefit, and diverge from
+            // the plain Task {} used by both Quit paths that call the same manager.
+            Task(priority: .utility) {
+                try? await LaunchAgentManager.install()
+            }
         }
     }
 
@@ -528,8 +536,7 @@ private struct SetupRequiredPanel: View {
             Divider()
 
             MenuActionRow(icon: "power", title: "Quit Parley") {
-                LaunchAgentManager.uninstall()
-                NSApplication.shared.terminate(nil)
+                quitAfterUninstallingLaunchAgent()
             }
             .keyboardShortcut("q")
         }
