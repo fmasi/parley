@@ -494,7 +494,15 @@ public final class RecordingCoordinator {
             }
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
-            notify("Transcription Failed", error.localizedDescription)
+            // #155: this catch is the Flow-A re-attach stop path's only signal to the user — the
+            // sentinel above is deleted unconditionally, so relaunching will not retry. Without an
+            // explicit "audio preserved" message here (mirroring the Flow B catch in
+            // TranscriberApp.recoverIfNeeded), a user who sees only "Transcription Failed" has no
+            // way to know their raw .wav/.m4a files are still safely on disk.
+            notifyCritical(
+                "Transcription Failed",
+                "The recording session could not be rehydrated after stopping: \(error.localizedDescription). Audio already on disk was preserved."
+            )
             appState.phase = .idle
         }
     }
