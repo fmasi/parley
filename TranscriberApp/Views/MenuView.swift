@@ -7,6 +7,29 @@ import UserNotifications
 import Sparkle
 import os
 
+/// Shared by both Quit paths (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift):
+/// `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no timeout, so a
+/// safety-net Task races the graceful uninstall-then-terminate path and terminates unconditionally
+/// after a bound generous past any real unload. Racing a second `terminate(nil)` in is safe here
+/// specifically because this app has no `applicationShouldTerminate(_:)` override — termination is
+/// always immediate once requested, never deferred via `.terminateLater` — so there's no
+/// in-progress graceful-shutdown answer for the safety net to cut short.
+@MainActor
+func quitAfterUninstallingLaunchAgent() {
+    // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never blocks on it.
+    // (On a launchd-spawned instance, `unload` SIGTERMs this process before these lines finish —
+    // expected, see LaunchAgentManager.)
+    Task {
+        await LaunchAgentManager.uninstall()
+        // No MainActor.run needed: this function is @MainActor, so the Task already runs there.
+        NSApplication.shared.terminate(nil)
+    }
+    Task {
+        try? await Task.sleep(for: .seconds(5))
+        NSApplication.shared.terminate(nil)
+    }
+}
+
 struct MenuView: View {
     @Bindable var appState: AppState
     let captureClient: AudioCaptureClient
@@ -136,23 +159,7 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit
-                    // never blocks on it. (On a launchd-spawned instance, `unload` SIGTERMs this
-                    // process before these lines finish — expected, see LaunchAgentManager.)
-                    Task {
-                        await LaunchAgentManager.uninstall()
-                        // No MainActor.run needed: this Task is spawned from a @MainActor View
-                        // body, so it already runs on the main actor.
-                        NSApplication.shared.terminate(nil)
-                    }
-                    // Safety net: runLaunchctl has no timeout on Process.waitUntilExit(), so a
-                    // wedged launchctl would otherwise suspend the Task above forever — Quit
-                    // silently does nothing instead of the old sync path's at-least-visible UI
-                    // freeze. Bounded generously past any real launchctl unload.
-                    Task {
-                        try? await Task.sleep(for: .seconds(5))
-                        NSApplication.shared.terminate(nil)
-                    }
+                    quitAfterUninstallingLaunchAgent()
                 }
                 .keyboardShortcut("q")
             }

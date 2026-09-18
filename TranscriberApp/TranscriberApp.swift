@@ -536,24 +536,7 @@ private struct SetupRequiredPanel: View {
             Divider()
 
             MenuActionRow(icon: "power", title: "Quit Parley") {
-                // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never
-                // blocks on it. (On a launchd-spawned instance, `unload` SIGTERMs this process
-                // before these lines finish — expected, see LaunchAgentManager.)
-                Task {
-                    await LaunchAgentManager.uninstall()
-                    // No MainActor.run needed: this Task is spawned from a @MainActor View
-                    // body, so it already runs on the main actor.
-                    NSApplication.shared.terminate(nil)
-                }
-                // Safety net: runLaunchctl has no timeout on Process.waitUntilExit(), so a
-                // wedged launchctl would otherwise suspend the Task above forever — Quit
-                // silently does nothing instead of the old sync path's at-least-visible UI
-                // freeze. Bounded generously past any real launchctl unload. Same pattern as
-                // MenuView.swift's Quit row.
-                Task {
-                    try? await Task.sleep(for: .seconds(5))
-                    NSApplication.shared.terminate(nil)
-                }
+                quitAfterUninstallingLaunchAgent()
             }
             .keyboardShortcut("q")
         }
