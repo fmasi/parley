@@ -188,8 +188,17 @@ public enum TranscriptRediarizer {
         // Decode ONCE, at the target format (16 kHz mono Float), and share the same buffer with
         // both the diarizer and VAD below (#204) — the old path decoded the channel's audio up to
         // four separate times (split, concatenate, diarizer's own decode, VAD's own decode).
+        //
+        // `.legacyDualStream` is a single file with nothing to concatenate, so there is no
+        // decode-reuse to be had there: our own `AudioDecode` pass would just add a full extra
+        // in-memory copy (~3x the file's decoded size, once for the native-rate read and again
+        // for the resample) on top of what the diarizer and VAD already hold internally. Handing
+        // them the path instead lets them stream it with FluidAudio's own decoder, matching the
+        // pre-#204 memory profile for this case — and, as a side effect, keeps the `AudioDecode`
+        // reimplementation (see its doc comment) out of the picture entirely for single-file
+        // recordings, which is most of them.
         onProgress?(Progress(phase: .decodingAudio))
-        let samples = try await decodeChannelAudio(
+        let decoded = try await decodeChannelAudio(
             layout: layout, source: source, scratchDirectory: scratchDirectory,
             onProgress: onProgress)
 
@@ -199,19 +208,30 @@ public enum TranscriptRediarizer {
         // check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
         onProgress?(Progress(phase: .detectingSpeakers))
-        let raw = try await diarizer.diarize(
-            audio: samples, numSpeakers: speakerCount,
-            progress: { processed, total in
-                guard total > 0 else { return }
-                onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
-            })
+        let raw: DiarizationResult
+        let speechMap: [SpeechRegion]?
+        switch decoded {
+        case .samples(let samples):
+            raw = try await diarizer.diarize(
+                audio: samples, numSpeakers: speakerCount,
+                progress: { processed, total in
+                    guard total > 0 else { return }
+                    onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
+                })
+            // Same samples the diarizer just used — no second decode of the same audio.
+            speechMap = try? await VadSpeechMap().analyze(samples: samples)
+        case .path(let audioURL):
+            // No pre-decoded buffer to share here (see the comment above) — each backend decodes
+            // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
+            // available on this route either, but the coarser phase indicator still applies.
+            raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+            speechMap = try? await VadSpeechMap().analyze(audioPath: audioURL)
+        }
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
         // are both in hand, rather than hoping the clusterer honours the request.
         let diarization = SpeakerCountEnforcer.enforce(raw, to: speakerCount)
         try Task.checkCancellation()
-        // Same samples the diarizer just used — no second decode of the same audio.
-        let speechMap = try? await VadSpeechMap().analyze(samples: samples)
 
         let transcriptSegments = rawSegments
             .filter { ($0["source"] as? String) == source }
@@ -303,18 +323,30 @@ public enum TranscriptRediarizer {
         return .needsSplit
     }
 
+    /// What `decodeChannelAudio` hands back: either pre-decoded samples ready to share between
+    /// the diarizer and VAD, or a path for them to decode themselves.
+    enum DecodedChannelAudio {
+        case samples([Float])
+        case path(URL)
+    }
+
     /// Decode the requested channel to mono Float samples at the diarizer/VAD target rate
     /// (16 kHz), concatenating chunks in THAT domain when needed — about 6x smaller than the
     /// 48kHz stereo source, and it lets the caller skip the old file-based concatenation step
     /// entirely (#204). A stereo chunk is split down to just the wanted side first
     /// (`AudioSourceResolver.splitChannel`), so neither the decode nor the write ever touches the
     /// unwanted side.
+    ///
+    /// `.legacyDualStream` is a single file, so there's nothing to concatenate and therefore no
+    /// decode-reuse benefit to justify pre-decoding it into an extra in-memory copy — that case
+    /// hands back the path instead and lets the diarizer/VAD stream it themselves, same as before
+    /// #204.
     private static func decodeChannelAudio(
         layout: AudioLayout,
         source: String,
         scratchDirectory: URL,
         onProgress: (@Sendable (Progress) -> Void)?
-    ) async throws -> [Float] {
+    ) async throws -> DecodedChannelAudio {
         let wantsLocal = source == "local"
 
         switch layout {
@@ -325,7 +357,7 @@ public enum TranscriptRediarizer {
             guard let url = wantsLocal ? local : remote,
                   FileManager.default.fileExists(atPath: url.path)
             else { throw RediarizeError.noAudioForChannel(source) }
-            return try AudioDecode.mono16kHzFloat(contentsOf: url)
+            return .path(url)
 
         case .chunkedArchives(let chunks):
             let existing = chunks.filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -349,7 +381,7 @@ public enum TranscriptRediarizer {
                 }
             }
             guard !combined.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
-            return combined
+            return .samples(combined)
         }
     }
 }
@@ -366,7 +398,7 @@ public enum TranscriptRediarizer {
 /// chunks, mix to mono Float32 if needed, then one `AVAudioConverter` pass to 16 kHz) — the same
 /// system `AVAudioConverter` API, called with the same target format, so the result matches what
 /// FluidAudio's own converter would have produced for the same file.
-private enum AudioDecode {
+enum AudioDecode {
     static let targetSampleRate: Double = 16000
 
     enum DecodeError: Error {
@@ -447,10 +479,11 @@ private enum AudioDecode {
             throw DecodeError.bufferAllocationFailed
         }
         inputBuffer.frameLength = AVAudioFrameCount(samples.count)
-        if let channelData = inputBuffer.floatChannelData {
-            samples.withUnsafeBufferPointer { src in
-                channelData[0].update(from: src.baseAddress!, count: samples.count)
-            }
+        guard let channelData = inputBuffer.floatChannelData else {
+            throw DecodeError.bufferAllocationFailed
+        }
+        samples.withUnsafeBufferPointer { src in
+            channelData[0].update(from: src.baseAddress!, count: samples.count)
         }
 
         guard let outputFormat = AVAudioFormat(

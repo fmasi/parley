@@ -326,6 +326,7 @@ struct RenameDialog: View {
                 await MainActor.run {
                     rediarizing = nil
                     rediarizePhase = nil
+                    rediarizeFraction = nil
                     rediarizeStartedAt = nil
                 }
             } catch {
@@ -341,6 +342,7 @@ struct RenameDialog: View {
                         ?? "Re-detection failed. See Console for details."
                     rediarizing = nil
                     rediarizePhase = nil
+                    rediarizeFraction = nil
                     rediarizeStartedAt = nil
                 }
             }

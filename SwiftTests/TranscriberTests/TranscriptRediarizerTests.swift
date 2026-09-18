@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import TranscriberCore
 
 /// Rewriting one channel's speakers after a re-diarization (#67).
@@ -296,5 +297,90 @@ struct TranscriptRediarizerNameClearingTests {
         #expect(TranscriptRediarizer.channelNames(in: metadata, source: "remote")
                 == ["Remote Speaker 1": "Paul"])
         #expect(TranscriptRediarizer.channelNames(in: [:], source: "remote").isEmpty)
+    }
+}
+
+/// `AudioDecode` mirrors FluidAudio's own decode algorithm rather than calling it directly (a
+/// Swift name collision makes the real `AudioConverter` class unreachable from this module — see
+/// the type's doc comment in `TranscriptRediarizer.swift`). That reimplementation is exactly the
+/// part of PR #218 flagged as needing a device A/B before merge, so this suite exists to catch a
+/// gross format mismatch (wrong frame count, wrong channel handling, wrong output rate) even
+/// though it can't substitute for the device comparison against FluidAudio's real converter.
+@Suite(.serialized)
+struct AudioDecodeTests {
+
+    private enum TestHelperError: Error { case cannotCreateBuffer }
+
+    /// A mono or stereo sine-wave WAV at an arbitrary sample rate, written to `url`.
+    private func writeTestWav(
+        at url: URL, durationSeconds: Double, sampleRate: Double, channels: UInt32
+    ) throws {
+        let frameCount = Int(sampleRate * durationSeconds)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: false
+        )!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            throw TestHelperError.cannotCreateBuffer
+        }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        for channel in 0..<Int(channels) {
+            let ptr = buffer.floatChannelData![channel]
+            for i in 0..<frameCount {
+                let t = Double(i) / sampleRate
+                ptr[i] = Float(sin(2.0 * .pi * 440.0 * t))
+            }
+        }
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        try file.write(from: buffer)
+    }
+
+    private func tempWavURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("audiodecode-test-\(UUID().uuidString).wav")
+    }
+
+    @Test("a file already at 16kHz mono passes through with the same frame count")
+    func alreadyTargetRatePassesThroughFrameCount() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 1.0, sampleRate: 16000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        #expect(samples.count == 16000)
+    }
+
+    @Test("a 48kHz source is downsampled to land within tolerance of the 16kHz-equivalent frame count")
+    func downsamplesToTargetRate() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 2.0, sampleRate: 48000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // 2s at 16kHz == 32000 frames. AVAudioConverter's resampler can land a few dozen frames
+        // either side of the exact ratio — this checks it's in the right ballpark, not exact.
+        let expected = 32000
+        #expect(abs(samples.count - expected) < 200)
+    }
+
+    @Test("a stereo source is mixed down to mono — one sample per frame, not one per channel")
+    func stereoIsMixedToMono() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 1.0, sampleRate: 16000, channels: 2)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        // Both channels carry the same 440Hz tone, so a correct mixdown lands at ~1 frame per
+        // input frame, not 2 (which is what a raw interleaved read gone wrong would produce).
+        #expect(abs(samples.count - 16000) < 200)
+    }
+
+    @Test("an empty (zero-frame) file decodes to an empty array rather than throwing")
+    func emptyFileDecodesToEmptyArray() throws {
+        let url = tempWavURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writeTestWav(at: url, durationSeconds: 0.0, sampleRate: 16000, channels: 1)
+
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        #expect(samples.isEmpty)
     }
 }
