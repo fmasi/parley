@@ -636,6 +636,22 @@ private struct Harness {
         #expect(h.recordingMic.current == .none)
     }
 
+    // #155: the Flow-A stop-path catch (which also covers `ChunkedSessionRecovery.recover()`
+    // throwing) is the user's only signal on this path — the sentinel above is deleted
+    // unconditionally, so relaunching will not retry. It must tell the user their raw audio is
+    // still on disk, mirroring the Flow B catch in `TranscriberApp.recoverIfNeeded`.
+    @Test func stopFailureNotifiesCriticallyThatAudioWasPreserved() async throws {
+        let h = try Harness()
+        // stopResult nil → stop() throws, landing in the outer catch.
+
+        await h.coordinator.stopRecording()
+
+        let critical = try #require(h.criticals.value.first)
+        #expect(critical.title == "Transcription Failed")
+        #expect(critical.body.contains("Audio already on disk was preserved"))
+        #expect(h.notified.value.isEmpty, "should escalate via the critical path, not the routine notify")
+    }
+
     @Test func crashWithoutSentinelEscalatesCritically() async throws {
         let h = try Harness()
 

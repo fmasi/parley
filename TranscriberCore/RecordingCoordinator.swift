@@ -494,7 +494,15 @@ public final class RecordingCoordinator {
             }
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
-            notify("Transcription Failed", error.localizedDescription)
+            // #155: this catch is the Flow-A re-attach stop path's only signal to the user — the
+            // sentinel above is deleted unconditionally, so relaunching will not retry. Without an
+            // explicit "audio preserved" message here (mirroring the Flow B catch in
+            // TranscriberApp.recoverIfNeeded), a user who sees only "Transcription Failed" has no
+            // way to know their raw .wav/.m4a files are still safely on disk.
+            notifyCritical(
+                "Transcription Failed",
+                "The recording session could not be rehydrated after stopping: \(error.localizedDescription). Audio already on disk was preserved."
+            )
             appState.phase = .idle
         }
     }
@@ -569,17 +577,11 @@ public final class RecordingCoordinator {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
             // chunk-index namespace, never the legacy segment counter — the two namespaces can
-            // collide. safeRestartChunkIndex owns the collision guard (see CrashRecoveryPlanner).
-            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
-            baseName = "\(sessionId)-\(idx)"
-            newSentinel = sentinel.incrementedSegment(
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-            )
-            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
-            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
-            newSentinel.chunkIndex = idx
+            // collide. CrashRecoveryPlanner.planRestart owns the collision guard + naming
+            // sequence, shared by every no-live-pipeline restart site (#170).
+            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            baseName = restart.baseName
+            newSentinel = restart.newSentinel
         }
 
         do {

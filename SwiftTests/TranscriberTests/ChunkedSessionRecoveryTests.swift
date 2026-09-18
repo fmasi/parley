@@ -151,4 +151,82 @@ struct ChunkedSessionRecoveryTests {
         let unwrapped = try #require(result)
         #expect(FileManager.default.fileExists(atPath: unwrapped.jsonPath.path))
     }
+
+    /// #158 item 1: the canonical post-crash scenario has MULTIPLE orphan chunks, not one — every
+    /// other end-to-end test above uses exactly one. Seeds chunk 0 in session.json (already
+    /// completed before the crash) and drops two more orphan WAVs (`m-1`, `m-2`) that never made
+    /// it into session.json, then asserts the recovered transcript covers all three chunks in
+    /// order. Deliberately system-only orphans (no `_mic.wav` companion), like
+    /// `recoversSystemOnlyOrphanAsSingleStream` above, so each orphan contributes exactly one
+    /// FakeEngine segment instead of exercising the separate dual-stream merge/echo-dedup logic.
+    @Test func recoversTranscriptCoveringAllOrphansInOrder() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeSessionJSON(
+            dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0]
+        )
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-1.wav"), seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+
+        let result = try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
+        )
+
+        let unwrapped = try #require(result)
+        let data = try Data(contentsOf: unwrapped.jsonPath)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]])
+        // Chunk 0 (from session.json) contributes "chunk 0"; orphans 1 and 2 each contribute one
+        // "hello" segment from FakeEngine — three chunks' worth of content, offset-ordered.
+        #expect(segments.count == 3)
+        let texts = segments.compactMap { $0["text"] as? String }
+        #expect(texts == ["chunk 0", "hello", "hello"])
+    }
+
+    /// #158 item 2: `ChunkProcessor` appends a `ProcessedChunk` for every orphan unconditionally —
+    /// even one whose transcription comes back with zero segments — so `recover()` still succeeds
+    /// here with a transcript that has no segments; it does NOT hit the
+    /// `guard !state.chunks.isEmpty else { return nil }` nil-return path (that guard can only fire
+    /// if a future `ChunkProcessor` change starts skipping the append for a fully-empty chunk).
+    /// Covers the "every orphan transcribes empty" case the guard's cleanup was written to protect,
+    /// and pins today's actual behavior so a future change to either side is caught.
+    @Test func recoversEmptyTranscriptWhenEveryOrphanTranscribesEmpty() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        struct EmptyEngine: TranscriptionEngine {
+            let name = "Empty"
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] { [] }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-0.wav"), seconds: 1)
+
+        let result = try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: EmptyEngine(), diarizer: nil, runner: TranscriptionRunner()
+        )
+
+        let unwrapped = try #require(result)
+        let data = try Data(contentsOf: unwrapped.jsonPath)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]])
+        #expect(segments.isEmpty)
+    }
+
+    /// #158 item 2 (the actually-reachable half): directly exercises `SessionState.delete`, the
+    /// cleanup call added to `ChunkedSessionRecovery`'s nil-return guard so a stale session.json
+    /// doesn't linger on the (currently theoretical, see above) path where recovery finds nothing
+    /// to salvage after orphans existed. `ChunkedSessionRecoveryTests.returnsNilWhenNothingToRecover`
+    /// already covers the nil return itself; this pins that the cleanup helper it now calls behaves.
+    @Test func sessionJSONCleanupIsNoOpWhenAlreadyAbsent() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        SessionState.delete(directory: dir)  // must not throw or crash with nothing on disk
+        #expect(SessionState.read(directory: dir) == nil)
+    }
 }
