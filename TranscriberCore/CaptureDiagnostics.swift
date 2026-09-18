@@ -75,12 +75,15 @@ public enum CaptureEventKind: String, Codable, Sendable {
 
     /// A timeline gap exceeded the 60 s pad cap and was clamped — the mic/system alignment for the
     /// rest of the chunk is desynced by the untruncated remainder (#196). Previously logged only.
-    /// Severity `.anomaly`.
+    /// Severity `.anomaly`. Deliberately NOT in `qualityCompromising` (PR #217 review): this is a
+    /// symptom, not independently a bad recording — its consequence (a frame-count mismatch at
+    /// finalize) is what `finalizeFrameCountMismatch` catches and IS in that set.
     case padCapExceeded
 
     /// The shared mic/system timeline delta was implausible (non-finite, negative, or absurdly
     /// large — a cross-source PTS clock-epoch mismatch) and alignment was skipped for that buffer
-    /// (#196). Previously logged only. Severity `.anomaly`.
+    /// (#196). Previously logged only. Severity `.anomaly`. Deliberately NOT in `qualityCompromising`
+    /// for the same reason as `padCapExceeded` above — `finalizeFrameCountMismatch` is the backstop.
     case timelineDeltaImplausible
 
     /// A modern throwing `FileHandle` call failed (disk full, I/O error) while writing a WAV. Before

@@ -184,10 +184,15 @@ public final class RecordingCoordinator {
         // full-rate buffers of exact digital zero — while the lid is closed. Warn BEFORE capture
         // starts, not only via the live exact-zero detector once the meeting is already underway.
         // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
-        if ClamshellMicGuard.shouldWarn(
-            lidClosed: ClamshellMicGuard.isLidClosed(),
-            isBuiltInMic: ClamshellMicGuard.isBuiltInMicSelected(deviceId: microphoneDeviceId)
-        ) {
+        // PR #217 review: `isLidClosed()`/`isBuiltInMicSelected(deviceId:)` are synchronous IOKit/
+        // CoreAudio HAL lookups. Normally sub-millisecond, but a HAL daemon restart or sleep/wake
+        // transition can occasionally stall them — hop to a detached task so a rare stall never
+        // blocks the main actor. Both are pure/static with no actor isolation, so this is a pure
+        // scheduling change; nothing before this point in `startRecording` depends on ordering.
+        let (lidClosed, isBuiltInMic) = await Task.detached {
+            (ClamshellMicGuard.isLidClosed(), ClamshellMicGuard.isBuiltInMicSelected(deviceId: microphoneDeviceId))
+        }.value
+        if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
             appState.interruptionWarning = ClamshellMicGuard.warningMessage
         }
 

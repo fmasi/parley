@@ -128,8 +128,11 @@ public final class WavFileWriter {
         let rate = sampleRate > 0 ? sampleRate : Self.fallbackSampleRate
         do {
             try fileHandle.seek(toOffset: 0)
+            // PR #217 review: `seekToEnd` must run even if `writeHeader` throws, or the file
+            // pointer is left near offset 0 and the next append writes audio samples into the
+            // RIFF header area, overwriting it with PCM data.
+            defer { _ = try? fileHandle.seekToEnd() }
             try writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
-            try fileHandle.seekToEnd()
         } catch {
             noteWriteFailure(error, context: "flushHeader")
         }

@@ -30,17 +30,29 @@ final class LivenessWatchdogDriver {
     /// Invoked (on `queue`) when either track opens a liveness gap.
     var onGap: ((CaptureEventKind, String) -> Void)?
 
+    /// PR #217 review: `start`/`stop` are called from at least four `AudioCaptureService` teardown
+    /// paths with no shared lock, so a concurrent `stop()`+`stop()` or `start()`+`stop()` would be
+    /// an unsynchronised read/write on `timer`. Serializing both onto `queue` (already the timer's
+    /// own serial queue, and never touched by `tick()` itself) fixes the race without adding a
+    /// separate lock.
     func start() {
-        stop()
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 1, repeating: 1)
-        t.setEventHandler { [weak self] in self?.tick() }
-        timer = t
-        t.resume()
+        queue.sync {
+            stopLocked()
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(deadline: .now() + 1, repeating: 1)
+            t.setEventHandler { [weak self] in self?.tick() }
+            timer = t
+            t.resume()
+        }
     }
 
     /// Idempotent.
     func stop() {
+        queue.sync { stopLocked() }
+    }
+
+    /// Must only be called while already running on `queue`.
+    private func stopLocked() {
         timer?.cancel()
         timer = nil
     }
