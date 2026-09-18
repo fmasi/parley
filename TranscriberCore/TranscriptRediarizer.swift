@@ -218,13 +218,18 @@ public enum TranscriptRediarizer {
                     guard total > 0 else { return }
                     onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
                 })
-            // Same samples the diarizer just used — no second decode of the same audio.
+            // Same samples the diarizer just used — no second decode of the same audio. Checked
+            // here (not just after the switch below) so a cancel right after the diarizer finishes
+            // is caught before the VAD pass runs too — `try?` on the VAD call itself swallows a
+            // CancellationError thrown internally, so this is the only place that actually stops it.
+            try Task.checkCancellation()
             speechMap = try? await VadSpeechMap().analyze(samples: samples)
         case .path(let audioURL):
             // No pre-decoded buffer to share here (see the comment above) — each backend decodes
             // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
             // available on this route either, but the coarser phase indicator still applies.
             raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+            try Task.checkCancellation()
             speechMap = try? await VadSpeechMap().analyze(audioPath: audioURL)
         }
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
@@ -334,8 +339,9 @@ public enum TranscriptRediarizer {
     }
 
     /// Decode the requested channel to mono Float samples at the diarizer/VAD target rate
-    /// (16 kHz), concatenating chunks in THAT domain when needed — about 6x smaller than the
-    /// 48kHz stereo source, and it lets the caller skip the old file-based concatenation step
+    /// (16 kHz), concatenating chunks in THAT domain when needed — about 3x smaller than the
+    /// 48kHz stereo Int16 source (matches `AudioDecode`'s own "3x smaller" note below), and it
+    /// lets the caller skip the old file-based concatenation step
     /// entirely (#204). A stereo chunk is split down to just the wanted side first
     /// (`AudioSourceResolver.splitChannel`), so neither the decode nor the write ever touches the
     /// unwanted side.
@@ -374,18 +380,29 @@ public enum TranscriptRediarizer {
                 // switched to .detectingSpeakers — visibly "snapping" past the last chunk. `defer`
                 // so a `.skip` chunk (which `continue`s early) still advances the fraction.
                 defer { onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(existing.count))) }
+                let decodedChunk: [Float]
                 switch channelRole(of: chunk, wantsLocal: wantsLocal) {
                 case .skip:
                     continue
                 case .useDirectly:
-                    combined.append(contentsOf: try AudioDecode.mono16kHzFloat(contentsOf: chunk))
+                    decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: chunk)
                 case .needsSplit:
                     let channel: AudioSourceResolver.Channel = wantsLocal ? .local : .remote
                     let split = try await AudioSourceResolver.splitChannel(
                         stereoAac: chunk, outputDirectory: scratchDirectory, channel: channel)
                     defer { try? FileManager.default.removeItem(at: split) }
-                    combined.append(contentsOf: try AudioDecode.mono16kHzFloat(contentsOf: split))
+                    decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: split)
                 }
+                // `combined` accumulates every chunk in the recording — on a 90-minute call at
+                // 16kHz that's tens of millions of floats, and Swift's array growth doubles on
+                // each reallocation, so the final grow briefly touches ~2x the steady-state size.
+                // The first chunk's own length is the best estimate available here (chunk
+                // durations aren't threaded into this function), so use it to size the rest in one
+                // shot rather than free-growing through log2(chunkCount) reallocations.
+                if combined.isEmpty {
+                    combined.reserveCapacity(decodedChunk.count * existing.count)
+                }
+                combined.append(contentsOf: decodedChunk)
             }
             guard !combined.isEmpty else { throw RediarizeError.noAudioForChannel(source) }
             return .samples(combined)

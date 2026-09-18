@@ -34,7 +34,14 @@ struct FakeDiarizer: DiarizationProvider {
     func diarize(
         audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?
     ) async throws -> DiarizationResult {
-        DiarizationResult(
+        // Calls the callback rather than silently dropping it: `TranscriptRediarizer.rediarize`'s
+        // onProgress plumbing for this path (the `.detectingSpeakers` fraction) was otherwise
+        // never exercised by any test — a divide-by-zero on `total == 0`, or the wrong phase being
+        // reported, wouldn't be caught. Two calls, matching what a real backend reporting partial
+        // then complete progress would look like.
+        progress?(1, 2)
+        progress?(2, 2)
+        return DiarizationResult(
             segments: [DiarizedSegment(start: 0, end: 5, speaker: "S1")],
             speakerDatabase: ["S1": [1, 0, 0]]
         )

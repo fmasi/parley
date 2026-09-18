@@ -300,6 +300,77 @@ struct TranscriptRediarizerNameClearingTests {
     }
 }
 
+/// `rediarize`'s `onProgress` plumbing for the `.samples` path (`.chunkedArchives` — the case
+/// with a decoded-buffer/progress callback to wire up at all) went unexercised by any test:
+/// `FakeDiarizer` used to silently drop the `progress` callback it was handed, so a regression in
+/// `rediarize`'s progress-forwarding closure (a divide-by-zero on `total == 0`, or reporting the
+/// wrong phase) wouldn't have been caught.
+@Suite(.serialized)
+struct TranscriptRediarizerProgressTests {
+
+    /// A single mic-only WAV chunk classifies as `.chunkedArchives` (not `.legacyDualStream`,
+    /// which has no per-chunk progress fraction at all — see `SpeakerSampleLocator.classify`),
+    /// so it exercises the `diarize(audio:numSpeakers:progress:)` branch this suite targets.
+    private func makeMicOnlyRecording() throws -> (transcript: URL, cleanup: () -> Void) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rediar-progress-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let wav = dir.appendingPathComponent("call-0_mic.wav")
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let frameCount = 16000
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount))!
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let file = try AVAudioFile(forWriting: wav, settings: format.settings)
+        try file.write(from: buffer)
+
+        let transcript = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = [
+            "metadata": ["audio_paths": [wav.path]],
+            "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "Local Speaker 1", "source": "local"]],
+        ]
+        try JSONSerialization.data(withJSONObject: doc).write(to: transcript)
+
+        return (transcript, { try? FileManager.default.removeItem(at: dir) })
+    }
+
+    /// Plain lock-protected accumulator rather than an actor: `onProgress` is a synchronous
+    /// `@Sendable` closure, and recording synchronously (no spawned `Task`) means the test doesn't
+    /// need to guess at a delay before every call has landed.
+    private final class ProgressLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [TranscriptRediarizer.Progress] = []
+        func record(_ p: TranscriptRediarizer.Progress) {
+            lock.lock(); defer { lock.unlock() }
+            stored.append(p)
+        }
+        var phases: [TranscriptRediarizer.Progress] {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    @Test("reports decodingAudio then detectingSpeakers, with the diarizer's own fraction forwarded")
+    func progressSequenceMatchesDiarizerCallback() async throws {
+        let (transcript, cleanup) = try makeMicOnlyRecording()
+        defer { cleanup() }
+
+        let log = ProgressLog()
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: transcript, source: "local", speakerCount: 1,
+            diarizer: FakeDiarizer(),
+            onProgress: { log.record($0) })
+
+        let phases = log.phases
+        #expect(phases.contains { $0.phase == .decodingAudio })
+        // FakeDiarizer.diarize(audio:numSpeakers:progress:) calls progress(1, 2) then
+        // progress(2, 2) — both should reach here as detectingSpeakers with the matching fraction.
+        #expect(phases.contains { $0.phase == .detectingSpeakers && $0.fraction == 0.5 })
+        #expect(phases.contains { $0.phase == .detectingSpeakers && $0.fraction == 1.0 })
+    }
+}
+
 /// `AudioDecode` mirrors FluidAudio's own decode algorithm rather than calling it directly (a
 /// Swift name collision makes the real `AudioConverter` class unreachable from this module — see
 /// the type's doc comment in `TranscriptRediarizer.swift`). That reimplementation is exactly the
