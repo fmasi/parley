@@ -462,10 +462,13 @@ struct SettingsView: View {
             // #48: the key never goes into `config`/config.json — Keychain only.
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. Likewise if
-            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
-            // "" then too, and that must not be read as "user cleared it" either.
-            if apiKeyLoaded && !apiKeyLoadFailed {
+            // yet, and saving here would delete a real stored key out from under them. If the load
+            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
+            // the user has since typed a real value into the field, which is unambiguous
+            // regardless of whether the original load ever succeeded: they explicitly want that
+            // value saved, and refusing to save it would leave them stuck with no visible way to
+            // fix a broken key until they restart the app.
+            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else if summaryEndpointMissing {
@@ -477,10 +480,13 @@ struct SettingsView: View {
             config.summary = summaryConfig(enabled: false)
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. Likewise if
-            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
-            // "" then too, and that must not be read as "user cleared it" either.
-            if apiKeyLoaded && !apiKeyLoadFailed {
+            // yet, and saving here would delete a real stored key out from under them. If the load
+            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
+            // the user has since typed a real value into the field, which is unambiguous
+            // regardless of whether the original load ever succeeded: they explicitly want that
+            // value saved, and refusing to save it would leave them stuck with no visible way to
+            // fix a broken key until they restart the app.
+            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         } else {
@@ -492,10 +498,13 @@ struct SettingsView: View {
             config.summary = nil
             // Only touch the Keychain once the async load has actually resolved — before that,
             // `summaryApiKey == ""` doesn't mean the user cleared it, it means we haven't checked
-            // yet, and saving here would delete a real stored key out from under them. Likewise if
-            // the load failed outright (transient Keychain error): `summaryApiKey` still reads as
-            // "" then too, and that must not be read as "user cleared it" either.
-            if apiKeyLoaded && !apiKeyLoadFailed {
+            // yet, and saving here would delete a real stored key out from under them. If the load
+            // failed outright (transient Keychain error), `""` is ambiguous the same way — UNLESS
+            // the user has since typed a real value into the field, which is unambiguous
+            // regardless of whether the original load ever succeeded: they explicitly want that
+            // value saved, and refusing to save it would leave them stuck with no visible way to
+            // fix a broken key until they restart the app.
+            if apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty) {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         }
