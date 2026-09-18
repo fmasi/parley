@@ -30,6 +30,15 @@ struct FakeDiarizer: DiarizationProvider {
             speakerDatabase: ["S1": [1, 0, 0]]
         )
     }
+
+    func diarize(
+        audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?
+    ) async throws -> DiarizationResult {
+        DiarizationResult(
+            segments: [DiarizedSegment(start: 0, end: 5, speaker: "S1")],
+            speakerDatabase: ["S1": [1, 0, 0]]
+        )
+    }
 }
 
 struct ChunkedSessionRecoveryTests {

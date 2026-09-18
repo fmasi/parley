@@ -54,12 +54,31 @@ public actor VadSpeechMap {
             Logger.transcription.debug("VAD model not cached — skipping speech map analysis")
             return nil
         }
-
         let startTime = ContinuousClock.now
         let mgr = try await ensureLoaded()
-
         let results = try await mgr.process(audioPath)
+        return Self.regions(from: results, startTime: startTime)
+    }
 
+    /// Analyze already-decoded mono samples at the VAD's target sample rate (16 kHz).
+    ///
+    /// Exists so a caller that has already decoded the same audio for another consumer (the
+    /// diarizer, in `TranscriptRediarizer`, #204) can share that buffer here instead of handing
+    /// this actor a path and paying for a second decode of identical audio.
+    /// Returns nil if VAD model is not cached (graceful degradation), matching `analyze(audioPath:)`.
+    public func analyze(samples: [Float]) async throws -> [SpeechRegion]? {
+        guard Self.isModelCached() else {
+            Logger.transcription.debug("VAD model not cached — skipping speech map analysis")
+            return nil
+        }
+        let startTime = ContinuousClock.now
+        let mgr = try await ensureLoaded()
+        let results = try await mgr.process(samples)
+        return Self.regions(from: results, startTime: startTime)
+    }
+
+    /// Shared region-building + logging behind both `analyze` overloads above.
+    private static func regions(from results: [VadResult], startTime: ContinuousClock.Instant) -> [SpeechRegion] {
         let chunkDuration = Double(VadManager.chunkSize) / Double(VadManager.sampleRate)
         let regions = results.enumerated().map { (index, result) in
             SpeechRegion(

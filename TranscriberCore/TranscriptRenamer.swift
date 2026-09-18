@@ -85,7 +85,9 @@ public enum TranscriptRenamer {
         let metadata = json["metadata"] as? [String: Any]
         let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
+        // Prefer durations already stamped in metadata (#204) over opening every chunk file.
+        let cachedDurations = metadata?["chunk_durations"] as? [Double]
+        let chunkDurations = SpeakerSampleLocator.durations(for: layout, cached: cachedDurations)
 
         // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
         // clean speech from crosstalk.
