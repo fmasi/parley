@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 /// Errors surfaced by `KeychainStoring` implementations.
 public enum KeychainError: Error, Equatable, Sendable {
@@ -116,12 +117,18 @@ public enum SummaryAPIKeyStore {
 
     /// Stores `value`, or deletes the item when `value` is empty (the user cleared the field).
     /// Best-effort: a Keychain write failure here has no good recovery at a UI call site, so it's
-    /// swallowed rather than thrown — same posture as `ConfigManager.save()`.
+    /// not thrown — but it is logged, same posture as `ConfigManager.save()`, so a rejected write
+    /// (missing entitlement, locked, ACL) leaves a diagnostic trail instead of silently vanishing
+    /// the key until the next summary run fails with an unexplained auth error.
     public static func save(_ value: String, keychain: KeychainStoring = KeychainStore.shared) {
-        if value.isEmpty {
-            try? keychain.delete(service: service, account: account)
-        } else {
-            try? keychain.set(value, service: service, account: account)
+        do {
+            if value.isEmpty {
+                try keychain.delete(service: service, account: account)
+            } else {
+                try keychain.set(value, service: service, account: account)
+            }
+        } catch {
+            Logger.config.warning("Failed to save summary API key to Keychain: \(String(describing: error), privacy: .public)")
         }
     }
 }

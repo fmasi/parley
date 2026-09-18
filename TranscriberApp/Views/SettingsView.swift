@@ -44,8 +44,12 @@ struct SettingsView: View {
         self._summaryEnabled = State(initialValue: s?.enabled ?? false)
         self._summaryProvider = State(initialValue: s?.provider ?? .openai)
         self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
-        // #48: the key lives in the Keychain, not on `SummaryConfig` — load it separately.
-        self._summaryApiKey = State(initialValue: SummaryAPIKeyStore.load())
+        // #48: the key lives in the Keychain, not on `SummaryConfig` — load it separately, and
+        // not synchronously here: `SecItemCopyMatching` can block (iCloud Keychain sync,
+        // first-unlock state, lock contention), and this initializer runs on whatever thread
+        // SwiftUI constructs the view on. Deferred to the body-level `.task` below instead, so
+        // opening Settings is never gated on a Keychain round-trip.
+        self._summaryApiKey = State(initialValue: "")
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
         self._summaryContextOverheadPercent = State(initialValue: s?.contextOverheadPercent.map(String.init) ?? "")
@@ -90,6 +94,9 @@ struct SettingsView: View {
         // until the user happened onto the Audio tab.
         .onAppear { AudioDeviceCatalog.shared.refresh() }   // background scan, never on main (#192)
         .task {
+            // #48: load the summary API key here, not in `init`, so a slow Keychain read never
+            // blocks view construction.
+            summaryApiKey = SummaryAPIKeyStore.load()
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )

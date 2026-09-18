@@ -190,6 +190,34 @@ struct ConfigManagerTests {
         #expect(summaryJSON?["model"] as? String == "gpt-4o-mini")
     }
 
+    /// Guards against a stale-plaintext-clobbers-newer-Keychain-value regression: if the Keychain
+    /// already holds a value for the summary key (e.g. Settings saved a new one after an earlier
+    /// migration attempt wrote the Keychain but failed to strip config.json), migration must
+    /// never overwrite it with whatever plaintext is still sitting in the file.
+    @Test func migrationNeverOverwritesAnAlreadyPresentKeychainValue() throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let configFile = dir.appendingPathComponent("config.json")
+        try legacyConfigJSON(apiKey: "sk-stale-from-disk").write(to: configFile, atomically: true, encoding: .utf8)
+
+        let keychain = FakeKeychainStore()
+        // The Keychain already holds a newer value — as if Settings saved it directly, or an
+        // earlier migration attempt wrote it but never got to strip config.json.
+        try keychain.set("sk-current-from-keychain", service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+
+        let manager = ConfigManager(configDir: dir, keychainStore: keychain)
+
+        // The newer Keychain value must survive untouched...
+        #expect(SummaryAPIKeyStore.load(keychain: keychain) == "sk-current-from-keychain")
+        #expect(keychain.setCallCount == 1) // only the pre-seeded write above — migration didn't write
+
+        // ...and the stale plaintext is still stripped from config.json.
+        _ = manager
+        let rewritten = try String(contentsOf: configFile, encoding: .utf8)
+        #expect(!rewritten.contains("sk-stale-from-disk"))
+        #expect(!rewritten.contains("api_key"))
+    }
+
     @Test func migrationIsIdempotentAcrossRepeatedLaunches() throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }

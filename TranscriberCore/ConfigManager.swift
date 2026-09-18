@@ -88,14 +88,25 @@ public final class ConfigManager {
             return false
         }
 
-        do {
-            try keychain.set(plaintextKey, service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
-        } catch {
-            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
-            return false
+        // The Keychain is authoritative the moment it holds anything for this key. If an earlier
+        // migration attempt wrote the key successfully but failed to strip config.json afterward
+        // (write-back failure below), or if Settings has since saved a newer key directly, this
+        // function can be reached again with a stale plaintext value still sitting on disk. Never
+        // let that stale value clobber whatever's already in the Keychain — only write when the
+        // Keychain doesn't have a value for this (service, account) yet.
+        let alreadyInKeychain = (try? keychain.get(service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)) != nil
+        if !alreadyInKeychain {
+            do {
+                try keychain.set(plaintextKey, service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+            } catch {
+                Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
+                return false
+            }
         }
 
-        // Only reachable once the Keychain write above has succeeded.
+        // Reachable once the Keychain is confirmed to hold a value for this key — either just
+        // written above, or already there from a prior attempt/Settings save. Either way it's now
+        // safe to strip the stale plaintext copy out of config.json.
         summaryJSON.removeValue(forKey: "api_key")
         json["summary"] = summaryJSON
         guard let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else {
