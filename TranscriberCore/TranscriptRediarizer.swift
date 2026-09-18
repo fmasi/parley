@@ -379,13 +379,23 @@ public enum TranscriptRediarizer {
                 // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
                 // 10 should not wait for the remaining eight.
                 try Task.checkCancellation()
+                let role = channelRole(of: chunk, wantsLocal: wantsLocal)
                 // Reported AFTER this chunk is done (index + 1), not before: reporting before
                 // meant the bar topped out at (N-1)/N and never reached 1.0 before the phase
-                // switched to .detectingSpeakers — visibly "snapping" past the last chunk. `defer`
-                // so a `.skip` chunk (which `continue`s early) still advances the fraction.
-                defer { onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(existing.count))) }
+                // switched to .detectingSpeakers — visibly "snapping" past the last chunk.
+                //
+                // Skipped only for a `.skip` chunk: reporting it too would let the fraction climb
+                // on a recording where EVERY chunk is `.skip` (e.g. re-diarizing the remote
+                // channel of a mic-only recording) — briefly showing "100%" before the empty-
+                // `combined` guard below throws `noAudioForChannel`, which reads as decode work
+                // that never actually happened.
+                defer {
+                    if role != .skip {
+                        onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(existing.count)))
+                    }
+                }
                 let decodedChunk: [Float]
-                switch channelRole(of: chunk, wantsLocal: wantsLocal) {
+                switch role {
                 case .skip:
                     continue
                 case .useDirectly:
@@ -451,6 +461,22 @@ enum AudioDecode {
         case conversionFailed(Error?)
     }
 
+    /// A one-shot latch for an `AVAudioConverterInputBlock`'s "have I already handed out the
+    /// buffer" check.
+    ///
+    /// Not a bare `var` captured by the closure: `AVAudioConverterInputBlock` is
+    /// `@escaping @Sendable`, and Swift 6's strict-concurrency checking flags a mutable capture
+    /// of a non-Sendable local inside a `@Sendable` closure as a potential data race — even though
+    /// the converter calls this block synchronously on the calling thread, so there's no actual
+    /// race. This project isn't built under strict concurrency today, so it isn't a current build
+    /// error, but a reference type marked `@unchecked Sendable` (its true safety comes from
+    /// AVAudioConverter's documented synchronous, single-threaded callback contract, not from
+    /// anything the compiler can verify) sidesteps the check now rather than leaving it as a
+    /// surprise refactor whenever that mode is turned on.
+    private final class InputProvidedOnce: @unchecked Sendable {
+        var provided = false
+    }
+
     static func mono16kHzFloat(contentsOf url: URL) throws -> [Float] {
         let audioFile = try AVAudioFile(forReading: url)
         let format = audioFile.processingFormat
@@ -494,13 +520,13 @@ enum AudioDecode {
             throw DecodeError.converterCreationFailed
         }
 
-        var provided = false
+        let gate = InputProvidedOnce()
         let inputBlock: AVAudioConverterInputBlock = { _, status in
-            if provided {
+            if gate.provided {
                 status.pointee = .endOfStream
                 return nil
             }
-            provided = true
+            gate.provided = true
             status.pointee = .haveData
             return buffer
         }
@@ -555,13 +581,13 @@ enum AudioDecode {
         let estimatedFrames = Double(samples.count) * outputRate / inputRate
         let capacity = AVAudioFrameCount(estimatedFrames.rounded(.up)) + 4096
 
-        var provided = false
+        let gate = InputProvidedOnce()
         let inputBlock: AVAudioConverterInputBlock = { _, status in
-            if provided {
+            if gate.provided {
                 status.pointee = .endOfStream
                 return nil
             }
-            provided = true
+            gate.provided = true
             status.pointee = .haveData
             return inputBuffer
         }
