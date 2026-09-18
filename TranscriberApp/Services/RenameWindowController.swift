@@ -29,7 +29,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // synchronously on the main actor for the "this will clear your names" warning (#207).
         showTask = Task { @MainActor in
             let (speakers, channelNames) = await Task.detached(priority: .userInitiated) {
-                (Self.parseSpeakers(from: jsonPath), Self.loadChannelNames(from: jsonPath))
+                Self.parseSpeakersAndChannelNames(from: jsonPath)
             }.value
             guard !Task.isCancelled else { return }
             guard !speakers.isEmpty else {
@@ -151,6 +151,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// `parseSpeakers`, from an already-parsed transcript — see `parseSpeakersAndChannelNames`.
+    nonisolated static func parseSpeakers(json: [String: Any], minSegments: Int = 5) -> [SpeakerEntry] {
+        let collected = TranscriptRenamer.collectSpeakerSamples(
+            json: json, maxSamplesPerSpeaker: 3, minSegmentsPerSpeaker: minSegments)
+        return collected.map { SpeakerEntry(id: $0.id, displayName: $0.id, samples: $0.samples) }
+    }
+
     /// The `speaker_names` already saved for each channel, keyed "local"/"remote" (#207).
     ///
     /// Read ONCE (here, off-main, alongside `parseSpeakers`) instead of by the dialog re-reading
@@ -159,13 +166,41 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// source:)` takes already-parsed metadata and does no I/O of its own.
     nonisolated static func loadChannelNames(from jsonPath: URL) -> [String: [String: String]] {
         guard let data = try? Data(contentsOf: jsonPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let metadata = json["metadata"] as? [String: Any]
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [:] }
+        return loadChannelNames(json: json)
+    }
+
+    /// `loadChannelNames`, from an already-parsed transcript — see `parseSpeakersAndChannelNames`.
+    nonisolated static func loadChannelNames(json: [String: Any]) -> [String: [String: String]] {
+        guard let metadata = json["metadata"] as? [String: Any] else { return [:] }
         return [
             "local": TranscriptRediarizer.channelNames(in: metadata, source: "local"),
             "remote": TranscriptRediarizer.channelNames(in: metadata, source: "remote"),
         ]
+    }
+
+    /// `parseSpeakers` and `loadChannelNames` combined behind a SINGLE `Data(contentsOf:)` +
+    /// JSON parse of the transcript, instead of each independently re-reading the same file.
+    ///
+    /// Both `show()` here and `RenameDialog`'s post-re-detect refresh need both results from the
+    /// same transcript at the same moment — a stale-out-of-sync pair between two separate reads
+    /// is unlikely but not impossible if something rewrites the file between them. More
+    /// concretely, a recording directory can be iCloud-mounted, where `Data(contentsOf:)` blocks
+    /// on the network per call — halving the round trips halves that latency.
+    ///
+    /// An unreadable/unparseable transcript degrades to `([], [:])`, matching what the two
+    /// individual URL-based helpers above would have returned on the same failure.
+    nonisolated static func parseSpeakersAndChannelNames(
+        from jsonPath: URL, minSegments: Int = 5
+    ) -> (speakers: [SpeakerEntry], channelNames: [String: [String: String]]) {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .sensitive)")
+            return ([], [:])
+        }
+        return (parseSpeakers(json: json, minSegments: minSegments), loadChannelNames(json: json))
     }
 
     // MARK: - Generate Format File

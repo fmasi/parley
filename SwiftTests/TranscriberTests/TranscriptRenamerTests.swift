@@ -304,6 +304,29 @@ struct TranscriptRenamerTests {
         #expect(sample.end == 6.0)
     }
 
+    /// The json-based overload exists so `RenameWindowController`/`RenameDialog` can read a
+    /// transcript ONCE and get both speakers and channel names from it (#207 follow-up) — it
+    /// must behave identically to the URL-based entry point for the same content.
+    @Test func collectFromParsedJSONMatchesCollectFromURL() throws {
+        let url = try writeTranscript(
+            segments: [seg("Remote Speaker 1", "hello there", start: 0, end: 2)]
+        )
+        let fromURL = try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 1)
+        let fromJSON = TranscriptRenamer.collectSpeakerSamples(json: try readJSON(url), maxSamplesPerSpeaker: 1)
+
+        #expect(fromJSON.count == fromURL.count)
+        #expect(fromJSON.map { $0.id } == fromURL.map { $0.id })
+        #expect(fromJSON.first?.samples.first?.text == fromURL.first?.samples.first?.text)
+    }
+
+    /// Unlike the URL-based entry point (`collectThrowsOnNonTranscriptJSON` below), the json-based
+    /// overload has no way to throw — a dict with no `segments` key degrades to `[]`, because its
+    /// caller has already committed to treating the dict as a transcript by the time it gets here.
+    @Test func collectFromParsedJSONWithNoSegmentsYieldsEmptyNotAThrow() {
+        let collected = TranscriptRenamer.collectSpeakerSamples(json: ["foo": 1], maxSamplesPerSpeaker: 1)
+        #expect(collected.isEmpty)
+    }
+
     @Test func collectThrowsOnNonTranscriptJSON() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("renamer-test-\(UUID().uuidString)")

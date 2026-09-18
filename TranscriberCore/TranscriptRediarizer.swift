@@ -229,6 +229,10 @@ public enum TranscriptRediarizer {
             // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
             // available on this route either, but the coarser phase indicator still applies.
             raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+            // Same reasoning as the `.samples` branch above: catches a cancel that arrives between
+            // the diarizer finishing and the VAD starting. The `try?` on the VAD call below is NOT
+            // just defensive error-swallowing — it's the other half of this design, absorbing a
+            // CancellationError that fires mid-VAD instead of surfacing it as a failure.
             try Task.checkCancellation()
             speechMap = try? await VadSpeechMap().analyze(audioPath: audioURL)
         }

@@ -73,11 +73,35 @@ public enum TranscriptRenamer {
         guard let data = try? Data(contentsOf: jsonPath) else {
             throw RenameError.cannotRead
         }
+        // Checked here, not in the json-based overload below: THIS entry point's contract is "a
+        // transcript JSON, or throw" — a dict with no `segments` key at all isn't a transcript, so
+        // it stays an error here. The json-based overload has a looser contract (an already-parsed
+        // transcript that just happens to have no segments IS valid, e.g. one #207 read alongside
+        // metadata that also lacks any), so it degrades to `[]` instead.
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let segments = json["segments"] as? [[String: Any]]
+              json["segments"] is [[String: Any]]
         else {
             throw RenameError.invalidJSON
         }
+        return collectSpeakerSamples(
+            json: json, maxSamplesPerSpeaker: maxSamplesPerSpeaker, minSegmentsPerSpeaker: minSegmentsPerSpeaker)
+    }
+
+    /// Same as `collectSpeakerSamples(from:...)`, but from an already-read-and-parsed transcript.
+    ///
+    /// Exists so a caller that ALSO needs `channelNames(in:source:)`-style metadata from the same
+    /// transcript (`RenameWindowController`/`RenameDialog`, #207) can read and parse the file once
+    /// and hand the same dictionary to both, instead of two independent `Data(contentsOf:)` round
+    /// trips to what can be an iCloud-mounted, network-backed path. A missing `segments` array is
+    /// not an error here — an empty transcript yields no speakers, not a throw — since the URL-based
+    /// overload above already turned "not parseable at all" into `RenameError.invalidJSON` before
+    /// reaching this point.
+    public static func collectSpeakerSamples(
+        json: [String: Any],
+        maxSamplesPerSpeaker: Int,
+        minSegmentsPerSpeaker: Int = 1
+    ) -> [RenameableSpeaker] {
+        guard let segments = json["segments"] as? [[String: Any]] else { return [] }
 
         // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
         // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that

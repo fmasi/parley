@@ -292,15 +292,14 @@ struct RenameDialog: View {
                 // AVAudioFile per chunk to measure durations, and this `Task` inherits the view's
                 // MainActor, so running it inline stalls the UI for O(chunks) file opens — right
                 // when the dialog is meant to be showing progress.
+                // minSegments: 1 — the user has just stated how many people are on this channel.
+                // Dropping one of them as "diarization noise" for being quiet contradicts the
+                // answer they gave and leaves a speaker they can see in the transcript with no row
+                // to name. A single combined read (not two independent ones) for the same reason
+                // as `RenameWindowController.show` — one round trip to what can be an
+                // iCloud-mounted path instead of two.
                 let (refreshed, namesNow) = await Task.detached(priority: .userInitiated) {
-                    // minSegments: 1 — the user has just stated how many people are on this
-                    // channel. Dropping one of them as "diarization noise" for being quiet
-                    // contradicts the answer they gave and leaves a speaker they can see in the
-                    // transcript with no row to name.
-                    (
-                        RenameWindowController.parseSpeakers(from: path, minSegments: 1),
-                        RenameWindowController.loadChannelNames(from: path)
-                    )
+                    RenameWindowController.parseSpeakersAndChannelNames(from: path, minSegments: 1)
                 }.value
                 await MainActor.run {
                     if refreshed.isEmpty {
