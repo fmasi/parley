@@ -110,9 +110,16 @@ public enum SummaryAPIKeyStore {
     /// Returns the stored key, or `""` if none is stored or the lookup fails. Callers already
     /// treat an empty string as "no key" throughout this codebase (see the summary providers'
     /// `Authorization` header logic), so this mirrors that instead of surfacing
-    /// `Optional`/`throws` at every call site.
+    /// `Optional`/`throws` at every call site. A lookup failure (as opposed to a clean "nothing
+    /// stored") is logged, same posture as `save()` — otherwise the first symptom a user sees is
+    /// a summary run failing with an unexplained auth error, with no trail back to the Keychain.
     public static func load(keychain: KeychainStoring = KeychainStore.shared) -> String {
-        (try? keychain.get(service: service, account: account)) ?? ""
+        do {
+            return try keychain.get(service: service, account: account) ?? ""
+        } catch {
+            Logger.config.warning("Failed to load summary API key from Keychain: \(String(describing: error), privacy: .public)")
+            return ""
+        }
     }
 
     /// Stores `value`, or deletes the item when `value` is empty (the user cleared the field).

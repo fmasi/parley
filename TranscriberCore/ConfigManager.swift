@@ -94,14 +94,24 @@ public final class ConfigManager {
         // function can be reached again with a stale plaintext value still sitting on disk. Never
         // let that stale value clobber whatever's already in the Keychain — only write when the
         // Keychain doesn't have a value for this (service, account) yet.
-        let alreadyInKeychain = (try? keychain.get(service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)) != nil
-        if !alreadyInKeychain {
-            do {
+        //
+        // The lookup and the write share one `do`/`catch`, not `try?` on the lookup: `try?` on a
+        // `throws -> String?` collapses "no value" and "the Keychain call itself failed" to the
+        // same `nil`, which would treat a transient read failure as "nothing stored" and proceed
+        // to overwrite a value that may still be there. Any failure here — lookup or write —
+        // aborts the whole migration for this launch instead of guessing.
+        let wroteToKeychain: Bool
+        do {
+            let existing = try keychain.get(service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+            if existing == nil {
                 try keychain.set(plaintextKey, service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
-            } catch {
-                Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
-                return false
+                wroteToKeychain = true
+            } else {
+                wroteToKeychain = false
             }
+        } catch {
+            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
+            return false
         }
 
         // Reachable once the Keychain is confirmed to hold a value for this key — either just
@@ -120,7 +130,11 @@ public final class ConfigManager {
             return false
         }
 
-        Logger.config.info("Migrated summary API key from config.json to Keychain")
+        if wroteToKeychain {
+            Logger.config.info("Migrated summary API key from config.json to Keychain")
+        } else {
+            Logger.config.info("Removed stale plaintext summary API key from config.json — Keychain already had a value")
+        }
         return true
     }
 }

@@ -95,8 +95,13 @@ struct SettingsView: View {
         .onAppear { AudioDeviceCatalog.shared.refresh() }   // background scan, never on main (#192)
         .task {
             // #48: load the summary API key here, not in `init`, so a slow Keychain read never
-            // blocks view construction.
-            summaryApiKey = SummaryAPIKeyStore.load()
+            // blocks view construction. `.task` alone isn't enough on its own — it inherits this
+            // view's @MainActor isolation, so a synchronous SecItemCopyMatching call would still
+            // run on the main thread here. Hop to a detached task for the actual Keychain read;
+            // only the state assignment needs to be back on the main actor.
+            summaryApiKey = await Task.detached(priority: .userInitiated) {
+                SummaryAPIKeyStore.load()
+            }.value
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )
