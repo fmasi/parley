@@ -325,7 +325,10 @@ public enum TranscriptRediarizer {
 
     /// What `decodeChannelAudio` hands back: either pre-decoded samples ready to share between
     /// the diarizer and VAD, or a path for them to decode themselves.
-    enum DecodedChannelAudio {
+    ///
+    /// Never returned from a `public` API — `private` keeps it out of the module's internal
+    /// namespace and signals that intent to future readers.
+    private enum DecodedChannelAudio {
         case samples([Float])
         case path(URL)
     }
@@ -366,7 +369,11 @@ public enum TranscriptRediarizer {
                 // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
                 // 10 should not wait for the remaining eight.
                 try Task.checkCancellation()
-                onProgress?(Progress(phase: .decodingAudio, fraction: Double(index) / Double(existing.count)))
+                // Reported AFTER this chunk is done (index + 1), not before: reporting before
+                // meant the bar topped out at (N-1)/N and never reached 1.0 before the phase
+                // switched to .detectingSpeakers — visibly "snapping" past the last chunk. `defer`
+                // so a `.skip` chunk (which `continue`s early) still advances the fraction.
+                defer { onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(existing.count))) }
                 switch channelRole(of: chunk, wantsLocal: wantsLocal) {
                 case .skip:
                     continue
@@ -398,6 +405,14 @@ public enum TranscriptRediarizer {
 /// chunks, mix to mono Float32 if needed, then one `AVAudioConverter` pass to 16 kHz) — the same
 /// system `AVAudioConverter` API, called with the same target format, so the result matches what
 /// FluidAudio's own converter would have produced for the same file.
+///
+/// Not streaming end-to-end: the whole file is read into `monoSamples` at its NATIVE rate first,
+/// then resampled to 16 kHz in one pass — so a chunk's peak memory is roughly 2x its native-rate
+/// decoded size (the native-rate buffer plus `resample`'s same-size input copy and smaller output
+/// buffer, briefly coexisting). For a 5-minute 48 kHz chunk that's tens of MB, not gigabytes, and
+/// each chunk is freed before the next one is decoded (`decodeChannelAudio`'s loop), so this
+/// doesn't accumulate across a long recording — just worth naming so a future reader doesn't
+/// wonder why this isn't reading in 16kHz-sized pieces throughout.
 enum AudioDecode {
     static let targetSampleRate: Double = 16000
 
@@ -413,6 +428,8 @@ enum AudioDecode {
         let format = audioFile.processingFormat
         let chunkSize = max(4096, Int(format.sampleRate))
         var monoSamples: [Float] = []
+        // Capacity at the file's NATIVE sample rate — the size of THIS intermediate buffer, not
+        // the smaller post-resample result (3x smaller for a 48kHz source going to 16kHz).
         monoSamples.reserveCapacity(Int(audioFile.length))
 
         while audioFile.framePosition < audioFile.length {

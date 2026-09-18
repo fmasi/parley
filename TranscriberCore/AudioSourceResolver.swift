@@ -53,7 +53,12 @@ public enum AudioSourceResolver {
         let (local, remote) = try await split(
             stereoAac: stereoAac, outputDirectory: outputDirectory, wantLocal: true, wantRemote: true)
         // Both were requested, so both are guaranteed non-nil by `split(...)` — see its contract.
-        return (local: local!, remote: remote!)
+        // A `preconditionFailure` here (rather than a bare force-unwrap) means a future change to
+        // that contract crashes with a message naming the violation, not an unlabeled trap.
+        guard let local, let remote else {
+            preconditionFailure("split(wantLocal:true, wantRemote:true) returned nil — contract violation")
+        }
+        return (local: local, remote: remote)
     }
 
     /// Write ONLY the requested channel as a mono WAV, skipping the decode and write of the other
@@ -70,7 +75,10 @@ public enum AudioSourceResolver {
             stereoAac: stereoAac, outputDirectory: outputDirectory,
             wantLocal: wantLocal, wantRemote: !wantLocal)
         // Exactly one of these is guaranteed non-nil, matching `wantLocal` — see `split(...)`.
-        return wantLocal ? local! : remote!
+        guard let result = wantLocal ? local : remote else {
+            preconditionFailure("split returned nil for the requested channel — contract violation")
+        }
+        return result
     }
 
     /// Shared implementation behind `splitChannels` and `splitChannel`.
