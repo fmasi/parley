@@ -20,6 +20,19 @@ struct RenameDialog: View {
     @State private var speakerCounts: [String: Int] = [:]  // "local"/"remote" → user-stated count
     @State private var rediarizing: String?                // channel currently being re-detected
     @State private var rediarizeError: String?
+    /// Live progress for the channel in `rediarizing`, so the row shows more than a bare spinner
+    /// on an operation that can take minutes (#203). A local phase list, not
+    /// `TranscriptRediarizer.Progress.Phase` directly: "Rebuilding list" happens here in the
+    /// dialog (re-reading the rewritten transcript into rows), after `rediarize` itself returns,
+    /// so Core has no phase for it.
+    private enum RediarizePhase: Equatable {
+        case decodingAudio
+        case detectingSpeakers
+        case rebuildingList
+    }
+    @State private var rediarizePhase: RediarizePhase?
+    @State private var rediarizeFraction: Double?
+    @State private var rediarizeStartedAt: Date?
     /// One instance for the dialog's lifetime. `FluidAudioDiarizer` caches a loaded manager per
     /// speaker count, and a fresh instance per press would throw that away — re-loading the models
     /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
@@ -27,6 +40,11 @@ struct RenameDialog: View {
     /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
     /// outlives the dialog and rewrites the transcript after the user asked it not to.
     @State private var rediarizeTask: Task<Void, Never>?
+    /// The `speaker_names` already saved per channel, loaded ONCE by `RenameWindowController` when
+    /// the dialog was opened, rather than re-read from disk on every "Re-detect" press (#207).
+    /// Refreshed after a successful re-detect, since names may have changed (cleared on this
+    /// channel; untouched on the other).
+    @State private var cachedChannelNames: [String: [String: String]]
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -35,11 +53,13 @@ struct RenameDialog: View {
     init(
         jsonPath: URL,
         speakers: [SpeakerEntry],
+        initialChannelNames: [String: [String: String]] = [:],
         onSave: @escaping ([String: String]) -> Void,
         onCancel: @escaping () -> Void = {}
     ) {
         self.jsonPath = jsonPath
         self._speakers = State(initialValue: speakers)
+        self._cachedChannelNames = State(initialValue: initialChannelNames)
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -107,7 +127,7 @@ struct RenameDialog: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         if rediarizing == channel {
-                            ProgressView().controlSize(.small)
+                            rediarizeStatus
                         } else {
                             Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
@@ -123,6 +143,44 @@ struct RenameDialog: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// Phase + elapsed + (when known) a fraction, plus a Cancel that only aborts THIS operation —
+    /// distinct from the dialog-level Cancel button, which also dismisses the whole panel (#203).
+    /// Cancellation is already handled correctly by `rediarize(channel:count:)` (a `CancellationError`
+    /// is treated as success, not failure); this is what makes it reachable and visible.
+    @ViewBuilder
+    private var rediarizeStatus: some View {
+        HStack(spacing: 6) {
+            if let rediarizeFraction {
+                ProgressView(value: rediarizeFraction).controlSize(.small).frame(width: 50)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(rediarizePhaseLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let rediarizeStartedAt {
+                    Text(rediarizeStartedAt, style: .timer)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Button("Cancel") { rediarizeTask?.cancel() }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var rediarizePhaseLabel: String {
+        switch rediarizePhase {
+        case .none: return "Starting…"
+        case .decodingAudio: return "Splitting audio…"
+        case .detectingSpeakers: return "Detecting speakers…"
+        case .rebuildingList: return "Rebuilding list…"
         }
     }
 
@@ -153,10 +211,10 @@ struct RenameDialog: View {
             return !typed.isEmpty && typed != speaker.id
         }
         if unsaved { return true }
-        // Reads the transcript on the main thread, deliberately: it happens once per button press,
-        // on a file the re-diarize is about to read anyway, and the answer gates a modal that must
-        // appear before any work starts.
-        return !TranscriptRediarizer.channelNames(inTranscriptAt: jsonPath, source: channel).isEmpty
+        // From the cache loaded once when the dialog appeared, not a fresh read of the transcript
+        // (#207) — `recording_directory` can be network- or iCloud-backed, and a synchronous read
+        // on every button press blocks the main thread for as long as the mount takes to answer.
+        return !(cachedChannelNames[channel] ?? [:]).isEmpty
     }
 
     /// Ask before clearing names (#202).
@@ -193,6 +251,9 @@ struct RenameDialog: View {
     private func rediarize(channel: String, count: Int) {
         rediarizing = channel
         rediarizeError = nil
+        rediarizePhase = nil
+        rediarizeFraction = nil
+        rediarizeStartedAt = Date()
         stopPlayback()
         let path = jsonPath
         let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
@@ -203,20 +264,43 @@ struct RenameDialog: View {
                     source: channel,
                     speakerCount: count,
                     diarizer: diarizer,
-                    vadSpeechThreshold: vadThreshold
+                    vadSpeechThreshold: vadThreshold,
+                    // Fires from off-main work (chunk decode loop, the diarizer's own background
+                    // progress callback) — hop back to the main actor per update rather than
+                    // requiring the whole signature be @MainActor, which the diarizer isn't.
+                    onProgress: { progress in
+                        Task { @MainActor in
+                            guard rediarizing == channel else { return }
+                            switch progress.phase {
+                            case .decodingAudio: rediarizePhase = .decodingAudio
+                            case .detectingSpeakers: rediarizePhase = .detectingSpeakers
+                            }
+                            rediarizeFraction = progress.fraction
+                        }
+                    }
                 )
+                await MainActor.run {
+                    rediarizePhase = .rebuildingList
+                    rediarizeFraction = nil
+                }
                 // Rebuild the rows from the rewritten transcript: labels, sample text and the
-                // resolved audio offsets can all have moved.
-                // Detached, matching `RenameWindowController.openRenameDialog`: `parseSpeakers`
-                // opens an AVAudioFile per chunk to measure durations, and this `Task` inherits the
-                // view's MainActor, so running it inline stalls the UI for O(chunks) file opens —
-                // right when the dialog is meant to be showing a spinner.
-                let refreshed = await Task.detached(priority: .userInitiated) {
+                // resolved audio offsets can all have moved. Also reload the channel-names cache
+                // (#207) — the channel just re-diarized had its names cleared, and the other
+                // channel is unaffected but re-reading both keeps the cache one honest snapshot
+                // rather than hand-patching just the changed side.
+                // Detached, matching `RenameWindowController.show`: `parseSpeakers` opens an
+                // AVAudioFile per chunk to measure durations, and this `Task` inherits the view's
+                // MainActor, so running it inline stalls the UI for O(chunks) file opens — right
+                // when the dialog is meant to be showing progress.
+                let (refreshed, namesNow) = await Task.detached(priority: .userInitiated) {
                     // minSegments: 1 — the user has just stated how many people are on this
                     // channel. Dropping one of them as "diarization noise" for being quiet
                     // contradicts the answer they gave and leaves a speaker they can see in the
                     // transcript with no row to name.
-                    RenameWindowController.parseSpeakers(from: path, minSegments: 1)
+                    (
+                        RenameWindowController.parseSpeakers(from: path, minSegments: 1),
+                        RenameWindowController.loadChannelNames(from: path)
+                    )
                 }.value
                 await MainActor.run {
                     if refreshed.isEmpty {
@@ -227,16 +311,23 @@ struct RenameDialog: View {
                     } else {
                         speakers = refreshed
                     }
+                    cachedChannelNames = namesNow
                     sampleIndices = [:]
                     // Drop the stated count so the stepper falls back to what the diarizer actually
                     // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,
                     // which reads as a result rather than as the request it was.
                     speakerCounts[channel] = nil
                     rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeStartedAt = nil
                 }
             } catch is CancellationError {
                 // The user asked for this. Reporting it as a failure would make Cancel look broken.
-                await MainActor.run { rediarizing = nil }
+                await MainActor.run {
+                    rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeStartedAt = nil
+                }
             } catch {
                 // .private: OS errors routinely embed full filesystem paths in their messages,
                 // and a recording's path names the meeting.
@@ -249,6 +340,8 @@ struct RenameDialog: View {
                     rediarizeError = (error as? TranscriptRediarizer.RediarizeError)?.errorDescription
                         ?? "Re-detection failed. See Console for details."
                     rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeStartedAt = nil
                 }
             }
         }
