@@ -123,6 +123,13 @@ public enum MeetingSummarizer {
             default:
                 return .failed("Summary request failed: \(error.localizedDescription)")
             }
+        } catch is CancellationError {
+            // Swift's structured-concurrency cancellation (Task.checkCancellation(), app quitting,
+            // the stop path tearing the task down) throws this distinct type — separate from
+            // `URLError.cancelled` above — but it's the same "user did this on purpose" case, so it
+            // gets the same non-`.failed` treatment (#191, same misdirection as #173's URLError case).
+            Logger.transcription.info("Summary cancelled — transcript is untouched")
+            return .cancelled
         } catch {
             // A non-SummaryError, non-URLError here is a file read/write failure (transcript
             // unreadable, summary write failed). CocoaError's description embeds the
