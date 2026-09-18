@@ -34,21 +34,26 @@ final class LivenessWatchdogDriver {
     /// paths with no shared lock, so a concurrent `stop()`+`stop()` or `start()`+`stop()` would be
     /// an unsynchronised read/write on `timer`. Serializing both onto `queue` (already the timer's
     /// own serial queue, and never touched by `tick()` itself) fixes the race without adding a
-    /// separate lock.
+    /// separate lock. Dispatched `async`, not `sync`: `start()` is called from inside a Swift
+    /// `Task`, and a synchronous `queue.sync` there would block a cooperative-thread-pool thread —
+    /// nothing requires the caller to wait for the timer to actually be armed before proceeding,
+    /// and `async` onto the same serial queue still fully serializes the mutations relative to
+    /// every other `start`/`stop` call.
     func start() {
-        queue.sync {
-            stopLocked()
-            let t = DispatchSource.makeTimerSource(queue: queue)
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.stopLocked()
+            let t = DispatchSource.makeTimerSource(queue: self.queue)
             t.schedule(deadline: .now() + 1, repeating: 1)
             t.setEventHandler { [weak self] in self?.tick() }
-            timer = t
+            self.timer = t
             t.resume()
         }
     }
 
     /// Idempotent.
     func stop() {
-        queue.sync { stopLocked() }
+        queue.async { [weak self] in self?.stopLocked() }
     }
 
     /// Must only be called while already running on `queue`.

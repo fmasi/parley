@@ -143,12 +143,15 @@ public final class WavFileWriter {
             // `seekToEnd` must run even if `writeHeader` throws, or the file
             // pointer is left near offset 0 and the next append writes audio samples into the
             // RIFF header area, overwriting it with PCM data. If `seekToEnd` itself fails (rare —
-            // a degraded volume) the same corruption risk applies with nothing left to catch it
-            // (the one-shot `onWriteFailure` latch may already be spent from `writeHeader`
-            // succeeding cleanly) — at minimum log it so the diagnostic ring has a record.
+            // a degraded volume) the same corruption risk applies on the NEXT write, at whatever
+            // offset writeHeader left the pointer at (byte 44 on the common case where writeHeader
+            // itself succeeded) — surface it exactly like any other write failure. The
+            // `onWriteFailure` latch is NOT yet spent here when `writeHeader` succeeded, so this
+            // reaches the user-visible banner before that next write makes the corruption worse.
             defer {
                 do { try fileHandle.seekToEnd() } catch {
                     Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")
+                    noteWriteFailure(error, context: "seekToEnd")
                 }
             }
             try writeHeader(sampleRate: rate, channels: channelCount, dataSize: dataByteCount)
