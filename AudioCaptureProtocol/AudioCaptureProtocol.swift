@@ -69,6 +69,13 @@ import Foundation
     func captureSystemAudioUnrecoverable(reason: String)
     /// The mic auto-switched to a new device — `deviceId` is the new device UID (nil = system default).
     @objc optional func micDeviceChanged(to deviceId: String?)
+    /// A live, user-facing capture-quality anomaly was detected WHILE the recording is still
+    /// running — an exact-zero mic run, a liveness gap on either track, or a disk-full write
+    /// failure (#193/#196). `kind` is the `CaptureEventKind` raw value (already recorded into the
+    /// helper's diagnostic ring by the call site that fired this); `message` is a human-readable,
+    /// user-facing description for the banner. Optional so an older app build talking to a newer
+    /// helper (or vice versa) doesn't crash on an unrecognized selector.
+    @objc optional func captureQualityAnomaly(kind: String, message: String)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.
