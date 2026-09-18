@@ -43,11 +43,11 @@ struct LaunchAgentManagerTests {
 
     // MARK: - install
 
-    @Test func installWritesPlistFile() throws {
+    @Test func installWritesPlistFile() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
 
-        try LaunchAgentManager.install(
+        try await LaunchAgentManager.install(
             executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false
@@ -65,12 +65,12 @@ struct LaunchAgentManagerTests {
 
     // MARK: - uninstall
 
-    @Test func uninstallRemovesPlistFile() throws {
+    @Test func uninstallRemovesPlistFile() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
 
         // First install
-        try LaunchAgentManager.install(
+        try await LaunchAgentManager.install(
             executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false
@@ -80,7 +80,7 @@ struct LaunchAgentManagerTests {
         #expect(FileManager.default.fileExists(atPath: plistURL.path))
 
         // Now uninstall
-        LaunchAgentManager.uninstall(launchAgentsDir: dir, unloadAgent: false)
+        await LaunchAgentManager.uninstall(launchAgentsDir: dir, unloadAgent: false)
 
         #expect(!FileManager.default.fileExists(atPath: plistURL.path))
     }
@@ -94,11 +94,11 @@ struct LaunchAgentManagerTests {
         #expect(!LaunchAgentManager.isInstalled(launchAgentsDir: dir))
     }
 
-    @Test func isInstalledReturnsTrueAfterInstall() throws {
+    @Test func isInstalledReturnsTrueAfterInstall() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
 
-        try LaunchAgentManager.install(
+        try await LaunchAgentManager.install(
             executablePath: "/Applications/Transcriber.app/Contents/MacOS/Parley",
             launchAgentsDir: dir,
             loadAgent: false

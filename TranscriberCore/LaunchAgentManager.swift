@@ -51,6 +51,10 @@ public enum LaunchAgentManager {
 
     /// Installs the LaunchAgent plist and optionally loads it with `launchctl`.
     ///
+    /// Async (#197): `launchctl load` is a subprocess wait (`Process.waitUntilExit`), and this is
+    /// called from app launch. The wait itself runs off the main thread; this suspends without
+    /// blocking it.
+    ///
     /// - Parameters:
     ///   - executablePath: Path to the app executable. Defaults to `Bundle.main.executablePath`.
     ///   - launchAgentsDir: Directory to write the plist into. Defaults to `~/Library/LaunchAgents`.
@@ -59,7 +63,7 @@ public enum LaunchAgentManager {
         executablePath: String? = nil,
         launchAgentsDir: URL? = nil,
         loadAgent: Bool = true
-    ) throws {
+    ) async throws {
         let exePath = executablePath ?? Bundle.main.executablePath ?? Bundle.main.bundlePath
         let agentsDir = launchAgentsDir ?? defaultLaunchAgentsDir()
 
@@ -72,7 +76,7 @@ public enum LaunchAgentManager {
         Logger.config.info("LaunchAgentManager: wrote plist to \(plistURL.path)")
 
         if loadAgent {
-            runLaunchctl(args: ["load", "-w", plistURL.path])
+            _ = await runLaunchctl(args: ["load", "-w", plistURL.path])
         }
     }
 
@@ -80,18 +84,26 @@ public enum LaunchAgentManager {
 
     /// Unloads the LaunchAgent and removes the plist file.
     ///
+    /// Async (#197): see `install` above — the same subprocess-wait concern applies here, called
+    /// on Quit. CAUTION: on a launchd-spawned instance (post-crash relaunch), `launchctl unload`
+    /// sends this very process SIGTERM — the default action terminates it immediately, wherever
+    /// execution currently is, so nothing after that point in the caller (including the removal
+    /// below, or a subsequent `NSApplication.terminate(nil)`) runs. That was already true when the
+    /// wait was synchronous on main, and stays true here: the signal is process-wide, not
+    /// thread-specific, so moving the wait off main does not change which lines execute.
+    ///
     /// - Parameters:
     ///   - launchAgentsDir: Directory containing the plist. Defaults to `~/Library/LaunchAgents`.
     ///   - unloadAgent: When `true`, calls `launchctl unload` before removing the plist. Pass `false` in tests.
     public static func uninstall(
         launchAgentsDir: URL? = nil,
         unloadAgent: Bool = true
-    ) {
+    ) async {
         let agentsDir = launchAgentsDir ?? defaultLaunchAgentsDir()
         let plistURL = agentsDir.appendingPathComponent(plistName)
 
         if unloadAgent && FileManager.default.fileExists(atPath: plistURL.path) {
-            runLaunchctl(args: ["unload", "-w", plistURL.path])
+            _ = await runLaunchctl(args: ["unload", "-w", plistURL.path])
         }
 
         do {
@@ -118,20 +130,26 @@ public enum LaunchAgentManager {
             .appendingPathComponent("Library/LaunchAgents")
     }
 
+    /// Runs `launchctl` and awaits it, off the main thread (#197): `Process.waitUntilExit()` is a
+    /// blocking, synchronous wait, and this used to run straight on main at both launch and Quit.
     @discardableResult
-    private static func runLaunchctl(args: [String]) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = args
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let status = process.terminationStatus
-            Logger.config.info("LaunchAgentManager: launchctl \(args.joined(separator: " ")) → \(status)")
-            return status
-        } catch {
-            Logger.config.error("LaunchAgentManager: launchctl failed: \(error.localizedDescription)")
-            return -1
+    private static func runLaunchctl(args: [String]) async -> Int32 {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                process.arguments = args
+                do {
+                    try process.run()
+                    process.waitUntilExit()   // off main: the caller is suspended, not blocked
+                    let status = process.terminationStatus
+                    Logger.config.info("LaunchAgentManager: launchctl \(args.joined(separator: " ")) → \(status)")
+                    continuation.resume(returning: status)
+                } catch {
+                    Logger.config.error("LaunchAgentManager: launchctl failed: \(error.localizedDescription)")
+                    continuation.resume(returning: -1)
+                }
+            }
         }
     }
 }

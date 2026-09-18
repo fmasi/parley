@@ -184,7 +184,11 @@ struct TranscriberApp: App {
         }
 
         if !LaunchAgentManager.isInstalled() {
-            try? LaunchAgentManager.install()
+            // Async (#197): `launchctl load` is a subprocess wait; off main so app launch never
+            // blocks on it.
+            Task.detached(priority: .utility) {
+                try? await LaunchAgentManager.install()
+            }
         }
     }
 
@@ -531,8 +535,13 @@ private struct SetupRequiredPanel: View {
             Divider()
 
             MenuActionRow(icon: "power", title: "Quit Parley") {
-                LaunchAgentManager.uninstall()
-                NSApplication.shared.terminate(nil)
+                // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never
+                // blocks on it. (On a launchd-spawned instance, `unload` SIGTERMs this process
+                // before these lines finish — expected, see LaunchAgentManager.)
+                Task {
+                    await LaunchAgentManager.uninstall()
+                    await MainActor.run { NSApplication.shared.terminate(nil) }
+                }
             }
             .keyboardShortcut("q")
         }

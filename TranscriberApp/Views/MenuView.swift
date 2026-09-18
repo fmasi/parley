@@ -136,8 +136,13 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    LaunchAgentManager.uninstall()
-                    NSApplication.shared.terminate(nil)
+                    // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit
+                    // never blocks on it. (On a launchd-spawned instance, `unload` SIGTERMs this
+                    // process before these lines finish — expected, see LaunchAgentManager.)
+                    Task {
+                        await LaunchAgentManager.uninstall()
+                        await MainActor.run { NSApplication.shared.terminate(nil) }
+                    }
                 }
                 .keyboardShortcut("q")
             }
