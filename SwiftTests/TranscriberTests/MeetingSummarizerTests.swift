@@ -231,10 +231,13 @@ struct MeetingSummarizerTests {
     // that the provider-injected runSummary tests wouldn't catch.
     @Test func summarizeIfConfiguredReportsFailureWhenProviderFails() async {
         var config = Config.default
-        config.summary = SummaryConfig(enabled: true, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        config.summary = SummaryConfig(enabled: true, endpoint: "http://127.0.0.1:1234", model: "m")
         // Nonexistent transcript → parseTranscript throws → runSummary returns .failed (no network).
+        // Explicit fake Keychain (#48): summarizeIfConfigured now looks up the API key before
+        // building the provider, and this must never touch the real macOS Keychain in a test.
         let outcome = await MeetingSummarizer.summarizeIfConfigured(
-            transcriptPath: URL(fileURLWithPath: "/tmp/no-such-file-\(UUID().uuidString).json"), config: config)
+            transcriptPath: URL(fileURLWithPath: "/tmp/no-such-file-\(UUID().uuidString).json"),
+            config: config, keychain: FakeKeychainStore())
         guard case .failed = outcome else {
             Issue.record("expected .failed, got \(outcome)")
             return
@@ -245,15 +248,15 @@ struct MeetingSummarizerTests {
         var config = Config.default
         config.summary = nil
         let outcome = await MeetingSummarizer.summarizeIfConfigured(
-            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config, keychain: FakeKeychainStore())
         #expect(outcome == .skipped)
     }
 
     @Test func summarizeIfConfiguredSkipsWhenDisabled() async {
         var config = Config.default
-        config.summary = SummaryConfig(enabled: false, endpoint: "http://127.0.0.1:1234", apiKey: "", model: "m")
+        config.summary = SummaryConfig(enabled: false, endpoint: "http://127.0.0.1:1234", model: "m")
         let outcome = await MeetingSummarizer.summarizeIfConfigured(
-            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config, keychain: FakeKeychainStore())
         #expect(outcome == .skipped)
     }
 
@@ -285,9 +288,9 @@ struct MeetingSummarizerTests {
 
     @Test func summarizeIfConfiguredSkipsWhenEndpointEmpty() async {
         var config = Config.default
-        config.summary = SummaryConfig(enabled: true, endpoint: "", apiKey: "", model: "m")
+        config.summary = SummaryConfig(enabled: true, endpoint: "", model: "m")
         let outcome = await MeetingSummarizer.summarizeIfConfigured(
-            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config)
+            transcriptPath: URL(fileURLWithPath: "/tmp/unused.json"), config: config, keychain: FakeKeychainStore())
         #expect(outcome == .skipped)
     }
 

@@ -227,7 +227,9 @@ enum CLIHandler {
 
         let providerStr = opts.provider ?? config.summary?.provider.rawValue ?? "openai"
         let endpoint = opts.endpoint ?? config.summary?.endpoint
-        let apiKey = opts.apiKey ?? config.summary?.apiKey ?? ""
+        // #48: no `config.summary?.apiKey` to fall back to any more — the key lives in the
+        // Keychain, not config.json. A `--api-key` flag still overrides it, same as before.
+        let apiKey = opts.apiKey ?? SummaryAPIKeyStore.load()
         let model = opts.model ?? config.summary?.model
         let contextLength = opts.contextLength ?? config.summary?.contextLength
 
@@ -241,11 +243,10 @@ enum CLIHandler {
             enabled: true,
             provider: providerType,
             endpoint: endpoint,
-            apiKey: apiKey,
             model: model,
             contextLength: contextLength
         )
-        let provider = MeetingSummarizer.createProvider(from: summaryConfig)
+        let provider = MeetingSummarizer.createProvider(from: summaryConfig, apiKey: apiKey)
         try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: endpoint)
 
         let baseName = jsonPath.deletingPathExtension().lastPathComponent

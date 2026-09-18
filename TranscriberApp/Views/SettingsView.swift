@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import TranscriberCore
+import os
 
 private enum DownloadState: Equatable {
     case idle
@@ -30,6 +31,18 @@ struct SettingsView: View {
     @State private var summaryProvider: SummaryProviderType = .openai
     @State private var summaryEndpoint: String = ""
     @State private var summaryApiKey: String = ""
+    // #48: true once the async Keychain load in the body-level `.task` has actually returned.
+    // `summaryApiKey` starts `""` and is only meaningfully "empty" once this is true — before
+    // that, `""` just means "haven't checked the Keychain yet". Gates every
+    // `SummaryAPIKeyStore.save()` call in `save()` so a Save pressed before the load resolves
+    // (slow first-unlock, iCloud Keychain sync, or an ad-hoc-signing Keychain access failure)
+    // can't be mistaken for "user cleared the key" and delete a real stored key.
+    @State private var apiKeyLoaded = false
+    // #48: true if the load itself threw rather than cleanly returning "nothing stored". A
+    // transient read failure would otherwise look exactly like "user cleared the field" once
+    // `apiKeyLoaded` flips true with `summaryApiKey` still "" — this keeps Save from treating an
+    // unreadable Keychain as permission to delete whatever's actually stored there.
+    @State private var apiKeyLoadFailed = false
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
     @State private var summaryContextOverheadPercent: String = ""
@@ -44,7 +57,12 @@ struct SettingsView: View {
         self._summaryEnabled = State(initialValue: s?.enabled ?? false)
         self._summaryProvider = State(initialValue: s?.provider ?? .openai)
         self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
-        self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
+        // #48: the key lives in the Keychain, not on `SummaryConfig` — load it separately, and
+        // not synchronously here: `SecItemCopyMatching` can block (iCloud Keychain sync,
+        // first-unlock state, lock contention), and this initializer runs on whatever thread
+        // SwiftUI constructs the view on. Deferred to the body-level `.task` below instead, so
+        // opening Settings is never gated on a Keychain round-trip.
+        self._summaryApiKey = State(initialValue: "")
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
         self._summaryContextOverheadPercent = State(initialValue: s?.contextOverheadPercent.map(String.init) ?? "")
@@ -89,6 +107,38 @@ struct SettingsView: View {
         // until the user happened onto the Audio tab.
         .onAppear { AudioDeviceCatalog.shared.refresh() }   // background scan, never on main (#192)
         .task {
+            // #48: load the summary API key here, not in `init`, so a slow Keychain read never
+            // blocks view construction. `.task` alone isn't enough on its own — it inherits this
+            // view's @MainActor isolation, so a synchronous SecItemCopyMatching call would still
+            // run on the main thread here. Hop to a detached task for the actual Keychain read;
+            // only the state assignment needs to be back on the main actor.
+            //
+            // `tryLoad`, not `load`: `load()` collapses "nothing stored" and "the read failed" to
+            // the same `""`, which is exactly the ambiguity `save()` can't afford below — an
+            // unreadable Keychain must not look like "user cleared the field".
+            do {
+                let loadedApiKey = try await Task.detached(priority: .userInitiated) {
+                    try SummaryAPIKeyStore.tryLoad()
+                }.value
+                // On a slow load (first-unlock, iCloud Keychain sync) the user may have already
+                // started typing a key by the time this returns — don't stomp it with the
+                // Keychain's (possibly stale, possibly empty) value.
+                if summaryApiKey.isEmpty {
+                    summaryApiKey = loadedApiKey ?? ""
+                }
+            } catch is CancellationError {
+                // The view was dismissed before the Keychain read finished (this `.task` is
+                // cancelled on disappear) — not a Keychain failure, and there's no view left to
+                // update state on. Stay on `Task.detached` rather than a structured `Task { }`
+                // here: a structured task would inherit this `.task`'s @MainActor isolation and
+                // put `SecItemCopyMatching` back on the main thread, reintroducing the exact
+                // blocking problem the detached hop exists to avoid.
+                return
+            } catch {
+                apiKeyLoadFailed = true
+                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
+            }
+            apiKeyLoaded = true
             archiveUsageBytes = StorageManager.currentUsageBytes(
                 in: URL(fileURLWithPath: config.recordingDirectory)
             )
@@ -401,7 +451,6 @@ struct SettingsView: View {
             enabled: enabled,
             provider: summaryProvider,
             endpoint: trimmedSummaryEndpoint,
-            apiKey: summaryApiKey,
             model: summaryModel,
             contextLength: Int(summaryContextLength),
             contextOverheadPercent: Int(summaryContextOverheadPercent),
@@ -415,9 +464,25 @@ struct SettingsView: View {
         )
     }
 
+    // #48: only safe to touch the Keychain once the async load in `.task` has resolved, and its
+    // result is unambiguous. Before `apiKeyLoaded`, `summaryApiKey == ""` just means "haven't
+    // checked yet". After a failed load, `""` is still ambiguous (could be "nothing stored" or
+    // "couldn't tell") — UNLESS the user has since typed a real value, which is unambiguous
+    // regardless of what the load did. A single source of truth here (rather than duplicating
+    // this condition at each of the three `save()` call sites) means a future change to the
+    // condition can't land in only some of them and silently reopen the key-deletion bug this
+    // guard exists to close.
+    private var shouldSaveApiKey: Bool {
+        apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty)
+    }
+
     private func save() {
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
+            // #48: the key never goes into `config`/config.json — Keychain only.
+            if shouldSaveApiKey {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         } else if summaryEndpointMissing {
             // The user wants summaries but hasn't supplied an endpoint. Persist
             // their typed provider/model/key with enabled:false rather than
@@ -425,9 +490,19 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
+            if shouldSaveApiKey {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         } else {
-            // Summaries genuinely off: clear the block.
+            // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
+            // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
+            // behavior (which dropped the whole SummaryConfig, key included), only delete it when
+            // the user actually cleared the field. Leaving a matching key in place means flipping
+            // summaries back on later doesn't require re-typing it.
             config.summary = nil
+            if shouldSaveApiKey {
+                SummaryAPIKeyStore.save(summaryApiKey)
+            }
         }
         config.lastMicrophoneDeviceId = settingsMicId
         configManager.update { $0 = config }

@@ -8,13 +8,24 @@ public final class ConfigManager {
 
     private let configDir: URL
     private let configFile: URL
+    private let keychainStore: KeychainStoring
+    // #48: set when a migration attempt found a plaintext key but couldn't get it safely into the
+    // Keychain (transient failure). Gates the retry in `save()` — see there for why this can't
+    // just be unconditional. Left `false` in the overwhelmingly common case (nothing to migrate,
+    // or migration already done), so `save()` doesn't pay for a disk read it doesn't need.
+    private var migrationPending: Bool
 
     public private(set) var config: Config
 
-    public init(configDir: URL? = nil) {
+    public init(configDir: URL? = nil, keychainStore: KeychainStoring = KeychainStore.shared) {
         let dir = configDir ?? AppPaths.dataDirectory
         self.configDir = dir
         self.configFile = dir.appendingPathComponent("config.json")
+        self.keychainStore = keychainStore
+        // #48: move a legacy plaintext `summary.api_key` out of config.json and into the Keychain
+        // before the file is ever decoded, so a config written by a pre-#48 build never leaves a
+        // real credential sitting in plaintext on disk past this launch.
+        self.migrationPending = Self.migrateAPIKeyIfNeeded(at: self.configFile, keychain: keychainStore) == .failed
         self.config = Self.load(from: self.configFile)
     }
 
@@ -43,6 +54,18 @@ public final class ConfigManager {
         try? FileManager.default.createDirectory(
             at: configDir, withIntermediateDirectories: true
         )
+        // #48: if the launch-time migration failed (e.g. a transient Keychain error), the on-disk
+        // file may still be carrying a plaintext `summary.api_key` that `Config` itself no longer
+        // has a field for. Retry the migration against the current file before every write while
+        // that's still outstanding, so an ordinary `save()` (e.g. from Settings) can't clobber
+        // that plaintext key with a freshly encoded `Config` before it's ever made it into the
+        // Keychain. Gated on `migrationPending`, not unconditional: `Config` structurally can
+        // never carry `api_key` again once decoded, so in the — overwhelmingly common —
+        // already-migrated/nothing-to-migrate case this would otherwise be a needless extra disk
+        // read and JSON parse on every single save for the rest of the app's lifetime.
+        if migrationPending {
+            migrationPending = Self.migrateAPIKeyIfNeeded(at: configFile, keychain: keychainStore) == .failed
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else { return }
@@ -53,5 +76,84 @@ public final class ConfigManager {
     public func update(_ transform: (inout Config) -> Void) {
         transform(&config)
         save()
+    }
+
+    /// Outcome of a `migrateAPIKeyIfNeeded` attempt, distinguishing "nothing to do" from "there
+    /// was a plaintext key but moving it to the Keychain didn't fully complete" — `ConfigManager`
+    /// needs that distinction to know whether a retry is worth paying for on a later `save()`.
+    enum MigrationOutcome: Equatable {
+        case nothingToMigrate
+        case migrated
+        case failed
+    }
+
+    /// Moves a legacy plaintext `summary.api_key` out of `config.json` and into the Keychain
+    /// (#48). Operates on the raw JSON, not `Config`/`SummaryConfig` — those types no longer have
+    /// an `apiKey` field at all, so a plain `Codable` decode would silently drop the value rather
+    /// than migrate it.
+    ///
+    /// Idempotent by construction: once `api_key` is gone from the file this is a no-op, so it is
+    /// safe (and simplest) to run on every launch rather than gating on a "did we migrate"
+    /// marker. If the Keychain write fails, the JSON is left completely untouched — the key must
+    /// never be cleared from disk before it is confirmed safe in the Keychain.
+    @discardableResult
+    static func migrateAPIKeyIfNeeded(at url: URL, keychain: KeychainStoring) -> MigrationOutcome {
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var summaryJSON = json["summary"] as? [String: Any],
+              let plaintextKey = summaryJSON["api_key"] as? String,
+              !plaintextKey.isEmpty
+        else {
+            return .nothingToMigrate
+        }
+
+        // The Keychain is authoritative the moment it holds anything for this key. If an earlier
+        // migration attempt wrote the key successfully but failed to strip config.json afterward
+        // (write-back failure below), or if Settings has since saved a newer key directly, this
+        // function can be reached again with a stale plaintext value still sitting on disk. Never
+        // let that stale value clobber whatever's already in the Keychain — only write when the
+        // Keychain doesn't have a value for this (service, account) yet.
+        //
+        // The lookup and the write share one `do`/`catch`, not `try?` on the lookup: `try?` on a
+        // `throws -> String?` collapses "no value" and "the Keychain call itself failed" to the
+        // same `nil`, which would treat a transient read failure as "nothing stored" and proceed
+        // to overwrite a value that may still be there. Any failure here — lookup or write —
+        // aborts the whole migration for this launch instead of guessing.
+        let wroteToKeychain: Bool
+        do {
+            let existing = try keychain.get(service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+            if existing == nil {
+                try keychain.set(plaintextKey, service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+                wroteToKeychain = true
+            } else {
+                wroteToKeychain = false
+            }
+        } catch {
+            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
+            return .failed
+        }
+
+        // Reachable once the Keychain is confirmed to hold a value for this key — either just
+        // written above, or already there from a prior attempt/Settings save. Either way it's now
+        // safe to strip the stale plaintext copy out of config.json.
+        summaryJSON.removeValue(forKey: "api_key")
+        json["summary"] = summaryJSON
+        guard let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else {
+            Logger.config.error("Migrated summary API key to Keychain but failed to serialize config.json — will retry next launch")
+            return .failed
+        }
+        do {
+            try rewritten.write(to: url, options: .atomic)
+        } catch {
+            Logger.config.error("Migrated summary API key to Keychain but failed to write config.json — will retry next launch: \(String(describing: error), privacy: .public)")
+            return .failed
+        }
+
+        if wroteToKeychain {
+            Logger.config.info("Migrated summary API key from config.json to Keychain")
+        } else {
+            Logger.config.info("Removed stale plaintext summary API key from config.json — Keychain already had a value")
+        }
+        return .migrated
     }
 }
