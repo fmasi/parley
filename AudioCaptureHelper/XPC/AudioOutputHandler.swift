@@ -83,6 +83,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
 
+    /// Whether system audio is coming from the Core Audio tap rather than ScreenCaptureKit. Set by
+    /// the service once the source is resolved in `startCapture`. The tap legitimately delivers
+    /// zero buffers before a call connects (gotcha #66) — `finalizeAll()`'s frame-count-plausibility
+    /// backstop must not mistake "no call ever connected" for a dropped/missing system track.
+    var isUsingSystemTap = false
+
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
     /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
     /// in-place restart's liveness probe reads it from the service's restart task to verify a rebuilt
@@ -151,10 +157,18 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             track: "mic", framesWritten: totalMicFramesWritten,
             rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed
         ))
-        noteFrameCountMismatch(FrameCountPlausibility.check(
-            track: "system", framesWritten: totalSystemFramesWritten,
-            rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
-        ))
+        // Skip the system-track check entirely for a tap recording that never received a single
+        // frame: on the tap, zero frames for the whole session means "recording started before any
+        // call connected" (gotcha #66), not a dropped/missing track. The liveness watchdog already
+        // gates its mid-recording check the same way (`isOutputDeviceRunningSomewhere()`); this is
+        // the finalize-time equivalent, using total frame count since the tap being silent NOW
+        // doesn't mean it was silent throughout — but zero frames for the ENTIRE session does.
+        if !(isUsingSystemTap && totalSystemFramesWritten == 0) {
+            noteFrameCountMismatch(FrameCountPlausibility.check(
+                track: "system", framesWritten: totalSystemFramesWritten,
+                rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
+            ))
+        }
     }
 
     /// Surface a track whose total recorded frames diverge implausibly from session elapsed time.

@@ -337,7 +337,7 @@ private struct Harness {
         #expect(h.appState.isRecording)
 
         h.client.onQualityAnomaly?("exactZeroMic", "The microphone has delivered 12s of pure digital silence.")
-        await Task.yield(); await Task.yield()
+        for _ in 0..<50 { await Task.yield() }
 
         #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
     }

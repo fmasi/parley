@@ -196,6 +196,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.record(.captureStart, .info, [
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
                     ])
+                    // So finalizeAll()'s frame-count-plausibility backstop can apply the same
+                    // gotcha-#66 gate the liveness watchdog already applies mid-recording.
+                    outputHandler.isUsingSystemTap = (source == .coreAudioTap)
                     switch source {
                     case .screenCaptureKit:
                         try await self.buildAndStartStream(handler: outputHandler)
