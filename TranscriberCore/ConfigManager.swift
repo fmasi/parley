@@ -11,10 +11,14 @@ public final class ConfigManager {
 
     public private(set) var config: Config
 
-    public init(configDir: URL? = nil) {
+    public init(configDir: URL? = nil, keychainStore: KeychainStoring = KeychainStore.shared) {
         let dir = configDir ?? AppPaths.dataDirectory
         self.configDir = dir
         self.configFile = dir.appendingPathComponent("config.json")
+        // #48: move a legacy plaintext `summary.api_key` out of config.json and into the Keychain
+        // before the file is ever decoded, so a config written by a pre-#48 build never leaves a
+        // real credential sitting in plaintext on disk past this launch.
+        Self.migrateAPIKeyIfNeeded(at: self.configFile, keychain: keychainStore)
         self.config = Self.load(from: self.configFile)
     }
 
@@ -53,5 +57,50 @@ public final class ConfigManager {
     public func update(_ transform: (inout Config) -> Void) {
         transform(&config)
         save()
+    }
+
+    /// Moves a legacy plaintext `summary.api_key` out of `config.json` and into the Keychain
+    /// (#48). Operates on the raw JSON, not `Config`/`SummaryConfig` — those types no longer have
+    /// an `apiKey` field at all, so a plain `Codable` decode would silently drop the value rather
+    /// than migrate it.
+    ///
+    /// Idempotent by construction: once `api_key` is gone from the file this is a no-op, so it is
+    /// safe (and simplest) to run on every launch rather than gating on a "did we migrate"
+    /// marker. If the Keychain write fails, the JSON is left completely untouched — the key must
+    /// never be cleared from disk before it is confirmed safe in the Keychain.
+    @discardableResult
+    static func migrateAPIKeyIfNeeded(at url: URL, keychain: KeychainStoring) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var summaryJSON = json["summary"] as? [String: Any],
+              let plaintextKey = summaryJSON["api_key"] as? String,
+              !plaintextKey.isEmpty
+        else {
+            return false
+        }
+
+        do {
+            try keychain.set(plaintextKey, service: SummaryAPIKeyStore.service, account: SummaryAPIKeyStore.account)
+        } catch {
+            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
+            return false
+        }
+
+        // Only reachable once the Keychain write above has succeeded.
+        summaryJSON.removeValue(forKey: "api_key")
+        json["summary"] = summaryJSON
+        guard let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else {
+            Logger.config.error("Migrated summary API key to Keychain but failed to serialize config.json — will retry next launch")
+            return false
+        }
+        do {
+            try rewritten.write(to: url, options: .atomic)
+        } catch {
+            Logger.config.error("Migrated summary API key to Keychain but failed to write config.json — will retry next launch: \(String(describing: error), privacy: .public)")
+            return false
+        }
+
+        Logger.config.info("Migrated summary API key from config.json to Keychain")
+        return true
     }
 }

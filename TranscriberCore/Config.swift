@@ -18,7 +18,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var provider: SummaryProviderType
     public var endpoint: String
-    public var apiKey: String
     public var model: String
     public var contextLength: Int?
     /// Safety margin on estimated input tokens (default 10 = 10%).
@@ -37,7 +36,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         enabled: Bool,
         provider: SummaryProviderType = .openai,
         endpoint: String,
-        apiKey: String,
         model: String,
         contextLength: Int? = nil,
         contextOverheadPercent: Int? = nil,
@@ -47,7 +45,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         self.enabled = enabled
         self.provider = provider
         self.endpoint = endpoint
-        self.apiKey = apiKey
         self.model = model
         self.contextLength = contextLength
         self.contextOverheadPercent = contextOverheadPercent
@@ -59,7 +56,10 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         case enabled
         case provider
         case endpoint
-        case apiKey = "api_key"
+        // No `apiKey` key (#48): the field was removed from `SummaryConfig` entirely and lives in
+        // the Keychain (`SummaryAPIKeyStore`) instead, so it is structurally impossible to
+        // round-trip a plaintext key through config.json again. `ConfigManager` migrates any
+        // `api_key` still present in an old config.json on load, then strips it.
         case model
         case contextLength = "context_length"
         case contextOverheadPercent = "context_overhead_percent"
@@ -72,7 +72,9 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         enabled = try c.decode(Bool.self, forKey: .enabled)
         provider = try c.decodeIfPresent(SummaryProviderType.self, forKey: .provider) ?? .openai
         endpoint = try c.decode(String.self, forKey: .endpoint)
-        apiKey = try c.decode(String.self, forKey: .apiKey)
+        // `api_key`, if present in the JSON, is intentionally not decoded here — see the
+        // CodingKeys comment above. It is unknown-key noise to this decoder; `ConfigManager`
+        // migrates it out of the file separately, on a raw JSON pass, before this ever runs.
         model = try c.decode(String.self, forKey: .model)
         contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
         contextOverheadPercent = try c.decodeIfPresent(Int.self, forKey: .contextOverheadPercent)
