@@ -36,4 +36,9 @@ struct SessionNameSuggestionPolicyTests {
         let result = SessionNameSuggestionPolicy.adopt(userHasEdited: false, newTitle: "\n\n")
         #expect(result == nil)
     }
+
+    @Test func trimsTrailingWhitespaceAndNewlinesFromAdoptedTitle() {
+        let result = SessionNameSuggestionPolicy.adopt(userHasEdited: false, newTitle: "Standup\n")
+        #expect(result == "Standup")
+    }
 }

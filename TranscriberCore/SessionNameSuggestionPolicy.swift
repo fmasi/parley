@@ -15,8 +15,13 @@ public enum SessionNameSuggestionPolicy {
     public static func adopt(userHasEdited: Bool, newTitle: String?) -> String? {
         // Whitespace-only titles are treated the same as empty: an all-space event title would
         // otherwise flash the "Suggested from your calendar" hint and fill the field with
-        // invisible spaces even though `start()` trims the name before using it.
-        guard !userHasEdited, let newTitle, !newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return newTitle
+        // invisible spaces even though `start()` trims the name before using it. The returned
+        // value is trimmed too — not just the guard's check — so e.g. a trailing newline from the
+        // calendar title can't survive into the field (and from there into the filename; `start()`
+        // only trims `.whitespaces`, and `sanitizeFilename` doesn't strip `\n`).
+        guard !userHasEdited, let newTitle else { return nil }
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 }

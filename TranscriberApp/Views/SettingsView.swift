@@ -97,7 +97,7 @@ struct SettingsView: View {
             // withCheckedContinuation + DispatchQueue, not Task.detached: the recursive walk below
             // is synchronous and can run long on a large or network-mounted archive, and Task.detached
             // would tie up one of Swift's limited cooperative thread-pool threads for the duration
-            // (same reasoning as CalendarService.currentEventTitle, #215 review).
+            // (same reasoning as CalendarService.currentEventTitle).
             let directory = URL(fileURLWithPath: config.recordingDirectory)
             archiveUsageBytes = await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async {
