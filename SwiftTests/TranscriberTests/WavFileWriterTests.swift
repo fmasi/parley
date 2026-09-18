@@ -404,6 +404,52 @@ struct WavFileWriterTests {
         #expect(rate == 48000)
     }
 
+    // MARK: - Throwing FileHandle write-failure surface (#196)
+
+    /// The legacy `FileHandle` write/seek/sync API raised an uncatchable Objective-C exception on a
+    /// full disk or I/O error, which could abort the whole helper process mid-meeting. This pins the
+    /// HEALTHY path: `onWriteFailure` must never fire when nothing is actually failing — a
+    /// regression guard against the throwing conversion accidentally treating success as failure.
+    /// Forcing a REAL write failure (disk full / revoked permissions) needs a live filesystem fault
+    /// injection and is a device/integration test, not a unit test — see the worktree's final report.
+    @Test func onWriteFailureNeverFiresOnTheHealthyPath() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failureMessages: [String] = []
+        writer.onWriteFailure = { failureMessages.append($0) }
+
+        writer.setSampleRate(48000)
+        let samples = [Int16](repeating: 42, count: 4800)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.flushHeader()
+        writer.finalize()
+
+        #expect(failureMessages.isEmpty)
+    }
+
+    /// Writing after `finalize()` (a straggler buffer racing teardown) must stay a silent no-op —
+    /// NOT a write-failure report. `onWriteFailure` means "a write was attempted and failed", not
+    /// "a write was skipped because the writer is closed" (that path already existed and is covered
+    /// by `finalizeIsIdempotentAndSafeAfterClose`).
+    @Test func writeFailureCallbackNotFiredForPostFinalizeNoOps() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failureMessages: [String] = []
+        writer.onWriteFailure = { failureMessages.append($0) }
+        writer.finalize()
+
+        let stray: [Int16] = [1, 2, 3]
+        stray.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.flushHeader()
+        writer.finalize()
+
+        #expect(failureMessages.isEmpty)
+    }
+
     @Test func repairHeaderLeavesConsistentFileUnchanged() throws {
         let path = tempPath()
         defer { cleanup(path) }

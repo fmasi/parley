@@ -40,13 +40,54 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private var systemPadMonitor = PadRatioMonitor()
     private var micPadMonitor = PadRatioMonitor()
 
+    /// Live exact-zero detector on the mic track (#193). Fed the REAL converted mic samples (never
+    /// the fabricated timeline padding) in `appendAlignedMic`, which is the single funnel point for
+    /// both the normal and multichannel-downmix mic paths.
+    private var micExactZeroMonitor = ExactZeroRunMonitor()
+
+    /// Mic / system frames written across the WHOLE SESSION, unlike `micFramesWritten`/
+    /// `systemFramesWritten` which are per-CHUNK (reset by `swapWriters`). Used by the finalize
+    /// frame-count-vs-wall-clock backstop (#196), which must judge the whole recording, not one
+    /// chunk. Never reset.
+    private var totalMicFramesWritten: Int64 = 0
+    private var totalSystemFramesWritten: Int64 = 0
+    /// When this handler (and therefore the session — the same handler is reused across chunk
+    /// rotations, see `swapWriters`) started, for the finalize wall-clock comparison. A
+    /// `ContinuousClock` (monotonic) rather than `Date` (wall clock), so an NTP step-correction
+    /// mid-recording can't push `elapsed` ahead or behind and produce a false-positive/false-negative
+    /// frame-count-plausibility verdict.
+    private let sessionStartTime = ContinuousClock.now
+
+    /// One-shot latch so a converter failure that repeats on every buffer (a format the converter
+    /// can't handle) files one anomaly per session, not one per buffer (#196).
+    private var micConverterFailureReported = false
+    /// One-shot-per-chunk-per-track latch for a persistently-implausible timeline delta (#196);
+    /// reset in `swapWriters` alongside the other per-chunk state. Keyed by the track label
+    /// (`"mic"`/`"system"`) — a single shared `Bool` would let whichever track hits an implausible
+    /// delta first (system, since it's processed before mic in the SCK callback) silently suppress
+    /// the OTHER track's report in the same chunk, even though a cross-source PTS clock-epoch
+    /// mismatch can affect both tracks independently (e.g. after a sleep/wake cycle).
+    private var timelineDeltaImplausibleReported: [String: Bool] = [:]
+
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
     var diagnostics: LockedDiagnostics?
 
+    /// Live, user-facing surface for an anomaly worth interrupting the user about WHILE the
+    /// recording is still running (exact-zero mic, a liveness gap, a disk-full write failure) —
+    /// as opposed to the silent diagnostic ring, which is only read after the fact (#193/#196).
+    /// Set by the service; wired to the reverse XPC channel exactly like `onStreamStopped`.
+    var onLiveAnomaly: ((CaptureEventKind, String) -> Void)?
+
     /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
+
+    /// Whether system audio is coming from the Core Audio tap rather than ScreenCaptureKit. Set by
+    /// the service once the source is resolved in `startCapture`. The tap legitimately delivers
+    /// zero buffers before a call connects (gotcha #66) — `finalizeAll()`'s frame-count-plausibility
+    /// backstop must not mistake "no call ever connected" for a dropped/missing system track.
+    var isUsingSystemTap = false
 
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
     /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
@@ -66,6 +107,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// queue (#86 probe hardening). Called by the service right after a rebuild, before the probe wait.
     func resetSystemBufferArrival() {
         systemBufferArrival.withLock { $0 = 0 }
+    }
+
+    /// Monotonic timestamp of the last mic buffer actually appended (i.e. after conversion
+    /// succeeded), mirroring `systemBufferArrival`. Feeds the #196 1 Hz liveness watchdog — a mic
+    /// delivers buffers even in silence, so a gap here is itself an anomaly. Stamped in
+    /// `appendAlignedMic`, the single funnel point for both the normal and multichannel mic paths.
+    private let micBufferArrival = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+
+    /// Last mic-buffer arrival timestamp (`uptimeNanoseconds`), 0 until the first buffer (#196).
+    func lastMicBufferArrivalNanos() -> UInt64 {
+        micBufferArrival.withLock { $0 }
     }
 
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
@@ -95,6 +147,46 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // here, where "never" is finally knowable.
         noteDeadTrack(systemPadMonitor.finish(), track: "system")
         noteDeadTrack(micPadMonitor.finish(), track: "mic")
+        // Session-wide backstop (#196): compare each track's TOTAL frame count against how long the
+        // session has actually been running. Catches gaps that padding itself skipped (an implausible
+        // timeline delta) and anything else nobody has thought of yet — the same "don't need to know
+        // the mechanism" property that makes PadRatioMonitor useful, at the whole-recording scope.
+        let elapsedComponents = sessionStartTime.duration(to: .now).components
+        let elapsed = Double(elapsedComponents.seconds) + Double(elapsedComponents.attoseconds) / 1e18
+        noteFrameCountMismatch(FrameCountPlausibility.check(
+            track: "mic", framesWritten: totalMicFramesWritten,
+            rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed
+        ))
+        // Skip the system-track check entirely for a tap recording that never received a single
+        // frame: on the tap, zero frames for the whole session means "recording started before any
+        // call connected" (gotcha #66), not a dropped/missing track. The liveness watchdog already
+        // gates its mid-recording check the same way (`isOutputDeviceRunningSomewhere()`); this is
+        // the finalize-time equivalent, using total frame count since the tap being silent NOW
+        // doesn't mean it was silent throughout — but zero frames for the ENTIRE session does.
+        if !(isUsingSystemTap && totalSystemFramesWritten == 0) {
+            noteFrameCountMismatch(FrameCountPlausibility.check(
+                track: "system", framesWritten: totalSystemFramesWritten,
+                rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
+            ))
+        }
+    }
+
+    /// Surface a track whose total recorded frames diverge implausibly from session elapsed time.
+    private func noteFrameCountMismatch(_ verdict: FrameCountPlausibility.Verdict?) {
+        guard let verdict else { return }
+        Logger.audio.error(
+            """
+            \(verdict.track, privacy: .public) track holds \(Int(verdict.actualSeconds), privacy: .public)s of audio \
+            after \(Int(verdict.elapsedSeconds), privacy: .public)s of wall-clock recording — \
+            \(Int(verdict.deficitSeconds), privacy: .public)s unaccounted for.
+            """
+        )
+        record(.finalizeFrameCountMismatch, .anomaly, [
+            "track": verdict.track,
+            "actual_seconds": "\(Int(verdict.actualSeconds))",
+            "elapsed_seconds": "\(Int(verdict.elapsedSeconds))",
+            "deficit_seconds": "\(Int(verdict.deficitSeconds))",
+        ])
     }
 
     /// Swap writers for chunk rotation. MUST be called on the audio callback queue.
@@ -138,6 +230,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // unreported even as those chunks are written empty.
         stickyDropCount = 0
         stickyDropReported = false
+        // Same reasoning: the timeline anchor itself resets per chunk (above), so a persistently
+        // implausible clock across chunk boundaries must be reported per chunk too.
+        timelineDeltaImplausibleReported = [:]
 
         return (oldSystemPath, oldMicPath)
     }
@@ -252,6 +347,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), label: "system"
         )
         systemFramesWritten += sysPad
+        totalSystemFramesWritten += sysPad
 
         let isFloat = isFloatFormat(from: sampleBuffer)
         var dataFrames: Int64 = 0
@@ -261,6 +357,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 systemWriter.append(UnsafeBufferPointer(start: floatPtr, count: count))
             }
             systemFramesWritten += Int64(count)
+            totalSystemFramesWritten += Int64(count)
             dataFrames = Int64(count)
         } else {
             let count = totalLength / MemoryLayout<Int16>.size
@@ -268,6 +365,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 systemWriter.appendInt16(UnsafeBufferPointer(start: int16Ptr, count: count))
             }
             systemFramesWritten += Int64(count)
+            totalSystemFramesWritten += Int64(count)
             dataFrames = Int64(count)
         }
         notePadding(
@@ -304,8 +402,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             into: systemWriter, framesWritten: systemFramesWritten, rate: rate, pts: pts, label: "system"
         )
         systemFramesWritten += pad
+        totalSystemFramesWritten += pad
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
+        totalSystemFramesWritten += Int64(samples.count)
         // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
@@ -456,23 +556,55 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             appendAlignedMic(result.samples, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         } catch {
             Logger.audio.error("Mic audio conversion failed: \(error, privacy: .public)")
+            noteMicConverterFailure(error)
         }
+    }
+
+    /// Surface a converter failure that was previously only logged (#196) — a format the converter
+    /// can't handle fails on EVERY buffer, so this fires once per session (not once per buffer,
+    /// which would flood the diagnostic ring the way the original pad bug's per-buffer log did).
+    private func noteMicConverterFailure(_ error: Error) {
+        guard !micConverterFailureReported else { return }
+        micConverterFailureReported = true
+        record(.converterFailure, .anomaly, ["source": "mic", "error": "\(error)"])
     }
 
     /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
     /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
+        // Liveness stamp (#196): a real, converted mic buffer arrived — independent of its content
+        // (even exact-zero samples count as "delivered" here; that is a DIFFERENT fault, caught by
+        // the exact-zero monitor below, not a delivery gap).
+        micBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+
         let pad = timelineSilencePad(
             into: micWriter, framesWritten: micFramesWritten,
             rate: AudioConverter.outputSampleRate, pts: pts, label: "mic"
         )
         micFramesWritten += pad
+        totalMicFramesWritten += pad
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
+        totalMicFramesWritten += Int64(samples.count)
         notePadding(
             micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
                                  rate: AudioConverter.outputSampleRate),
             track: "mic")
+        noteExactZeroMic(
+            micExactZeroMonitor.record(samples: samples, rate: AudioConverter.outputSampleRate))
+    }
+
+    /// Surface a sustained run of exact-zero mic samples (#193) — a mic that is delivering but
+    /// hardware-muted (canonical case: MacBook lid closed, built-in mic stays the default input).
+    /// Fires live (via `onLiveAnomaly`), unlike most anomalies here, because this is exactly the
+    /// class the issue exists to catch EARLY: "notify during the recording, while there is still
+    /// time to fix it."
+    private func noteExactZeroMic(_ verdict: ExactZeroRunMonitor.Verdict) {
+        guard case .silentRun(let seconds) = verdict else { return }
+        let message = "The microphone has delivered \(Int(seconds))s of pure digital silence — it may be hardware-muted (e.g. the lid is closed on the built-in mic)."
+        Logger.audio.error("Mic exact-zero run: \(Int(seconds), privacy: .public)s of exact-zero samples — \(message, privacy: .public)")
+        record(.exactZeroMic, .anomaly, ["seconds": "\(Int(seconds))"])
+        onLiveAnomaly?(.exactZeroMic, message)
     }
 
     /// Insert leading/gap silence into `writer` so its next sample lands at this buffer's position on
@@ -501,6 +633,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         guard deltaSeconds.isFinite, deltaSeconds >= 0, deltaSeconds < maxPlausibleDelta else {
             if !deltaSeconds.isFinite || deltaSeconds >= maxPlausibleDelta {
                 Logger.audio.error("Timeline \(label) delta \(deltaSeconds)s implausible (PTS clock mismatch?) — skipping alignment")
+                // Previously logged only (#196) — a skipped alignment leaves neither real frames nor
+                // compensating padding for this gap, which `PadRatioMonitor` cannot see (it only ever
+                // judges what actually got appended). One-shot per chunk so a persistently implausible
+                // clock doesn't flood the ring.
+                let trackKey = "\(label)"
+                if timelineDeltaImplausibleReported[trackKey] != true {
+                    timelineDeltaImplausibleReported[trackKey] = true
+                    record(.timelineDeltaImplausible, .anomaly, [
+                        "track": trackKey, "delta_seconds": "\(deltaSeconds)",
+                    ])
+                }
             }
             return 0
         }
@@ -510,6 +653,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let maxPad = Int64(rate * 60)  // clamp a pathological gap at 60s of silence
         if pad > maxPad {
             Logger.audio.error("Timeline \(label) gap \(Int(Double(pad) / rate))s exceeds 60s cap — clamping")
+            // Previously logged only (#196) — the untruncated remainder of the gap leaves mic/system
+            // desynced for the rest of this chunk.
+            record(.padCapExceeded, .anomaly, [
+                "track": "\(label)", "gap_seconds": "\(Int(Double(pad) / rate))",
+            ])
             pad = maxPad
         }
         Logger.audio.info("Timeline: padding \(Int(Double(pad) / rate * 1000))ms silence into \(label)")
@@ -663,6 +811,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             appendAlignedMic(result.samples, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         } catch {
             Logger.audio.error("Mic audio conversion failed (multichannel): \(error, privacy: .public)")
+            noteMicConverterFailure(error)
         }
     }
 

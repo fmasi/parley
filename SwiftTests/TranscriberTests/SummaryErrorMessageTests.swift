@@ -176,6 +176,14 @@ extension RunSummaryURLErrorTests {
         let outcome = try await outcome(for: URLError(.cancelled))
         #expect(outcome == .cancelled)
     }
+
+    @Test("Swift's own CancellationError is .cancelled too, not the disk-space catch-all (#191)")
+    func swiftCancellationIsNotReportedAsAFault() async throws {
+        // CancellationError (Task.checkCancellation(), structured-concurrency teardown on quit) is a
+        // different type from URLError.cancelled above and previously fell through to the catch-all,
+        // reproducing #173's "check disk space and permissions" misdirection for a user-initiated quit.
+        #expect(try await outcome(for: CancellationError()) == .cancelled)
+    }
 }
 
 /// The providers' own 401/403 → `authenticationFailed` throw. The suites above pin the message

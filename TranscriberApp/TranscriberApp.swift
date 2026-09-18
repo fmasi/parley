@@ -320,19 +320,11 @@ struct TranscriberApp: App {
             let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
             let seg = sentinel.segment + 1
             // #135: name the restart capture in the chunk-index namespace, never the legacy segment
-            // counter — the two namespaces can collide. safeRestartChunkIndex owns the collision
-            // guard (see CrashRecoveryPlanner).
-            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
-            let baseName = "\(sessionId)-\(idx)"
-
-            var newSentinel = sentinel.incrementedSegment(
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-            )
-            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
-            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
-            newSentinel.chunkIndex = idx
+            // counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart owns the
+            // collision guard + naming sequence, shared by every no-live-pipeline restart site (#170).
+            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            let baseName = restart.baseName
+            let newSentinel = restart.newSentinel
 
             do {
                 try await captureClient.start(
@@ -390,19 +382,12 @@ struct TranscriberApp: App {
 
                 let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
                 // #135: name the restart capture in the chunk-index namespace, never the legacy
-                // segment counter — the two namespaces can collide. safeRestartChunkIndex owns the
-                // collision guard (see CrashRecoveryPlanner).
-                let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-                let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
-                let baseName = "\(sessionId)-\(idx)"
-
-                var newSentinel = sentinel.incrementedSegment(
-                    systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                    micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-                )
-                // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
-                // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
-                newSentinel.chunkIndex = idx
+                // segment counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart
+                // owns the collision guard + naming sequence, shared by every no-live-pipeline
+                // restart site (#170).
+                let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+                let baseName = restart.baseName
+                let newSentinel = restart.newSentinel
 
                 do {
                     RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // before the helper opens it (#192)
@@ -459,6 +444,18 @@ struct TranscriberApp: App {
             Task { @MainActor in
                 guard appState.isRecording else { return }
                 appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
+            }
+        }
+        // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a
+        // disk-full write failure) — surfaced WHILE the recording is still running, while there is
+        // still time to react. The recording is never stopped by this.
+        // Also set by RecordingCoordinator.startRecording() — that site covers a normal recording
+        // start, this one covers the launch-time crash-recovery re-attach paths (Flow A/B), which
+        // never go through startRecording(). Keep both in sync if this wiring changes.
+        captureClient.onQualityAnomaly = { _, message in
+            Task { @MainActor in
+                guard appState.isRecording else { return }
+                appState.interruptionWarning = message
             }
         }
         captureClient.onFatalFailure = { _ in

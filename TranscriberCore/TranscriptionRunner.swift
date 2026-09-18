@@ -199,7 +199,7 @@ public final class TranscriptionRunner {
         let chunkLengthFallback = Double(config.validatedChunkDuration) * 60
         let segmentDurations: [Double] = zip(segments, zip(perSegmentSystem, perSegmentMic)).map { pair, streams in
             let (system, mic) = streams
-            if let physical = SpeakerSampleLocator.durations(of: [pair.system]).first.flatMap({ $0 }) {
+            if let firstDuration = SpeakerSampleLocator.durations(of: [pair.system]).first, let physical = firstDuration {
                 return physical
             }
             Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .sensitive); falling back to transcript end (then configured chunk length) for the offset of the next segment")

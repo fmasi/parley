@@ -267,6 +267,66 @@ struct TranscriptRenamerTests {
         }
     }
 
+    /// #204: `collectSpeakerSamples` prefers `metadata.chunk_durations` over opening the chunk
+    /// files to measure their real length.
+    ///
+    /// Proven with a deliberately WRONG cached duration: the segment at absolute [5, 6] would, at
+    /// each chunk's REAL length (an empty file has none, so `durations(of:)` would report `nil`
+    /// and drop this sample), resolve to nothing playable. The cached metadata below claims chunk
+    /// 0 is 10s long, which places the same segment inside chunk 0 instead — so a resolved,
+    /// playable sample here can only mean the cache was used, not a fallback file read.
+    @Test func collectUsesCachedChunkDurationsOverReadingTheFiles() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("renamer-cache-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Contents are irrelevant to this test — only existence is checked before a resolved
+        // sample is accepted — so these are empty placeholder chunk files, not real audio.
+        let chunk0 = dir.appendingPathComponent("call-0.wav")
+        let chunk1 = dir.appendingPathComponent("call-1.wav")
+        try Data().write(to: chunk0)
+        try Data().write(to: chunk1)
+
+        let url = try writeTranscript(
+            segments: [seg("Remote Speaker 1", "hello", start: 5, end: 6)],
+            metadata: [
+                "audio_paths": [chunk0.path, chunk1.path],
+                "chunk_durations": [10.0, 10.0],
+            ]
+        )
+
+        let collected = try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 1)
+        #expect(collected.count == 1)
+        let sample = try #require(collected.first?.samples.first)
+        #expect(sample.audioFile?.lastPathComponent == "call-0.wav")
+        #expect(sample.start == 5.0)
+        #expect(sample.end == 6.0)
+    }
+
+    /// The json-based overload exists so `RenameWindowController`/`RenameDialog` can read a
+    /// transcript ONCE and get both speakers and channel names from it (#207 follow-up) — it
+    /// must behave identically to the URL-based entry point for the same content.
+    @Test func collectFromParsedJSONMatchesCollectFromURL() throws {
+        let url = try writeTranscript(
+            segments: [seg("Remote Speaker 1", "hello there", start: 0, end: 2)]
+        )
+        let fromURL = try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 1)
+        let fromJSON = TranscriptRenamer.collectSpeakerSamples(json: try readJSON(url), maxSamplesPerSpeaker: 1)
+
+        #expect(fromJSON.count == fromURL.count)
+        #expect(fromJSON.map { $0.id } == fromURL.map { $0.id })
+        #expect(fromJSON.first?.samples.first?.text == fromURL.first?.samples.first?.text)
+    }
+
+    /// Unlike the URL-based entry point (`collectThrowsOnNonTranscriptJSON` below), the json-based
+    /// overload has no way to throw — a dict with no `segments` key degrades to `[]`, because its
+    /// caller has already committed to treating the dict as a transcript by the time it gets here.
+    @Test func collectFromParsedJSONWithNoSegmentsYieldsEmptyNotAThrow() {
+        let collected = TranscriptRenamer.collectSpeakerSamples(json: ["foo": 1], maxSamplesPerSpeaker: 1)
+        #expect(collected.isEmpty)
+    }
+
     @Test func collectThrowsOnNonTranscriptJSON() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("renamer-test-\(UUID().uuidString)")

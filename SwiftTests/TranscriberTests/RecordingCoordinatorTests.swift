@@ -10,6 +10,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var onServiceCrash: (@Sendable () -> Void)?
     var onMicDeviceChanged: (@Sendable (String?) -> Void)?
     var onFatalFailure: (@Sendable (String) -> Void)?
+    var onQualityAnomaly: (@Sendable (String, String) -> Void)?
 
     struct StartCall: Equatable {
         let outputDirectory: URL
@@ -291,10 +292,11 @@ private struct Harness {
         #expect(h.appState.isIdle)
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.map { $0.title } == ["Recording Failed"])
-        // The crash/fatal/mic-change callbacks are wired before start is attempted.
+        // The crash/fatal/mic-change/quality-anomaly callbacks are wired before start is attempted.
         #expect(h.client.onServiceCrash != nil)
         #expect(h.client.onFatalFailure != nil)
         #expect(h.client.onMicDeviceChanged != nil)
+        #expect(h.client.onQualityAnomaly != nil)
         // Sentinel was written before start (then deleted on failure); start saw the -0 base name.
         #expect(h.client.startCalls.count == 1)
         #expect(h.client.startCalls[0].baseName.hasSuffix("-Test-0"))
@@ -316,6 +318,28 @@ private struct Harness {
         h.client.onMicDeviceChanged?("mic-2")   // helper auto-switched
         await Task.yield(); await Task.yield()
         #expect(h.recordingMic.current == .some("mic-2"))
+    }
+
+    // NOTE: the clamshell preflight in startRecording() (ClamshellMicGuard.isLidClosed() /
+    // isBuiltInMicSelected()) has no unit test here — both device queries are real IOKit/CoreAudio
+    // HAL calls with no injection seam, so they're device-test only (see PR #217's device-test
+    // checklist item 1). What IS covered below is the re-entrancy-guard-before-banner ordering
+    // bug this preflight had: the guard must run before `interruptionWarning` is set, or a
+    // startRecording call that loses the re-entrancy race still shows a banner for a recording it
+    // isn't driving.
+
+    // #193/#196 review fix: onQualityAnomaly must be wired by startRecording itself, not only by
+    // TranscriberApp's setupCrashHandler (which only runs on the launch-time crash-recovery
+    // re-attach paths) — otherwise a live anomaly banner never appears during a normal recording.
+    @Test func qualityAnomalyDuringNormalRecordingShowsBanner() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        #expect(h.appState.isRecording)
+
+        h.client.onQualityAnomaly?("exactZeroMic", "The microphone has delivered 12s of pure digital silence.")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
     }
 
     @Test func failedStartReleasesTheRecordingMic() async throws {
@@ -634,6 +658,22 @@ private struct Harness {
 
         #expect(seenDuringStop == .some("mic-1"), "the mic was released while the helper still held it")
         #expect(h.recordingMic.current == .none)
+    }
+
+    // #155: the Flow-A stop-path catch (which also covers `ChunkedSessionRecovery.recover()`
+    // throwing) is the user's only signal on this path — the sentinel above is deleted
+    // unconditionally, so relaunching will not retry. It must tell the user their raw audio is
+    // still on disk, mirroring the Flow B catch in `TranscriberApp.recoverIfNeeded`.
+    @Test func stopFailureNotifiesCriticallyThatAudioWasPreserved() async throws {
+        let h = try Harness()
+        // stopResult nil → stop() throws, landing in the outer catch.
+
+        await h.coordinator.stopRecording()
+
+        let critical = try #require(h.criticals.value.first)
+        #expect(critical.title == "Transcription Failed")
+        #expect(critical.body.contains("Audio already on disk was preserved"))
+        #expect(h.notified.value.isEmpty, "should escalate via the critical path, not the routine notify")
     }
 
     @Test func crashWithoutSentinelEscalatesCritically() async throws {

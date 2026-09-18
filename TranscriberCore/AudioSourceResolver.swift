@@ -21,6 +21,12 @@ public enum AudioSourceResolverError: LocalizedError {
 /// - Right channel = remote system audio (other participants)
 public enum AudioSourceResolver {
 
+    /// One side of a stereo archive: L = local mic, R = remote system (see the type's doc comment).
+    public enum Channel: Sendable, Equatable {
+        case local
+        case remote
+    }
+
     /// Real channel count of an audio file's first audio track.
     ///
     /// `splitChannels` asks the reader for 2 channels, so a MONO source is upmixed to L=R and the
@@ -44,6 +50,47 @@ public enum AudioSourceResolver {
         stereoAac: URL,
         outputDirectory: URL
     ) async throws -> (local: URL, remote: URL) {
+        let (local, remote) = try await split(
+            stereoAac: stereoAac, outputDirectory: outputDirectory, wantLocal: true, wantRemote: true)
+        // Both were requested, so both are guaranteed non-nil by `split(...)` — see its contract.
+        // A `preconditionFailure` here (rather than a bare force-unwrap) means a future change to
+        // that contract crashes with a message naming the violation, not an unlabeled trap.
+        guard let local, let remote else {
+            preconditionFailure("split(wantLocal:true, wantRemote:true) returned nil — contract violation")
+        }
+        return (local: local, remote: remote)
+    }
+
+    /// Write ONLY the requested channel as a mono WAV, skipping the decode and write of the other
+    /// side entirely (#204). The old two-channel path wrote both sides and left the caller to
+    /// delete the one it didn't want — half the decode and half the write were pure waste on a
+    /// caller (like re-detect) that only ever needed one side.
+    public static func splitChannel(
+        stereoAac: URL,
+        outputDirectory: URL,
+        channel: Channel
+    ) async throws -> URL {
+        let wantLocal = channel == .local
+        let (local, remote) = try await split(
+            stereoAac: stereoAac, outputDirectory: outputDirectory,
+            wantLocal: wantLocal, wantRemote: !wantLocal)
+        // Exactly one of these is guaranteed non-nil, matching `wantLocal` — see `split(...)`.
+        guard let result = wantLocal ? local : remote else {
+            preconditionFailure("split returned nil for the requested channel — contract violation")
+        }
+        return result
+    }
+
+    /// Shared implementation behind `splitChannels` and `splitChannel`.
+    ///
+    /// - Returns: `(local, remote)` where an entry is `nil` exactly when its `want*` flag was
+    ///   `false` — the caller who set that flag never force-unwraps a channel it didn't ask for.
+    private static func split(
+        stereoAac: URL,
+        outputDirectory: URL,
+        wantLocal: Bool,
+        wantRemote: Bool
+    ) async throws -> (local: URL?, remote: URL?) {
         let baseName = stereoAac.deletingPathExtension().lastPathComponent
         let localPath = outputDirectory.appendingPathComponent("\(baseName)_split_mic.wav")
         let remotePath = outputDirectory.appendingPathComponent("\(baseName)_split_system.wav")
@@ -75,12 +122,24 @@ public enum AudioSourceResolver {
             sampleRate = 48000
         }
 
-        let localWriter = try WavFileWriter(path: localPath.path)
-        let remoteWriter = try WavFileWriter(path: remotePath.path)
-        localWriter.setSampleRate(UInt32(sampleRate))
-        localWriter.setChannelCount(1)
-        remoteWriter.setSampleRate(UInt32(sampleRate))
-        remoteWriter.setChannelCount(1)
+        let localWriter: WavFileWriter?
+        let remoteWriter: WavFileWriter?
+        if wantLocal {
+            let w = try WavFileWriter(path: localPath.path)
+            w.setSampleRate(UInt32(sampleRate))
+            w.setChannelCount(1)
+            localWriter = w
+        } else {
+            localWriter = nil
+        }
+        if wantRemote {
+            let w = try WavFileWriter(path: remotePath.path)
+            w.setSampleRate(UInt32(sampleRate))
+            w.setChannelCount(1)
+            remoteWriter = w
+        } else {
+            remoteWriter = nil
+        }
 
         while let sampleBuffer = readerOutput.copyNextSampleBuffer() {
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
@@ -90,26 +149,33 @@ public enum AudioSourceResolver {
                 CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: rawPtr.baseAddress!)
             }
 
-            // Deinterleave stereo Int16: [L0, R0, L1, R1, ...] → separate L and R
+            // Deinterleave stereo Int16: [L0, R0, L1, R1, ...] → separate L and R. Only the
+            // wanted side(s) are extracted — the unwanted side is never even copied out.
             let sampleCount = length / MemoryLayout<Int16>.size
             let frameCount = sampleCount / 2
             data.withUnsafeBytes { rawPtr in
                 let int16Ptr = rawPtr.bindMemory(to: Int16.self)
-                var leftSamples = [Int16](repeating: 0, count: frameCount)
-                var rightSamples = [Int16](repeating: 0, count: frameCount)
-                for i in 0..<frameCount {
-                    leftSamples[i] = int16Ptr[i * 2]       // L = local mic
-                    rightSamples[i] = int16Ptr[i * 2 + 1]  // R = remote system
+                if let localWriter {
+                    var leftSamples = [Int16](repeating: 0, count: frameCount)
+                    for i in 0..<frameCount {
+                        leftSamples[i] = int16Ptr[i * 2]       // L = local mic
+                    }
+                    leftSamples.withUnsafeBufferPointer { localWriter.appendInt16($0) }
                 }
-                leftSamples.withUnsafeBufferPointer { localWriter.appendInt16($0) }
-                rightSamples.withUnsafeBufferPointer { remoteWriter.appendInt16($0) }
+                if let remoteWriter {
+                    var rightSamples = [Int16](repeating: 0, count: frameCount)
+                    for i in 0..<frameCount {
+                        rightSamples[i] = int16Ptr[i * 2 + 1]  // R = remote system
+                    }
+                    rightSamples.withUnsafeBufferPointer { remoteWriter.appendInt16($0) }
+                }
             }
         }
 
-        localWriter.finalize()
-        remoteWriter.finalize()
+        localWriter?.finalize()
+        remoteWriter?.finalize()
 
-        Logger.files.info("Split stereo AAC into L=\(localPath.lastPathComponent, privacy: .sensitive), R=\(remotePath.lastPathComponent, privacy: .sensitive)")
-        return (local: localPath, remote: remotePath)
+        Logger.files.info("Split stereo AAC → L=\(wantLocal ? localPath.lastPathComponent : "(skipped)", privacy: .sensitive), R=\(wantRemote ? remotePath.lastPathComponent : "(skipped)", privacy: .sensitive)")
+        return (local: wantLocal ? localPath : nil, remote: wantRemote ? remotePath : nil)
     }
 }

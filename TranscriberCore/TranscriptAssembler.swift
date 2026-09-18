@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import os
 
@@ -85,6 +86,12 @@ public enum TranscriptAssembler {
     /// Rewrite a transcript JSON's `audio_paths` / `audio_files` to reference every audio source
     /// that contributed to it, replacing the placeholder source-WAV paths written at assembly
     /// time (#93). No-op if the file is missing or unreadable.
+    ///
+    /// Also stamps `chunk_durations`, one entry per `paths` element, read here ONCE while
+    /// archiving already has these files open — so a later O(chunks) `AVAudioFile` open per
+    /// button press (re-detect, opening the rename dialog) can read this instead (#204).
+    /// A chunk whose duration can't be read gets `0`, a sentinel `SpeakerSampleLocator` treats as
+    /// "distrust the cache, re-read the file" rather than a real zero-length chunk.
     public static func reconcileAudioPaths(in jsonPath: URL, to paths: [URL]) {
         guard let data = try? Data(contentsOf: jsonPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -93,6 +100,7 @@ public enum TranscriptAssembler {
 
         metadata["audio_paths"] = paths.map { $0.path }
         metadata["audio_files"] = paths.map { $0.lastPathComponent }
+        metadata["chunk_durations"] = paths.map(Self.duration(of:))
         json["metadata"] = metadata
 
         guard let updated = try? JSONSerialization.data(
@@ -100,5 +108,12 @@ public enum TranscriptAssembler {
         ) else { return }
         try? updated.write(to: jsonPath, options: .atomic)
         Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .sensitive) → \(paths.count) source(s)")
+    }
+
+    private static func duration(of url: URL) -> Double {
+        guard let file = try? AVAudioFile(forReading: url),
+              file.processingFormat.sampleRate > 0, file.length > 0
+        else { return 0 }
+        return Double(file.length) / file.processingFormat.sampleRate
     }
 }

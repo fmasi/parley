@@ -180,6 +180,30 @@ public final class RecordingCoordinator {
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
 
+        // Pre-flight (#193): the built-in mic stays the default input device — and keeps delivering
+        // full-rate buffers of exact digital zero — while the lid is closed. Warn BEFORE capture
+        // starts, not only via the live exact-zero detector once the meeting is already underway.
+        // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
+        // `isLidClosed()`/`isBuiltInMicSelected(deviceId:)` are synchronous IOKit/
+        // CoreAudio HAL lookups. Normally sub-millisecond, but a HAL daemon restart or sleep/wake
+        // transition can occasionally stall them — hop to a detached task so a rare stall never
+        // blocks the main actor. Both are pure/static with no actor isolation, so this is a pure
+        // scheduling change; nothing before this point in `startRecording` depends on ordering.
+        let (lidClosed, isBuiltInMic) = await Task.detached {
+            (ClamshellMicGuard.isLidClosed(), ClamshellMicGuard.isBuiltInMicSelected(deviceId: microphoneDeviceId))
+        }.value
+        // Re-entrancy guard: the await above is a genuine suspension point (unlike the two
+        // synchronous IOKit/CoreAudio calls it replaced), so a second startRecording call fired
+        // during it — e.g. a double-tap of the record control before the UI disables it — must not
+        // race this one into writing a second sentinel / starting a second capture. Same
+        // "bail if the state moved" pattern already used by the callback guards below. Checked
+        // BEFORE the warning is set, so a call that loses the race never shows a banner for a
+        // recording it isn't the one driving.
+        guard appState.isIdle else { return }
+        if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
+            appState.interruptionWarning = ClamshellMicGuard.warningMessage
+        }
+
         let config = configManager.config
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
 
@@ -212,6 +236,18 @@ public final class RecordingCoordinator {
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
                 await self.handleXPCCrash()
+            }
+        }
+        // This was previously only wired by TranscriberApp's `setupCrashHandler`, which runs solely
+        // on the launch-time crash-recovery re-attach paths (Flow A/B) — a fresh recording started
+        // here never received it, so the exact-zero-mic, liveness-gap, and write-failure banners
+        // this PR adds could never appear during a normal recording. The recording is never stopped
+        // by this. Also set by TranscriberApp's setupCrashHandler for the re-attach paths above —
+        // keep both in sync if this wiring changes.
+        captureClient.onQualityAnomaly = { [weak self] _, message in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.interruptionWarning = message
             }
         }
 
@@ -494,7 +530,15 @@ public final class RecordingCoordinator {
             }
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
-            notify("Transcription Failed", error.localizedDescription)
+            // #155: this catch is the Flow-A re-attach stop path's only signal to the user — the
+            // sentinel above is deleted unconditionally, so relaunching will not retry. Without an
+            // explicit "audio preserved" message here (mirroring the Flow B catch in
+            // TranscriberApp.recoverIfNeeded), a user who sees only "Transcription Failed" has no
+            // way to know their raw .wav/.m4a files are still safely on disk.
+            notifyCritical(
+                "Transcription Failed",
+                "The recording session could not be rehydrated after stopping: \(error.localizedDescription). Audio already on disk was preserved."
+            )
             appState.phase = .idle
         }
     }
@@ -569,17 +613,11 @@ public final class RecordingCoordinator {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
             // chunk-index namespace, never the legacy segment counter — the two namespaces can
-            // collide. safeRestartChunkIndex owns the collision guard (see CrashRecoveryPlanner).
-            let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-            let idx = CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: outputDir)
-            baseName = "\(sessionId)-\(idx)"
-            newSentinel = sentinel.incrementedSegment(
-                systemAudioPath: outputDir.appendingPathComponent(baseName + ".wav").path,
-                micAudioPath: outputDir.appendingPathComponent(baseName + "_mic.wav").path
-            )
-            // Stamp the freshly computed index directly so the max(nextFreeChunkIndex,
-            // chunkIndex+1) floor above stays tight even if a later disk scan fails (#154 finding 6).
-            newSentinel.chunkIndex = idx
+            // collide. CrashRecoveryPlanner.planRestart owns the collision guard + naming
+            // sequence, shared by every no-live-pipeline restart site (#170).
+            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            baseName = restart.baseName
+            newSentinel = restart.newSentinel
         }
 
         do {

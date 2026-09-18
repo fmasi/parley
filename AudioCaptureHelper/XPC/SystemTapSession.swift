@@ -42,6 +42,9 @@ final class SystemTapSession {
     /// Converts each tap buffer (float32 @ output rate, stereo) → 48 kHz mono Int16. Reused across
     /// IOProc invocations; only ever touched on `deliveryQueue` (serial), so no lock needed.
     private let converter = AudioConverter()
+    /// One-shot latch for the converter-failure anomaly (#196); only ever touched on
+    /// `deliveryQueue`, same as `converter`.
+    private var converterFailureReported = false
 
     /// Serializes every build / output-switch rebuild / stop so a HAL output-change rebuild can't race
     /// a user stop into two aggregate devices. `AudioDeviceStart`/destroy happen here, never under
@@ -455,6 +458,12 @@ final class SystemTapSession {
             samples = try converter.convert(pcm).samples
         } catch {
             Logger.audio.error("System tap conversion failed: \(error, privacy: .public)")
+            // Previously logged only (#196) — a format the converter can't handle fails on EVERY
+            // buffer. One-shot per session so a persistent failure doesn't flood the ring.
+            if !converterFailureReported {
+                converterFailureReported = true
+                onEvent?(.converterFailure, .anomaly, ["source": "system-tap", "error": "\(error)"])
+            }
             return
         }
         guard !samples.isEmpty else { return }
@@ -648,6 +657,29 @@ final class SystemTapSession {
         var addr = defaultOutputAddress
         let st = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
         return st == noErr ? id : AudioObjectID(kAudioObjectUnknown)
+    }
+
+    /// Whether the CURRENT default output device reports itself as running (gotcha #66): unlike
+    /// ScreenCaptureKit, the tap's IOProc delivers NO buffers while nothing holds the output device
+    /// open — a recording started before joining a call legitimately receives zero system-audio
+    /// buffers until the call connects. The #196 liveness watchdog must gate its tap-track check on
+    /// this, or it reproduces the exact false positive gotcha #66 documents (a healthy recording
+    /// measured 97.6% zero/leading-silence in its first 30s and tripped a naive detector).
+    ///
+    /// Fails OPEN (returns `true` — "assume running") on any read failure, matching this file's
+    /// existing convention (`deviceExists`): a missed idle-output period costs one spurious
+    /// liveness-gap anomaly, which is far cheaper than silently disabling the watchdog for a session.
+    static func isOutputDeviceRunningSomewhere() -> Bool {
+        let device = defaultOutputDevice()
+        guard device != kAudioObjectUnknown else { return true }
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &running) == noErr else { return true }
+        return running != 0
     }
 
     /// Compare frames actually delivered against elapsed wall time. Runs on the audio queue, so it

@@ -39,6 +39,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- writes system audio (from the SCStream `.audio` output) and mic buffers (fed via `appendMicSampleBuffer()` from `MicCaptureSession`, #96) to WavFileWriters; auto-detects sample format (Float32/Int16) and channel count. Since #96 the SCStream delivers system audio only — `.microphone` is no longer registered.
 - `AudioCaptureHelper/XPC/SystemTapSession.swift` -- Core Audio output process tap for system audio (#103), selected by `system_audio_source: core_audio_tap`; captures Continuity/VoIP calls ScreenCaptureKit misses
 - `AudioCaptureHelper/XPC/MicCaptureSession.swift` -- microphone capture session feeding the mic WAV stream
+- `AudioCaptureHelper/XPC/LivenessWatchdogDriver.swift` -- off-audio-queue 1 Hz driver for `LivenessGapDetector`: owns its own `DispatchSourceTimer` on a dedicated serial queue, never the real-time audio callback path (#196)
 - `AudioCaptureHelper/XPC/main.swift` -- NSXPCListener entry point, shared service instance, connection invalidation handler
 
 ### Shared Protocol (AudioCaptureProtocol target)
@@ -68,7 +69,11 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/SessionNameSuggestionPolicy.swift` -- pure decision: whether a late-arriving calendar title should replace the current session-name field value (#197)
-- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync
+- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync; throwing `FileHandle` writes are caught and surfaced as a write-failure anomaly instead of crashing the helper (#196)
+- `TranscriberCore/ExactZeroRunMonitor.swift` -- pure detector: fires after a sustained run of exact-zero mic samples (hardware-muted mic, e.g. lid closed on the built-in mic) (#193)
+- `TranscriberCore/LivenessGapDetector.swift` -- pure decision core for the 1 Hz off-audio-queue capture-liveness watchdog: a track that delivers then stops mid-recording is caught even though there's no next buffer to compare against (#196)
+- `TranscriberCore/FrameCountPlausibility.swift` -- session-wide finalize backstop: compares each track's total recorded frames against wall-clock session duration (#196)
+- `TranscriberCore/ClamshellMicGuard.swift` -- pre-flight check: warns before capture starts if the lid is closed and the built-in mic is selected (#193)
 - `TranscriberCore/RecordingSentinel.swift` -- crash recovery sentinel file (JSON at ~/Library/Application Support/Parley/recording.json), atomic write/read/delete
 - `TranscriberCore/LaunchAgentManager.swift` -- install/unload macOS LaunchAgent (KeepAlive) for auto-relaunch on crash
 - `TranscriberCore/SegmentDiscovery.swift` -- discover multi-segment audio files from crash recovery (base, -2, -3, ...)

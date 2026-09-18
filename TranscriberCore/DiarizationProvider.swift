@@ -26,4 +26,17 @@ public struct DiarizationResult: Sendable {
 
 public protocol DiarizationProvider: Sendable {
     func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult
+
+    /// Diarize pre-decoded mono samples at the provider's target sample rate (16 kHz for
+    /// FluidAudio), rather than a file path.
+    ///
+    /// Exists so a caller that must ALSO feed the exact same samples to another consumer (VAD,
+    /// in `TranscriptRediarizer`, #204) decodes the audio once and shares the buffer, instead of
+    /// handing this provider a path and letting it decode its own copy.
+    /// - Parameter progress: optional `(chunksProcessed, totalChunks)` callback for long inputs.
+    func diarize(
+        audio: [Float],
+        numSpeakers: Int?,
+        progress: (@Sendable (Int, Int) -> Void)?
+    ) async throws -> DiarizationResult
 }

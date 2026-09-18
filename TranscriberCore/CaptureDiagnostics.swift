@@ -52,6 +52,50 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// records silence for their Continuity/VoIP calls — so a silent downgrade produces a
     /// structurally valid recording whose remote track is empty. Severity `.anomaly`.
     case captureSourceFallback
+
+    /// The mic delivered a sustained run of samples that are EXACTLY zero — not merely quiet (#193).
+    /// A real microphone always has a noise floor, so exact-zero is a sharp, false-positive-free
+    /// signal that the input is being hardware-muted (the canonical case: a MacBook's built-in mic
+    /// with the lid closed, which stays the default input device and keeps delivering full-rate
+    /// buffers of digital silence — no padding, no `trackNeverDelivered`, nothing else fires).
+    /// Severity `.anomaly`.
+    case exactZeroMic
+
+    /// A track that was delivering stopped delivering for longer than the liveness watchdog's gap
+    /// threshold, caught by a 1 Hz off-audio-queue timer rather than waiting for the next buffer
+    /// that may never arrive (#196). Distinct from `trackNeverDelivered` (which judges only at
+    /// finalize, for a track that NEVER started) — this fires mid-recording, while there is still
+    /// time to react. Severity `.anomaly`.
+    case livenessGap
+
+    /// `AVAudioConverter` (or the tap's format conversion) failed on a buffer. Previously only
+    /// logged — a format the converter cannot handle fails on EVERY buffer with no user-visible
+    /// signal (#196). Reported once per session per source, not per buffer. Severity `.anomaly`.
+    case converterFailure
+
+    /// A timeline gap exceeded the 60 s pad cap and was clamped — the mic/system alignment for the
+    /// rest of the chunk is desynced by the untruncated remainder (#196). Previously logged only.
+    /// Severity `.anomaly`. Deliberately NOT in `qualityCompromising`: this is a
+    /// symptom, not independently a bad recording — its consequence (a frame-count mismatch at
+    /// finalize) is what `finalizeFrameCountMismatch` catches and IS in that set.
+    case padCapExceeded
+
+    /// The shared mic/system timeline delta was implausible (non-finite, negative, or absurdly
+    /// large — a cross-source PTS clock-epoch mismatch) and alignment was skipped for that buffer
+    /// (#196). Previously logged only. Severity `.anomaly`. Deliberately NOT in `qualityCompromising`
+    /// for the same reason as `padCapExceeded` above — `finalizeFrameCountMismatch` is the backstop.
+    case timelineDeltaImplausible
+
+    /// A modern throwing `FileHandle` call failed (disk full, I/O error) while writing a WAV. Before
+    /// this the legacy `FileHandle` API raised an uncatchable Objective-C exception on the same
+    /// fault, aborting the whole helper process mid-meeting (#196). Severity `.anomaly`.
+    case writeFailure
+
+    /// At finalize, a track's recorded frame count diverged implausibly from the session's elapsed
+    /// wall-clock time — a session-wide backstop distinct from the per-chunk `excessivePadding`
+    /// ratio, catching cases where padding itself was skipped (e.g. `timelineDeltaImplausible`)
+    /// (#196). Severity `.anomaly`.
+    case finalizeFrameCountMismatch
 }
 
 extension CaptureEventKind {
@@ -76,6 +120,14 @@ extension CaptureEventKind {
         .systemAudioUnrecovered,
         .restartFailed,
         .captureSourceFallback,
+        // A track full of exact-zero samples holds nothing usable, same as trackNeverDelivered.
+        .exactZeroMic,
+        // A liveness gap means a stretch of the recording is missing or was recovered late.
+        .livenessGap,
+        // Every buffer the converter rejects is audio that never reached the WAV.
+        .converterFailure,
+        .writeFailure,
+        .finalizeFrameCountMismatch,
     ]
 }
 

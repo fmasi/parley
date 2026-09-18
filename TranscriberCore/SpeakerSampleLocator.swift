@@ -112,8 +112,17 @@ public enum SpeakerSampleLocator {
 
     /// Chunk durations for a layout, read once so a caller can reuse them across many `locate`
     /// calls. Empty for non-chunked layouts, which carry their own timeline and need no mapping.
-    public static func durations(for layout: AudioLayout) -> [TimeInterval?] {
+    ///
+    /// - Parameter cached: durations already stamped in the transcript's `metadata.chunk_durations`
+    ///   (`TranscriptAssembler.reconcileAudioPaths`, #204) — one entry per chunk, `0` meaning
+    ///   "unreadable when stamped". Used as-is when its count matches the chunk count and every
+    ///   entry is positive; any mismatch or zero falls back to opening every chunk file directly,
+    ///   which also covers transcripts written before this field existed.
+    public static func durations(for layout: AudioLayout, cached: [Double]? = nil) -> [TimeInterval?] {
         if case .chunkedArchives(let chunks) = layout {
+            if let cached, cached.count == chunks.count, cached.allSatisfy({ $0 > 0 }) {
+                return cached
+            }
             return durations(of: chunks)
         }
         return []
