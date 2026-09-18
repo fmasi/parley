@@ -61,9 +61,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// One-shot latch so a converter failure that repeats on every buffer (a format the converter
     /// can't handle) files one anomaly per session, not one per buffer (#196).
     private var micConverterFailureReported = false
-    /// One-shot-per-chunk latch for a persistently-implausible timeline delta (#196); reset in
-    /// `swapWriters` alongside the other per-chunk state.
-    private var timelineDeltaImplausibleReported = false
+    /// One-shot-per-chunk-per-track latch for a persistently-implausible timeline delta (#196);
+    /// reset in `swapWriters` alongside the other per-chunk state. Keyed by the track label
+    /// (`"mic"`/`"system"`) — a single shared `Bool` would let whichever track hits an implausible
+    /// delta first (system, since it's processed before mic in the SCK callback) silently suppress
+    /// the OTHER track's report in the same chunk, even though a cross-source PTS clock-epoch
+    /// mismatch can affect both tracks independently (e.g. after a sleep/wake cycle).
+    private var timelineDeltaImplausibleReported: [String: Bool] = [:]
 
     /// Anomaly-gated diagnostic ring (set by the service). Records format detections/changes and
     /// stream stop errors so an anomalous session can be reconstructed after the fact (#95).
@@ -214,7 +218,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         stickyDropReported = false
         // Same reasoning: the timeline anchor itself resets per chunk (above), so a persistently
         // implausible clock across chunk boundaries must be reported per chunk too.
-        timelineDeltaImplausibleReported = false
+        timelineDeltaImplausibleReported = [:]
 
         return (oldSystemPath, oldMicPath)
     }
@@ -619,10 +623,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
                 // compensating padding for this gap, which `PadRatioMonitor` cannot see (it only ever
                 // judges what actually got appended). One-shot per chunk so a persistently implausible
                 // clock doesn't flood the ring.
-                if !timelineDeltaImplausibleReported {
-                    timelineDeltaImplausibleReported = true
+                let trackKey = "\(label)"
+                if timelineDeltaImplausibleReported[trackKey] != true {
+                    timelineDeltaImplausibleReported[trackKey] = true
                     record(.timelineDeltaImplausible, .anomaly, [
-                        "track": "\(label)", "delta_seconds": "\(deltaSeconds)",
+                        "track": trackKey, "delta_seconds": "\(deltaSeconds)",
                     ])
                 }
             }

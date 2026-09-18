@@ -90,4 +90,23 @@ import Testing
         let verdict = d.check(nowNanos: nanos(105), lastArrivalNanos: nanos(50), gateOpen: true)
         #expect(verdict == .gap(seconds: 55))
     }
+
+    /// Documented tradeoff on `Verdict.gap`: a gate close is treated as delivery resumption (so a
+    /// tap track's idle→active transition stays observable), which means a gap already reported
+    /// fires AGAIN if the gate flaps closed and back open while `lastArrivalNanos` never actually
+    /// changed (delivery never really resumed). Pinned here so a future change to this behavior is
+    /// a deliberate decision, not a silent regression.
+    @Test func gateFlapWithUnchangedArrivalRefiresGap() {
+        var d = LivenessGapDetector(track: "system", gapThresholdSeconds: 3)
+        var fired = 0
+        for t in stride(from: 100.0, through: 110.0, by: 1.0) {
+            if case .gap = d.check(nowNanos: nanos(t), lastArrivalNanos: nanos(100), gateOpen: true) { fired += 1 }
+        }
+        #expect(fired == 1)
+        // Gate closes then immediately re-opens with the SAME lastArrivalNanos — delivery never
+        // actually resumed, but the gate close/re-open cycle re-arms the latch anyway.
+        _ = d.check(nowNanos: nanos(111), lastArrivalNanos: nanos(100), gateOpen: false)
+        if case .gap = d.check(nowNanos: nanos(112), lastArrivalNanos: nanos(100), gateOpen: true) { fired += 1 }
+        #expect(fired == 2, "gate flap with unchanged arrival must re-fire — see Verdict.gap doc comment")
+    }
 }

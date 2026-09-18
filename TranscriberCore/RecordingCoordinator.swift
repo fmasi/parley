@@ -192,15 +192,17 @@ public final class RecordingCoordinator {
         let (lidClosed, isBuiltInMic) = await Task.detached {
             (ClamshellMicGuard.isLidClosed(), ClamshellMicGuard.isBuiltInMicSelected(deviceId: microphoneDeviceId))
         }.value
-        if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
-            appState.interruptionWarning = ClamshellMicGuard.warningMessage
-        }
         // Re-entrancy guard: the await above is a genuine suspension point (unlike the two
         // synchronous IOKit/CoreAudio calls it replaced), so a second startRecording call fired
         // during it — e.g. a double-tap of the record control before the UI disables it — must not
         // race this one into writing a second sentinel / starting a second capture. Same
-        // "bail if the state moved" pattern already used by the callback guards below.
+        // "bail if the state moved" pattern already used by the callback guards below. Checked
+        // BEFORE the warning is set, so a call that loses the race never shows a banner for a
+        // recording it isn't the one driving.
         guard appState.isIdle else { return }
+        if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
+            appState.interruptionWarning = ClamshellMicGuard.warningMessage
+        }
 
         let config = configManager.config
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
@@ -236,11 +238,12 @@ public final class RecordingCoordinator {
                 await self.handleXPCCrash()
             }
         }
-        // #193/#196 review fix: this was previously only wired by TranscriberApp's
-        // `setupCrashHandler`, which runs solely on the launch-time crash-recovery re-attach paths
-        // (Flow A/B) — a fresh recording started here never received it, so the exact-zero-mic,
-        // liveness-gap, and write-failure banners this PR adds could never appear during a normal
-        // recording. The recording is never stopped by this.
+        // This was previously only wired by TranscriberApp's `setupCrashHandler`, which runs solely
+        // on the launch-time crash-recovery re-attach paths (Flow A/B) — a fresh recording started
+        // here never received it, so the exact-zero-mic, liveness-gap, and write-failure banners
+        // this PR adds could never appear during a normal recording. The recording is never stopped
+        // by this. Also set by TranscriberApp's setupCrashHandler for the re-attach paths above —
+        // keep both in sync if this wiring changes.
         captureClient.onQualityAnomaly = { [weak self] _, message in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }

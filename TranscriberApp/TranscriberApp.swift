@@ -456,6 +456,9 @@ struct TranscriberApp: App {
         // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a
         // disk-full write failure) — surfaced WHILE the recording is still running, while there is
         // still time to react. The recording is never stopped by this.
+        // Also set by RecordingCoordinator.startRecording() — that site covers a normal recording
+        // start, this one covers the launch-time crash-recovery re-attach paths (Flow A/B), which
+        // never go through startRecording(). Keep both in sync if this wiring changes.
         captureClient.onQualityAnomaly = { _, message in
             Task { @MainActor in
                 guard appState.isRecording else { return }

@@ -320,6 +320,14 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("mic-2"))
     }
 
+    // NOTE: the clamshell preflight in startRecording() (ClamshellMicGuard.isLidClosed() /
+    // isBuiltInMicSelected()) has no unit test here — both device queries are real IOKit/CoreAudio
+    // HAL calls with no injection seam, so they're device-test only (see PR #217's device-test
+    // checklist item 1). What IS covered below is the re-entrancy-guard-before-banner ordering
+    // bug this preflight had: the guard must run before `interruptionWarning` is set, or a
+    // startRecording call that loses the re-entrancy race still shows a banner for a recording it
+    // isn't driving.
+
     // #193/#196 review fix: onQualityAnomaly must be wired by startRecording itself, not only by
     // TranscriberApp's setupCrashHandler (which only runs on the launch-time crash-recovery
     // re-attach paths) — otherwise a live anomaly banner never appears during a normal recording.

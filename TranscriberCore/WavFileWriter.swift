@@ -33,14 +33,26 @@ public final class WavFileWriter {
         Logger.files.error("WAV write failure (\(context, privacy: .public)): \(self.path, privacy: .sensitive): \(error, privacy: .public)")
         guard !writeFailureReported else { return }
         writeFailureReported = true
-        onWriteFailure?("Recording write failed (\(context)): \(error.localizedDescription)")
+        // `error.localizedDescription` is bridged from NSError for a POSIX write failure and can
+        // embed the file URL — which contains the user's session name — so it must never reach the
+        // user-visible menu-bar banner (onWriteFailure -> onQualityAnomaly -> interruptionWarning).
+        // The full error, path included, is already captured above in the private log.
+        onWriteFailure?("Recording write failed (\(context)) — the disk may be full or unavailable.")
     }
 
     public init(path: String) throws {
         self.path = path
         FileManager.default.createFile(atPath: path, contents: nil)
-        fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-        try writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
+        do {
+            fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+            try writeHeader(sampleRate: 16000, channels: 1, dataSize: 0)
+        } catch {
+            // Don't leave an empty/headerless stub file on disk if the very first write (the 44-byte
+            // header) fails — e.g. disk-full at the moment of creation. Nothing else owns this path
+            // yet (init hasn't returned), so nothing else will clean it up.
+            try? FileManager.default.removeItem(atPath: path)
+            throw error
+        }
         Logger.files.debug("WAV writer created: \(path, privacy: .sensitive)")
     }
 
