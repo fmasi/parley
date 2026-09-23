@@ -237,8 +237,8 @@ struct MenuView: View {
         if appState.isRecording && appState.remoteAudioNotCaptured {
             MenuActionRow(
                 icon: "speaker.slash.fill",
-                title: "The other side isn’t being recorded",
-                subtitle: "System Audio Recording is off — click to fix"
+                title: "The other side may not be recorded",
+                subtitle: appState.remoteAudioProblem ?? "Click to check System Audio Recording"
             ) {
                 dismissPanel()
                 Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }

@@ -69,7 +69,8 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         Logger.permissions.info("Permission check (\(trigger.rawValue, privacy: .public)): missing \(missing.map(\.rawValue), privacy: .public)")
         guard !missing.isEmpty else {
             // Granted now. If a recording is running on the tap, let the helper confirm and rebuild.
-            await nudgeHelperIfRecording()
+            // Not awaited: a wedged helper must never hold `verifying` and silence every later check.
+            Task { await self.nudgeHelperIfRecording() }
             return
         }
         let isNewWindow = !(panel?.isVisible ?? false)

@@ -11,6 +11,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var onMicDeviceChanged: (@Sendable (String?) -> Void)?
     var onFatalFailure: (@Sendable (String) -> Void)?
     var onQualityAnomaly: (@Sendable (String, String) -> Void)?
+    var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
 
     struct StartCall: Equatable {
         let outputDirectory: URL

@@ -76,6 +76,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// ~1 Hz tick for `tapGuard`, on `audioQueue`, only while capturing with the tap. The guard does
     /// nothing on a tick unless a problem is suspected or reported. Created and cancelled on `audioQueue`.
     private var tapGuardTimer: DispatchSourceTimer?
+    /// Bumped per tap session, so a permission check still in flight from a previous session can't
+    /// land in the next session's fresh guard. Read and written on `audioQueue`.
+    private var tapGuardEpoch = 0
     private let guardEpoch = DispatchTime.now().uptimeNanoseconds
     private func guardNow() -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - guardEpoch) / 1_000_000_000
@@ -111,8 +114,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self?.record(kind, .anomaly, ["reason": message])
             self?.onQualityAnomaly?(kind.rawValue, message)
         }
-        // A tap that stops delivering while output plays can be a permission denial with no buffers
-        // at all, which the exact-zero detector can't see (#220 delivered nothing for 51 minutes).
+        // A tap that stops delivering while output plays gives the exact-zero detector nothing to see.
+        // In #220 the tap delivered zeros for 46 s, then no buffers at all for 51 minutes.
         livenessWatchdog.onSystemGap = isUsingSystemTap ? { [weak self] in
             guard let self else { return }
             self.audioQueue.async { self.apply(self.tapGuard.deliveryGap(now: self.guardNow())) }
@@ -423,11 +426,18 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private func startTapGuardTimer() {
         audioQueue.async {
             self.tapGuardTimer?.cancel()
+            self.tapGuardTimer = nil
+            // A stop queued its cancel before this ran: don't arm a timer that outlives the session.
+            guard self.stateLock.sync(execute: { self.isCapturing && !self.isUserStopping && self.tapSession != nil })
+            else { return }
             let t = DispatchSource.makeTimerSource(queue: self.audioQueue)
             t.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
             t.setEventHandler { [weak self] in
                 guard let self else { return }
-                self.apply(self.tapGuard.tick(now: self.guardNow()))
+                // The HAL read only happens while a grant rebuild still owes proof.
+                let outputRunning = self.tapGuard.wantsOutputState
+                    ? SystemTapSession.isOutputDeviceRunningSomewhere() : nil
+                self.apply(self.tapGuard.tick(now: self.guardNow(), outputRunning: outputRunning))
             }
             t.resume()
             self.tapGuardTimer = t
@@ -455,10 +465,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             switch action {
             case .checkPermission(let evidence):
                 // A TCC IPC round-trip: never on the audio queue.
+                let epoch = tapGuardEpoch
                 DispatchQueue.global(qos: .utility).async { [weak self] in
                     let status = SystemAudioRecordingPermission.preflight()
                     guard let self else { return }
                     self.audioQueue.async {
+                        guard epoch == self.tapGuardEpoch else { return }   // a previous session's check
                         self.apply(self.tapGuard.permissionChecked(status, evidence: evidence, now: self.guardNow()))
                     }
                 }
@@ -469,9 +481,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             case .reportDenied(let status):
                 guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
                 Logger.audio.error("System tap: System Audio Recording permission \(SystemAudioRecordingPermission.wireValue(status), privacy: .public) — the other side is not being captured")
-                record(.systemAudioPermissionDenied, .anomaly, ["status": SystemAudioRecordingPermission.wireValue(status)])
+                record(.systemAudioPermissionDenied, .anomaly, [
+                    "status": status == nil ? "unconfirmed" : SystemAudioRecordingPermission.wireValue(status),
+                ])
                 let message = status == nil
-                    ? "System audio has been completely silent and Parley can’t verify its System Audio Recording permission. If the other side is talking, check the permission."
+                    ? "Parley can’t confirm it’s capturing the other side of the call: system audio has been completely silent. If they’re talking, check System Audio Recording."
                     : "Parley isn’t allowed to record system audio, so the other side of the call is not being captured. Your microphone is still recording. Grant System Audio Recording to fix it."
                 onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, message)
             case .reportRestored:
@@ -594,7 +608,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// rebuild failing) is NOT fatal: like a dead SCK system stream, the mic keeps recording and the
     /// system track is silence-padded — surfaced via `onSystemAudioUnrecoverable`, never a teardown.
     private func startSystemTap(handler: AudioOutputHandler) throws {
-        audioQueue.sync { tapGuard = TapPermissionGuard() }
+        audioQueue.sync {
+            tapGuard = TapPermissionGuard()
+            tapGuardEpoch += 1
+        }
         let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak self, weak handler] samples, pts in
             handler?.appendSystemSamples(samples, pts: pts)
             // Already on audioQueue.

@@ -112,6 +112,9 @@ struct PermissionRepairView: View {
             // Settings right now, and Parley has no notification for the change.
             while !Task.isCancelled {
                 await permissionManager.refreshRequired()
+                // This window may have been replaced while the refresh was in flight: a cancelled
+                // task must not close its successor.
+                if Task.isCancelled { return }
                 if unresolved.isEmpty {
                     onResolved()
                     return

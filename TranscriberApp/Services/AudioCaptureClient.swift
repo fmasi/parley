@@ -331,14 +331,17 @@ final class AudioCaptureClient {
     @discardableResult
     func restartSystemAudio() async -> Bool {
         guard let conn = try? getConnection() else { return false }
-        return await withCheckedContinuation { cont in
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let once = ResumeOnce(cont)
             let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                cont.resume(returning: false)
+                once.resume(false)
             } as! AudioCaptureProtocol
             proxy.restartSystemAudio { success, error in
                 if let error { Logger.audio.info("System audio restart skipped: \(error, privacy: .public)") }
-                cont.resume(returning: success)
+                once.resume(success)
             }
+            // The helper replies from its audio queue; a stalled queue must not hang the caller.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(false) }
         }
     }
 

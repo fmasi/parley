@@ -17,7 +17,7 @@ public final class AppState {
                 Logger.state.info("State: \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.phase), privacy: .public)")
             }
             // Scoped to the recording it describes.
-            if !isRecording { remoteAudioNotCaptured = false }
+            if !isRecording { clearRemoteAudioProblem() }
         }
     }
     public var lastTranscriptPath: String?
@@ -33,6 +33,8 @@ public final class AppState {
     /// overwritten by a later, unrelated anomaly: it clears only when real remote audio arrives or the
     /// recording ends. A single past-tense banner is exactly how #220 went unnoticed for 51 minutes.
     public var remoteAudioNotCaptured = false
+    /// What the helper said about it, for the sticky row (denied vs. can't confirm vs. rebuild failed).
+    public var remoteAudioProblem: String?
 
     public var errorMessage: String? {
         didSet {
@@ -60,13 +62,29 @@ public final class AppState {
         switch kind {
         case CaptureEventKind.systemAudioPermissionDenied.rawValue:
             remoteAudioNotCaptured = true
+            remoteAudioProblem = message
             return true
         case CaptureEventKind.systemAudioPermissionRestored.rawValue:
-            remoteAudioNotCaptured = false
+            clearRemoteAudioProblem()
             return false
         default:
             return false
         }
+    }
+
+    /// The helper gave up on the remote stream (a tap rebuild failed, or SCK exhausted its restarts):
+    /// as sticky as a denial, since the result is the same.
+    public func noteSystemAudioLost(message: String) {
+        interruptionWarning = message
+        remoteAudioNotCaptured = true
+        remoteAudioProblem = message
+    }
+
+    /// Clear the sticky state: real remote audio is back, the recording ended, or capture was restarted
+    /// from scratch (a fresh helper re-reports within seconds if the problem is still there).
+    public func clearRemoteAudioProblem() {
+        remoteAudioNotCaptured = false
+        remoteAudioProblem = nil
     }
 
     public var isIdle: Bool {

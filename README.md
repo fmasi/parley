@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-1187%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1193%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 

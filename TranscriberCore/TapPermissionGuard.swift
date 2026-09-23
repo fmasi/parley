@@ -47,13 +47,22 @@ public struct TapPermissionGuard {
     /// Building the tap raises the system prompt when the permission was never asked; don't alarm
     /// over a question the user is answering right now.
     public static let promptGrace: Double = 20
+    /// After a grant rebuild, a tap that delivers no buffers at all for this long while output is
+    /// playing is evidence too (no samples means the exact-zero detector can't see it).
+    public static let noBuffersAfterRebuild: Double = 15
 
     /// A denial has been reported and not yet cleared by a grant.
     public private(set) var problemReported = false
     /// The current tap was built while the permission was not granted: it needs a rebuild once it is.
     public private(set) var builtWithoutGrant = false
-    /// Granted and rebuilt after a problem; "restored" waits for the first real audio.
+    /// Granted and rebuilt after a problem; still owed proof (real audio) that the rebuild worked.
     private var awaitingAudio = false
+    /// An alarm was raised this episode, so the first real audio must say "restored" (and only then:
+    /// a fast Allow that never alarmed must not announce a recovery nobody saw a problem for).
+    private var alarmRaised = false
+    /// The outstanding report came from an unverifiable check: polling can't improve on it.
+    private var problemUnverifiable = false
+    private var lastSampleAt: Double = -.infinity
     private var insuranceRebuildUsed = false
     private var checkInFlight = false
     private var builtAt: Double = 0
@@ -86,6 +95,7 @@ public struct TapPermissionGuard {
     /// A batch of real (not padded) tap samples.
     public mutating func samples(_ samples: [Int16], rate: Double, now: Double) -> [Action] {
         guard !samples.isEmpty else { return [] }
+        lastSampleAt = now
         deliveredFrames += Int64(samples.count)
         let allZero = samples.allSatisfy { $0 == 0 }
         var actions: [Action] = []
@@ -95,9 +105,11 @@ public struct TapPermissionGuard {
             // Real audio: whatever the TCC cache says, the tap is being fed.
             builtWithoutGrant = false
             insuranceRebuildUsed = false
-            if problemReported || awaitingAudio {
-                problemReported = false
-                awaitingAudio = false
+            problemReported = false
+            problemUnverifiable = false
+            awaitingAudio = false
+            if alarmRaised {
+                alarmRaised = false
                 actions.append(.reportRestored)
             }
         }
@@ -113,12 +125,21 @@ public struct TapPermissionGuard {
     }
 
     /// Called about once a second while the tap is capturing. Only does anything while a problem
-    /// is suspected or reported.
-    public mutating func tick(now: Double) -> [Action] {
-        guard builtWithoutGrant || problemReported else { return [] }
+    /// is suspected or reported. `outputRunning` (is anything playing?) is only consulted while a grant
+    /// rebuild still owes proof, and callers may pass nil otherwise.
+    public mutating func tick(now: Double, outputRunning: Bool? = nil) -> [Action] {
+        if awaitingAudio, outputRunning == true,
+           now - max(lastSampleAt, builtAt) >= Self.noBuffersAfterRebuild,
+           now - lastCheckAt >= Self.noBuffersAfterRebuild {
+            return requestCheck(.deliveryGap, now: now)
+        }
+        guard builtWithoutGrant || (problemReported && !problemUnverifiable) else { return [] }
         guard now - lastCheckAt >= Self.recheckInterval else { return [] }
         return requestCheck(.none, now: now)
     }
+
+    /// Whether `tick` wants to know if output is playing (a HAL read the caller can skip otherwise).
+    public var wantsOutputState: Bool { awaitingAudio }
 
     private mutating func requestCheck(_ evidence: Evidence, now: Double) -> [Action] {
         guard !checkInFlight else { return [] }
@@ -133,18 +154,24 @@ public struct TapPermissionGuard {
         checkInFlight = false
         switch status {
         case .authorized?:
-            if builtWithoutGrant || problemReported {
+            if builtWithoutGrant || (problemReported && !problemUnverifiable) {
                 // The grant only reaches a tap built after it.
                 builtWithoutGrant = false
                 problemReported = false
                 awaitingAudio = true
                 return [.rebuildTap]
             }
-            if evidence != .none, !insuranceRebuildUsed {
+            guard evidence != .none else { return [] }
+            if !insuranceRebuildUsed {
                 // Granted, yet silent: most likely a genuinely silent call, but TCC's answer can be
                 // stale, and a rebuild during silence costs nothing. Once per episode, so it can't loop.
                 insuranceRebuildUsed = true
                 return [.rebuildTap]
+            }
+            if awaitingAudio {
+                // A grant rebuild and an insurance rebuild later, still nothing real. It may be a
+                // silent call, but "audio or an alarm, never neither": say we can't confirm it.
+                return report(nil, now: now)
             }
             return []
         case .denied?:
@@ -162,6 +189,8 @@ public struct TapPermissionGuard {
     private mutating func report(_ status: PermissionStatus?, now: Double) -> [Action] {
         guard !problemReported || now - lastReportAt >= Self.reReportInterval else { return [] }
         problemReported = true
+        problemUnverifiable = status == nil
+        alarmRaised = true
         lastReportAt = now
         return [.reportDenied(status)]
     }

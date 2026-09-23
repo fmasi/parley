@@ -19,6 +19,8 @@ Check the right channel with `ffmpeg -i <file>.m4a -af "pan=mono|c0=c1,volumedet
 ## The council's critical case: Allow quickly at Record
 - [ ] **Fast Allow, built-in speakers.** With output on the **built-in speakers** (not AirPods, whose route switch triggers a rebuild that would hide the bug), `tccutil reset AudioCapture eu.fmasi.parley`, play audio, press Record, and click **Allow within ~5 s**. After Stop the right channel **has audio** from a few seconds in, and `system_exact_zero_seconds` is small, not the whole recording.
 
+- [ ] **No false "restored".** In the fast-Allow run above, no "being recorded again" banner appears (nothing was ever reported).
+
 ## Repair window, before recording
 - [ ] **Denied at launch → repair, not lockout.** Switch Parley **off** under "System Audio Recording Only", relaunch. The menu is usable (no "Setup required"), and a floating **Permission Needed** window lists System Audio Recording with **Open Settings**. Open Settings lands on the right pane; switch Parley on → the window **closes by itself** within ~2 s.
 - [ ] **Record start with the permission off.** Switch it off, press Record. The recording **starts** (timer running, mic captured), then the repair window opens saying **"Parley isn’t recording everything"** (not "your next recording"), with a notification. The menu shows the sticky red row **"The other side isn’t being recorded"**.

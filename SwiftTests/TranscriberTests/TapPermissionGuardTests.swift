@@ -187,4 +187,57 @@ struct TapPermissionGuardTests {
         #expect(g.deliveredFrames == 9_600)
         #expect(g.exactZeroFrames == 4_800)
     }
+
+    // MARK: - Council round 2
+
+    /// Fast Allow: nothing was ever reported, so real audio must not announce a "restore".
+    @Test func noRestoredMessageWhenNothingWasReported() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: .notDetermined, now: 0)
+        _ = g.tick(now: 1)
+        #expect(g.permissionChecked(.authorized, evidence: .none, now: 1) == [.rebuildTap])
+        _ = g.tapBuilt(status: .authorized, now: 1.2)
+        #expect(g.samples(audio, rate: 48_000, now: 2) == [])
+    }
+
+    /// After a grant rebuild, if silence persists past the one insurance rebuild, say so: "audio or an
+    /// alarm, never neither".
+    @Test func silenceAfterAGrantRebuildIsReportedAsUnconfirmed() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: .notDetermined, now: 0)
+        _ = g.tick(now: 1)
+        _ = g.permissionChecked(.authorized, evidence: .none, now: 1)
+        _ = g.tapBuilt(status: .authorized, now: 1.2)
+        _ = feedZeros(&g, seconds: 12.5, from: 1.3)
+        #expect(g.permissionChecked(.authorized, evidence: .exactZeroRun, now: 14) == [.rebuildTap])   // insurance
+        _ = g.tapBuilt(status: .authorized, now: 14.2)
+        _ = feedZeros(&g, seconds: 12.5, from: 14.3)
+        #expect(g.permissionChecked(.authorized, evidence: .exactZeroRun, now: 27) == [.reportDenied(nil)])
+        // …and real audio then clears it with a restore.
+        #expect(g.samples(audio, rate: 48_000, now: 28) == [.reportRestored])
+    }
+
+    /// A rebuilt tap that delivers NOTHING while output plays (no samples → no zero run) is evidence too.
+    @Test func noBuffersAfterAGrantRebuildWhileOutputPlaysIsEvidence() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: .denied, now: 0)
+        _ = g.tick(now: 1)
+        _ = g.permissionChecked(.denied, evidence: .none, now: 1)
+        _ = g.tick(now: 6)
+        _ = g.permissionChecked(.authorized, evidence: .none, now: 6)
+        _ = g.tapBuilt(status: .authorized, now: 6.2)
+        #expect(g.tick(now: 10, outputRunning: true) == [])
+        #expect(g.tick(now: 22, outputRunning: false) == [])   // idle output: no buffers is normal (#66)
+        #expect(g.tick(now: 22, outputRunning: true) == [.checkPermission(.deliveryGap)])
+    }
+
+    /// Unverifiable (SPI gone): report once on evidence, then stop polling a check that can't answer.
+    @Test func unverifiableReportDoesNotKeepPolling() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: nil, now: 0)
+        _ = feedZeros(&g, seconds: 12.5, from: 0)
+        #expect(g.permissionChecked(nil, evidence: .exactZeroRun, now: 13) == [.reportDenied(nil)])
+        #expect(g.tick(now: 20) == [])
+        #expect(g.tick(now: 100) == [])
+    }
 }

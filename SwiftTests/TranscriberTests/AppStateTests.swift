@@ -272,4 +272,24 @@ struct AppStateTests {
         state.phase = .transcribing(progress: "")
         #expect(!state.remoteAudioNotCaptured)
     }
+
+    /// A failed tap rebuild loses the other side just as surely as a denial.
+    @Test func systemAudioLostIsStickyWithItsMessage() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteSystemAudioLost(message: "lost")
+        state.interruptionWarning = nil
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.remoteAudioProblem == "lost")
+    }
+
+    /// A crash-restarted helper can't "restore" the old helper's alarm, so the restart clears it.
+    @Test func clearingRemovesStickyStateAndMessage() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        state.clearRemoteAudioProblem()
+        #expect(!state.remoteAudioNotCaptured)
+        #expect(state.remoteAudioProblem == nil)
+    }
 }
