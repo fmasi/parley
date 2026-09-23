@@ -96,6 +96,16 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// ratio, catching cases where padding itself was skipped (e.g. `timelineDeltaImplausible`)
     /// (#196). Severity `.anomaly`.
     case finalizeFrameCountMismatch
+
+    /// The Core Audio tap is running WITHOUT the System Audio Recording permission (#220). macOS
+    /// accepts the tap and runs its IOProc at full rate, but every sample is exact digital zero, so
+    /// the recording looks structurally perfect while the remote side is gone. Raised when the helper
+    /// confirms the denial (at tap start, or after a sustained exact-zero run while output is playing).
+    /// Severity `.anomaly`.
+    case systemAudioPermissionDenied
+    /// The permission was granted mid-recording and the tap was rebuilt, so remote audio is being
+    /// captured again (#220). The stretch before it stays lost. Severity `.info`.
+    case systemAudioPermissionRestored
 }
 
 extension CaptureEventKind {
@@ -128,6 +138,8 @@ extension CaptureEventKind {
         .converterFailure,
         .writeFailure,
         .finalizeFrameCountMismatch,
+        // A permission-denied tap records nothing but exact zeros for as long as the denial lasts.
+        .systemAudioPermissionDenied,
     ]
 }
 
@@ -337,7 +349,17 @@ public struct CaptureDiagnostics: Sendable {
         events.lazy.filter { CaptureEventKind.qualityCompromising.contains($0.kind) }.count
     }
     /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
-    public var systemAudioUnrecovered: Bool { events.contains { $0.kind == .systemAudioUnrecovered } }
+    /// True when the remote side stopped being captured and did not come back. That includes a
+    /// System Audio Recording denial that was never restored: the 2026-09-23 recording reported
+    /// `false` here while holding no remote audio at all (#220).
+    public var systemAudioUnrecovered: Bool {
+        if events.contains(where: { $0.kind == .systemAudioUnrecovered }) { return true }
+        guard let denied = events.lastIndex(where: { $0.kind == .systemAudioPermissionDenied }) else {
+            return false
+        }
+        let restored = events.lastIndex(where: { $0.kind == .systemAudioPermissionRestored })
+        return restored.map { $0 < denied } ?? true
+    }
 
     /// Newline-delimited JSON of all events (the `.diag.jsonl` payload).
     public func jsonlData() -> Data {

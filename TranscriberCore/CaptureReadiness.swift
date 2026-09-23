@@ -1,0 +1,77 @@
+import Foundation
+
+/// A permission a recording cannot do without.
+public enum CapturePermission: String, CaseIterable, Sendable {
+    case microphone
+    case screenRecording
+    /// `kTCCServiceAudioCapture` — what the Core Audio tap needs (#103, #220).
+    case systemAudioRecording
+}
+
+/// Pure decisions about whether Parley is ready to record (#174, #220).
+///
+/// The rule this encodes: onboarding is the one place permissions get set up. After that, Parley is
+/// always usable. A missing permission is REPAIRED (a window naming exactly what is missing, with a
+/// one-click fix), never answered with the "Setup required" lockout, which catches the user by
+/// surprise at the moment they press Record.
+public enum CaptureReadiness {
+
+    /// The permissions a recording needs with this system-audio source. The tap does NOT need Screen
+    /// Recording, and Screen Recording does NOT let the tap hear anything. Holding one while missing
+    /// the other is precisely how 52 minutes of remote audio were recorded as digital zeros (#220).
+    public static func required(for source: SystemAudioSource) -> [CapturePermission] {
+        switch source {
+        case .screenCaptureKit: return [.microphone, .screenRecording]
+        case .coreAudioTap: return [.microphone, .systemAudioRecording]
+        }
+    }
+
+    /// The required permissions that are not granted, in `required(for:)` order.
+    public static func missing(
+        for source: SystemAudioSource,
+        status: (CapturePermission) -> PermissionStatus
+    ) -> [CapturePermission] {
+        required(for: source).filter { !status($0).isGranted }
+    }
+
+    public enum LaunchDecision: Equatable, Sendable {
+        /// Everything needed is in place.
+        case ready
+        /// First run (or a missing model): show the setup window, which gates the app.
+        case onboarding
+        /// Onboarding was completed once, so the app stays usable — open the repair window for these.
+        case readyNeedsRepair([CapturePermission])
+    }
+
+    public static func launchDecision(
+        onboardingCompleted: Bool,
+        missing: [CapturePermission],
+        modelReady: Bool
+    ) -> LaunchDecision {
+        // A missing model is not a permission problem: only the setup window can download it.
+        guard modelReady else { return .onboarding }
+        guard onboardingCompleted else { return missing.isEmpty ? .ready : .onboarding }
+        return missing.isEmpty ? .ready : .readyNeedsRepair(missing)
+    }
+
+    /// Whether this install has been through onboarding. Installs predating the persisted flag are
+    /// recognised by a granted microphone, which can only have come from going through setup.
+    public static func isOnboarded(flag: Bool, microphoneGranted: Bool) -> Bool {
+        flag || microphoneGranted
+    }
+
+    public enum FixAction: Equatable, Sendable {
+        /// Never asked: the system prompt can still be shown.
+        case requestPrompt
+        /// Explicitly denied or switched off: macOS will not prompt again, only System Settings can fix it.
+        case openSystemSettings
+    }
+
+    public static func fixAction(for status: PermissionStatus) -> FixAction? {
+        switch status {
+        case .authorized: return nil
+        case .notDetermined: return .requestPrompt
+        case .denied: return .openSystemSettings
+        }
+    }
+}

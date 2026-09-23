@@ -48,6 +48,41 @@ struct CaptureDiagnosticsTests {
         #expect(d.isAnomalous == true)
     }
 
+    // MARK: - #220: System Audio Recording permission denial
+
+    /// A tap denied by TCC records 100% digital zeros that look structurally perfect. That is the
+    /// definition of compromised content, so it must count against the recording's quality.
+    @Test func permissionDenialIsQualityCompromising() {
+        #expect(CaptureEventKind.qualityCompromising.contains(.systemAudioPermissionDenied))
+        #expect(!CaptureEventKind.qualityCompromising.contains(.systemAudioPermissionRestored))
+    }
+
+    /// The 2026-09-23 incident's provenance said `system_audio_unrecovered: false` for a recording
+    /// with no remote audio at all. A denial that was never restored must set it.
+    @Test func unrestoredPermissionDenialMarksSystemAudioUnrecovered() {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStart, .info, at: 0, origin: .helper))
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        #expect(d.systemAudioUnrecovered == true)
+    }
+
+    @Test func restoredPermissionDenialDoesNotMarkSystemAudioUnrecovered() {
+        var d = CaptureDiagnostics()
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        d.record(event(.systemAudioPermissionRestored, .info, at: 2, origin: .helper))
+        #expect(d.systemAudioUnrecovered == false)
+        // The lost stretch still compromises the recording even though capture came back.
+        #expect(d.qualityAnomalyCount == 1)
+    }
+
+    @Test func denialAfterARestoreMarksSystemAudioUnrecoveredAgain() {
+        var d = CaptureDiagnostics()
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        d.record(event(.systemAudioPermissionRestored, .info, at: 2, origin: .helper))
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 3, origin: .helper))
+        #expect(d.systemAudioUnrecovered == true)
+    }
+
     @Test func countersReflectKinds() {
         // Mirrors real severities: restartInPlace/retry/launchRecovery are warnings; the route
         // disruption itself (streamStopError) is the anomaly. routeChangeCount counts the handled

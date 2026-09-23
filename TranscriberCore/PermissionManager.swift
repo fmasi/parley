@@ -66,6 +66,18 @@ public protocol PermissionChecking: Sendable {
     func requestScreenRecording() async -> PermissionStatus
     func requestCalendar() async -> PermissionStatus
     func requestNotifications() async -> PermissionStatus
+
+    /// System Audio Recording (`kTCCServiceAudioCapture`), which the Core Audio tap needs (#220).
+    func checkSystemAudioRecording() async -> PermissionStatus
+    /// Show the system prompt if never asked; otherwise return the stored answer.
+    func requestSystemAudioRecording() async -> PermissionStatus
+}
+
+extension PermissionChecking {
+    /// Default for checkers that predate the tap permission (and for tests that don't exercise it):
+    /// report granted, so they keep behaving as they did.
+    public func checkSystemAudioRecording() async -> PermissionStatus { .authorized }
+    public func requestSystemAudioRecording() async -> PermissionStatus { .authorized }
 }
 
 @Observable
@@ -74,6 +86,12 @@ public final class PermissionManager {
     public var screenRecording: PermissionStatus = .notDetermined
     public var calendar: PermissionStatus = .notDetermined
     public var notifications: PermissionStatus = .notDetermined
+    /// System Audio Recording, checked only while the tap is the configured source (#220).
+    public var systemAudioRecording: PermissionStatus = .notDetermined
+
+    /// Which system-audio capture method the requirements follow. Kept in sync with the config by the
+    /// app; the tap needs System Audio Recording, ScreenCaptureKit needs Screen Recording.
+    public var systemAudioSource: SystemAudioSource = .screenCaptureKit
 
     private let checker: PermissionChecking
 
@@ -85,8 +103,37 @@ public final class PermissionManager {
         self.notifications = .notDetermined
     }
 
-    public var allRequiredGranted: Bool {
-        microphone.isGranted && screenRecording.isGranted
+    public func status(of permission: CapturePermission) -> PermissionStatus {
+        switch permission {
+        case .microphone: return microphone
+        case .screenRecording: return screenRecording
+        case .systemAudioRecording: return systemAudioRecording
+        }
+    }
+
+    /// The permissions the configured source needs that are not granted.
+    public var missingRequired: [CapturePermission] {
+        CaptureReadiness.missing(for: systemAudioSource) { status(of: $0) }
+    }
+
+    public var allRequiredGranted: Bool { missingRequired.isEmpty }
+
+    /// Re-check just the permissions a recording needs: cheap enough for record start and for the
+    /// repair window's refresh while it is open.
+    public func refreshRequired() async {
+        microphone = checker.checkMicrophone()
+        switch systemAudioSource {
+        case .screenCaptureKit: screenRecording = await checker.checkScreenRecording()
+        case .coreAudioTap: systemAudioRecording = await checker.checkSystemAudioRecording()
+        }
+    }
+
+    public func request(_ permission: CapturePermission) async {
+        switch permission {
+        case .microphone: await requestMicrophone()
+        case .screenRecording: await requestScreenRecording()
+        case .systemAudioRecording: await requestSystemAudioRecording()
+        }
     }
 
     /// The ongoing notifications-disabled signal derived from the current status (#150).
@@ -107,7 +154,11 @@ public final class PermissionManager {
         screenRecording = await checker.checkScreenRecording()
         calendar = checker.checkCalendar()
         notifications = await checker.checkNotifications()
-        Logger.permissions.info("Permissions — mic: \(String(describing: self.microphone), privacy: .public), screen: \(String(describing: self.screenRecording), privacy: .public), calendar: \(String(describing: self.calendar), privacy: .public), notifications: \(String(describing: self.notifications), privacy: .public)")
+        // Only the tap needs it, and checking means an XPC round-trip to the capture helper.
+        if systemAudioSource == .coreAudioTap {
+            systemAudioRecording = await checker.checkSystemAudioRecording()
+        }
+        Logger.permissions.info("Permissions — mic: \(String(describing: self.microphone), privacy: .public), screen: \(String(describing: self.screenRecording), privacy: .public), system audio: \(String(describing: self.systemAudioRecording), privacy: .public) (source \(self.systemAudioSource.rawValue, privacy: .public)), calendar: \(String(describing: self.calendar), privacy: .public), notifications: \(String(describing: self.notifications), privacy: .public)")
     }
 
     public func requestMicrophone() async {
@@ -118,6 +169,11 @@ public final class PermissionManager {
     public func requestScreenRecording() async {
         screenRecording = await checker.requestScreenRecording()
         Logger.permissions.debug("Screen recording permission: \(String(describing: self.screenRecording), privacy: .public)")
+    }
+
+    public func requestSystemAudioRecording() async {
+        systemAudioRecording = await checker.requestSystemAudioRecording()
+        Logger.permissions.info("System Audio Recording permission: \(String(describing: self.systemAudioRecording), privacy: .public)")
     }
 
     public func requestCalendar() async {
