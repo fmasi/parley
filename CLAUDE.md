@@ -98,6 +98,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol — source-aware: the tap needs System Audio Recording, ScreenCaptureKit needs Screen Recording (#220)
 - `TranscriberCore/CaptureReadiness.swift` -- pure readiness decisions: required permissions per system-audio source, launch routing (after onboarding a missing permission goes to REPAIR, never the Setup lockout), fix action per status (#174, #220)
+- `TranscriberCore/TapPermissionGuard.swift` -- pure state machine keeping the tap honest about its permission: rebuild after a grant, re-check/re-report only while a problem exists, "restored" only on real audio, no rebuild loops; counts exact-zero frames for provenance (#220)
 - `TranscriberCore/SystemAudioRecordingPermission.swift` -- private TCC SPI wrapper (`dlsym`) for `kTCCServiceAudioCapture`; preflight is cached per process, so live checks go through the helper (gotcha #70, docs/app-store-blockers.md)
 - `TranscriberCore/PathDisplay.swift` -- prefix-anchored `~` abbreviation of filesystem paths for display (shared by Setup + Settings)
 - `TranscriberCore/RecordingTimer.swift` -- pure elapsed-time formatting (mm:ss / h:mm:ss) for the menu bar live timer
@@ -137,7 +138,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 1161 tests across 136 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
+# 1188 tests across 137 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```

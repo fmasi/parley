@@ -41,11 +41,17 @@ extension CapturePermission {
 /// back as soon as everything it lists is granted.
 struct PermissionRepairView: View {
     let permissionManager: PermissionManager
+    let appState: AppState
     /// The permissions this window was opened for. Rows stay listed (turning green) once fixed.
     let permissions: [CapturePermission]
-    let isRecording: Bool
+    /// Opened because of a recording (starting or running): word it that way even in the moment
+    /// before the phase flips to `.recording`.
+    let assumeRecording: Bool
     let onResolved: () -> Void
     let onDismiss: () -> Void
+
+    /// Read live, so a window opened before a recording started says the right thing once it has.
+    private var isRecording: Bool { assumeRecording || appState.isRecording }
 
     static let preferredSize = NSSize(width: 460, height: 300)
 
@@ -77,7 +83,12 @@ struct PermissionRepairView: View {
                         detail: permission.detail,
                         status: permissionManager.status(of: permission),
                         pane: permission.pane,
-                        onGrant: { Task { await permissionManager.request(permission) } }
+                        onGrant: {
+                            // CGRequestScreenCaptureAccess never prompts again after a first refusal:
+                            // take the user where the fix actually is.
+                            if permission == .screenRecording { permission.pane.open() }
+                            Task { await permissionManager.request(permission) }
+                        }
                     )
                 }
             }

@@ -189,6 +189,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// True when the MID-RECORDING system (remote) stream could not be restarted within budget during
     /// the session — the remote side stopped being captured even though the mic kept recording (#86).
     public let systemAudioUnrecovered: Bool
+    /// Measured on the Core Audio tap track: seconds of audio it delivered, and how many of those were
+    /// exact digital zero (#220). A fact, not a judgement: a permission-denied tap is 100% zeros while
+    /// every other field looks healthy. nil when the session didn't use the tap (or predates this).
+    public let systemDeliveredSeconds: Int?
+    public let systemExactZeroSeconds: Int?
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -201,6 +206,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case anomalyCount = "anomaly_count"
         case qualityAnomalyCount = "quality_anomaly_count"
         case systemAudioUnrecovered = "system_audio_unrecovered"
+        case systemDeliveredSeconds = "system_delivered_seconds"
+        case systemExactZeroSeconds = "system_exact_zero_seconds"
     }
 
     public init(
@@ -213,7 +220,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         recovered: Bool,
         anomalyCount: Int,
         qualityAnomalyCount: Int = 0,
-        systemAudioUnrecovered: Bool = false
+        systemAudioUnrecovered: Bool = false,
+        systemDeliveredSeconds: Int? = nil,
+        systemExactZeroSeconds: Int? = nil
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -225,6 +234,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.anomalyCount = anomalyCount
         self.qualityAnomalyCount = qualityAnomalyCount
         self.systemAudioUnrecovered = systemAudioUnrecovered
+        self.systemDeliveredSeconds = systemDeliveredSeconds
+        self.systemExactZeroSeconds = systemExactZeroSeconds
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -248,6 +259,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         qualityAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .qualityAnomalyCount) ?? 0
         // Also added after the original shape — same hazard, previously latent.
         systemAudioUnrecovered = try c.decodeIfPresent(Bool.self, forKey: .systemAudioUnrecovered) ?? false
+        systemDeliveredSeconds = try c.decodeIfPresent(Int.self, forKey: .systemDeliveredSeconds)
+        systemExactZeroSeconds = try c.decodeIfPresent(Int.self, forKey: .systemExactZeroSeconds)
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -264,6 +277,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
         if let micDevice { d["mic_device"] = micDevice }
+        if let systemDeliveredSeconds { d["system_delivered_seconds"] = systemDeliveredSeconds }
+        if let systemExactZeroSeconds { d["system_exact_zero_seconds"] = systemExactZeroSeconds }
         return d
     }
 }
@@ -397,8 +412,16 @@ public struct CaptureDiagnostics: Sendable {
             recovered: didRecover,
             anomalyCount: anomalyCount,
             qualityAnomalyCount: qualityAnomalyCount,
-            systemAudioUnrecovered: systemAudioUnrecovered
+            systemAudioUnrecovered: systemAudioUnrecovered,
+            systemDeliveredSeconds: tapTrackSeconds("system_delivered_seconds"),
+            systemExactZeroSeconds: tapTrackSeconds("system_exact_zero_seconds")
         )
+    }
+
+    /// Summed across every helper session's `captureStop` (a crash-recovered recording has several).
+    private func tapTrackSeconds(_ key: String) -> Int? {
+        let values = events.filter { $0.kind == .captureStop }.compactMap { $0.detail[key].flatMap(Int.init) }
+        return values.isEmpty ? nil : values.reduce(0, +)
     }
 }
 

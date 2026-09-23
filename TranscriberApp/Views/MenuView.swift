@@ -233,6 +233,17 @@ struct MenuView: View {
 
     @ViewBuilder
     private var alertBanners: some View {
+        // Sticky (#220): can't be dismissed or overwritten while the other side isn't being captured.
+        if appState.isRecording && appState.remoteAudioNotCaptured {
+            MenuActionRow(
+                icon: "speaker.slash.fill",
+                title: "The other side isn’t being recorded",
+                subtitle: "System Audio Recording is off — click to fix"
+            ) {
+                dismissPanel()
+                Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }
+            }
+        }
         if let critical = appState.criticalError {
             AlertBanner(severity: .critical, message: critical) {
                 appState.criticalError = nil
@@ -386,10 +397,12 @@ struct MenuView: View {
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator
-            Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
-            // In parallel, never gating the recording: if a permission it needs is missing, the fix
-            // appears now, at the start of the meeting, not after it (#220).
-            Task { await PermissionRepairWindowController.shared.verify(trigger: .recordStart) }
+            Task {
+                await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId)
+                // After the recording is up (never gating it): if a permission it needs is missing, the
+                // fix appears now, at the start of the meeting, not after it (#220).
+                await PermissionRepairWindowController.shared.verify(trigger: .recordStart)
+            }
         }
     }
 

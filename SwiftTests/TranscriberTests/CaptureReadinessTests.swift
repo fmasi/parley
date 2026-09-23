@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import TranscriberCore
 
 /// #220 / #174: the permissions a recording needs depend on the configured system-audio source, and
@@ -96,6 +97,23 @@ struct CaptureReadinessTests {
 
     @Test func freshInstallIsNotOnboarded() {
         #expect(!CaptureReadiness.isOnboarded(flag: false, microphoneGranted: false))
+    }
+
+    // MARK: - repair window snooze
+
+    @Test func repairPresentsWhenNeverDismissed() {
+        #expect(CaptureReadiness.shouldPresentRepair(lastDismissedAt: nil, now: Date()))
+    }
+
+    @Test func repairStaysSnoozedRightAfterLater() {
+        let now = Date()
+        #expect(!CaptureReadiness.shouldPresentRepair(lastDismissedAt: now.addingTimeInterval(-60), now: now))
+    }
+
+    /// A problem that is still there after the snooze comes back: the alarm keeps telling you.
+    @Test func repairReturnsAfterTheSnooze() {
+        let now = Date()
+        #expect(CaptureReadiness.shouldPresentRepair(lastDismissedAt: now.addingTimeInterval(-181), now: now))
     }
 
     // MARK: - fixAction

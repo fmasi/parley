@@ -312,13 +312,17 @@ final class AudioCaptureClient {
     /// The System Audio Recording permission as the helper sees it (#220), or `nil` if it can't be
     /// verified (SPI unavailable, or the helper unreachable). Asked of the helper because TCC caches
     /// the answer per process — the app's own view goes stale for its whole lifetime.
+    /// Bounded: the launch gate waits on this, and a helper that never answers must not leave the app
+    /// stuck (it fails open to `nil` — unverifiable — after 3 s).
     func systemAudioPermissionStatus() async -> PermissionStatus? {
         guard let conn = try? getConnection() else { return nil }
-        return await withCheckedContinuation { cont in
+        return await withCheckedContinuation { (cont: CheckedContinuation<PermissionStatus?, Never>) in
+            let once = ResumeOnce(cont)
             let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                cont.resume(returning: nil)
+                once.resume(nil)
             } as! AudioCaptureProtocol
-            proxy.systemAudioPermissionStatus { cont.resume(returning: SystemAudioRecordingPermission.status(fromWire: $0)) }
+            proxy.systemAudioPermissionStatus { once.resume(SystemAudioRecordingPermission.status(fromWire: $0)) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
         }
     }
 

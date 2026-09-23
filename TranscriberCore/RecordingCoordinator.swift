@@ -252,8 +252,7 @@ public final class RecordingCoordinator {
         captureClient.onQualityAnomaly = { [weak self] kind, message in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
-                self.appState.interruptionWarning = message
-                if kind == CaptureEventKind.systemAudioPermissionDenied.rawValue {
+                if self.appState.noteQualityAnomaly(kind: kind, message: message) {
                     self.onSystemAudioPermissionDenied()
                 }
             }

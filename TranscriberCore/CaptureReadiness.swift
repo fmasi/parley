@@ -67,6 +67,16 @@ public enum CaptureReadiness {
         case openSystemSettings
     }
 
+    /// After the user clicks "Later" on the repair window, a persisting problem reopens it only once
+    /// this has passed. The sticky menu-bar state keeps saying so in between.
+    public static let repairSnooze: TimeInterval = 180
+
+    /// Whether a new report of a still-missing permission should (re)open the repair window.
+    public static func shouldPresentRepair(lastDismissedAt: Date?, now: Date) -> Bool {
+        guard let lastDismissedAt else { return true }
+        return now.timeIntervalSince(lastDismissedAt) >= repairSnooze
+    }
+
     public static func fixAction(for status: PermissionStatus) -> FixAction? {
         switch status {
         case .authorized: return nil

@@ -491,9 +491,8 @@ struct TranscriberApp: App {
         captureClient.onQualityAnomaly = { kind, message in
             Task { @MainActor in
                 guard appState.isRecording else { return }
-                appState.interruptionWarning = message
                 // #220: the tap is running without its permission — put the fix in front of the user.
-                if kind == CaptureEventKind.systemAudioPermissionDenied.rawValue {
+                if appState.noteQualityAnomaly(kind: kind, message: message) {
                     await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence)
                 }
             }
@@ -558,7 +557,7 @@ private struct SetupRequiredPanel: View {
             .padding(.horizontal, 4)
             .padding(.top, 2)
 
-            Text("Grant the required permissions to start recording.")
+            Text("Finish setup to start recording.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)

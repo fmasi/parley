@@ -235,4 +235,41 @@ struct AppStateTests {
         let state = AppState()
         #expect(state.criticalError == nil)
     }
+
+    // MARK: - #220: remote audio not captured is sticky
+
+    @Test func permissionDenialSetsStickyStateAndAsksForRepair() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        #expect(state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied"))
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    /// The single-slot banner can be dismissed or overwritten by any later anomaly; the sticky state can't.
+    @Test func unrelatedAnomalyDoesNotClearStickyState() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.livenessGap.rawValue, message: "mic gap"))
+        state.interruptionWarning = nil   // user dismissed the banner
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    @Test func restoredAudioClearsStickyState() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionRestored.rawValue, message: "back"))
+        #expect(!state.remoteAudioNotCaptured)
+    }
+
+    @Test func stickyStateEndsWithTheRecording() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        state.phase = .transcribing(progress: "")
+        #expect(!state.remoteAudioNotCaptured)
+    }
 }
