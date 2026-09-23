@@ -70,6 +70,18 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// teardown path.
     private let livenessWatchdog = LivenessWatchdogDriver()
 
+    /// Exact-zero run detector on the TAP's samples (#220). A tap without the System Audio Recording
+    /// permission runs at full rate and delivers nothing but exact digital zeros, so every other
+    /// detector stays quiet. A long exact-zero run is only EVIDENCE (a silent call can look the same),
+    /// so it triggers a permission check rather than an alarm. Confined to `audioQueue`.
+    private var tapZeroMonitor = ExactZeroRunMonitor()
+    /// One report per denial episode, so a persistent denial doesn't re-alarm every 12 s; cleared when
+    /// the app reports the permission restored. Guarded by `stateLock`.
+    private var permissionDenialReported = false
+    /// How long to wait for the user to answer the system prompt that starting the tap raises before
+    /// treating a still-undetermined permission as a problem.
+    private let permissionPromptGraceSeconds: Double = 20
+
     private func record(
         _ kind: CaptureEventKind,
         _ severity: CaptureEvent.Severity,
@@ -176,6 +188,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.hasFailedFatally = false
                 self.systemStreamGivenUp = false
                 self.tapSession = nil
+                self.permissionDenialReported = false
             }
 
             Task {
@@ -365,6 +378,102 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(diagnostics.drainData())
     }
 
+    // MARK: - #220 System Audio Recording permission
+
+    func systemAudioPermissionStatus(reply: @escaping (String) -> Void) {
+        reply(SystemAudioRecordingPermission.wireValue(SystemAudioRecordingPermission.preflight()))
+    }
+
+    func restartSystemAudio(reply: @escaping (Bool, String?) -> Void) {
+        guard let tap = stateLock.sync(execute: { tapSession }) else {
+            reply(false, "System audio is not being captured with the Core Audio tap")
+            return
+        }
+        let status = SystemAudioRecordingPermission.preflight()
+        Logger.audio.info("System tap: rebuilding after the System Audio Recording permission changed (now \(SystemAudioRecordingPermission.wireValue(status), privacy: .public))")
+        stateLock.sync { permissionDenialReported = false }
+        // Fresh detector: if the rebuilt tap is STILL all zeros, that is a new run to report — the old
+        // one latched when it fired and would never re-arm without a non-zero sample in between.
+        audioQueue.async { self.tapZeroMonitor = ExactZeroRunMonitor() }
+        tap.rebuild(reason: "system audio permission granted")
+        record(.systemAudioPermissionRestored, .info, [
+            "status": SystemAudioRecordingPermission.wireValue(status),
+        ])
+        reply(true, nil)
+    }
+
+    private enum PermissionCheckTrigger {
+        /// Right after the tap started.
+        case tapStart
+        /// The grace period after a start that found the permission never answered.
+        case promptGraceExpired
+        /// The tap has delivered only exact zeros for this long while output was playing.
+        case silentRun(seconds: Double)
+
+        var label: String {
+            switch self {
+            case .tapStart: return "tap start"
+            case .promptGraceExpired: return "prompt grace expired"
+            case .silentRun: return "exact-zero run"
+            }
+        }
+    }
+
+    /// Runs on `audioQueue` for every tap buffer. The check itself (a TCC IPC round-trip) is hopped
+    /// off the audio queue.
+    private func noteTapSamples(_ samples: [Int16]) {
+        guard case .silentRun(let seconds) = tapZeroMonitor.record(samples: samples, rate: 48_000) else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.confirmSystemAudioPermission(trigger: .silentRun(seconds: seconds))
+        }
+    }
+
+    private func confirmSystemAudioPermission(trigger: PermissionCheckTrigger) {
+        let status = SystemAudioRecordingPermission.preflight()
+        switch (trigger, status) {
+        case (_, .authorized?):
+            if case .silentRun(let seconds) = trigger {
+                // A call can genuinely output digital silence; with the permission granted this is not
+                // our problem to raise.
+                Logger.audio.info("System tap: \(Int(seconds), privacy: .public)s of exact-zero audio with System Audio Recording granted — genuine silence")
+            }
+        case (.tapStart, .notDetermined?):
+            // Starting the tap raises the system prompt; don't alarm over a question the user is
+            // answering right now.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + permissionPromptGraceSeconds) { [weak self] in
+                self?.confirmSystemAudioPermission(trigger: .promptGraceExpired)
+            }
+        case (.tapStart, nil), (.promptGraceExpired, nil):
+            // Unverifiable (SPI gone): only the exact-zero evidence can speak for it.
+            break
+        case (.silentRun(let seconds), nil):
+            reportSystemAudioPermissionProblem(
+                status: nil, trigger: trigger,
+                message: "System audio has been completely silent for \(Int(seconds))s and Parley can’t verify its System Audio Recording permission. If the other side is talking, check the permission."
+            )
+        case (_, .denied?), (_, .notDetermined?):
+            reportSystemAudioPermissionProblem(
+                status: status, trigger: trigger,
+                message: "Parley isn’t allowed to record system audio, so the other side of the call is not being captured. Your microphone is still recording. Grant System Audio Recording to fix it."
+            )
+        }
+    }
+
+    private func reportSystemAudioPermissionProblem(status: PermissionStatus?, trigger: PermissionCheckTrigger, message: String) {
+        let shouldReport = stateLock.sync { () -> Bool in
+            guard tapSession != nil, !isUserStopping, !permissionDenialReported else { return false }
+            permissionDenialReported = true
+            return true
+        }
+        guard shouldReport else { return }
+        Logger.audio.error("System tap: System Audio Recording permission \(SystemAudioRecordingPermission.wireValue(status), privacy: .public) (\(trigger.label, privacy: .public)) — the tap is recording digital zeros")
+        record(.systemAudioPermissionDenied, .anomaly, [
+            "status": SystemAudioRecordingPermission.wireValue(status),
+            "trigger": trigger.label,
+        ])
+        onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, message)
+    }
+
     func stopAndFinalize() {
         // Mark stopping before snapshotting the stream so an in-flight restart bails / is torn
         // down (council F1), mirroring stopCapture.
@@ -472,8 +581,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// rebuild failing) is NOT fatal: like a dead SCK system stream, the mic keeps recording and the
     /// system track is silence-padded — surfaced via `onSystemAudioUnrecoverable`, never a teardown.
     private func startSystemTap(handler: AudioOutputHandler) throws {
-        let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak handler] samples, pts in
+        audioQueue.sync { tapZeroMonitor = ExactZeroRunMonitor() }
+        let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak self, weak handler] samples, pts in
             handler?.appendSystemSamples(samples, pts: pts)
+            self?.noteTapSamples(samples)
         }
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
@@ -492,7 +603,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self.tapSession = tap
             return false
         }
-        if stopping { tap.stop() }
+        if stopping {
+            tap.stop()
+            return
+        }
+        // Core Audio accepts a tap it will never feed (#220): check the permission now rather than
+        // waiting for the exact-zero evidence.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.confirmSystemAudioPermission(trigger: .tapStart)
+        }
     }
 
     /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the

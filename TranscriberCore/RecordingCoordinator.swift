@@ -26,6 +26,9 @@ public final class RecordingCoordinator {
     private let notifyCritical: @MainActor (String, String) -> Void
     /// Present a completed transcript — rename dialog, then auto-summary: (jsonPath, config).
     private let presentTranscript: @MainActor (URL, Config) -> Void
+    /// The helper found the tap running without its System Audio Recording permission (#220): the
+    /// app opens its repair window. Injected because Core can't present AppKit windows.
+    private let onSystemAudioPermissionDenied: @MainActor () -> Void
 
     // MARK: - Lifecycle state (previously `@State` in MenuView)
 
@@ -71,8 +74,10 @@ public final class RecordingCoordinator {
         notify: @escaping @MainActor (String, String) -> Void,
         notifyCritical: @escaping @MainActor (String, String) -> Void,
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
+        onSystemAudioPermissionDenied: @escaping @MainActor () -> Void = {},
         recordingMicrophone: RecordingMicrophone = .shared
     ) {
+        self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
         self.recordingMicrophone = recordingMicrophone
         self.appState = appState
         self.captureClient = captureClient
@@ -244,10 +249,13 @@ public final class RecordingCoordinator {
         // this PR adds could never appear during a normal recording. The recording is never stopped
         // by this. Also set by TranscriberApp's setupCrashHandler for the re-attach paths above —
         // keep both in sync if this wiring changes.
-        captureClient.onQualityAnomaly = { [weak self] _, message in
+        captureClient.onQualityAnomaly = { [weak self] kind, message in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
                 self.appState.interruptionWarning = message
+                if kind == CaptureEventKind.systemAudioPermissionDenied.rawValue {
+                    self.onSystemAudioPermissionDenied()
+                }
             }
         }
 

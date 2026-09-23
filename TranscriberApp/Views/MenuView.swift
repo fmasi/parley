@@ -81,6 +81,9 @@ struct MenuView: View {
                     // Auto-summarize after rename completes (so summary has real speaker names)
                     MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }
+            },
+            onSystemAudioPermissionDenied: {
+                Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
             }
         ))
     }
@@ -384,6 +387,9 @@ struct MenuView: View {
             selectedMicId = micDeviceId
             let coordinator = coordinator
             Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            // In parallel, never gating the recording: if a permission it needs is missing, the fix
+            // appears now, at the start of the meeting, not after it (#220).
+            Task { await PermissionRepairWindowController.shared.verify(trigger: .recordStart) }
         }
     }
 

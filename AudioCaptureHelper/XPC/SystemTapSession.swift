@@ -629,9 +629,16 @@ final class SystemTapSession {
         monitorQueue.asyncAfter(deadline: .now() + 0.2, execute: item)
     }
 
+    /// Rebuild the aggregate + IOProc in place, keeping the same recording. Used when the System Audio
+    /// Recording permission is granted mid-recording (#220): TCC decides access when the aggregate
+    /// starts, so a tap started while denied keeps delivering zeros until it is rebuilt.
+    func rebuild(reason: String) {
+        rebuildForOutputChange(reason: reason)
+    }
+
     /// Rebuild the aggregate + IOProc around the new default output, keeping the same global tap. Runs
     /// the actual rebuild on `configQueue` (serialized against stop and other rebuilds).
-    private func rebuildForOutputChange() {
+    private func rebuildForOutputChange(reason: String = "output device changed") {
         if stateLock.sync(execute: { isStopping }) { return }
         configQueue.async { [weak self] in
             guard let self else { return }
@@ -640,7 +647,7 @@ final class SystemTapSession {
             do {
                 try self.buildAggregateAndStart()
                 Logger.audio.info("System tap rebuilt around new default output")
-                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": "output device changed"])
+                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": reason])
             } catch {
                 Logger.audio.error("System tap rebuild after output change failed: \(error, privacy: .public)")
                 self.onEvent?(.restartFailed, .anomaly, ["source": "system-tap", "reason": "output rebuild failed", "error": "\(error)"])

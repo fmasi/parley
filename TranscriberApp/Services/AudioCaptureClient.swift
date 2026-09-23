@@ -309,6 +309,35 @@ final class AudioCaptureClient {
         }
     }
 
+    /// The System Audio Recording permission as the helper sees it (#220), or `nil` if it can't be
+    /// verified (SPI unavailable, or the helper unreachable). Asked of the helper because TCC caches
+    /// the answer per process — the app's own view goes stale for its whole lifetime.
+    func systemAudioPermissionStatus() async -> PermissionStatus? {
+        guard let conn = try? getConnection() else { return nil }
+        return await withCheckedContinuation { cont in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
+                cont.resume(returning: nil)
+            } as! AudioCaptureProtocol
+            proxy.systemAudioPermissionStatus { cont.resume(returning: SystemAudioRecordingPermission.status(fromWire: $0)) }
+        }
+    }
+
+    /// Rebuild the tap in place once the permission is granted mid-recording, so remote audio resumes
+    /// in the same recording (#220). Returns false if nothing was rebuilt.
+    @discardableResult
+    func restartSystemAudio() async -> Bool {
+        guard let conn = try? getConnection() else { return false }
+        return await withCheckedContinuation { cont in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
+                cont.resume(returning: false)
+            } as! AudioCaptureProtocol
+            proxy.restartSystemAudio { success, error in
+                if let error { Logger.audio.info("System audio restart skipped: \(error, privacy: .public)") }
+                cont.resume(returning: success)
+            }
+        }
+    }
+
     /// Pings the XPC service to check whether a capture session is currently active.
     /// Attempts to reconnect if the connection is nil. Returns false if the service
     /// is unreachable (used for crash-recovery Flow A re-attach on launch).
