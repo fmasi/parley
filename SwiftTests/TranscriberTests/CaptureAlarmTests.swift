@@ -45,28 +45,36 @@ import Testing
         // L round 4, item 4: the coordinator hands a NEW permission kind to the repair window first and
         // passes it here only when that window declined — then it presents at once like any other kind.
         let fresh = AlarmRealarmPolicy.presentation(due: [disk, denied], newlyRaised: [.remotePermissionDenied],
-                                                    repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+                                                    repairWindow: nil, lastDismissedAt: nil, now: t0)
         #expect(fresh == .init(notify: denied, openWindow: true))
         let onlyDenied = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
-                                                         repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+                                                         repairWindow: nil, lastDismissedAt: nil, now: t0)
         #expect(onlyDenied == .init(notify: denied, openWindow: true), "never silent when the repair window declined")
         let reNotify = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [],
-                                                       repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+                                                       repairWindow: nil, lastDismissedAt: nil, now: t0)
         #expect(reNotify.notify == denied, "a later re-notify with the repair window closed is the alarm window's")
 
         let repairOpen = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
-                                                         repairWindowOpen: true, lastDismissedAt: nil, now: t0)
+                                                         repairWindow: .init(listed: [.systemAudioRecording], source: .coreAudioTap), lastDismissedAt: nil, now: t0)
         #expect(repairOpen == .init(notify: nil, openWindow: false), "the repair window posts its own notification")
 
-        let snoozed = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindowOpen: false,
+        let snoozed = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindow: nil,
                                                       lastDismissedAt: t0, now: t0 + 60)
         #expect(snoozed == .init(notify: disk, openWindow: false), "re-notify, but the window stays snoozed")
-        let snoozeOver = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindowOpen: false,
+        let snoozeOver = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindow: nil,
                                                          lastDismissedAt: t0, now: t0 + CaptureReadiness.repairSnooze)
         #expect(snoozeOver.openWindow)
 
-        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: true) == [disk])
-        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: false) == [disk, denied])
+        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindow: .init(listed: [.systemAudioRecording], source: .coreAudioTap)) == [disk])
+        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindow: nil) == [disk, denied])
+
+        // L round 7, item 1: a repair window open for ANOTHER permission (the mic) covers nothing about
+        // the other side: the remote alarm is presented, notification and window, on every re-notify.
+        let micOnly = RepairWindowListing(listed: [.microphone], source: .coreAudioTap)
+        let cantConfirm = alarm(.remoteCantConfirm, at: t0)
+        #expect(AlarmRealarmPolicy.presentation(due: [cantConfirm], newlyRaised: [], repairWindow: micOnly,
+                                                lastDismissedAt: nil, now: t0) == .init(notify: cantConfirm, openWindow: true))
+        #expect(AlarmRealarmPolicy.windowRows([disk, cantConfirm], repairWindow: micOnly) == [disk, cantConfirm])
     }
 
     /// L round 6, item 23: one notification per alarm. Each kind has its own stable identifier (a repeat

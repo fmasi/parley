@@ -405,6 +405,9 @@ struct MenuView: View {
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator
+            // In flight from THIS turn, before the Task: a crash-protection hand-over must never see the
+            // gap between the dialog closing and the start (L round 7). `startRecording` takes it over.
+            coordinator.announceStart()
             Task {
                 await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId)
                 // After the recording is up (never gating it): if a permission it needs is missing, the

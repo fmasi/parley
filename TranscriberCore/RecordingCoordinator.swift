@@ -108,10 +108,18 @@ public final class RecordingCoordinator {
     /// window — a double-tap, or a future programmatic caller — is ignored rather than reaching the
     /// helper and the transcription pipeline twice. Internal for tests.
     var stopInFlight = false
-    /// True from the very top of `startRecording` until it returns, whatever the outcome: the phase is
-    /// still `.idle` while the helper starts, and a crash-protection hand-over (an exit) must wait (L
-    /// round 5). L5's synchronous `.starting` phase may replace it.
-    public private(set) var startInFlight = false
+    /// A recording start is in flight: announced by the UI the moment its dialog commits (no main-actor
+    /// turn in between counts as idle — L round 7), or running in `startRecording`, whatever the
+    /// outcome. The phase is still `.idle` meanwhile, and a crash-protection hand-over (an exit) must
+    /// wait. L5's synchronous `.starting` phase may replace it.
+    public var startInFlight: Bool { startAnnounced || startRunning }
+    private var startAnnounced = false
+    private var startRunning = false
+
+    /// The UI committed to a Start (the session dialog closed): in flight from this very turn. The
+    /// caller's Task always reaches `startRecording`, which takes it over at its first line — even
+    /// when it then declines to start.
+    public func announceStart() { startAnnounced = true }
     /// True once the helper has reported which device it is actually capturing on (post auto-switch).
     /// When false, `helperMicId` is meaningless and the UI falls back to the user's selection.
     public private(set) var helperMicKnown: Bool = false
@@ -257,11 +265,15 @@ public final class RecordingCoordinator {
     // MARK: - Recording lifecycle
 
     public func startRecording(sessionName: String, microphoneDeviceId: String?) async {
-        // A second call racing the first (it returns at the isIdle guard below) must not clear the
-        // first one's flag.
-        let ownsStartFlag = !startInFlight
-        startInFlight = true
-        defer { if ownsStartFlag { startInFlight = false } }
+        startAnnounced = false   // taken over from here
+        // One start at a time: the phase is still `.idle` while the first awaits the helper, so the
+        // isIdle guard below alone let a second start through (L round 7). The loser changes nothing.
+        guard !startRunning else {
+            Logger.state.info("A recording start is already in flight — ignoring a second one")
+            return
+        }
+        startRunning = true
+        defer { startRunning = false }
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
 
@@ -932,10 +944,20 @@ public final class RecordingCoordinator {
             // interruption plus an invalidation, or a blip scored against the old `.ips`). Re-running
             // recovery on a capturing helper would fail its `start()` and end a healthy recording as
             // "Failed" (L round 5). Bounded: a helper that does not answer in 3 s is treated as dead.
+            // `recoveryInFlight` is held across the check: a Stop pressed meanwhile takes the deferred
+            // path instead of racing a restart (L round 7).
+            recoveryInFlight = true
             let capturing = (try? await withDeadline(seconds: 3, label: "queued crash: isCapturing") {
                 await self.helperIsCapturing()
             }) ?? false
-            guard appState.isRecording else { break }
+            recoveryInFlight = false
+            if stopRequestedDuringRecovery {
+                stopRequestedDuringRecovery = false
+                Logger.state.info("Honoring stop requested during the queued-crash check")
+                await stopRecording()
+                break
+            }
+            guard appState.isRecording, !stopInFlight else { break }
             if capturing {
                 Logger.state.info("Queued crash event dropped — the helper is capturing (a duplicate or stale report)")
                 continue

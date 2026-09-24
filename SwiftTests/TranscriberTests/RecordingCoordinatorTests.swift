@@ -85,8 +85,11 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     /// Whether the crash callbacks were wired when the Flow-A ping ran (L round 5, item 12).
     var wiredAtPing: Bool?
     var isCapturingCalls = 0
+    /// Awaited inside isCapturing(): lets a test act while the ping is outstanding (L round 7).
+    var onIsCapturing: (() async -> Void)?
     func isCapturing() async -> Bool {
         isCapturingCalls += 1
+        await onIsCapturing?()
         armedAtPing = captureReattachedCalls > 0
         wiredAtPing = onServiceCrash != nil
         return isCapturingResult
@@ -929,6 +932,51 @@ private struct Harness {
         #expect(!coordinator.startInFlight, "cleared on the failure path too")
     }
 
+    /// L round 7, item 3: the Start is announced SYNCHRONOUSLY when the dialog commits, so no main-actor
+    /// turn between the dialog closing and `startRecording` counts as idle; `startRecording` takes it over.
+    @Test func anAnnouncedStartIsInFlightFromTheFirstTurn() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        h.coordinator.announceStart()
+        #expect(h.coordinator.startInFlight, "from this very turn")
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        #expect(h.appState.isRecording && !h.coordinator.startInFlight)
+    }
+
+    /// L round 7, item 5: the phase is still `.idle` while the first start awaits the helper, so the
+    /// `isIdle` guard alone let a second start through. Exactly one helper start; the loser changes nothing.
+    @Test func twoConcurrentStartsStartTheHelperOnce() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        let coordinator = h.coordinator
+        let second = Harness.Box<Task<Void, Never>?>(nil)
+        h.client.onStartAsync = {
+            guard second.value == nil else { return }
+            second.value = Task { await coordinator.startRecording(sessionName: "Second", microphoneDeviceId: "mic-2") }
+            for _ in 0..<50 { await Task.yield() }
+        }
+        await coordinator.startRecording(sessionName: "First", microphoneDeviceId: "mic-1")
+        await second.value?.value
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        #expect(h.client.startCalls.count == 1)
+        #expect(h.client.startCalls.first?.microphoneDeviceId == "mic-1")
+        #expect(h.appState.isRecording)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1", "the loser wrote nothing")
+    }
+
     /// L round 5, item 15: a failed stop whose sentinel is MISSING still salvages from the live
     /// pipeline's own session location — never "no recorded audio" while chunks are on disk.
     @Test func aFailedStopWithoutTheSentinelSalvagesFromTheLivePipeline() async throws {
@@ -1235,6 +1283,36 @@ private struct Harness {
 
         #expect(h.criticals.value.isEmpty && h.appState.isRecording, "the healthy recording goes on")
         #expect(starts.value == 1 && h.client.retryEvents.count == 1)
+    }
+
+    /// L round 7, item 2 (IMPORTANT): a Stop pressed during the queued-crash `isCapturing` check must not
+    /// race a restart (helper capturing, app idle, sentinel gone: a silent recording with the mic on).
+    /// It takes the deferred-stop path; exactly one clean stop, no restart.
+    @Test func aStopDuringTheQueuedCrashCheckNeverRacesARestart() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        let client = h.client, coordinator = h.coordinator
+        let fired = Harness.Box(false)
+        client.onStartAsync = {
+            guard !fired.value else { return }
+            fired.value = true
+            await coordinator.handleXPCCrash()   // queued during the restart
+        }
+        let stopTask = Harness.Box<Task<Void, Never>?>(nil)
+        client.onIsCapturing = {
+            stopTask.value = Task { await coordinator.stopRecording() }   // the user presses Stop now
+            for _ in 0..<20 { await Task.yield() }
+        }
+        client.onStop = { for _ in 0..<200 { await Task.yield() } }   // …and the stop is still in flight
+
+        await coordinator.handleXPCCrash()
+        await stopTask.value?.value
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(client.startCalls.count == 1, "no restart raced the Stop")
+        #expect(client.stopCalls == 1)
+        #expect(!h.appState.isRecording)
     }
 
     /// A crash queued while a restart SUCCEEDS runs next, and counts toward the cap.

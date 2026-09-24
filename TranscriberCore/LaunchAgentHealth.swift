@@ -191,6 +191,6 @@ public enum LaunchAgentHealth {
 
     /// Minimum time between two `.handOverToJob` attempts, to avoid a kickstart loop. The rest of the
     /// hand-over guard (never while busy or recording, never by the launchd job itself, never without
-    /// the single-instance lock) is `crashProtectionAction` (L round 5 retired `shouldAttemptHandOver`).
+    /// the single-instance lock) is decided by `crashProtectionAction`.
     public static let handOverCooldown: TimeInterval = 30
 }

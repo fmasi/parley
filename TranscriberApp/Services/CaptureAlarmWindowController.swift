@@ -38,7 +38,7 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
         }
         let presentation = AlarmRealarmPolicy.presentation(
             due: due, newlyRaised: newlyRaised,
-            repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen,
+            repairWindow: PermissionRepairWindowController.shared.listing,
             lastDismissedAt: lastDismissedAt, now: Date()
         )
         if let alarm = presentation.notify { post(alarm) }
@@ -54,7 +54,7 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
 
     /// The rows the window lists: every alarm, minus the permission ones while the repair window is up.
     static func windowRows(_ alarms: [ActiveAlarm]) -> [ActiveAlarm] {
-        AlarmRealarmPolicy.windowRows(alarms, repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen)
+        AlarmRealarmPolicy.windowRows(alarms, repairWindow: PermissionRepairWindowController.shared.listing)
     }
 
     private func show(appState: AppState) {

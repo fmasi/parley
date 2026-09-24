@@ -81,6 +81,17 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         return isPanelOpen && CaptureReadiness.repairWindowCovers(listed: listed, source: source)
     }
 
+    /// What the open window lists, for the alarm window's row filter; nil when it is closed. Reads the
+    /// observable open state, so SwiftUI rows follow it (L rounds 6-7).
+    var listing: RepairWindowListing? {
+        guard isPanelOpen else { return nil }
+        let source = CaptureReadiness.sourceToVerify(
+            configured: configManager.config.systemAudioSource,
+            tapReportedProblem: appState?.remoteAudioNotCaptured == true
+        )
+        return RepairWindowListing(listed: listed, source: source)
+    }
+
     private func performVerify(trigger: Trigger, permissionManager: PermissionManager) async {
         // The source is a LOCAL decision: nothing here repoints `permissionManager.systemAudioSource`,
         // which drives the Settings and Setup rows. A report from a running tap outranks the config.

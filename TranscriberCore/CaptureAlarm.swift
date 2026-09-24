@@ -349,6 +349,16 @@ private enum WireAlarm: Decodable {
     }
 }
 
+/// What the open permission repair window lists, for the source it verified (L round 7).
+public struct RepairWindowListing: Equatable, Sendable {
+    public let listed: [CapturePermission]
+    public let source: SystemAudioSource
+    public init(listed: [CapturePermission], source: SystemAudioSource) { self.listed = listed; self.source = source }
+
+    /// Whether it covers the remote-permission alarms (`hasOwnRepairWindow` kinds).
+    public var coversRemoteAlarms: Bool { CaptureReadiness.repairWindowCovers(listed: listed, source: source) }
+}
+
 public enum AlarmRealarmPolicy {
     public static let notifyInterval: TimeInterval = 120
 
@@ -403,20 +413,23 @@ public enum AlarmRealarmPolicy {
     }
 
     /// `due`: the alarms whose notify floor allows a presentation now. Rows the open repair window
-    /// shows are left to it — including the notification, which it posts itself. A NEW permission kind
+    /// COVERS are left to it — including the notification, which it posts itself. A NEW permission kind
     /// reaches here only when the repair window declined to open (the coordinator hands it over first,
-    /// L round 4): it is then presented like any other.
-    public static func presentation(due: [ActiveAlarm], newlyRaised: [AlarmKind], repairWindowOpen: Bool,
+    /// L round 4): it is then presented like any other. `repairWindow`: what it lists, nil when closed.
+    public static func presentation(due: [ActiveAlarm], newlyRaised: [AlarmKind], repairWindow: RepairWindowListing?,
                                     lastDismissedAt: Date?, now: Date) -> Presentation {
-        let rows = windowRows(due, repairWindowOpen: repairWindowOpen)
+        let rows = windowRows(due, repairWindow: repairWindow)
         guard !rows.isEmpty else { return Presentation(notify: nil, openWindow: false) }
         let newRow = rows.first { newlyRaised.contains($0.kind) }
         return Presentation(notify: newRow ?? rows[0],
                             openWindow: newRow != nil || shouldReopenWindow(lastDismissedAt: lastDismissedAt, now: now))
     }
 
-    /// The rows the alarm window lists: every alarm, minus the permission ones while the repair window is up.
-    public static func windowRows(_ alarms: [ActiveAlarm], repairWindowOpen: Bool) -> [ActiveAlarm] {
-        repairWindowOpen ? alarms.filter { !$0.kind.hasOwnRepairWindow } : alarms
+    /// The rows the alarm window lists: every alarm, minus the permission ones the repair window COVERS
+    /// — only when it lists the remote permission they are about. A repair window open for another
+    /// permission (the microphone) says nothing about the other side, so it filters nothing (L round 7).
+    public static func windowRows(_ alarms: [ActiveAlarm], repairWindow: RepairWindowListing?) -> [ActiveAlarm] {
+        guard let repairWindow, repairWindow.coversRemoteAlarms else { return alarms }
+        return alarms.filter { !$0.kind.hasOwnRepairWindow }
     }
 }
