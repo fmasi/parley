@@ -523,4 +523,15 @@ import Testing
         return r
     }
     private func other(_ track: CaptureTrack) -> CaptureTrack { track == .mic ? .system : .mic }
+
+    /// L11 (council A-I4): a status pull carries the helper session's cumulative coverage; a snapshot from
+    /// a helper that sends none (a push, or an older build) decodes with none.
+    @Test func aSnapshotCarriesCoverageAndDecodesWithoutIt() throws {
+        let s = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 1, isCapturing: true, alarms: [], tracks: [],
+                                      coverage: ["remote_expected_seconds": "12.0", "helper_session": "1000-0"])
+        #expect(CaptureStatusSnapshot.decode(s.encoded())?.coverage?["remote_expected_seconds"] == "12.0")
+        let bare = #"{"helperSessionId":"1000-0","sequence":1,"isCapturing":true,"alarms":[],"tracks":[]}"#
+        let decoded = try #require(CaptureStatusSnapshot.decode(Data(bare.utf8)))
+        #expect(decoded.coverage == nil)
+    }
 }

@@ -171,12 +171,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Sequence, id and alarms in ONE `stateLock` section (F2 round 2), so a later sequence can never
     /// carry an older registry. `tracks` is computed by the caller OUTSIDE the lock (it reads other
     /// locks and, in H6, the cached gate). Never call the `helperSessionId` getter in here.
-    private func snapshot(tracks: [TrackHealthSnapshot]) -> CaptureStatusSnapshot {
+    private func snapshot(tracks: [TrackHealthSnapshot], coverage: [String: String]? = nil) -> CaptureStatusSnapshot {
         stateLock.sync {
             snapshotSequence += 1
             let id = HelperSessionId(processStartMillis: processStartMillis, registryResets: registryResets).description
             return CaptureStatusSnapshot(helperSessionId: id, sequence: snapshotSequence, isCapturing: isCapturing,
-                                         alarms: alarms.sorted, tracks: tracks)
+                                         alarms: alarms.sorted, tracks: tracks, coverage: coverage)
         }
     }
 
@@ -220,6 +220,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// `.trackCoverage`. Uses `audioQueue.sync`, so it must NEVER be called from a block running on
     /// `audioQueue` (it would deadlock): only `stopCapture`, `stopAndFinalize` and `rotateChunk`, on XPC threads.
     private func coverageFacts() -> [String: String] {
+        // Which helper session these facts are: a `captureStop` supersedes the app's last pulled snapshot
+        // of the SAME helper session (L11). Read before anything below, outside every `stateLock.sync`.
+        let session = helperSessionId
         let (h, mic, tap) = stateLock.sync { (handler, micSession, tapSession) }
         let totals = audioQueue.sync { h?.trackTotals() }
         // The guard only sees tap samples; on SCK (or a stale guard from an earlier tap session) it says nothing.
@@ -249,6 +252,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             remoteDetail["remote_heartbeat_callbacks"] = nil
         }
         return remoteDetail.merging(local.asDetail(prefix: "local")) { a, _ in a }
+            .merging(["helper_session": session]) { a, _ in a }
     }
 
     /// Both may be called from the audio queue (write failure, exact zeros, permission verdicts) and
@@ -609,9 +613,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(stateLock.sync { isCapturing }, nil)
     }
 
-    /// The app's pull (§6.2): the helper's alarm registry and per-track health, one snapshot.
+    /// The app's pull (§6.2): the helper's alarm registry and per-track health, one snapshot — plus,
+    /// while capturing, this helper session's cumulative coverage, which the app keeps so a crash of this
+    /// helper cannot erase it (L11, council A-I4). An XPC thread: `coverageFacts` may run here.
     func captureStatus(reply: @escaping (Data?) -> Void) {
-        reply(snapshot(tracks: trackHealth()).encoded())
+        let capturing = stateLock.sync { isCapturing }
+        reply(snapshot(tracks: trackHealth(), coverage: capturing ? coverageFacts() : nil).encoded())
     }
 
     /// Replies false ("not understood") for a payload it cannot read, and leaves `pendingOptions` as is.

@@ -24,6 +24,9 @@ public final class ChunkRotator {
     private var timer: Timer?
     private var currentChunkIndex: Int
     private var currentChunkStartTime: Date
+    /// Chunk start times (§8.12): wall-clock at the anchor, advanced by the monotonic clock — a wall-clock
+    /// step (NTP, a manual change) mid-recording cannot bend the timeline.
+    private let clock: MonotonicWallClock
     private let onChunkFinalized: @MainActor (FinalizedChunk) -> Void
     /// After every successful rotation, once the finalized chunk was handed over: the coordinator
     /// refreshes the sentinel's liveness there (§8.3).
@@ -41,7 +44,7 @@ public final class ChunkRotator {
         sessionBaseName: String,
         chunkDurationMinutes: Int,
         startIndex: Int = 0,
-        startTime: Date,
+        clock: MonotonicWallClock,
         onChunkFinalized: @MainActor @escaping (FinalizedChunk) -> Void
     ) {
         self.captureClient = captureClient
@@ -49,8 +52,25 @@ public final class ChunkRotator {
         self.sessionBaseName = sessionBaseName
         self.chunkDuration = TimeInterval(chunkDurationMinutes * 60)
         self.currentChunkIndex = startIndex
-        self.currentChunkStartTime = startTime
+        self.clock = clock
+        self.currentChunkStartTime = clock.anchorWall
         self.onChunkFinalized = onChunkFinalized
+    }
+
+    /// Anchored at `startTime`, now. A resume passes the CURRENT time: the monotonic clock cannot be
+    /// persisted, so a relaunch re-anchors — never at the seeded `meetingStart` (C10).
+    public convenience init(
+        captureClient: any ChunkRotationClient,
+        outputDirectory: String,
+        sessionBaseName: String,
+        chunkDurationMinutes: Int,
+        startIndex: Int = 0,
+        startTime: Date,
+        onChunkFinalized: @MainActor @escaping (FinalizedChunk) -> Void
+    ) {
+        self.init(captureClient: captureClient, outputDirectory: outputDirectory, sessionBaseName: sessionBaseName,
+                  chunkDurationMinutes: chunkDurationMinutes, startIndex: startIndex,
+                  clock: .start(now: startTime), onChunkFinalized: onChunkFinalized)
     }
 
     /// Test seam (`@testable import`): the active rotation timer, so tests can confirm it was
@@ -150,7 +170,7 @@ public final class ChunkRotator {
                 newBaseName: nextBaseName
             )
             self.currentChunkIndex = nextIndex
-            self.currentChunkStartTime = Date()
+            self.currentChunkStartTime = clock.now()
             let finalized = FinalizedChunk(
                 index: oldIndex,
                 systemPath: paths.systemPath,

@@ -14,10 +14,11 @@ final class AudioCaptureClient {
     private var interruptionPolicy = XPCInterruptionPolicy()
     private var reverseChannel: ReverseChannel?
 
-    /// Anomaly-gated diagnostic ring (app side). Merges helper-origin events drained over XPC with
-    /// the app's own (interruptions, retries, launch recovery) and is flushed to disk only when the
-    /// session was anomalous (#95).
-    private(set) var diagnostics = CaptureDiagnostics()
+    /// The session's capture evidence (§8.11): the anomaly-gated ring — helper-origin events drained over
+    /// XPC plus the app's own (interruptions, retries, launch recovery) — the live log beside the
+    /// recording, and each helper session's latest coverage. Reset only on a NEW session id (council
+    /// A-C1); flushed to `<session>.diag.jsonl` only when the session was anomalous (#95).
+    private let evidence = SessionEvidence()
 
     /// Invoked when the XPC connection is invalidated or interrupted by a *real* crash (a fresh
     /// crash report names the helper). Drives the full relaunch / re-attach recovery flow.
@@ -64,9 +65,6 @@ final class AudioCaptureClient {
     /// Invoked (reverse channel) on a successful write: (helper session id). The helper's
     /// write-succeeded evidence (§6.2) — clears a stale `diskWriteFailure` a replaced helper left.
     var onWriteSucceeded: (@Sendable (String) -> Void)?
-
-    /// The chunk session id of the most recent `start` (L11 resets the diagnostics ring only when it changes).
-    private(set) var currentSessionId: String?
 
     func connect() {
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
@@ -158,7 +156,7 @@ final class AudioCaptureClient {
         _ severity: CaptureEvent.Severity,
         _ detail: [String: String] = [:]
     ) {
-        diagnostics.record(CaptureEvent(
+        evidence.record(CaptureEvent(
             timestamp: Date(), origin: .app, kind: kind, severity: severity, detail: detail
         ))
     }
@@ -230,20 +228,21 @@ final class AudioCaptureClient {
             proxy.drainDiagnostics { done(.success($0)) }
         }
         if let data {
-            let events = CaptureDiagnostics.events(from: data)
-            if !events.isEmpty { diagnostics.merge(events) }
+            evidence.mergeHelperEvents(CaptureDiagnostics.events(from: data))
         }
     }
 
-    /// Drain the helper, build the transcript provenance stamp, and — only when the session was
-    /// anomalous — flush the full event ring to `<sessionId>.diag.jsonl` beside the recording (#95).
-    /// A clean session writes no log, only the ~200-byte provenance stamp the caller embeds.
+    /// Drain the helper, merge the live log and the helper sessions' latest coverage (L11), build the
+    /// transcript provenance stamp, and — only when the session was anomalous — flush the full event ring
+    /// to `<sessionId>.diag.jsonl` beside the recording (#95). A clean session writes no log, only the
+    /// ~200-byte provenance stamp the caller embeds.
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,
         recordingDirectory: URL
     ) async -> CaptureProvenance {
         await drainHelperDiagnostics()
+        let diagnostics = evidence.finalize(sessionId: sessionId, directory: recordingDirectory)
 
         func formatString(_ kind: CaptureEventKind) -> String? {
             guard let e = diagnostics.events.last(where: { $0.kind == kind }) else { return nil }
@@ -262,7 +261,7 @@ final class AudioCaptureClient {
             let url = recordingDirectory.appendingPathComponent("\(sessionId).diag.jsonl")
             do {
                 try diagnostics.jsonlData().write(to: url, options: .atomic)
-                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(self.diagnostics.events.count) events)")
+                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(diagnostics.events.count) events)")
             } catch {
                 Logger.files.error("Failed to flush diagnostics: \(error, privacy: .public)")
             }
@@ -286,12 +285,14 @@ final class AudioCaptureClient {
         options: CaptureOptions = CaptureOptions(),
         sessionId: String = ""
     ) async throws {
-        // Per-session reset (#101): the app ring accumulates across ALL sessions, so a clean session
-        // would otherwise report the prior session's tallies. Clear it at the very top of start.
-        diagnostics.clear()
+        // The previous helper's events first (bounded, 3 s): its start clears its own ring, and an
+        // in-session restart must not lose them (L11).
+        await drainHelperDiagnostics()
+        // A NEW session id resets every tally, so no recording inherits an earlier one's facts (council
+        // A-C1); the SAME id — an in-session restart — keeps the session's evidence.
+        evidence.beginCapture(sessionId: sessionId, directory: outputDirectory)
         // Armed BEFORE the XPC start (C1): a crash during configure/start is this capture's crash.
         interruptionPolicy.captureStarted()
-        currentSessionId = sessionId
         let conn = try getConnection()
         await configureCapture(options, on: conn)
         try await bounded("start", seconds: 15) { (done: @escaping @Sendable (Result<Void, Error>) -> Void) in
@@ -348,7 +349,7 @@ final class AudioCaptureClient {
         let conn = try getConnection()
         // Bounded at 10 s (§8.8). The reply text is passed on as-is: the coordinator reads it in one place
         // (`RecordingCoordinator.rotateFailure`) — a dead capture, a refusal while stopping, or neither.
-        return try await bounded("rotateChunk", seconds: 10) { done in
+        let paths: (systemPath: String, micPath: String) = try await bounded("rotateChunk", seconds: 10) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
                 done(.failure(CaptureError.rotateChunkFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol
@@ -361,6 +362,9 @@ final class AudioCaptureClient {
                 }
             }
         }
+        // Every rotation also keeps the helper session's coverage (L11): a pull, off the rotation's path.
+        Task { _ = await self.captureStatus() }
+        return paths
     }
 
     /// Bounded at 10 s (§8.8).
@@ -395,15 +399,18 @@ final class AudioCaptureClient {
     }
 
     /// The helper's alarm state + per-track health (§6.2), or `nil` if the helper is unreachable or
-    /// does not answer within 3 s.
+    /// does not answer within 3 s. A pull's coverage becomes that helper session's latest (L11): a helper
+    /// crash can no longer erase it.
     func captureStatus() async -> CaptureStatusSnapshot? {
         guard let conn = try? getConnection() else { return nil }
-        return await withCheckedContinuation { (cont: CheckedContinuation<CaptureStatusSnapshot?, Never>) in
+        let snapshot = await withCheckedContinuation { (cont: CheckedContinuation<CaptureStatusSnapshot?, Never>) in
             let once = ResumeOnce(cont)
             let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(nil) } as! AudioCaptureProtocol
             proxy.captureStatus { once.resume($0.flatMap(CaptureStatusSnapshot.decode)) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
         }
+        if let snapshot { evidence.noteCoverage(snapshot) }
+        return snapshot
     }
 
     /// Forward an `NSWorkspace` sleep / wake to the helper (§8.10). Bounded at 3 s.

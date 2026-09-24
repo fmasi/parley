@@ -47,6 +47,34 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: log.url.path))
     }
 
+    /// L11 ruling: coverage evidence is `.info`, and dropping it lost every pre-crash second of coverage.
+    /// `captureStop` and `trackCoverage` are written whatever their severity.
+    @Test func coverageEvidenceIsWrittenWhateverItsSeverity() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        log.append(CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .helper, kind: .captureStop, severity: .info,
+                                detail: ["remote_expected_seconds": "60.0"]))
+        log.append(CaptureEvent(timestamp: Date(timeIntervalSince1970: 2), origin: .helper, kind: .trackCoverage, severity: .info,
+                                detail: ["remote_expected_seconds": "30.0"]))
+        #expect(log.events().map(\.kind) == [.captureStop, .trackCoverage])
+    }
+
+    /// Council A-I4 / C-I1: the latest coverage of each helper session is kept beside the live log — one
+    /// entry per helper session, the newest wins — and goes with it on delete.
+    @Test func coverageSnapshotsKeepTheLatestPerHelperSession() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        log.writeCoverage(helperSession: "1000-0", facts: ["remote_expected_seconds": "10.0"], at: Date(timeIntervalSince1970: 10))
+        log.writeCoverage(helperSession: "1000-0", facts: ["remote_expected_seconds": "20.0"], at: Date(timeIntervalSince1970: 15))
+        log.writeCoverage(helperSession: "2000-0", facts: ["remote_expected_seconds": "5.0"], at: Date(timeIntervalSince1970: 20))
+        let snapshots = LiveDiagnosticsLog(directory: d, sessionId: "s").coverageSnapshots()   // a later process reads it
+        #expect(snapshots["1000-0"]?.facts["remote_expected_seconds"] == "20.0")
+        #expect(snapshots["1000-0"]?.at == Date(timeIntervalSince1970: 15))
+        #expect(snapshots["2000-0"]?.facts["remote_expected_seconds"] == "5.0")
+        log.delete()
+        #expect(LiveDiagnosticsLog(directory: d, sessionId: "s").coverageSnapshots().isEmpty)
+    }
+
     @Test func aCorruptLineIsSkippedAndTheRestSurvive() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")

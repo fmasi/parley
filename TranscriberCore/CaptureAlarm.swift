@@ -268,17 +268,23 @@ public struct CaptureStatusSnapshot: Codable, Equatable, Sendable {
     public let isCapturing: Bool
     public let alarms: [ActiveAlarm]
     public let tracks: [TrackHealthSnapshot]
+    /// A status PULL's cumulative per-track coverage for this helper session (`remote_*` / `local_*` and
+    /// `helper_session` detail keys, as in `captureStop`): the app keeps the latest, so a helper crash
+    /// cannot erase it (L11, council A-I4). nil in a push, when not capturing, or from an older helper.
+    public let coverage: [String: String]?
     /// Decode side only: alarm kinds this build does not know (a newer helper), skipped from `alarms`.
     /// Never encoded.
     public private(set) var unknownAlarmKinds: [String] = []
 
-    public init(helperSessionId: String, sequence: UInt64, isCapturing: Bool, alarms: [ActiveAlarm], tracks: [TrackHealthSnapshot]) {
+    public init(helperSessionId: String, sequence: UInt64, isCapturing: Bool, alarms: [ActiveAlarm], tracks: [TrackHealthSnapshot],
+                coverage: [String: String]? = nil) {
         self.helperSessionId = helperSessionId; self.sequence = sequence
         self.isCapturing = isCapturing; self.alarms = alarms; self.tracks = tracks
+        self.coverage = coverage
     }
 
     // `unknownAlarmKinds` is deliberately absent: it describes the decoding build, not the wire.
-    private enum CodingKeys: String, CodingKey { case helperSessionId, sequence, isCapturing, alarms, tracks }
+    private enum CodingKeys: String, CodingKey { case helperSessionId, sequence, isCapturing, alarms, tracks, coverage }
 
     /// Tolerant of exactly one thing: an alarm whose KIND this build does not know is skipped and
     /// recorded in `unknownAlarmKinds`. Any other defect fails the whole snapshot — a silently
@@ -289,6 +295,7 @@ public struct CaptureStatusSnapshot: Codable, Equatable, Sendable {
         sequence = try c.decode(UInt64.self, forKey: .sequence)
         isCapturing = try c.decode(Bool.self, forKey: .isCapturing)
         tracks = try c.decodeIfPresent([TrackHealthSnapshot].self, forKey: .tracks) ?? []
+        coverage = try c.decodeIfPresent([String: String].self, forKey: .coverage)
         var known: [ActiveAlarm] = []
         var unknown: [String] = []
         for element in try c.decode([WireAlarm].self, forKey: .alarms) {

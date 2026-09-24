@@ -143,6 +143,21 @@ struct ChunkRotatorTests {
         #expect(fired.value == 1 && rotator.currentChunkInfo.index == 1)
     }
 
+    // MARK: - Monotonic chunk clock (L11, §8.12)
+
+    /// L15: chunk start times come from the monotonic clock anchored at the session start.
+    @Test func chunkStartTimesComeFromTheMonotonicClock() async throws {
+        let anchor = ContinuousClock.now
+        let clock = MonotonicWallClock(anchorWall: Date(timeIntervalSince1970: 0), anchorMonotonic: anchor)
+        let rotator = ChunkRotator(captureClient: FakeChunkRotationClient(), outputDirectory: "/tmp/out", sessionBaseName: "meeting",
+                                   chunkDurationMinutes: 10, clock: clock, onChunkFinalized: { _ in })
+        #expect(rotator.currentChunkInfo.startTime == Date(timeIntervalSince1970: 0))
+        rotator.rotateNow()
+        for _ in 0..<50 { await Task.yield() }
+        let t = rotator.currentChunkInfo.startTime.timeIntervalSince1970
+        #expect(t >= 0 && t < 5, "derived from the monotonic clock, not from Date()")
+    }
+
     // MARK: - Rotation failures (L8, §8.7)
 
     @Test func aThrowingRotateInvokesOnRotationFailedAndKeepsTheIndex() async throws {
