@@ -214,7 +214,16 @@ public enum LaunchAgentManager {
         // round 2, item 1b) — an absolute safety net independent of the classification above, in
         // case a program-path comparison is ever wrong (e.g. a symlink, an unusual launchd report).
         let isSelf = currentPID != nil && before.pid == currentPID
-        switch LaunchAgentHealth.action(for: state) {
+        let action = LaunchAgentHealth.action(for: state)
+        // pid proves launchd's in-memory job launched exactly this process, so a crash relaunch
+        // already works, whatever the on-disk plist or `print`'s program string says (fix round 3,
+        // item 3; round 4, item 1; round 4b). Every plist-missing or plist-stale state therefore
+        // takes the quiet rewrite: no bootout (it would SIGTERM this process), and no enable or
+        // bootstrap (the job is already loaded; bootstrap would only fail with "already loaded").
+        if isSelf, [.installAndBootstrap, .bootoutInstallAndBootstrap, .rewriteAndBootstrap].contains(action) {
+            return await quietlyRewritePlist(from: state, executablePath: exePath, launchAgentsDir: agentsDir, plistURL: plistURL, runner: runner)
+        }
+        switch action {
         case .none:
             return state
         case .handOverToJob:
@@ -229,15 +238,8 @@ public enum LaunchAgentManager {
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
         case .bootoutInstallAndBootstrap, .rewriteAndBootstrap:
-            // pid proves launchd's in-memory job launched exactly this process (fix round 3, item 3;
-            // fix round 4, item 1 — the plist-absent `.missing(staleLoadedJob: true)` route too), so
-            // a crash relaunch already works: a mismatched program string (a stale/inconsistent or
-            // absent on-disk plist, or a symlink/normalization quirk in `print`'s output) is not
-            // real staleness. No launchctl call is needed or wanted; correct the file quietly.
-            if isSelf {
-                return await quietlyRewritePlist(from: state, executablePath: exePath, launchAgentsDir: agentsDir, plistURL: plistURL, runner: runner)
-            }
-            // A stale job must be booted out first or bootstrap fails with "already loaded".
+            // A stale job must be booted out first or bootstrap fails with "already loaded". Never
+            // this process's own job: `isSelf` returned above.
             _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])

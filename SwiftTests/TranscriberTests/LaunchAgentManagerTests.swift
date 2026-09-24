@@ -246,11 +246,11 @@ struct LaunchAgentManagerTests {
 
     /// Item 3 (the critical case): the plist is gone but launchd's loaded job points at THIS SAME
     /// program — very likely this very process. Must NOT bootout (that would SIGTERM the app).
+    /// Fix round 4b: with the pid matching, not enable/bootstrap either — quiet rewrite only.
     @Test func missingWithTheLoadedJobPointingAtUsNeverBootsOut() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
         let uid: uid_t = 501
-        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
 
         let runner = RecordingLaunchctlRunner(responses: [
             "print": [
@@ -263,12 +263,7 @@ struct LaunchAgentManagerTests {
         )
         #expect(state == .healthy)
         let calls = await runner.calls
-        #expect(calls == [
-            ["print", job(uid)],
-            ["enable", job(uid)],
-            ["bootstrap", gui(uid), plistPath],
-            ["print", job(uid)],
-        ])
+        #expect(calls == [["print", job(uid)]])
     }
 
     @Test func notLoadedEnablesThenBootstraps() async throws {
@@ -365,13 +360,14 @@ struct LaunchAgentManagerTests {
     /// Fix round 2, item 1a (the reported regression, end to end): a space in the install path used
     /// to truncate the parsed `program =`, so it never matched the executablePath comparison,
     /// `staleLoadedJob` came out true, and `verifyAndRepair` booted out the job that WAS this
-    /// process — SIGTERMing it after a crash relaunch.
+    /// process — SIGTERMing it after a crash relaunch. Fix round 4b: the pid match now takes the
+    /// quiet rewrite whatever the program string, so the parse itself is pinned by
+    /// `loadedProgramPathWithASpaceIsNotTruncated`.
     @Test func missingWithASpaceInThePathAndTheLoadedJobBeingUsNeverBootsOut() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
         let uid: uid_t = 501
         let exeWithSpace = "/Applications/Parley 2.app/Contents/MacOS/Parley"
-        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
 
         let runner = RecordingLaunchctlRunner(responses: [
             "print": [
@@ -385,12 +381,7 @@ struct LaunchAgentManagerTests {
         #expect(state == .healthy)
         let calls = await runner.calls
         #expect(!calls.contains { $0.first == "bootout" })
-        #expect(calls == [
-            ["print", job(uid)],
-            ["enable", job(uid)],
-            ["bootstrap", gui(uid), plistPath],
-            ["print", job(uid)],
-        ])
+        #expect(calls == [["print", job(uid)]])
     }
 
     /// Fix round 2, item 1b: an absolute safety net independent of any state classification — never
@@ -412,6 +403,28 @@ struct LaunchAgentManagerTests {
                 LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n"),
                 LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n"),
             ]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .healthy)
+        let calls = await runner.calls
+        #expect(calls == [["print", job(uid)]])
+        let written = try String(contentsOfFile: plistPath, encoding: .utf8)
+        #expect(LaunchAgentManager.programPath(inPlist: written) == exe)
+    }
+
+    /// Fix round 4b: the plist is absent but the loaded job's pid IS this process and its program
+    /// MATCHES. It used to write, then enable + bootstrap an already-loaded job (a spurious
+    /// launchctl error). A pid match always takes the quiet rewrite, whatever the program string.
+    @Test func missingPlistWithAPidMatchAndTheSameProgramRewritesQuietlyAndIsHealthy() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [LaunchctlResult(status: 0, output: "program = \(exe)\npid = 4242\n")]
         ])
         let state = await LaunchAgentManager.verifyAndRepair(
             executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
