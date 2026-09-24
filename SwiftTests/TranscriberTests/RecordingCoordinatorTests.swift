@@ -102,6 +102,7 @@ private struct Harness {
     let notified: Box<[(title: String, body: String)]> = Box([])
     let criticals: Box<[(title: String, body: String)]> = Box([])
     let presented: Box<[URL]> = Box([])
+    let repairRequests: Box<Int> = Box(0)
     let recordingMic: RecordingMicrophone
 
     final class Box<T> { var value: T; init(_ value: T) { self.value = value } }
@@ -115,6 +116,7 @@ private struct Harness {
         let notified = notified
         let criticals = criticals
         let presented = presented
+        let repairRequests = repairRequests
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -124,6 +126,7 @@ private struct Harness {
             notify: { notified.value.append(($0, $1)) },
             notifyCritical: { criticals.value.append(($0, $1)) },
             presentTranscript: { url, _ in presented.value.append(url) },
+            onSystemAudioPermissionDenied: { repairRequests.value += 1 },
             recordingMicrophone: recordingMic
         )
     }
@@ -341,6 +344,84 @@ private struct Harness {
         for _ in 0..<50 { await Task.yield() }
 
         #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
+    }
+
+    // MARK: - #220: remote audio not captured (PR #222 review)
+
+    /// The tap running without its permission: sticky state, the banner text, and the repair window.
+    @Test func permissionDeniedAnomalySetsStickyStateAndOpensRepair() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+
+        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(h.appState.remoteAudioNotCaptured)
+        #expect(h.appState.remoteAudioProblem == "denied")
+        #expect(h.repairRequests.value == 1)
+    }
+
+    @Test func unrelatedAnomalyDoesNotOpenRepair() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+
+        h.client.onQualityAnomaly?("exactZeroMic", "mic silent")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(!h.appState.remoteAudioNotCaptured)
+        #expect(h.repairRequests.value == 0)
+    }
+
+    @Test func restoredAnomalyClearsTheStickyState() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        for _ in 0..<50 { await Task.yield() }
+
+        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionRestored.rawValue, "back")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(!h.appState.remoteAudioNotCaptured)
+        #expect(h.appState.interruptionWarning == "back")
+    }
+
+    /// A failed tap rebuild used to be wired only on the relaunch re-attach paths, so a normal
+    /// recording showed nothing at all.
+    @Test func systemAudioUnrecoverableSetsStickyStateInANormalRecording() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+
+        h.client.onSystemAudioUnrecoverable?("tap rebuild failed")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(h.appState.remoteAudioNotCaptured)
+        #expect(h.appState.interruptionWarning?.contains("only your microphone") == true)
+    }
+
+    @Test func staleReportAfterTheRecordingEndedIsIgnored() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        h.appState.phase = .idle
+
+        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(!h.appState.remoteAudioNotCaptured)
+        #expect(h.repairRequests.value == 0)
+    }
+
+    /// A crash-restarted helper starts with a fresh permission guard, so it can never "restore" the old
+    /// helper's alarm; the restart clears it and the new helper re-reports if the problem persists.
+    @Test func crashRestartClearsTheStickyState() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.appState.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+
+        await h.coordinator.handleXPCCrash()
+
+        #expect(h.client.startCalls.count == 1)
+        #expect(!h.appState.remoteAudioNotCaptured)
     }
 
     @Test func failedStartReleasesTheRecordingMic() async throws {

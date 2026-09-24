@@ -67,7 +67,12 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
 
     private func performVerify(trigger: Trigger, permissionManager: PermissionManager) async {
 
-        // Evidence only ever comes from a running tap, whatever the config says now.
+        // Evidence only ever comes from a running tap, whatever the config says now. This leaves
+        // `systemAudioSource` on the tap even if Settings was switched to ScreenCaptureKit mid-recording
+        // (which applies to the NEXT recording). Deliberately not restored here: an open repair window
+        // refreshes through this same setting, so restoring it would stop the window seeing the fix.
+        // It self-corrects at the next verify() or Settings save, and once the recording ends the sticky
+        // state that selects the tap is cleared.
         let tapIsTheProblem = trigger == .captureEvidence || appState?.remoteAudioNotCaptured == true
         permissionManager.systemAudioSource = tapIsTheProblem ? .coreAudioTap : configManager.config.systemAudioSource
         await permissionManager.refreshRequired()
