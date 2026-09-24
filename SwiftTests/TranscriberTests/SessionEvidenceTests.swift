@@ -118,6 +118,23 @@ import Testing
         #expect(provenance(b.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 25)
     }
 
+    /// L follow-up 43: the relaunch adopts the session first, then drains: the sealed `captureStop` survives
+    /// the resume's own start (the same session id resets nothing).
+    @Test func anAdoptedSessionKeepsTheDrainedCaptureStopThroughItsStart() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {
+            let a = SessionEvidence()
+            a.beginCapture(sessionId: "s", directory: d)
+            a.noteCoverage(statusPull(remote: 20, local: 20, helper: "1000-0"))
+        }
+        let b = SessionEvidence()
+        b.beginCapture(sessionId: "s", directory: d)                                            // adopt
+        b.mergeHelperEvents([captureStop(remote: 25, local: 25, helper: "1000-0", at: 50)])    // the drain
+        b.beginCapture(sessionId: "s", directory: d)                                            // the resume's start
+        b.mergeHelperEvents([captureStop(remote: 5, local: 5, helper: "2000-0", at: 90)])
+        #expect(provenance(b.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 30)
+    }
+
     /// A relaunch that salvages (no capture started in this process) still finds the crashed process's
     /// live log for that session.
     @Test func aSalvageFinalizesTheLiveLogOfTheCrashedProcess() throws {

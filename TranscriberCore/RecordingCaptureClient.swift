@@ -80,6 +80,10 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     func isCapturing() async -> Bool
     /// Record that the app re-attached to or relaunched a recording on launch (crash recovery) (#95).
     func recordLaunchRecovery(_ detail: [String: String])
+    /// A relaunch continues session `sessionId` (a re-attach or a resume): its evidence is this session's
+    /// from now on, and the helper's events — a `captureStop` it sealed when the crashed app went, say — are
+    /// drained into it BEFORE anything could reset them (L follow-up 43).
+    func adoptSession(sessionId: String, directory: URL) async
     /// Forward an `NSWorkspace` sleep / wake ("sleep" | "wake") to the helper (§8.10).
     func systemPowerEvent(_ kind: String) async
     /// Record an app-origin event into the diagnostic ring.

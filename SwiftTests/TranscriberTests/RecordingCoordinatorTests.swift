@@ -61,6 +61,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         options: CaptureOptions,
         sessionId: String
     ) async throws {
+        sessionCalls.append("start:\(sessionId)")
         startCalls.append(StartCall(
             outputDirectory: outputDirectory,
             baseName: baseName,
@@ -97,6 +98,10 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     var launchRecoveries: [[String: String]] = []
     func recordLaunchRecovery(_ detail: [String: String]) { launchRecoveries.append(detail) }
+
+    /// The order of the calls that decide which session the evidence belongs to (L follow-up 43).
+    var sessionCalls: [String] = []
+    func adoptSession(sessionId: String, directory: URL) async { sessionCalls.append("adopt:\(sessionId)") }
 
     var powerEvents: [String] = []
     /// Awaited before the event lands: lets a test slow a delivery down (a "sleep" still in flight).
@@ -3362,5 +3367,116 @@ private struct Harness {
         await h.coordinator.recoverAtLaunch()
         let message = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
         #expect(message == "Parley was quit while finishing the transcript; it recovered 1 chunk to sess.json.", "\(message)")
+    }
+}
+
+// MARK: - L follow-ups: Flow A keeps its pipeline, the evidence is adopted first, the crash time
+
+@MainActor
+@Suite struct RecordingCoordinatorReattachTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+    }
+
+    private func freshSentinel(_ h: Harness, alive: TimeInterval = 20) throws -> RecordingSentinel {
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-alive); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        return s
+    }
+
+    private func dir(_ s: RecordingSentinel) -> URL { URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent() }
+
+    /// 30: a recording re-attached after an app crash (the helper kept capturing) keeps its chunk pipeline:
+    /// the rotator names the helper's live file, a rotation hands it over, and a low disk still alarms.
+    @Test func aReattachRebuildsThePipelineOnTheHelpersLiveFile() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h)
+        try RecoveryFixtures.writeSessionJSON(dir: dir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        let live = dir(s).appendingPathComponent("sess-1.wav")
+        try Harness.headerOnlyWAV().write(to: live)   // the helper's live file (chunk 0 is done)
+        let began = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 - 300).rounded(.down))
+        try FileManager.default.setAttributes([.creationDate: began], ofItemAtPath: live.path)
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isRecording && h.client.startCalls.isEmpty, "re-attached, not restarted")
+        let rotator = try #require(h.runner.chunkRotator)
+        #expect(rotator.currentBaseName == "sess-1")
+        #expect(abs(rotator.currentChunkInfo.startTime.timeIntervalSince(began)) < 1, "the live chunk began before this process")
+        await rotator.rotateForTesting()
+        #expect(h.client.rotateCalls == 1 && rotator.currentChunkInfo.index == 2, "the live file handed over")
+        h.freeBytes.value = 1_000   // below one chunk
+        await rotator.rotateForTesting()
+        #expect(h.appState.activeAlarms[.diskLow] != nil)
+    }
+
+    /// 30: a chunk the crash cut short (sealed, never processed) goes through the live processor; the
+    /// helper's live file is left to its rotation.
+    @Test func aReattachIngestsTheOrphanButNotTheLiveFile() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h)
+        try RecoveryFixtures.writeSessionJSON(dir: dir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        try Harness.headerOnlyWAV().write(to: dir(s).appendingPathComponent("sess-1.wav"))   // sealed, unprocessed
+        try Harness.headerOnlyWAV().write(to: dir(s).appendingPathComponent("sess-2.wav"))   // live
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.runner.chunkRotator?.currentBaseName == "sess-2")
+        let processor = try #require(h.runner.chunkProcessor)
+        await processor.awaitAllProcessed()
+        #expect(await processor.getSessionState().chunks.map(\.index).sorted() == [0, 1])
+    }
+
+    /// 43: the relaunch adopts the session with the capture client BEFORE anything can reset it, so the
+    /// helper's sealed `captureStop` of the crashed app's session is drained into it, not dropped.
+    @Test func aResumeAdoptsTheSessionBeforeTheStart() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        _ = try freshSentinel(h)
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.sessionCalls == ["adopt:sess", "start:sess"])
+    }
+
+    @Test func aReattachAdoptsTheSession() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        _ = try freshSentinel(h)
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.sessionCalls == ["adopt:sess"])
+    }
+
+    /// 37: the newest orphan's last write IS when capture stopped. `lastAliveAt` is only the fallback: an
+    /// in-process recovery's alive refreshes would otherwise overstate it.
+    @Test func theCrashTimePrefersTheOrphanOverANewerLastAlive() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h, alive: 10)
+        let wav = dir(s).appendingPathComponent("sess-0.wav")
+        try Harness.headerOnlyWAV().write(to: wav)
+        let sealed = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 - 40).rounded(.down))
+        try FileManager.default.setAttributes([.modificationDate: sealed], ofItemAtPath: wav.path)
+        await h.coordinator.recoverAtLaunch()
+        let gap = try #require(await h.runner.chunkProcessor?.getSessionState().gaps.first)
+        #expect(abs(gap.start.timeIntervalSince(sealed)) < 1)
+    }
+
+    /// 37: no liveness is vouched for while the helper is dead and a recovery runs.
+    @Test func theAliveTimerPausesDuringARecovery() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.aliveRefreshInterval = .milliseconds(20)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.recoveryInFlight = true
+        var written = try #require(RecordingSentinel.read(directory: h.tmp))
+        let stale = Date(timeIntervalSince1970: 1_000)
+        written.lastAliveAt = stale
+        try RecordingSentinel.write(written, directory: h.tmp)
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.lastAliveAt == stale)
+        h.coordinator.recoveryInFlight = false
     }
 }

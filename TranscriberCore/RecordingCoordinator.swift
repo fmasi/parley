@@ -1369,7 +1369,10 @@ public final class RecordingCoordinator {
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
+            // The evidence is this session's before anything else (L follow-up 43).
+            await captureClient.adoptSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir)
             captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
+            reattachPipeline(sentinel: sentinel, outputDir: outputDir)
             // At once: the crashed app's last refresh may be minutes old, and a crash in the next minute
             // must still resume. The alive timer (with the status poll) takes over from here.
             refreshSentinelLiveness()
@@ -1397,6 +1400,47 @@ public final class RecordingCoordinator {
             keepPending(sentinel)
             updateFolderAlarm()
         }
+    }
+
+    /// Flow A (L follow-up 30): the helper kept capturing, so the recording goes on — with its chunk
+    /// pipeline rebuilt, seeded from `session.json`, and the rotator naming the helper's live file, so
+    /// rotation, the disk checks and their alarms continue as normal. A chunk the crash cut short (sealed,
+    /// never processed) goes through the live processor; the live file is left to its rotation.
+    private func reattachPipeline(sentinel: RecordingSentinel, outputDir: URL) {
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        let config = configManager.config
+        let persisted = SessionState.read(directory: outputDir, sessionId: sessionId)
+        let onDisk = CrashRecoveryPlanner.orphanChunks(
+            outputDirectory: outputDir, sessionId: sessionId, completedIndices: Set(persisted?.chunks.map(\.index) ?? []))
+        // The helper's live file is the newest chunk on disk (indices only grow), never below the sentinel's.
+        let liveIndex = max(sentinel.chunkIndex, onDisk.map(\.index).max() ?? sentinel.chunkIndex)
+        let seed = persisted ?? SessionState(sessionId: sessionId, meetingStart: sentinel.startedAt, engine: config.engine.rawValue,
+                                             chunkDurationMinutes: config.validatedChunkDuration)
+        do {
+            try transcriptionRunner.setupChunkedPipeline(
+                captureClient: captureClient, outputDirectory: outputDir, sessionBaseName: sessionId,
+                config: config, seededState: seed, firstChunkIndex: liveIndex)
+        } catch {
+            // The stop's fallback branch still recovers the session from disk.
+            Logger.state.error("Re-attached without a chunk pipeline: \(error, privacy: .private)")
+            return
+        }
+        guard let rotator = transcriptionRunner.chunkRotator, let processor = transcriptionRunner.chunkProcessor else { return }
+        let live = outputDir.appendingPathComponent("\(sessionId)-\(liveIndex).wav")
+        if let began = (try? FileManager.default.attributesOfItem(atPath: live.path))?[.creationDate] as? Date {
+            rotator.adoptCurrentChunk(startedAt: began)
+        }
+        transcriptionRunner.startChunkRotation()
+        wirePipelineHooks()
+        for orphan in onDisk where orphan.index != liveIndex {
+            let system = outputDir.appendingPathComponent(orphan.baseName + ".wav")
+            let created = (try? FileManager.default.attributesOfItem(atPath: system.path))?[.creationDate] as? Date
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index, systemPath: system.path,
+                micPath: outputDir.appendingPathComponent(orphan.baseName + "_mic.wav").path,
+                startTime: created ?? seed.meetingStart))
+        }
+        Logger.state.info("Re-attached at chunk \(liveIndex, privacy: .public) with its pipeline")
     }
 
     /// Move a session the relaunch cannot finish now into the pending list — persisted, so a later
@@ -1569,6 +1613,8 @@ public final class RecordingCoordinator {
         restartLostAudio = true
         acceptFramesBeforeRecording = true
         setHelperMic(sentinel.micDeviceUID)   // before the helper opens it (#192)
+        // The evidence is this session's before the start could reset it (L follow-up 43).
+        await captureClient.adoptSession(sessionId: sessionId, directory: outputDir)
         var captureStarted = false
         do {
             try await captureClient.start(
@@ -1673,9 +1719,10 @@ public final class RecordingCoordinator {
     }
 
     /// When capture actually stopped: the newest orphan chunk WAV's modification date when one exists
-    /// (the helper sealed it on XPC disconnect, and WavFileWriter syncs every 0.5 s), else the sentinel's
-    /// `lastAliveAt` — refreshed every 60 s, so it can be up to that much early (C7/C9) — else `startedAt`.
-    /// Never later than now. Read BEFORE a salvage archives (deletes) the orphans.
+    /// (the helper sealed it on XPC disconnect, and WavFileWriter syncs every 0.5 s) — preferred even over
+    /// a newer `lastAliveAt`, which vouches for the app, not the capture (L follow-up 37) — else the
+    /// sentinel's `lastAliveAt` — refreshed every 60 s, so it can be up to that much early (C7/C9) — else
+    /// `startedAt`. Never later than now. Read BEFORE a salvage archives (deletes) the orphans.
     private func crashTime(sentinel: RecordingSentinel, outputDir: URL, lastAlive: Date?) -> Date {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         let orphanEnds = CrashRecoveryPlanner.orphanChunks(
@@ -1684,8 +1731,7 @@ public final class RecordingCoordinator {
         )
         .flatMap { [$0.baseName + ".wav", $0.baseName + "_mic.wav"] }
         .compactMap { (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent($0).path))?[.modificationDate] as? Date }
-        let best = ([lastAlive ?? sentinel.startedAt] + orphanEnds).max() ?? sentinel.startedAt
-        return min(best, Date())
+        return min(orphanEnds.max() ?? lastAlive ?? sentinel.startedAt, Date())
     }
 
     // MARK: - Sleep, wake, power-off, quit (§8.10)
@@ -1804,6 +1850,9 @@ public final class RecordingCoordinator {
     /// Stamp the sentinel's `lastAliveAt`: the alive timer, every rotation, a re-attach. Never creates
     /// one — no sentinel, no recording to vouch for.
     func refreshSentinelLiveness(now: Date = Date()) {
+        // While a crash recovery runs the helper is dead: nothing is being captured to vouch for (L
+        // follow-up 37). A successful restart stamps it again.
+        guard !recoveryInFlight else { return }
         guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory) else { return }
         sentinel.lastAliveAt = now
         do {

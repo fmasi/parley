@@ -90,6 +90,12 @@ public final class ChunkRotator {
         (index: currentChunkIndex, startTime: currentChunkStartTime)
     }
 
+    /// The chunk being recorded began before this rotator existed — a re-attach after an app crash (L
+    /// follow-up 30): its start time is when its file was created, not now.
+    public func adoptCurrentChunk(startedAt date: Date) {
+        currentChunkStartTime = date
+    }
+
     /// Recover from a live XPC crash: advance to the next chunk index so the post-crash recording
     /// continues at a fresh chunk, and return the plan whose names the caller uses for the orphan
     /// (the current index) and the recovery segment. The caller MUST enqueue the orphan chunk

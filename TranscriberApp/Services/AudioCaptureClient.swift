@@ -177,6 +177,13 @@ final class AudioCaptureClient {
         record(.launchRecovery, .warning, detail)
     }
 
+    /// A relaunch continues `sessionId`: adopt it first, then drain the helper into it (L follow-up 43).
+    /// The resume's own `start` then keeps it all (the same session id resets nothing).
+    func adoptSession(sessionId: String, directory: URL) async {
+        evidence.beginCapture(sessionId: sessionId, directory: directory)
+        await drainHelperDiagnostics()
+    }
+
     /// Reverse-channel receipt of a system-stream-unrecoverable warning (#86). Records the anomaly into
     /// the app ring — so it lands in the transcript provenance (`system_audio_unrecovered`) and flags
     /// the session — then surfaces the warning. The recording is NEVER stopped (the mic keeps recording).
