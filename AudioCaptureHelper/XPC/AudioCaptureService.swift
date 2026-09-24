@@ -351,7 +351,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                         // Core Audio output tap (#103): captures Continuity/telephony + VoIP that SCK
                         // misses. No SCStream is created, so `stream` stays nil and the #86 SCK
                         // restart path is dormant — the tap self-heals output switches internally.
-                        try self.startSystemTap(handler: outputHandler)
+                        try self.startSystemTap(handler: outputHandler, options: options)
                     }
                     Logger.audio.info("Capture started — mic AVCaptureSession + system source \(source.rawValue, privacy: .public); awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
@@ -640,7 +640,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             case .rebuildTap:
                 let tap = stateLock.sync { isUserStopping ? nil : tapSession }
                 Logger.audio.info("System tap: rebuilding for the System Audio Recording permission")
-                tap?.rebuild(reason: "system audio permission")
+                tap?.rebuild(rung: .rebuildAggregate, token: 0, reason: "system audio permission")
             case .reportDenied(let status):
                 guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
                 Logger.audio.error("System tap: System Audio Recording permission \(SystemAudioRecordingPermission.wireValue(status), privacy: .public) — the other side is not being captured")
@@ -776,18 +776,22 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         return (mic, mic.resolvedDeviceId)
     }
 
-    /// Start the Core Audio output-tap system source (#103), wiring its diagnostics + unavailability
+    /// Start the Core Audio output-tap system source (#103), wiring its diagnostics + rebuild-result
     /// callbacks into the service. Throws — failing the whole start — if the tap can't be created (most
     /// likely a missing System Audio Recording TCC grant), so the user fixes permissions before the
-    /// meeting, symmetric with the SCK path's start failure. Mid-session tap loss (an output-switch
-    /// rebuild failing) is NOT fatal: like a dead SCK system stream, the mic keeps recording and the
-    /// system track is silence-padded — surfaced via `onSystemAudioUnrecoverable`, never a teardown.
-    private func startSystemTap(handler: AudioOutputHandler) throws {
+    /// meeting, symmetric with the SCK path's start failure. Mid-session tap loss (a rebuild failing)
+    /// is NOT fatal: the mic keeps recording and the system track is silence-padded — surfaced as the
+    /// `remoteRecoveryFailed` alarm, never a teardown.
+    /// `options` is the start's own copy (`startCapture` consumes `pendingOptions`, F4 round 1).
+    private func startSystemTap(handler: AudioOutputHandler, options: CaptureOptions) throws {
         audioQueue.sync {
             tapGuard = TapPermissionGuard()
             tapGuardEpoch += 1
         }
-        let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak self, weak handler] samples, pts in
+        let tap = SystemTapSession(
+            deliveryQueue: audioQueue, tapAutoStart: options.tapAutoStart,
+            dropFramesForDiagnostics: options.debugDropTapFrames
+        ) { [weak self, weak handler] samples, pts in
             handler?.appendSystemSamples(samples, pts: pts)
             // Already on audioQueue.
             guard let self else { return }
@@ -797,11 +801,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
-        tap.onUnavailable = { [weak self] reason in
-            Logger.audio.error("System tap unavailable mid-session: \(reason, privacy: .public)")
-            self?.record(.systemAudioUnrecovered, .anomaly, ["source": "system-tap", "reason": reason])
-            self?.onSystemAudioUnrecoverable?("Remote audio couldn’t be captured — only your microphone is recording.")
-            self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
+        // §6.1: `remoteRecoveryFailed` is raised when a rung threw and cleared by the next successful
+        // rung (scan C8). Interim until H4 routes the results into `TapHealer`.
+        tap.onRebuildResult = { [weak self] rung, _, succeeded, _ in
+            guard let self else { return }
+            if succeeded { self.clearAlarm(.remoteRecoveryFailed) }
+            else { self.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture (\(rung.rawValue)). The other side may not be recorded.") }
         }
         try tap.start()
         // Commit-or-abort against a stop that raced in during start (mirrors startMicSession's council-F1
