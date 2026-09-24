@@ -44,6 +44,12 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         service.onAlarmsChanged = { data in
             send.async { client?.captureAlarmsChanged?(snapshot: data) }
         }
+        service.onRealAudio = { track, helperSessionId in
+            send.async { client?.captureDidDeliverRealAudio?(track: track.rawValue, helperSessionId: helperSessionId) }
+        }
+        service.onWriteSucceeded = { helperSessionId in
+            send.async { client?.captureDidWriteSuccessfully?(helperSessionId: helperSessionId) }
+        }
 
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }

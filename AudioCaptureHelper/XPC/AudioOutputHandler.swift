@@ -75,6 +75,15 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// as opposed to the silent diagnostic ring, which is only read after the fact (#193/#196).
     /// Set by the service; wired to the reverse XPC channel exactly like `onStreamStopped`.
     var onLiveAnomaly: ((CaptureEventKind, String) -> Void)?
+    /// The first non-zero mic batch after a REPORTED exact-zero run (once per run): the service
+    /// clears `micDigitalSilence` (§6.1). On the audio queue.
+    var onMicAudioResumed: (() -> Void)?
+    /// The FIRST non-zero real (never padded) sample batch on a track, once per handler (= once per
+    /// capture session = once per helper registry): content evidence that disproves a stale content
+    /// alarm on the app side (§6.2). On the audio queue.
+    var onRealAudio: ((CaptureTrack) -> Void)?
+    /// Tracks whose first real audio has been reported. Audio-queue confined.
+    private var realAudioReported: Set<CaptureTrack> = []
 
     /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
@@ -373,6 +382,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        noteRealAudio(samples, track: .system)
         guard !samples.isEmpty else { return }
 
         // Pin the writer to the canonical tap format exactly once. swapWriters re-applies systemFormatInfo
@@ -566,6 +576,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         // (even exact-zero samples count as "delivered" here; that is a DIFFERENT fault, caught by
         // the exact-zero monitor below, not a delivery gap).
         micBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        noteRealAudio(samples, track: .mic)
 
         let pad = timelineSilencePad(
             into: micWriter, framesWritten: micFramesWritten,
@@ -590,11 +601,20 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// class the issue exists to catch EARLY: "notify during the recording, while there is still
     /// time to fix it."
     private func noteExactZeroMic(_ verdict: ExactZeroRunMonitor.Verdict) {
+        if verdict == .resumed { onMicAudioResumed?(); return }
         guard case .silentRun(let seconds) = verdict else { return }
         let message = "The microphone has delivered \(Int(seconds))s of pure digital silence — it may be hardware-muted (e.g. the lid is closed on the built-in mic)."
         Logger.audio.error("Mic exact-zero run: \(Int(seconds), privacy: .public)s of exact-zero samples — \(message, privacy: .public)")
         record(.exactZeroMic, .anomaly, ["seconds": "\(Int(seconds))"])
         onLiveAnomaly?(.exactZeroMic, message)
+    }
+
+    /// Report the first non-zero REAL batch on `track`, once per handler. Only ever fed captured
+    /// samples, never timeline padding. The scan stops for good once the track has reported.
+    private func noteRealAudio(_ samples: [Int16], track: CaptureTrack) {
+        guard !realAudioReported.contains(track), samples.contains(where: { $0 != 0 }) else { return }
+        realAudioReported.insert(track)
+        onRealAudio?(track)
     }
 
     /// Insert leading/gap silence into `writer` so its next sample lands at this buffer's position on

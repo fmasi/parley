@@ -467,4 +467,39 @@ struct WavFileWriterTests {
         let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
         #expect(dataSize == UInt32(samples.count * 2))
     }
+
+    /// §6.2: a stale `diskWriteFailure` from a REPLACED helper is disproved by the NEW helper's first
+    /// successful write — so the writer reports its first write, once.
+    @Test func theFirstSuccessfulWriteIsReportedOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("first-write-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var successes = 0
+        writer.onWriteSucceeded = { successes += 1 }
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(successes == 1)
+    }
+
+    /// §6.1: diskWriteFailure clears on the next successful write on that writer — reported once.
+    @Test func aSuccessfulWriteAfterAFailureReportsRecoveryOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recover-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        writer.noteWriteFailure(CocoaError(.fileWriteNoPermission), context: "test")   // internal seam (was private)
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(failures == 1 && successes == 1)
+    }
 }

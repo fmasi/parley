@@ -107,6 +107,12 @@ import Foundation
     @objc optional func captureDidDeliverFirstFrames(track: String, helperSessionId: String)
     /// The helper's alarm set changed: `snapshot` is a JSON `CaptureStatusSnapshot` (§6.2).
     @objc optional func captureAlarmsChanged(snapshot: Data)
+    /// A non-zero sample on `track` ("mic" | "system"), once per helper registry: disproves a stale
+    /// CONTENT alarm (`micDigitalSilence`, `remotePermissionDenied`, `remoteCantConfirm`) (§6.2).
+    @objc optional func captureDidDeliverRealAudio(track: String, helperSessionId: String)
+    /// A successful WAV write (first write of a writer, or the first after a failure): disproves a
+    /// stale `diskWriteFailure` (§6.2).
+    @objc optional func captureDidWriteSuccessfully(helperSessionId: String)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

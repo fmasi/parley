@@ -2,8 +2,8 @@ import Testing
 @testable import TranscriberCore
 
 /// #193: a mic that is delivering pure digital silence (lid closed, built-in mic stays default)
-/// looks perfectly healthy to every other detector — frames ARE arriving, so no padding, no
-/// `trackNeverDelivered`. `ExactZeroRunMonitor` is the one signal built specifically to catch it:
+/// looks perfectly healthy to every other detector — frames ARE arriving, so no padding and a
+/// healthy liveness heartbeat. `ExactZeroRunMonitor` is the one signal built specifically to catch it:
 /// samples that are exactly zero, not merely quiet.
 @Suite struct ExactZeroRunMonitorTests {
 
@@ -82,5 +82,21 @@ import Testing
         let batch = [Int16](repeating: 0, count: 4800)
         let verdict = m.record(samples: batch, rate: 0)
         #expect(verdict == .notYet)
+    }
+
+    /// §6.1: `micDigitalSilence` clears on the first non-zero mic sample — the monitor says so once.
+    @Test func silentRunThenAudioReportsResumedOnce() {
+        var m = ExactZeroRunMonitor(thresholdSeconds: 12)
+        let zeros = [Int16](repeating: 0, count: 4800)
+        let audio = [Int16](repeating: 0, count: 4799) + [1]
+        for _ in 0..<130 { _ = m.record(samples: zeros, rate: rate) }
+        #expect(m.record(samples: audio, rate: rate) == .resumed)
+        #expect(m.record(samples: audio, rate: rate) == .notYet, "once per run")
+    }
+
+    @Test func audioWithoutAReportedRunIsNotAResume() {
+        var m = ExactZeroRunMonitor(thresholdSeconds: 12)
+        let audio = [Int16](repeating: 0, count: 4799) + [1]
+        #expect(m.record(samples: audio, rate: rate) == .notYet)
     }
 }

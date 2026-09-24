@@ -14,13 +14,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// so a helper started later always names a newer `HelperSessionId` — a wall-clock start could
     /// step backwards and make the replacement look older than the helper it replaced.
     private let processStartMillis = clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000
-    /// Alarm-registry resets in this process. Guarded by `stateLock`. H2 increments it on every
-    /// registry reset (stop, stopAndFinalize, cleanupAfterFailure), so each reset names a strictly
-    /// newer registry; until H2 adds the registry it stays 0.
+    /// Alarm-registry resets in this process. Guarded by `stateLock`. Incremented on every registry
+    /// reset (stop, stopAndFinalize, cleanupAfterFailure, failFatally), so each reset names a strictly
+    /// newer registry.
     private var registryResets: UInt64 = 0
-    /// Sequence of the last `CaptureStatusSnapshot` built (pull reply or push). Guarded by `stateLock`;
-    /// H2's pushes take the next value the same way.
+    /// Sequence of the last `CaptureStatusSnapshot` built (pull reply or push). Guarded by `stateLock`,
+    /// taken in the same critical section as the alarm read (`snapshot(tracks:)`).
     private var snapshotSequence: UInt64 = 0
+    /// The helper-owned capture alarms (§6.1). Guarded by `stateLock`, next to `registryResets` and
+    /// `snapshotSequence`, so a snapshot's id, sequence and alarms are read in one critical section.
+    private var alarms = CaptureAlarmRegistry()
 
     /// Names the helper's alarm-REGISTRY INSTANCE, not the process, as an ordered `HelperSessionId`
     /// (`"<processStartMillis>-<registryResets>"`), in every snapshot and first-frames call: a newer id
@@ -93,6 +96,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     var onFirstFrames: ((CaptureTrack, String) -> Void)?
     /// Invoked with a JSON `CaptureStatusSnapshot` whenever the alarm set changes (§6.2).
     var onAlarmsChanged: ((Data) -> Void)?
+    /// The first non-zero sample on a track, once per registry: (track, `helperSessionId`). Content
+    /// evidence that disproves a stale content alarm on the app side (§6.2).
+    var onRealAudio: ((CaptureTrack, String) -> Void)?
+    /// A writer's first successful write, or its first after a failure: (`helperSessionId`). Disproves
+    /// a stale `diskWriteFailure` on the app side (§6.2).
+    var onWriteSucceeded: ((String) -> Void)?
 
     /// Off-audio-queue 1 Hz liveness watchdog (#196). Started once capture is up, stopped on every
     /// teardown path.
@@ -133,7 +142,47 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         writer.onWriteFailure = { [weak self] message in
             self?.record(.writeFailure, .anomaly, ["track": track, "reason": message])
             self?.onQualityAnomaly?(CaptureEventKind.writeFailure.rawValue, message)
+            self?.raiseAlarm(.diskWriteFailure, message)
         }
+        // Start writers and every rotation's writers come through here, so each chunk's first write
+        // is one cheap evidence call (§6.2).
+        writer.onWriteSucceeded = { [weak self] in
+            guard let self else { return }
+            self.clearAlarm(.diskWriteFailure)
+            self.onWriteSucceeded?(self.helperSessionId)
+        }
+    }
+
+    // MARK: - Alarm registry (§6)
+
+    /// Sequence, id and alarms in ONE `stateLock` section (F2 round 2), so a later sequence can never
+    /// carry an older registry. `tracks` is computed by the caller OUTSIDE the lock (it reads other
+    /// locks and, in H6, the cached gate). Never call the `helperSessionId` getter in here.
+    private func snapshot(tracks: [TrackHealthSnapshot]) -> CaptureStatusSnapshot {
+        stateLock.sync {
+            snapshotSequence += 1
+            let id = HelperSessionId(processStartMillis: processStartMillis, registryResets: registryResets).description
+            return CaptureStatusSnapshot(helperSessionId: id, sequence: snapshotSequence, isCapturing: isCapturing,
+                                         alarms: alarms.sorted, tracks: tracks)
+        }
+    }
+
+    private func trackHealth() -> [TrackHealthSnapshot] { [] }   // H6 fills this from the coverage counters
+
+    /// Both may be called from the audio queue (write failure, exact zeros, permission verdicts) and
+    /// from the watchdog / config queues — never from inside `stateLock.sync`, and they do no HAL
+    /// read and no `audioQueue.sync` (a push encodes a handful of alarms; that is all).
+    private func raiseAlarm(_ kind: AlarmKind, _ message: String) {
+        let changed = stateLock.sync { alarms.raise(kind, message: message, now: Date()) }
+        guard changed else { return }
+        record(.alarmRaised, .anomaly, ["kind": kind.rawValue])
+        onAlarmsChanged?(snapshot(tracks: trackHealth()).encoded())
+    }
+
+    private func clearAlarm(_ kind: AlarmKind) {
+        guard stateLock.sync(execute: { alarms.clear(kind) }) != nil else { return }
+        record(.alarmCleared, .info, ["kind": kind.rawValue])
+        onAlarmsChanged?(snapshot(tracks: trackHealth()).encoded())
     }
 
     /// Start the off-audio-queue liveness watchdog (§4.2) on the sessions' heartbeats, and re-arm a
@@ -152,24 +201,35 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// Verdicts arrive on the watchdog queue. H1: record + transient banner + first-frames evidence;
-    /// H2 adds the alarm registry; H4 routes the system track into the ladder and the mic into MicHealPolicy.
+    /// H2: the NotDelivering alarms, raised directly for now (H4 routes the system track into the
+    /// ladder and the mic into MicHealPolicy, so both alarm only once healing has failed).
     /// `helperSessionId` reads `stateLock`; this never runs inside a `stateLock.sync` block.
     private func handleLiveness(track: CaptureTrack, verdict: TrackLivenessMonitor.Verdict) {
         let t = track.rawValue
+        let notDelivering: AlarmKind = track == .mic ? .micNotDelivering : .remoteNotDelivering
         switch verdict {
         case .firstFrames:
             record(.firstFrames, .info, ["track": t])
             onFirstFrames?(track, helperSessionId)
+            // Only the NotDelivering/RecoveryFailed kinds: first frames prove the OS is calling us,
+            // not that the content is real (permission and digital-silence kinds clear on real audio).
+            clearAlarm(notDelivering)
+            if track == .system { clearAlarm(.remoteRecoveryFailed) }
         case .neverDelivered(let s):
             record(.neverDelivered, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            onQualityAnomaly?(CaptureEventKind.neverDelivered.rawValue, track == .mic
-                ? "The microphone isn’t delivering any audio." : "The other side of the call isn’t reaching Parley although audio is playing.")
+            let message = track == .mic
+                ? "The microphone isn’t delivering any audio." : "The other side of the call isn’t reaching Parley although audio is playing."
+            onQualityAnomaly?(CaptureEventKind.neverDelivered.rawValue, message)
+            raiseAlarm(notDelivering, message)
         case .stalled(let s):
             record(.livenessGap, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, track == .mic
-                ? "The microphone stopped delivering audio \(Int(s))s ago." : "System audio stopped delivering \(Int(s))s ago.")
+            let message = track == .mic
+                ? "The microphone stopped delivering audio \(Int(s))s ago." : "System audio stopped delivering \(Int(s))s ago."
+            onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, message)
+            raiseAlarm(notDelivering, message)
         case .cleared(let reason):
             record(.livenessRecovered, .info, ["track": t, "reason": "\(reason)"])
+            clearAlarm(notDelivering)
         case .healthy:
             break
         }
@@ -241,6 +301,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // live, user-facing surface (#193/#196).
             outputHandler.onLiveAnomaly = { [weak self] kind, message in
                 self?.onQualityAnomaly?(kind.rawValue, message)
+                if kind == .exactZeroMic { self?.raiseAlarm(.micDigitalSilence, message) }
+            }
+            outputHandler.onMicAudioResumed = { [weak self] in self?.clearAlarm(.micDigitalSilence) }
+            // On the audio queue; `helperSessionId` takes `stateLock`, a leaf lock never held there.
+            outputHandler.onRealAudio = { [weak self] track in
+                guard let self else { return }
+                self.onRealAudio?(track, self.helperSessionId)
             }
 
             self.stateLock.sync {
@@ -358,6 +425,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.tapSession = nil
                 self.systemPath = nil
                 self.micPath = nil
+                self.alarms = CaptureAlarmRegistry()
+                self.registryResets += 1
                 return result
             }
             reply(sys, mic, nil)
@@ -368,14 +437,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(stateLock.sync { isCapturing }, nil)
     }
 
-    /// F4 stub: the registry arrives in H2. Until then the snapshot carries no alarms and no tracks.
+    /// The app's pull (§6.2): the helper's alarm registry and per-track health, one snapshot.
     func captureStatus(reply: @escaping (Data?) -> Void) {
-        let (capturing, resets, sequence) = stateLock.sync { () -> (Bool, UInt64, UInt64) in
-            snapshotSequence += 1
-            return (isCapturing, registryResets, snapshotSequence)
-        }
-        let id = HelperSessionId(processStartMillis: processStartMillis, registryResets: resets).description
-        reply(CaptureStatusSnapshot(helperSessionId: id, sequence: sequence, isCapturing: capturing, alarms: [], tracks: []).encoded())
+        reply(snapshot(tracks: trackHealth()).encoded())
     }
 
     /// Replies false ("not understood") for a payload it cannot read, and leaves `pendingOptions` as is.
@@ -587,6 +651,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     ? "Parley can’t confirm it’s capturing the other side of the call: system audio has been completely silent. If they’re talking, check System Audio Recording."
                     : "Parley isn’t allowed to record system audio, so the other side of the call is not being captured. Your microphone is still recording. Grant System Audio Recording to fix it."
                 onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, message)
+                raiseAlarm(status == nil ? .remoteCantConfirm : .remotePermissionDenied, message)
             case .reportRestored:
                 Logger.audio.info("System tap: real audio is arriving again — remote side restored")
                 record(.systemAudioPermissionRestored, .info)
@@ -594,6 +659,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     CaptureEventKind.systemAudioPermissionRestored.rawValue,
                     "The other side of the call is being recorded again."
                 )
+                clearAlarm(.remotePermissionDenied)
+                clearAlarm(.remoteCantConfirm)
             }
         }
     }
@@ -628,6 +695,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.handler = nil
                     self.micSession = nil
                     self.tapSession = nil
+                    self.alarms = CaptureAlarmRegistry()
+                    self.registryResets += 1
                 }
                 Logger.audio.info("Capture finalized after client disconnect")
             }
@@ -637,6 +706,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.handler = nil
                 self.micSession = nil
                 self.tapSession = nil
+                self.alarms = CaptureAlarmRegistry()
+                self.registryResets += 1
             }
         }
     }
@@ -656,6 +727,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             tapSession = nil
             systemPath = nil
             micPath = nil
+            alarms = CaptureAlarmRegistry()
+            registryResets += 1
             return snapshot
         }
         micSess?.stop()
@@ -728,6 +801,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             Logger.audio.error("System tap unavailable mid-session: \(reason, privacy: .public)")
             self?.record(.systemAudioUnrecovered, .anomaly, ["source": "system-tap", "reason": reason])
             self?.onSystemAudioUnrecoverable?("Remote audio couldn’t be captured — only your microphone is recording.")
+            self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
         }
         try tap.start()
         // Commit-or-abort against a stop that raced in during start (mirrors startMicSession's council-F1
@@ -856,6 +930,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             tapSession = nil
             systemPath = nil
             micPath = nil
+            alarms = CaptureAlarmRegistry()
+            registryResets += 1
             return (true, handlerToFinalize, micToStop, tapToStop)
         }
         guard won else { return }
@@ -972,5 +1048,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             "reason": "system stream produced no frames after \(maxRestartAttempts) restarts"
         ])
         onSystemAudioUnrecoverable?("Remote audio couldn’t be recovered — only your microphone is recording.")
+        raiseAlarm(.remoteRecoveryFailed, "Remote audio couldn’t be recovered — only your microphone is recording.")
     }
 }
