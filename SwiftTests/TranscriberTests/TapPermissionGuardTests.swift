@@ -173,8 +173,16 @@ struct TapPermissionGuardTests {
     @Test func unverifiableWithoutEvidenceIsSilent() {
         var g = TapPermissionGuard()
         _ = g.tapBuilt(status: nil, now: 0)
-        _ = g.deliveryGap(now: 1)
         #expect(g.permissionChecked(nil, evidence: .none, now: 1) == [])
+    }
+
+    /// The reachable production path: a delivery gap asks for a check, the check can't verify, and the
+    /// gap itself is the evidence worth reporting.
+    @Test func deliveryGapWithAnUnverifiableStatusReports() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: nil, now: 0)
+        #expect(g.deliveryGap(now: 1) == [.checkPermission(.deliveryGap)])
+        #expect(g.permissionChecked(nil, evidence: .deliveryGap, now: 1) == [.reportDenied(nil)])
     }
 
     // MARK: - Provenance facts

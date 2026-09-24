@@ -77,10 +77,11 @@ public enum CaptureReadiness {
 
     /// "System Audio Recording is off" / "Microphone and System Audio Recording are off".
     public static func offPhrase(for permissions: [CapturePermission]) -> String {
+        guard !permissions.isEmpty else { return "" }
         let names = permissions.map(\.displayName)
         let list: String
         switch names.count {
-        case 0, 1: list = names.first ?? ""
+        case 1: list = names[0]
         case 2: list = "\(names[0]) and \(names[1])"
         default: list = names.dropLast().joined(separator: ", ") + ", and " + names[names.count - 1]
         }

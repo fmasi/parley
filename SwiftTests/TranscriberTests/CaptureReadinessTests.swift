@@ -118,6 +118,10 @@ struct CaptureReadinessTests {
 
     // MARK: - offPhrase (PR #222 review: "X and Y is off" is ungrammatical)
 
+    @Test func noPermissionsGivesAnEmptyPhrase() {
+        #expect(CaptureReadiness.offPhrase(for: []) == "")
+    }
+
     @Test func onePermissionUsesIs() {
         #expect(CaptureReadiness.offPhrase(for: [.systemAudioRecording]) == "System Audio Recording is off")
     }
