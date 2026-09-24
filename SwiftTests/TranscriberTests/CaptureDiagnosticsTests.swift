@@ -240,6 +240,66 @@ struct CaptureDiagnosticsTests {
             #expect(!CaptureEventKind.qualityCompromising.contains(k), "\(k.rawValue) must not taint the record")
         }
     }
+
+    /// A crash-recovered recording has several helper sessions, each with its own captureStop.
+    @Test func provenanceSumsCoverageAcrossHelperSessions() {
+        var d = CaptureDiagnostics()
+        var a = TrackAccounting(); a.expectedSeconds = 100; a.deliveredSeconds = 100
+        var b = TrackAccounting(); b.expectedSeconds = 50; b.deliveredSeconds = 0
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "remote")))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info, detail: b.asDetail(prefix: "remote")))
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.remoteCoverage?.expectedSeconds == 150)
+        #expect(p.remoteCoverage?.deliveredSeconds == 100)
+        #expect(p.remoteStatus == "compromised")
+        #expect(p.systemDeliveredSeconds == 100, "legacy field derived from coverage")
+        #expect(p.localCoverage == nil && p.localStatus == nil)
+        let meta = p.asMetadataDictionary()
+        #expect((meta["remote_coverage"] as? [String: Any])?["status"] as? String == "compromised")
+        #expect(meta["local_coverage"] == nil)
+    }
+
+    /// Spec §7.1 (scan C12): only CONTENT-compromising kinds mark a side compromised. A stall that
+    /// healed is evidence in the ring, not a verdict on the record.
+    @Test func aHealedStallDoesNotCompromiseTheTrackButRateDriftDoes() {
+        var d = CaptureDiagnostics()
+        var a = TrackAccounting(); a.expectedSeconds = 100; a.deliveredSeconds = 99
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .livenessGap, severity: .anomaly, detail: ["track": "system", "seconds": "3"]))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .livenessRecovered, severity: .info, detail: ["track": "system"]))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(2), origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "remote")))
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).remoteStatus == "healthy")
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(3), origin: .helper, kind: .rateDrift, severity: .anomaly, detail: ["source": "system-tap"]))
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).remoteStatus == "compromised")
+        #expect(d.contentAnomalyCount(track: "mic") == 0)
+    }
+
+    @Test func micContentKindsCountForTheLocalSideOnly() {
+        var d = CaptureDiagnostics()
+        var a = TrackAccounting(); a.expectedSeconds = 60; a.deliveredSeconds = 60
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .exactZeroMic, severity: .anomaly))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info,
+                              detail: a.asDetail(prefix: "local").merging(a.asDetail(prefix: "remote")) { x, _ in x }))
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.localStatus == "compromised" && p.remoteStatus == "healthy")
+    }
+
+    @Test func coverageRoundTripsThroughCodable() throws {
+        var a = TrackAccounting(); a.expectedSeconds = 10; a.deliveredSeconds = 9
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, remoteCoverage: a, remoteStatus: "healthy")
+        let back = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(back.remoteCoverage == a && back.remoteStatus == "healthy" && back.localCoverage == nil)
+    }
+
+    /// C6 round 1: a side that captured NOTHING is `neverDelivered`, never merely `compromised` —
+    /// R1 must not print "partly captured (0 s delivered…)" for it, whatever else went wrong.
+    @Test func aSideThatDeliveredNothingIsNeverDeliveredEvenWithAContentAnomaly() {
+        var d = CaptureDiagnostics()
+        var a = TrackAccounting(); a.expectedSeconds = 100; a.deliveredSeconds = 0
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .rateDrift, severity: .anomaly, detail: ["source": "system-tap"]))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "remote")))
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).remoteStatus == "neverDelivered")
+    }
 }
 
 struct CaptureProvenanceTests {

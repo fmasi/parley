@@ -175,6 +175,13 @@ extension CaptureEventKind {
         .systemAudioPermissionDenied,
         .neverDelivered, .tapRecoveryGivenUp, .recoveryStuck, .captureGap, .rotationFailed,
     ]
+
+    /// The kinds that mean a side's CONTENT is wrong (§7.1) — what turns a track's status into
+    /// `compromised`. Healed liveness episodes (`livenessGap`, `neverDelivered`) and recovery events
+    /// stay evidence: they are already counted in the coverage deficit if they cost audio.
+    public static let contentCompromising: Set<CaptureEventKind> = [
+        .rateDrift, .exactZeroMic, .systemAudioPermissionDenied, .converterFailure, .writeFailure, .sustainedFormatDrop,
+    ]
 }
 
 /// One structured capture event for the anomaly-gated diagnostic log.
@@ -228,6 +235,14 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// every other field looks healthy. nil when the session didn't use the tap (or predates this).
     public let systemDeliveredSeconds: Int?
     public let systemExactZeroSeconds: Int?
+    /// Per-track coverage (§7.1), summed across every helper session's `captureStop`. `nil` when
+    /// no `captureStop` carried that side's counters (predates this, or the side was never used).
+    public let localCoverage: TrackAccounting?
+    public let remoteCoverage: TrackAccounting?
+    /// `TrackAccounting.Status.rawValue` for each side, computed once at `makeProvenance` time from
+    /// the coverage plus that side's content anomalies. `nil` exactly when the matching coverage is.
+    public let localStatus: String?
+    public let remoteStatus: String?
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -242,6 +257,10 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case systemAudioUnrecovered = "system_audio_unrecovered"
         case systemDeliveredSeconds = "system_delivered_seconds"
         case systemExactZeroSeconds = "system_exact_zero_seconds"
+        case localCoverage = "local_coverage"
+        case remoteCoverage = "remote_coverage"
+        case localStatus = "local_status"
+        case remoteStatus = "remote_status"
     }
 
     public init(
@@ -256,7 +275,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         qualityAnomalyCount: Int = 0,
         systemAudioUnrecovered: Bool = false,
         systemDeliveredSeconds: Int? = nil,
-        systemExactZeroSeconds: Int? = nil
+        systemExactZeroSeconds: Int? = nil,
+        localCoverage: TrackAccounting? = nil,
+        remoteCoverage: TrackAccounting? = nil,
+        localStatus: String? = nil,
+        remoteStatus: String? = nil
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -270,6 +293,10 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.systemAudioUnrecovered = systemAudioUnrecovered
         self.systemDeliveredSeconds = systemDeliveredSeconds
         self.systemExactZeroSeconds = systemExactZeroSeconds
+        self.localCoverage = localCoverage
+        self.remoteCoverage = remoteCoverage
+        self.localStatus = localStatus
+        self.remoteStatus = remoteStatus
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -295,6 +322,10 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         systemAudioUnrecovered = try c.decodeIfPresent(Bool.self, forKey: .systemAudioUnrecovered) ?? false
         systemDeliveredSeconds = try c.decodeIfPresent(Int.self, forKey: .systemDeliveredSeconds)
         systemExactZeroSeconds = try c.decodeIfPresent(Int.self, forKey: .systemExactZeroSeconds)
+        localCoverage = try c.decodeIfPresent(TrackAccounting.self, forKey: .localCoverage)
+        remoteCoverage = try c.decodeIfPresent(TrackAccounting.self, forKey: .remoteCoverage)
+        localStatus = try c.decodeIfPresent(String.self, forKey: .localStatus)
+        remoteStatus = try c.decodeIfPresent(String.self, forKey: .remoteStatus)
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -313,6 +344,12 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         if let micDevice { d["mic_device"] = micDevice }
         if let systemDeliveredSeconds { d["system_delivered_seconds"] = systemDeliveredSeconds }
         if let systemExactZeroSeconds { d["system_exact_zero_seconds"] = systemExactZeroSeconds }
+        if let remoteCoverage {
+            d["remote_coverage"] = remoteCoverage.asMetadataDictionary(status: TrackAccounting.Status(rawValue: remoteStatus ?? "healthy") ?? .healthy)
+        }
+        if let localCoverage {
+            d["local_coverage"] = localCoverage.asMetadataDictionary(status: TrackAccounting.Status(rawValue: localStatus ?? "healthy") ?? .healthy)
+        }
         return d
     }
 }
@@ -430,13 +467,39 @@ public struct CaptureDiagnostics: Sendable {
         (try? makeDecoder().decode([CaptureEvent].self, from: data)) ?? []
     }
 
+    /// Which side an event is about: its `track`/`source` detail, else the kind's own side.
+    private static func side(of e: CaptureEvent) -> String? {
+        if let t = e.detail["track"] ?? e.detail["source"] {
+            if t == "mic" { return "mic" }
+            if ["system", "system-tap", "tap"].contains(t) { return "system" }
+        }
+        switch e.kind {
+        case .exactZeroMic: return "mic"
+        case .systemAudioPermissionDenied, .rateDrift, .sustainedFormatDrop: return "system"
+        default: return nil
+        }
+    }
+
+    public func contentAnomalyCount(track: String) -> Int {
+        events.filter { CaptureEventKind.contentCompromising.contains($0.kind) && Self.side(of: $0) == track }.count
+    }
+
+    private func coverage(prefix: String) -> TrackAccounting? {
+        let parts = events.filter { $0.kind == .captureStop }.compactMap { TrackAccounting(detail: $0.detail, prefix: prefix) }
+        guard var total = parts.first else { return nil }
+        for p in parts.dropFirst() { total += p }
+        return total
+    }
+
     public func makeProvenance(
         engine: String,
         systemFormat: String?,
         micFormat: String?,
         micDevice: String?
     ) -> CaptureProvenance {
-        CaptureProvenance(
+        let remote = coverage(prefix: "remote")
+        let local = coverage(prefix: "local")
+        return CaptureProvenance(
             engine: engine,
             systemFormat: systemFormat,
             micFormat: micFormat,
@@ -447,12 +510,18 @@ public struct CaptureDiagnostics: Sendable {
             anomalyCount: anomalyCount,
             qualityAnomalyCount: qualityAnomalyCount,
             systemAudioUnrecovered: systemAudioUnrecovered,
-            systemDeliveredSeconds: tapTrackSeconds("system_delivered_seconds"),
-            systemExactZeroSeconds: tapTrackSeconds("system_exact_zero_seconds")
+            systemDeliveredSeconds: remote.map { Int($0.deliveredSeconds.rounded()) } ?? tapTrackSeconds("system_delivered_seconds"),
+            systemExactZeroSeconds: remote.map { Int($0.exactZeroSeconds.rounded()) } ?? tapTrackSeconds("system_exact_zero_seconds"),
+            localCoverage: local,
+            remoteCoverage: remote,
+            localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
+            remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue }
         )
     }
 
     /// Summed across every helper session's `captureStop` (a crash-recovered recording has several).
+    /// Legacy fallback for when no per-track coverage counters are present in the events (§7.1's
+    /// `coverage(prefix:)` supersedes this once a session carries `remote_expected_seconds` etc.).
     private func tapTrackSeconds(_ key: String) -> Int? {
         let values = events.filter { $0.kind == .captureStop }.compactMap { $0.detail[key].flatMap(Int.init) }
         return values.isEmpty ? nil : values.reduce(0, +)
