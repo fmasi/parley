@@ -108,10 +108,13 @@ public enum LaunchAgentHealth {
     /// tried. Never during a recording (killing this process mid-recording would lose audio still
     /// buffered here), never in CLI mode (there is no menu-bar app instance to hand over to, and a
     /// one-shot CLI invocation is not what KeepAlive is meant to protect), never when THIS process
-    /// already IS the launchd job (fix round 3, item 4 — it would be handing over to itself), and
-    /// never twice within `handOverCooldown` of the last attempt.
-    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, isLaunchdJob: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
-        guard !isRecording, !isCLI, !isLaunchdJob else { return false }
+    /// already IS the launchd job (fix round 3, item 4 — it would be handing over to itself), never
+    /// without the single-instance lock (fix round 5, item 1 — `kickstart -k` kills the running
+    /// job, which is only safe when the lock proves no other instance can be recording; an
+    /// unguarded process, lock unavailable, has no such proof), and never twice within
+    /// `handOverCooldown` of the last attempt.
+    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, isLaunchdJob: Bool, holdsInstanceLock: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
+        guard !isRecording, !isCLI, !isLaunchdJob, holdsInstanceLock else { return false }
         if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown { return false }
         return true
     }

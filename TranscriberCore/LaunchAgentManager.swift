@@ -186,11 +186,19 @@ public enum LaunchAgentManager {
     /// auto-repaired here: whether a hand-over is safe depends on recording/CLI-mode state this
     /// function has no access to. Call `LaunchAgentManager.handOverToJob` directly, gated by
     /// `LaunchAgentHealth.shouldAttemptHandOver`, when that context is available (L3).
+    ///
+    /// `holdsInstanceLock` (fix round 5, item 1; deliberately no default): whether this process
+    /// holds the single-instance lock. Without it (`SingleInstanceGuard.LockOutcome.unavailable`,
+    /// the app runs unguarded) another live instance may exist and may be recording, so every
+    /// launchctl repair verb (bootout, enable, bootstrap) is skipped: judge only, log `.error`,
+    /// return the judged state. The pid-confirmed quiet rewrite still runs: it is a file write
+    /// with no launchctl verb, and a pid match means crash relaunch already works.
     public static func verifyAndRepair(
         executablePath: String? = nil,
         launchAgentsDir: URL? = nil,
         uid: uid_t = getuid(),
         currentPID: pid_t? = getpid(),
+        holdsInstanceLock: Bool,
         runner: LaunchctlRunning = ProcessLaunchctlRunner()
     ) async -> LaunchAgentHealth.State {
         let exePath = executablePath ?? Bundle.main.executablePath ?? Bundle.main.bundlePath
@@ -199,13 +207,13 @@ public enum LaunchAgentManager {
         func currentPlistPath() -> String? {
             (try? String(contentsOf: plistURL, encoding: .utf8)).flatMap(programPath(inPlist:))
         }
-        func query() async -> (state: LaunchAgentHealth.State, pid: pid_t?) {
+        func query() async -> (state: LaunchAgentHealth.State, job: (loaded: Bool, programPath: String?, pid: pid_t?)) {
             let job = await queryLoadedJob(uid: uid, runner: runner)
             let state = LaunchAgentHealth.assess(
                 plistProgramPath: currentPlistPath(), executablePath: exePath, loaded: job.loaded,
                 loadedProgramPath: job.programPath, loadedPID: job.pid, currentPID: currentPID
             )
-            return (state, job.pid)
+            return (state, job)
         }
 
         let before = await query()
@@ -213,7 +221,7 @@ public enum LaunchAgentManager {
         // NEVER bootout the job whose pid IS this process, no matter what the state says (fix
         // round 2, item 1b) — an absolute safety net independent of the classification above, in
         // case a program-path comparison is ever wrong (e.g. a symlink, an unusual launchd report).
-        let isSelf = currentPID != nil && before.pid == currentPID
+        let isSelf = currentPID != nil && before.job.pid == currentPID
         let action = LaunchAgentHealth.action(for: state)
         // pid proves launchd's in-memory job launched exactly this process, so a crash relaunch
         // already works, whatever the on-disk plist or `print`'s program string says (fix round 3,
@@ -222,6 +230,12 @@ public enum LaunchAgentManager {
         // bootstrap (the job is already loaded; bootstrap would only fail with "already loaded").
         if isSelf, [.installAndBootstrap, .bootoutInstallAndBootstrap, .rewriteAndBootstrap].contains(action) {
             return await quietlyRewritePlist(from: state, executablePath: exePath, launchAgentsDir: agentsDir, plistURL: plistURL, runner: runner)
+        }
+        // Fix round 5, item 1: without the single-instance lock another live instance may be
+        // recording as the launchd job, and a bootout would SIGTERM it. Judge only.
+        if !holdsInstanceLock, action != .none {
+            Logger.config.error("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) — single-instance lock unavailable — crash-protection repair skipped")
+            return state
         }
         switch action {
         case .none:
@@ -235,8 +249,14 @@ public enum LaunchAgentManager {
             return state
         case .installAndBootstrap:
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
-            _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
-            _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
+            // Already loaded with OUR program as another process (a B still waiting for the lock,
+            // or the plist deleted while the job stays loaded): bootstrap would only fail with
+            // "already loaded". Write the plist only; the re-judge below reports the normal
+            // hand-over state. (Fix round 5, item 2.)
+            if !(before.job.loaded && before.job.programPath == exePath) {
+                _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
+                _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
+            }
         case .bootoutInstallAndBootstrap, .rewriteAndBootstrap:
             // A stale job must be booted out first or bootstrap fails with "already loaded". Never
             // this process's own job: `isSelf` returned above.
@@ -301,8 +321,10 @@ public enum LaunchAgentManager {
     /// launch-time repair) returns 0 WITHOUT restarting it. If that B's deadline then passed between
     /// A's kickstart and A's exit, both would exit 0 and nothing would relaunch either: zero
     /// instances. `-k` kills and restarts the job, so B always gets a full fresh
-    /// `SingleInstancePolicy.lockWaitTimeout` window from A's kickstart. It is safe because A holds
-    /// the single-instance lock: any running job process is a B waiting for it, never one recording.
+    /// `SingleInstancePolicy.lockWaitTimeout` window from A's kickstart. It is safe ONLY because A
+    /// holds the single-instance lock, so any running job process is a B waiting for it, never one
+    /// recording. An unguarded A (lock unavailable) has no such proof and could kill a recording
+    /// job, so `shouldAttemptHandOver` requires `holdsInstanceLock` (fix round 5, item 1).
     ///
     /// The full hand-over protocol (fix round 2, item 2 — a design correction: round 1's plan was
     /// "kickstart then yield", which as DOCUMENTED left NO instance running. This process, A, still
@@ -310,10 +332,10 @@ public enum LaunchAgentManager {
     /// see the lock held and exit 0 immediately — `SuccessfulExit: false` means launchd does not
     /// relaunch a clean exit — and then A would exit too, having handed off to nothing):
     /// 1. This process, A, calls `handOverToJob`.
-    /// 2. On success, A releases the single-instance lock and exits 0 straight away, well inside
-    ///    B's fresh window. On failure, A keeps running (better a process KeepAlive can't protect
-    ///    than none at all); the state still maps to `LaunchAgentHealth.userMessage` for "crash
-    ///    protection is off".
+    /// 2. On success, A releases the single-instance lock and MUST exit 0 immediately (L3's
+    ///    wiring: `exit(0)` straight after the kickstart), well inside B's fresh window. On
+    ///    failure, A keeps running (better a process KeepAlive can't protect than none at all);
+    ///    the state still maps to `LaunchAgentHealth.userMessage` for "crash protection is off".
     /// 3. B, launchd-spawned, recognises it IS the launchd job (`SingleInstancePolicy.decide(isLaunchdJob:
     ///    true, lockHeldByOther: true)` → `.waitForLock`) and WAITS up to
     ///    `SingleInstancePolicy.lockWaitTimeout` for A to release the lock, instead of yielding —
@@ -324,9 +346,12 @@ public enum LaunchAgentManager {
     ///    launch-time repair times out whenever A does not hand over (A is recording, inside
     ///    `handOverCooldown`, or its kickstart failed). B must neither exit non-zero (KeepAlive
     ///    would respawn it roughly every 10 s, a relaunch loop) nor proceed unlocked (two
-    ///    instances); A, still running, remains the one surviving instance. (Fix round 3, item 1.)
-    ///    When A DOES hand over, `-k` restarted B at the kickstart, so B's full window outlasts A's
-    ///    prompt exit (step 2) and B takes the lock. (Fix round 4, item 2.)
+    ///    instances). (Fix round 3, item 1.) A timed-out B means A still held the lock at B's
+    ///    deadline, so A is still running. A remains the one surviving instance PROVIDED that,
+    ///    after a successful kickstart, A exits within B's window (step 2): `-k` restarted B at the
+    ///    kickstart, so B's full window then outlasts A's exit and B takes the lock. An A that
+    ///    lingered past B's window and then exited would leave none. (Fix round 4, item 2; round
+    ///    5, item 4.)
     ///
     /// `LaunchAgentHealth.shouldAttemptHandOver`'s `lastHandOverAt` guard must be persisted ACROSS
     /// PROCESSES (e.g. `UserDefaults`, by L3): A does not survive a successful hand-over to
@@ -334,9 +359,11 @@ public enum LaunchAgentManager {
     /// and the cooldown would never actually apply.
     ///
     /// Callers MUST gate this call with `LaunchAgentHealth.shouldAttemptHandOver` first (never while
-    /// recording, never in CLI mode, never from the launchd job itself (`isLaunchdJob`), never twice
-    /// within `handOverCooldown`) — this method performs no such guard itself, since it has no idea
-    /// whether a recording is in progress or which process it is running in. The exit/yield
+    /// recording, never in CLI mode, never from the launchd job itself (`isLaunchdJob`), never
+    /// without the single-instance lock (`holdsInstanceLock`), never twice within
+    /// `handOverCooldown`) — this method performs no such guard itself, since it has no idea
+    /// whether a recording is in progress, which process it is running in, or whether it holds the
+    /// lock. The exit/yield
     /// wiring (steps 2–3) and `SingleInstancePolicy`'s call site (detecting `isLaunchdJob`, e.g. via
     /// the `XPC_SERVICE_NAME` environment variable equalling `label`) belong to task L3; this
     /// Manager provides only the kickstart call and `SingleInstancePolicy`'s pure decision table —

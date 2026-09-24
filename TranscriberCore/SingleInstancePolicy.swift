@@ -28,11 +28,14 @@ public enum SingleInstancePolicy: Equatable, Sendable {
     /// non-zero would make KeepAlive respawn B roughly every 10 s — a relaunch loop
     /// (`SuccessfulExit: false` only suppresses a relaunch after a CLEAN exit). Proceeding without
     /// the lock would leave two instances running. `.exitZero` is the only outcome that is safe
-    /// either way: A never released the lock, so A is still the one surviving instance; B's clean
-    /// exit is never relaunched by KeepAlive. When A DOES hand over, it uses `kickstart -k`
-    /// (`LaunchAgentManager.handOverToJob`, fix round 4, item 2), which restarts B so it gets a
-    /// full fresh window from A's kickstart; a B still waiting from before cannot time out and exit
-    /// in the gap before A's exit releases the lock.
+    /// either way, and B's clean exit is never relaunched by KeepAlive. A timed-out B means A still
+    /// held the lock at B's deadline, so A was still running then. A remains the one surviving
+    /// instance PROVIDED that, after a successful kickstart, A exits within B's 10 s window: A
+    /// hands over with `kickstart -k` (`LaunchAgentManager.handOverToJob`, fix round 4, item 2),
+    /// which restarts B with a full fresh window from the kickstart, so a prompt exit releases the
+    /// lock before B's deadline. An A that lingered past that window and then exited would leave
+    /// no instance, so L3's wiring must `exit(0)` immediately after the kickstart. (Fix round 5,
+    /// item 4.)
     public enum TimeoutOutcome: Equatable, Sendable {
         case exitZero
     }
