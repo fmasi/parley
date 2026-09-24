@@ -129,7 +129,8 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         panel = newPanel
 
         if !wasOpen, trigger == .recordStart || trigger == .captureEvidence {
-            postNotification(missing: merged, recording: appState.isRecording || trigger != .launch)
+            // Both triggers that reach here happen around a recording (the phase may not have flipped yet).
+            postNotification(missing: merged, recording: true)
         }
     }
 
@@ -180,12 +181,13 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     private static func withDeadline(seconds: Double, _ work: @escaping @MainActor () async -> Void) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             let once = ResumeOnce(cont)
-            Task { @MainActor in
-                await work()
+            let deadline = Task {
+                try? await Task.sleep(for: .seconds(seconds))
                 once.resume(())
             }
-            Task {
-                try? await Task.sleep(for: .seconds(seconds))
+            Task { @MainActor in
+                await work()
+                deadline.cancel()
                 once.resume(())
             }
         }

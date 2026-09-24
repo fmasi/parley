@@ -508,6 +508,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
+        // Same tap-track facts as a clean stop, so a recording the app crashed out of during a
+        // denial still reports how much of its remote track was exact zeros (#220).
+        record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
         stopTapGuardTimer()
 

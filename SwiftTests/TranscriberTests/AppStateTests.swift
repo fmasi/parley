@@ -263,6 +263,8 @@ struct AppStateTests {
         state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
         #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionRestored.rawValue, message: "back"))
         #expect(!state.remoteAudioNotCaptured)
+        // The user is told it's fixed, not just silently returned to normal.
+        #expect(state.interruptionWarning == "back")
     }
 
     @Test func stickyStateEndsWithTheRecording() {
