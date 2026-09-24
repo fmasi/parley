@@ -2,14 +2,27 @@ import Foundation
 
 /// The two WAV files a stopped capture produced (system audio + microphone).
 /// Lives in Core (moved from the app target's `AudioCaptureClient.swift`) so
-/// `RecordingCoordinator` can consume a stop result without importing the XPC client.
-public struct AudioPaths {
+/// `RecordingCoordinator` can consume a stop result without importing the XPC client. `Sendable`:
+/// a bounded stop (`withDeadline`) returns it across tasks.
+public struct AudioPaths: Sendable {
     public let systemAudio: URL
     public let micAudio: URL
 
     public init(systemAudio: URL, micAudio: URL) {
         self.systemAudio = systemAudio
         self.micAudio = micAudio
+    }
+}
+
+/// A helper call that did not answer within its deadline (§8.8). Thrown by the XPC client for its own
+/// deadlines and by the coordinator for its outer ones; a Core type, so the coordinator recognizes a
+/// timeout and words it for the user.
+public struct CaptureCallTimeout: Error, LocalizedError, Equatable, Sendable {
+    public let call: String
+    public let seconds: Double
+    public init(call: String, seconds: Double) { self.call = call; self.seconds = seconds }
+    public var errorDescription: String? {
+        "the capture helper did not respond within \(max(1, Int(seconds.rounded()))) s"
     }
 }
 

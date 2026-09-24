@@ -196,14 +196,38 @@ final class AudioCaptureClient {
         onQualityAnomaly?(kind, message)
     }
 
+    // MARK: - Deadlines (§8.8)
+
+    /// One helper call, bounded: the reply, the XPC error handler and the deadline race through
+    /// `ResumeOnce`, so whichever comes first wins and a late reply is ignored (never a second resume, never
+    /// a leaked continuation). A timeout is recorded as an `xpcTimeout` anomaly and thrown as
+    /// `CaptureCallTimeout`, a Core type the coordinator recognizes.
+    private func bounded<T: Sendable>(
+        _ call: String, seconds: Double,
+        _ send: (@escaping @Sendable (Result<T, Error>) -> Void) -> Void
+    ) async throws -> T {
+        let result: Result<T, Error> = await withCheckedContinuation { cont in
+            let once = ResumeOnce(cont)
+            send { once.resume($0) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                once.resume(.failure(CaptureCallTimeout(call: call, seconds: seconds)))
+            }
+        }
+        if case .failure(let error as CaptureCallTimeout) = result {
+            Logger.audio.error("The capture helper did not answer \(call, privacy: .public) within \(seconds, privacy: .public) s")
+            record(.xpcTimeout, .anomaly, ["call": call])
+            throw error
+        }
+        return try result.get()
+    }
+
     /// Pull and clear the helper's diagnostic ring over XPC, merging its events into the app ring.
+    /// Bounded at 3 s: a helper that does not answer leaves its events behind, never the caller stuck.
     func drainHelperDiagnostics() async {
         guard let conn = connection else { return }
-        let data: Data? = await withCheckedContinuation { cont in
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                cont.resume(returning: nil)
-            } as! AudioCaptureProtocol
-            proxy.drainDiagnostics { cont.resume(returning: $0) }
+        let data: Data? = try? await bounded("drainDiagnostics", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
+            proxy.drainDiagnostics { done(.success($0)) }
         }
         if let data {
             let events = CaptureDiagnostics.events(from: data)
@@ -252,6 +276,8 @@ final class AudioCaptureClient {
         )
     }
 
+    /// Bounded: `configureCapture` (3 s, best effort) runs first, then the `startCapture` call itself
+    /// (15 s) — worst case 18 s to a start failure (§8.8).
     func start(
         outputDirectory: URL,
         baseName: String,
@@ -268,11 +294,9 @@ final class AudioCaptureClient {
         currentSessionId = sessionId
         let conn = try getConnection()
         await configureCapture(options, on: conn)
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        try await bounded("start", seconds: 15) { (done: @escaping @Sendable (Result<Void, Error>) -> Void) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
-                cont.resume(throwing: CaptureError.startFailed(
-                    "XPC connection failed: \(error.localizedDescription)"
-                ))
+                done(.failure(CaptureError.startFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol
 
             proxy.startCapture(
@@ -281,13 +305,7 @@ final class AudioCaptureClient {
                 microphoneDeviceId: microphoneDeviceId,
                 systemAudioSource: systemAudioSource.rawValue
             ) { success, errorMessage in
-                if success {
-                    cont.resume()
-                } else {
-                    cont.resume(throwing: CaptureError.startFailed(
-                        errorMessage ?? "Unknown error"
-                    ))
-                }
+                done(success ? .success(()) : .failure(CaptureError.startFailed(errorMessage ?? "Unknown error")))
             }
         }
     }
@@ -303,27 +321,21 @@ final class AudioCaptureClient {
         if !acknowledged { Logger.audio.warning("configureCapture not acknowledged — the helper records with default capture options") }
     }
 
+    /// Bounded at 20 s (§8.8): the coordinator salvages from disk when the helper never answers.
     func stop() async throws -> AudioPaths {
         // Disarmed first: the helper exiting after a stop is expected, not a crash (C1).
         interruptionPolicy.captureStopped()
         let conn = try getConnection()
-        return try await withCheckedThrowingContinuation { cont in
+        return try await bounded("stop", seconds: 20) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
-                cont.resume(throwing: CaptureError.stopFailed(
-                    "XPC connection failed: \(error.localizedDescription)"
-                ))
+                done(.failure(CaptureError.stopFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol
 
             proxy.stopCapture { systemPath, micPath, errorMessage in
                 if let sys = systemPath, let mic = micPath {
-                    cont.resume(returning: AudioPaths(
-                        systemAudio: URL(fileURLWithPath: sys),
-                        micAudio: URL(fileURLWithPath: mic)
-                    ))
+                    done(.success(AudioPaths(systemAudio: URL(fileURLWithPath: sys), micAudio: URL(fileURLWithPath: mic))))
                 } else {
-                    cont.resume(throwing: CaptureError.stopFailed(
-                        errorMessage ?? "Unknown error"
-                    ))
+                    done(.failure(CaptureError.stopFailed(errorMessage ?? "Unknown error")))
                 }
             }
         }
@@ -334,42 +346,33 @@ final class AudioCaptureClient {
         newBaseName: String
     ) async throws -> (systemPath: String, micPath: String) {
         let conn = try getConnection()
-        return try await withCheckedThrowingContinuation { cont in
+        // Bounded at 10 s (§8.8). The reply text is passed on as-is: the coordinator reads it in one place
+        // (`RecordingCoordinator.rotateFailure`) — a dead capture, a refusal while stopping, or neither.
+        return try await bounded("rotateChunk", seconds: 10) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
-                cont.resume(throwing: CaptureError.rotateChunkFailed(
-                    "XPC connection failed: \(error.localizedDescription)"
-                ))
+                done(.failure(CaptureError.rotateChunkFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol
 
             proxy.rotateChunk(outputDirectory: outputDirectory, newBaseName: newBaseName) { oldSystemPath, oldMicPath, errorMessage in
                 if let sys = oldSystemPath, let mic = oldMicPath {
-                    cont.resume(returning: (systemPath: sys, micPath: mic))
+                    done(.success((systemPath: sys, micPath: mic)))
                 } else {
-                    cont.resume(throwing: CaptureError.rotateChunkFailed(
-                        errorMessage ?? "Unknown error"
-                    ))
+                    done(.failure(CaptureError.rotateChunkFailed(errorMessage ?? "Unknown error")))
                 }
             }
         }
     }
 
+    /// Bounded at 10 s (§8.8).
     func updateMicrophone(deviceId: String?) async throws {
         let conn = try getConnection()
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        try await bounded("updateMicrophone", seconds: 10) { (done: @escaping @Sendable (Result<Void, Error>) -> Void) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
-                cont.resume(throwing: CaptureError.micSwitchFailed(
-                    "XPC connection failed: \(error.localizedDescription)"
-                ))
+                done(.failure(CaptureError.micSwitchFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol
 
             proxy.updateMicrophone(deviceId: deviceId) { success, errorMessage in
-                if success {
-                    cont.resume()
-                } else {
-                    cont.resume(throwing: CaptureError.micSwitchFailed(
-                        errorMessage ?? "Unknown error"
-                    ))
-                }
+                done(success ? .success(()) : .failure(CaptureError.micSwitchFailed(errorMessage ?? "Unknown error")))
             }
         }
     }
@@ -449,15 +452,12 @@ final class AudioCaptureClient {
         return result
     }
 
+    /// Bounded at 3 s (§8.8): a helper that does not answer counts as not capturing.
     private func pingStatus(_ conn: NSXPCConnection) async -> Bool {
-        await withCheckedContinuation { cont in
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                cont.resume(returning: false)
-            } as! AudioCaptureProtocol
-            proxy.status { isCapturing, _ in
-                cont.resume(returning: isCapturing)
-            }
-        }
+        (try? await bounded("status", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(false)) } as! AudioCaptureProtocol
+            proxy.status { isCapturing, _ in done(.success(isCapturing)) }
+        }) ?? false
     }
 
     private func getConnection() throws -> NSXPCConnection {

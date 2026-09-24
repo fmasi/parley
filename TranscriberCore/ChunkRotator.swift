@@ -111,8 +111,19 @@ public final class ChunkRotator {
         Logger.audio.info("ChunkRotator stopped at chunk \(self.currentChunkIndex, privacy: .public)")
     }
 
+    /// The rotation in flight. Each one chains after the previous, so two never overlap (both would
+    /// name the same next chunk).
+    private var rotation: Task<Void, Never>?
+
     private func rotate() {
-        Task { await performRotation() }
+        let previous = rotation
+        rotation = Task { await previous?.value; await performRotation() }
+    }
+
+    /// Returns once no rotation is in flight: Stop must not ask the helper to stop while it swaps the
+    /// chunk files (council B-I3). The caller stops the timer first.
+    public func awaitRotationInFlight() async {
+        await rotation?.value
     }
 
     /// An immediate rotation, off the timer's schedule (wake, tests).

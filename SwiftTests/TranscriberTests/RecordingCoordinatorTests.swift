@@ -141,9 +141,12 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     var rotateError: Error?
     var rotateCalls = 0
+    /// Awaited inside rotateChunk(): lets a test hold a rotation in flight.
+    var onRotate: (() async -> Void)?
     func rotateChunk(outputDirectory: String, newBaseName: String) async throws
         -> (systemPath: String, micPath: String) {
         rotateCalls += 1
+        await onRotate?()
         if let rotateError { throw rotateError }
         return (outputDirectory + "/" + newBaseName + ".wav",
                 outputDirectory + "/" + newBaseName + "_mic.wav")
@@ -157,6 +160,11 @@ private struct FakeCaptureError: Error, LocalizedError {
 /// The helper's reply to a rotate when it is not capturing: the capture is dead (§8.7).
 private struct NoCaptureError: Error, LocalizedError {
     var errorDescription: String? { "No capture in progress" }
+}
+
+/// The helper's reply to a rotate while it is stopping (council B-I3, stream H2): not a dead capture.
+private struct RefusedStoppingError: Error, LocalizedError {
+    var errorDescription: String? { "refused: stopping" }
 }
 
 @MainActor
@@ -2720,5 +2728,171 @@ private struct Harness {
         await h.runner.recordCaptureGap(CaptureGap(start: Date().addingTimeInterval(-5), end: Date(), reason: "sleep"))
         #expect(h.appState.activeAlarms[.sessionWriteFailed] != nil)
         #expect(h.client.recordedEvents.contains { $0.kind == .sessionWriteFailed && $0.detail["chunk"] == "session" })
+    }
+}
+
+// MARK: - Deadlines; the sentinel outlives finalize (L9, §8.8)
+
+@MainActor
+@Suite struct RecordingCoordinatorDeadlineTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+    }
+
+    /// L13 / #194 / #195: a crash during transcription must still find the sentinel.
+    @Test func stopKeepsTheSentinelUntilTheTranscriptExists() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }   // never the real ~/Documents/Recordings
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        let mic = call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav")
+        // Header-only: processing them never loads a model (the test stays hermetic and fast).
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: mic)
+        h.runner.finalizeDelayForTesting = .milliseconds(400)   // R0 seam
+
+        let stopping = Task { await h.coordinator.stopRecording() }
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil, "still there while finalize runs")
+        #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true, "and marked: a crash now is salvaged, never resumed")
+        await stopping.value
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(h.presented.value.count == 1)
+    }
+
+    /// Council B-I3: no rotation may race the helper's stop. The timer stops, and a rotation already in
+    /// flight completes, BEFORE the helper is asked to stop.
+    @Test func stopWaitsForARotationInFlightBeforeAskingTheHelper() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let released = Harness.Box(false)
+        h.client.onRotate = { while !released.value { await Task.yield() } }
+        rotator.rotateNow()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.client.rotateCalls == 1, "a rotation is in flight")
+        let seenAtStop = Harness.Box<(index: Int, timerLive: Bool)?>(nil)
+        h.client.onStop = { seenAtStop.value = (rotator.currentChunkInfo.index, rotator.activeTimerForTesting != nil) }
+        let stopping = Task { await h.coordinator.stopRecording() }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.client.stopCalls == 0, "the helper is not asked to stop while a rotation is in flight")
+        released.value = true
+        await stopping.value
+        #expect(seenAtStop.value?.index == 1, "the rotation finished first")
+        #expect(seenAtStop.value?.timerLive == false, "the rotation timer stopped before the helper's stop")
+    }
+
+    /// Council B-I3 / H2: the helper refuses a rotation while it is stopping. That is the recording ending,
+    /// not a dead capture: no crash restart, no rotation alarm.
+    @Test func aRotationRefusedWhileStoppingIsNotACrash() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.client.rotateError = RefusedStoppingError()
+        await h.runner.chunkRotator?.rotateForTesting()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.startCalls.count == 1 && h.appState.activeAlarms[.rotationFailed] == nil)
+    }
+
+    /// The one place that reads the helper's rotate replies (to be pointed at H2's `CaptureReplies`).
+    @Test func rotateRepliesAreClassifiedInOnePlace() {
+        #expect(RecordingCoordinator.rotateFailure("No capture in progress") == .captureDead)
+        #expect(RecordingCoordinator.rotateFailure("refused: stopping") == .refusedWhileStopping)
+        #expect(RecordingCoordinator.rotateFailure("XPC connection failed: boom") == .other)
+    }
+
+    /// L8 review: a rotate that fails while a Stop is in flight (the drain before the helper's stop) is
+    /// the recording ending: no rotationFailed anomaly, no alarm.
+    @Test func aRotationFailingDuringAStopIsNotAnAnomaly() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let released = Harness.Box(false)
+        h.client.onRotate = { while !released.value { await Task.yield() } }
+        h.client.rotateError = NoCaptureError()
+        h.runner.chunkRotator?.rotateNow()
+        for _ in 0..<20 { await Task.yield() }
+        let stopping = Task { await h.coordinator.stopRecording() }
+        for _ in 0..<20 { await Task.yield() }
+        released.value = true
+        await stopping.value
+        for _ in 0..<50 { await Task.yield() }
+        #expect(!h.client.recordedEvents.contains { $0.kind == .rotationFailed })
+        #expect(h.client.startCalls.count == 1, "no crash restart during the stop")
+    }
+
+    /// L8 review: nor during a crash recovery (the restart owns the capture then).
+    @Test func aRotationFailingDuringARecoveryIsNotAnAnomaly() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.recoveryInFlight = true
+        h.client.rotateError = FakeCaptureError()
+        await h.runner.chunkRotator?.rotateForTesting()
+        h.coordinator.recoveryInFlight = false
+        #expect(!h.client.recordedEvents.contains { $0.kind == .rotationFailed })
+        #expect(h.appState.activeAlarms[.rotationFailed] == nil)
+    }
+
+    /// §8.8 + addendum: a start that the audio system never answers ends at the deadline — honestly, with
+    /// no helper left capturing, and the next Start is possible at once.
+    @Test func aStartTheHelperNeverAnswersEndsAtTheDeadline() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.startDeadline = .milliseconds(200)
+        let stalled = Harness.Box(true)
+        h.client.onStartAsync = { if stalled.value { try? await Task.sleep(for: .seconds(2)) } }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        #expect(!h.coordinator.isStartInFlight, "cleared on the timeout path")
+        #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(h.notified.value.last?.title == "Recording Failed")
+        #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
+        #expect(h.client.stopCalls == 1, "a bounded stop: a start that commits late is aborted, never left capturing")
+        #expect(h.recordingMic.current == .none)
+        #expect(h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+
+        stalled.value = false
+        await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
+        #expect(h.appState.isRecording && h.client.startCalls.count == 2)
+    }
+
+    /// Addendum: the deadline covers the WHOLE start, the pre-flight IOKit/CoreAudio lookup included.
+    @Test func aStalledPreflightLookupEndsAtTheDeadline() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.coordinator.startDeadline = .milliseconds(150)
+        h.coordinator.preflight = { _ in Thread.sleep(forTimeInterval: 0.6); return (false, false) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(!h.coordinator.isStartInFlight && h.appState.isIdle)
+        #expect(h.client.startCalls.isEmpty && h.client.stopCalls == 0, "the helper was never involved")
+        #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
+    }
+
+    /// §8.8 (council B-I1): the stop has a deadline. On timeout the session is salvaged from disk and the
+    /// user told so — never stuck on "Finishing…".
+    @Test func aStopTheHelperNeverAnswersIsSalvagedAtTheDeadline() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.stopDeadline = .milliseconds(200)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        h.client.stopResult = AudioPaths(systemAudio: URL(fileURLWithPath: "/nonexistent/a.wav"), micAudio: URL(fileURLWithPath: "/nonexistent/a_mic.wav"))
+        await h.coordinator.stopRecording()
+        #expect(h.appState.isIdle, "never left on Finishing…")
+        let critical = try #require(h.criticals.value.first)
+        // The title follows what the salvage wrote (L6); the body says why the stop failed.
+        #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
     }
 }
