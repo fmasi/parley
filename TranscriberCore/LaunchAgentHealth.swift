@@ -29,7 +29,7 @@ public enum LaunchAgentHealth {
         case bootoutInstallAndBootstrap
         case rewriteAndBootstrap
         case bootstrap
-        /// `.loadedButNotThisProcess`: `launchctl kickstart` launchd's own copy; on success, THIS
+        /// `.loadedButNotThisProcess`: `launchctl kickstart -k` launchd's own copy; on success, THIS
         /// process releases the single-instance lock and exits 0 (fix round 3, item 5 — it does not
         /// merely "yield": see `SingleInstancePolicy` for why B must wait for the lock rather than
         /// yield on it). See `LaunchAgentManager.handOverToJob` and `shouldAttemptHandOver` below.

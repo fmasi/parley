@@ -396,6 +396,11 @@ struct LaunchAgentManagerTests {
     /// Fix round 2, item 1b: an absolute safety net independent of any state classification — never
     /// bootout the job whose pid IS this process, no matter what the program-path comparison says
     /// (adversarial/defensive: pid wins over a mismatched program string).
+    ///
+    /// Fix round 4, item 1: with the plist ABSENT this is `.missing(staleLoadedJob: true)`, and it
+    /// used to skip only the bootout, then run enable + bootstrap and re-judge a false-alarm
+    /// `.stalePath` ("Crash protection is off"). launchd's in-memory job launched THIS process, so a
+    /// crash relaunch works: write the plist quietly, no launchctl calls beyond the first `print`.
     @Test func neverBootsOutWhenTheLoadedPidIsThisProcessRegardlessOfTheProgramPath() async throws {
         let dir = makeTempDir()
         defer { cleanup(dir) }
@@ -408,17 +413,35 @@ struct LaunchAgentManagerTests {
                 LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n"),
             ]
         ])
-        _ = await LaunchAgentManager.verifyAndRepair(
+        let state = await LaunchAgentManager.verifyAndRepair(
             executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
         )
+        #expect(state == .healthy)
         let calls = await runner.calls
-        #expect(!calls.contains { $0.first == "bootout" })
-        #expect(calls == [
-            ["print", job(uid)],
-            ["enable", job(uid)],
-            ["bootstrap", gui(uid), plistPath],
-            ["print", job(uid)],
+        #expect(calls == [["print", job(uid)]])
+        let written = try String(contentsOfFile: plistPath, encoding: .utf8)
+        #expect(LaunchAgentManager.programPath(inPlist: written) == exe)
+    }
+
+    /// Fix round 4, item 4: the quiet rewrite's plist write can fail (here: the LaunchAgents "dir"
+    /// is a regular file, so `install` throws). Still `.healthy` with no launchctl calls beyond the
+    /// first `print`: launchd's in-memory job is this process, so a crash relaunch still works.
+    @Test func pidMatchQuietRewriteStaysHealthyWhenThePlistWriteFails() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let notADir = dir.appendingPathComponent("LaunchAgents")
+        try Data().write(to: notADir)
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n")]
         ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: notADir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .healthy)
+        let calls = await runner.calls
+        #expect(calls == [["print", job(uid)]])
     }
 
     /// Fix round 2, item 1c (end to end): the on-disk plist already matches, but the loaded job
@@ -542,13 +565,17 @@ struct LaunchAgentManagerTests {
 
     // MARK: - handOverToJob (item 4)
 
+    /// Fix round 4, item 2: `-k`, so launchd RESTARTS a B that is still waiting for the lock and it
+    /// gets a full fresh `lockWaitTimeout` window from A's kickstart. Without `-k`, kickstart on a
+    /// running B returns 0 without restarting it; if B's deadline then passed before A exited, both
+    /// would exit 0, leaving zero instances.
     @Test func handOverToJobRunsKickstartAndReportsSuccess() async {
         let uid: uid_t = 501
         let runner = RecordingLaunchctlRunner(responses: ["kickstart": [LaunchctlResult(status: 0)]])
         let ok = await LaunchAgentManager.handOverToJob(uid: uid, runner: runner)
         #expect(ok)
         let calls = await runner.calls
-        #expect(calls == [["kickstart", job(uid)]])
+        #expect(calls == [["kickstart", "-k", job(uid)]])
     }
 
     @Test func handOverToJobReportsFailure() async {

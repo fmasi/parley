@@ -26,10 +26,11 @@ import Testing
 
     /// Fix round 3, item 1 [Important]: the timeout outcome was unspecified, and launchd starts the
     /// job at EVERY bootstrap (runs=1, minimum runtime=10 — see launchctl-print-live.txt), so B hits
-    /// this timeout on every launch-time repair from a Finder-launched instance. Exiting non-zero
-    /// would make KeepAlive respawn B roughly every 10s (a relaunch loop); proceeding would leave
-    /// two instances. `.exitZero` is the only outcome the type allows — it's baked into the case,
-    /// not left for the caller to guess.
+    /// this timeout whenever a Finder-launched instance repairs at launch and then does not hand
+    /// over (recording, or inside the cooldown). Exiting non-zero would make KeepAlive respawn B
+    /// roughly every 10s (a relaunch loop); proceeding would leave two instances. `.exitZero` is
+    /// the only outcome the type allows — it's baked into the case, not left for the caller to
+    /// guess.
     @Test func theWaitTimeoutOutcomeIsAlwaysExitZeroNeverNonZeroNeverProceed() {
         guard case .waitForLock(_, let onTimeout) = SingleInstancePolicy.decide(isLaunchdJob: true, lockHeldByOther: true) else {
             Issue.record("expected .waitForLock")

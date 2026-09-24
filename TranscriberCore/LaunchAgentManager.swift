@@ -218,34 +218,26 @@ public enum LaunchAgentManager {
         case .none:
             return state
         case .handOverToJob:
-            // Non-healthy but not auto-repaired here (round 1, item 4): whether a hand-over is safe
-            // needs recording/CLI-mode context this function doesn't have. Log it anyway so
-            // `log show` surfaces it the same as a failed repair (fix round 2, item 3).
-            Logger.config.error("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) — not auto-repaired here")
+            // Not auto-repaired here (round 1, item 4): whether a hand-over is safe needs
+            // recording/CLI-mode context this function doesn't have. A normal outcome (a Finder or
+            // Sparkle launch while the job is loaded), not a failed repair: `.info`, the same as
+            // the post-repair case below (fix round 4, item 5).
+            Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) — not auto-repaired here; hand-over pending")
             return state
         case .installAndBootstrap:
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
-        case .bootoutInstallAndBootstrap:
-            // A stale job must be booted out first or bootstrap fails with "already loaded" —
-            // unless it would boot out THIS process (item 1b above).
-            if !isSelf {
-                _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
-            }
-            try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
-            _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
-            _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
-        case .rewriteAndBootstrap:
+        case .bootoutInstallAndBootstrap, .rewriteAndBootstrap:
+            // pid proves launchd's in-memory job launched exactly this process (fix round 3, item 3;
+            // fix round 4, item 1 — the plist-absent `.missing(staleLoadedJob: true)` route too), so
+            // a crash relaunch already works: a mismatched program string (a stale/inconsistent or
+            // absent on-disk plist, or a symlink/normalization quirk in `print`'s output) is not
+            // real staleness. No launchctl call is needed or wanted; correct the file quietly.
             if isSelf {
-                // pid proves launchd already runs exactly this process (fix round 3, item 3): a
-                // mismatched program string (a stale/inconsistent on-disk plist, or a symlink/
-                // normalization quirk in `print`'s output) is not real staleness — no launchctl
-                // call is needed or wanted. Silently correct the file and report healthy.
-                try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
-                Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → healthy (pid confirmed self; plist rewritten, no launchctl calls)")
-                return .healthy
+                return await quietlyRewritePlist(from: state, executablePath: exePath, launchAgentsDir: agentsDir, plistURL: plistURL, runner: runner)
             }
+            // A stale job must be booted out first or bootstrap fails with "already loaded".
             _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
@@ -277,10 +269,38 @@ public enum LaunchAgentManager {
         return after
     }
 
+    /// The pid-confirmed repair (`isSelf` in `verifyAndRepair`): write the plist for
+    /// `executablePath` and run NO launchctl verb — no bootout (it would SIGTERM this process), no
+    /// enable/bootstrap (the job is already loaded and running as this process).
+    private static func quietlyRewritePlist(
+        from state: LaunchAgentHealth.State,
+        executablePath: String,
+        launchAgentsDir: URL,
+        plistURL: URL,
+        runner: LaunchctlRunning
+    ) async -> LaunchAgentHealth.State {
+        do {
+            try await install(executablePath: executablePath, launchAgentsDir: launchAgentsDir, loadAgent: false, runner: runner)
+            Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → healthy (pid confirmed self; plist rewritten, no launchctl calls)")
+        } catch {
+            // Still `.healthy`: launchd's in-memory job is this process, so a crash relaunch works.
+            Logger.config.error("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → healthy (pid confirmed self) but the plist rewrite at \(plistURL.path, privacy: .private) failed: \(error.localizedDescription, privacy: .private)")
+        }
+        return .healthy
+    }
+
     /// `.loadedButNotThisProcess`: launchd's job is a DIFFERENT process than this one (Finder
     /// launch, a Sparkle relaunch, or quit-and-reopen), so this process's crash would not be
-    /// relaunched. Runs `launchctl kickstart gui/<uid>/<label>` (no `-k`) so launchd starts its own
+    /// relaunched. Runs `launchctl kickstart -k gui/<uid>/<label>` so launchd (re)starts its own
     /// copy of the job — call it B — and returns whether launchd accepted that.
+    ///
+    /// `-k` (fix round 4, item 2): without it, kickstart on a B that is already running (launchd
+    /// starts the job at every `bootstrap`, so one may still be waiting for the lock from a
+    /// launch-time repair) returns 0 WITHOUT restarting it. If that B's deadline then passed between
+    /// A's kickstart and A's exit, both would exit 0 and nothing would relaunch either: zero
+    /// instances. `-k` kills and restarts the job, so B always gets a full fresh
+    /// `SingleInstancePolicy.lockWaitTimeout` window from A's kickstart. It is safe because A holds
+    /// the single-instance lock: any running job process is a B waiting for it, never one recording.
     ///
     /// The full hand-over protocol (fix round 2, item 2 — a design correction: round 1's plan was
     /// "kickstart then yield", which as DOCUMENTED left NO instance running. This process, A, still
@@ -288,19 +308,23 @@ public enum LaunchAgentManager {
     /// see the lock held and exit 0 immediately — `SuccessfulExit: false` means launchd does not
     /// relaunch a clean exit — and then A would exit too, having handed off to nothing):
     /// 1. This process, A, calls `handOverToJob`.
-    /// 2. On success, A releases the single-instance lock and exits 0. On failure, A keeps running
-    ///    (better a process KeepAlive can't protect than none at all); the state still maps to
-    ///    `LaunchAgentHealth.userMessage` for "crash protection is off".
+    /// 2. On success, A releases the single-instance lock and exits 0 straight away, well inside
+    ///    B's fresh window. On failure, A keeps running (better a process KeepAlive can't protect
+    ///    than none at all); the state still maps to `LaunchAgentHealth.userMessage` for "crash
+    ///    protection is off".
     /// 3. B, launchd-spawned, recognises it IS the launchd job (`SingleInstancePolicy.decide(isLaunchdJob:
     ///    true, lockHeldByOther: true)` → `.waitForLock`) and WAITS up to
     ///    `SingleInstancePolicy.lockWaitTimeout` for A to release the lock, instead of yielding —
     ///    every OTHER duplicate launch still yields immediately (`.yield`).
-    /// 4. If that wait times out (A never released the lock — the hand-over effectively failed),
+    /// 4. If that wait times out (A never released the lock),
     ///    `SingleInstancePolicy.TimeoutOutcome.exitZero` is B's ONLY allowed outcome: B exits 0.
-    ///    launchd starts this job at EVERY `bootstrap` (this is not a rare case — a Finder-launched
-    ///    instance hits it on every launch-time repair), so B must neither exit non-zero (KeepAlive
+    ///    launchd starts this job at EVERY `bootstrap`, so this is not rare: the B started by a
+    ///    launch-time repair times out whenever A does not hand over (A is recording, inside
+    ///    `handOverCooldown`, or its kickstart failed). B must neither exit non-zero (KeepAlive
     ///    would respawn it roughly every 10 s, a relaunch loop) nor proceed unlocked (two
     ///    instances); A, still running, remains the one surviving instance. (Fix round 3, item 1.)
+    ///    When A DOES hand over, `-k` restarted B at the kickstart, so B's full window outlasts A's
+    ///    prompt exit (step 2) and B takes the lock. (Fix round 4, item 2.)
     ///
     /// `LaunchAgentHealth.shouldAttemptHandOver`'s `lastHandOverAt` guard must be persisted ACROSS
     /// PROCESSES (e.g. `UserDefaults`, by L3): A does not survive a successful hand-over to
@@ -308,14 +332,15 @@ public enum LaunchAgentManager {
     /// and the cooldown would never actually apply.
     ///
     /// Callers MUST gate this call with `LaunchAgentHealth.shouldAttemptHandOver` first (never while
-    /// recording, never in CLI mode, never twice within `handOverCooldown`) — this method performs
-    /// no such guard itself, since it has no idea whether a recording is in progress. The exit/yield
+    /// recording, never in CLI mode, never from the launchd job itself (`isLaunchdJob`), never twice
+    /// within `handOverCooldown`) — this method performs no such guard itself, since it has no idea
+    /// whether a recording is in progress or which process it is running in. The exit/yield
     /// wiring (steps 2–3) and `SingleInstancePolicy`'s call site (detecting `isLaunchdJob`, e.g. via
     /// the `XPC_SERVICE_NAME` environment variable equalling `label`) belong to task L3; this
     /// Manager provides only the kickstart call and `SingleInstancePolicy`'s pure decision table —
     /// no app files are touched here.
     public static func handOverToJob(uid: uid_t = getuid(), runner: LaunchctlRunning = ProcessLaunchctlRunner()) async -> Bool {
-        let result = await runner.run(["kickstart", "gui/\(uid)/\(label)"])
+        let result = await runner.run(["kickstart", "-k", "gui/\(uid)/\(label)"])
         return result.status == 0
     }
 
