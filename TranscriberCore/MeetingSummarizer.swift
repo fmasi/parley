@@ -30,8 +30,11 @@ public enum MeetingSummarizer {
 
         let response = try await provider.summarizeDetailed(segments: segments, metadata: metadata)
 
-        // A summary cut off at the model's output limit reads as complete — say so first (P14).
-        let banner = response.truncated ? Self.truncationBanner : ""
+        // Parley's own statement of what was not captured comes first, deterministically: a model
+        // instruction alone is not a guarantee (small local models drop late rules). Then a summary
+        // cut off at the model's output limit, which also reads as complete (P14).
+        let banner = (SummaryPromptBuilder.captureBanner(metadata) ?? "")
+            + (response.truncated ? Self.truncationBanner : "")
 
         // Deterministically stamp the source transcript filename as a footer so
         // the notes can always be traced back to their source — independent of
@@ -193,6 +196,8 @@ public enum MeetingSummarizer {
         let dualStream = metadata_raw?["dual_stream"] as? Bool ?? false
         let echoRemoved = metadata_raw?["echo_segments_removed"] as? Int ?? 0
         let capture = metadata_raw?["capture"] as? [String: Any]
+        let provenance = metadata_raw?["capture_provenance"] as? [String: Any]
+        let gaps = capture?["gaps"] as? [[String: Any]] ?? []
 
         // Flagged segments (VAD-filtered noise, mic-bleed echo) are kept in the record but are not
         // what anybody said to the meeting: the model never sees them (P10/P11).
@@ -225,21 +230,37 @@ public enum MeetingSummarizer {
             speakers: speakers,
             dualStream: dualStream,
             echoSegmentsRemoved: echoRemoved,
-            remoteCapture: captureSideNote(capture?["remote"]),
-            localCapture: captureSideNote(capture?["local"])
+            remoteCapture: captureSideNote(capture?["remote"], provenance: provenance, isRemote: true),
+            localCapture: captureSideNote(capture?["local"], provenance: provenance, isRemote: false),
+            // Written by a build that tracks issues, yet no coverage for either side: say so rather
+            // than let silence read as "complete".
+            coverageNotRecorded: metadata_raw?["processing_issues"] != nil && capture?["remote"] == nil && capture?["local"] == nil,
+            gapCount: gaps.count,
+            gapSeconds: gaps.reduce(0) { $0 + (validSeconds($1["seconds"]) ?? 0) }
         )
 
         return (segments, metadata)
     }
 
-    /// One side of `metadata.capture` (§7.2) as a `CaptureSideNote`; nil when absent or unusable.
-    private static func captureSideNote(_ raw: Any?) -> CaptureSideNote? {
-        guard let side = raw as? [String: Any], let status = side["status"] as? String else { return nil }
+    /// One side of `metadata.capture` (§7.2) as a `CaptureSideNote`; nil when the side is absent.
+    /// A side with no readable `status` keeps an empty status, which reads as "unknown" (fail
+    /// closed). Seconds outside any real range become NaN and print as "?".
+    private static func captureSideNote(_ raw: Any?, provenance: [String: Any]?, isRemote: Bool) -> CaptureSideNote? {
+        guard let side = raw as? [String: Any] else { return nil }
         return CaptureSideNote(
-            status: status,
-            deliveredSeconds: side["delivered_seconds"] as? Double ?? 0,
-            expectedSeconds: side["expected_seconds"] as? Double ?? 0
+            status: side["status"] as? String ?? "",
+            deliveredSeconds: validSeconds(side["delivered_seconds"]) ?? .nan,
+            expectedSeconds: validSeconds(side["expected_seconds"]) ?? .nan,
+            exactZeroSeconds: validSeconds(side["exact_zero_seconds"]),
+            permissionDenied: isRemote ? provenance?["system_audio_unrecovered"] as? Bool : nil,
+            anomalyCount: provenance?["quality_anomaly_count"] as? Int
         )
+    }
+
+    /// A seconds value a recording could have: finite, ≥ 0, under a century. nil otherwise.
+    private static func validSeconds(_ raw: Any?) -> Double? {
+        guard let value = raw as? Double, value.isFinite, value >= 0, value < 3_153_600_000 else { return nil }
+        return value
     }
 
     /// Determine the canonical recording-start date for the summary (#49).

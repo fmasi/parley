@@ -458,6 +458,68 @@ struct MeetingSummarizerTests {
         #expect(meta.remoteCapture == CaptureSideNote(status: "neverDelivered", deliveredSeconds: 0, expectedSeconds: 2736))
         #expect(meta.localCapture == nil)
     }
+
+    /// R1 review round 1 item 2: the capture banner is written by Parley, not left to the model.
+    @Test func theCaptureBannerLeadsTheSummaryEvenWhenTheModelIgnoresTheRule() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("banner-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("m.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["capture": ["remote": ["status": "neverDelivered", "delivered_seconds": 0.0, "expected_seconds": 2736.0]]],
+            "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "A"]],
+        ]).write(to: transcript)
+        try await MeetingSummarizer.summarize(transcriptPath: transcript, provider: MockProvider(response: "# Summary\nAll fine."), endpoint: "http://localhost")
+        let md = try String(contentsOf: dir.appendingPathComponent("m-summary.md"), encoding: .utf8)
+        #expect(md.hasPrefix("> ⚠️"))
+        #expect(md.contains("Remote audio: not captured (0 s delivered of 2736 s expected)"))
+        #expect(md.contains("# Summary\nAll fine."))
+    }
+
+    @Test func parsesPermissionAnomaliesGapsAndMissingCoverage() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("t-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": [
+                "capture": [
+                    "remote": ["status": "compromised", "delivered_seconds": 2736.0, "expected_seconds": 2736.0, "exact_zero_seconds": 2736.0],
+                    "gaps": [["seconds": 120.0, "reason": "sleep"], ["seconds": 70.0, "reason": "app relaunch"]],
+                ] as [String: Any],
+                "capture_provenance": ["system_audio_unrecovered": true, "quality_anomaly_count": 1],
+            ],
+            "segments": [] as [Any],
+        ]).write(to: url)
+        let (_, meta) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(meta.remoteCapture == CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736,
+                                                      exactZeroSeconds: 2736, permissionDenied: true, anomalyCount: 1))
+        #expect(meta.gapCount == 2 && meta.gapSeconds == 190)
+        #expect(!meta.coverageNotRecorded)
+
+        try JSONSerialization.data(withJSONObject: ["metadata": ["processing_issues": [] as [Any]], "segments": [] as [Any]]).write(to: url)
+        #expect(try MeetingSummarizer.parseTranscriptForTesting(at: url).1.coverageNotRecorded)
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [] as [Any]]).write(to: url)
+        #expect(try !MeetingSummarizer.parseTranscriptForTesting(at: url).1.coverageNotRecorded, "an untracked transcript says nothing")
+    }
+
+    /// assemble → write → parse → header: the wording the model sees comes from what was stamped.
+    @Test func captureWordingSurvivesTheFullRoundTrip() throws {
+        var remote = TrackAccounting(); remote.expectedSeconds = 2736; remote.deliveredSeconds = 2736; remote.exactZeroSeconds = 2736
+        let provenance = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                           recovered: false, anomalyCount: 1, qualityAnomalyCount: 1, systemAudioUnrecovered: true,
+                                           remoteCoverage: remote, remoteStatus: "compromised")
+        let json = TranscriptAssembler.assemble(
+            segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil, diarization: false, dualStream: true,
+            provenance: provenance,
+            captureGaps: [CaptureGap(start: Date(timeIntervalSince1970: 0), end: Date(timeIntervalSince1970: 120), reason: "sleep")],
+            processingIssues: [])
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("rt-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try TranscriptAssembler.write(json, to: url)
+        let (_, meta) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        let line = try #require(SummaryPromptBuilder.captureLine(meta))
+        #expect(line.contains("Remote audio: not captured — system audio permission was denied; 2736 s of digital silence were recorded instead"))
+        #expect(line.contains("Recording gaps: 1 (total 2 min 0 s)"))
+    }
 }
 
 private struct TruncatingProvider: SummaryProvider {

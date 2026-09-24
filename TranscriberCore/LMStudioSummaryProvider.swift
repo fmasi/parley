@@ -197,7 +197,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let userMessage = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
-        let prompt = SummaryPromptBuilder.systemMessage(dualStream: metadata.dualStream)
+        let prompt = SummaryPromptBuilder.systemMessage(metadata: metadata)
 
         // Estimate tokens needed and auto-size context window (uses calibrated ratio if available)
         let cache = TokenRatioCache.shared

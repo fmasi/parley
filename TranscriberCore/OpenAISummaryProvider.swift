@@ -191,7 +191,7 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
         }
 
         let userContent = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
-        let prompt = SummaryPromptBuilder.systemMessage(dualStream: metadata.dualStream)
+        let prompt = SummaryPromptBuilder.systemMessage(metadata: metadata)
 
         let body: [String: Any] = [
             "model": model,

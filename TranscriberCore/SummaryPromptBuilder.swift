@@ -13,6 +13,15 @@ enum SummaryPromptBuilder {
         dualStream ? systemPrompt + dualStreamHint : systemPrompt
     }
 
+    /// `systemMessage(dualStream:)`, minus the echo hint when there is no remote audio to compare
+    /// against (not captured, nothing playing, or uncertain): the hint tells the model to use
+    /// "concurrent remote segments", which would contradict the header.
+    static func systemMessage(metadata: SummaryMetadata) -> String {
+        let remote = metadata.remoteCapture.map { verdict($0, isRemote: true) }
+        let noRemoteAudio: Set<SideVerdict> = [.notCaptured, .idle, .permissionDeniedSilence, .uncertainSilence]
+        return systemMessage(dualStream: metadata.dualStream && !(remote.map(noRemoteAudio.contains) ?? false))
+    }
+
     /// The user message: the meeting-metadata header followed by the formatted transcript.
     static func userMessage(metadata: SummaryMetadata, segments: [SummarySegment]) -> String {
         let transcript = formatTranscript(segments, includeSource: metadata.dualStream)
@@ -30,25 +39,117 @@ enum SummaryPromptBuilder {
         """
     }
 
-    /// The header line(s) naming a side that was not (fully) captured, or nil when both sides were
-    /// captured (or the transcript carries no coverage). Both lines, newline-joined, when both apply.
+    /// The header line(s) about what was captured, newline-joined, or nil when there is nothing to
+    /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, "coverage
+    /// not recorded", recording gaps.
     static func captureLine(_ metadata: SummaryMetadata) -> String? {
-        let lines = [
-            metadata.remoteCapture.flatMap { sideLine("Remote audio", $0, isRemote: true) },
-            metadata.localCapture.flatMap { sideLine("Your microphone", $0, isRemote: false) },
-        ].compactMap { $0 }
+        let lines = captureLines(metadata).map(\.text)
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
-    private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> String? {
-        let amounts = "(\(Int(note.deliveredSeconds.rounded())) s delivered of \(Int(note.expectedSeconds.rounded())) s expected)"
+    /// The deterministic banner `MeetingSummarizer` puts at the top of `-summary.md` when a side was
+    /// not (fully) captured or the recording has gaps — the summary must never read as complete on
+    /// the strength of a model obeying an instruction. nil when nothing warrants one (a healthy or
+    /// idle side, or coverage merely not recorded).
+    static func captureBanner(_ metadata: SummaryMetadata) -> String? {
+        let lines = captureLines(metadata).filter(\.warrantsBanner).map(\.text)
+        guard !lines.isEmpty else { return nil }
+        return "> ⚠️ This summary covers only what was captured:\n"
+            + lines.map { "> \($0)" }.joined(separator: "\n") + "\n\n"
+    }
+
+    /// How one side's capture reads, from its recorded status and facts.
+    enum SideVerdict: Hashable {
+        case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, uncertainSilence, compromised, unknown
+    }
+
+    /// `compromised` is split by WHY, because one word cannot cover them honestly: a shortfall is
+    /// "partly captured"; a full-length track of exact digital silence is "not captured" only when
+    /// the permission denial was confirmed, and "uncertain" otherwise (the other side may simply
+    /// have been muted — never claim a fault that can't be confirmed, never claim health either);
+    /// anything else is "captured, but compromised". An unreadable status is "unknown" (fail closed).
+    static func verdict(_ note: CaptureSideNote, isRemote: Bool) -> SideVerdict {
         switch TrackAccounting.Status(rawValue: note.status) {
-        case .neverDelivered: return "\(label): not captured \(amounts)"
-        case .compromised: return "\(label): partly captured \(amounts)"
+        case .healthy: return .healthy
         // `idle` is a tap-only verdict (nothing played on this Mac); a mic is never idle.
-        case .idle: return isRemote ? "\(label): nothing was playing on this Mac (no remote side)" : nil
-        case .healthy, nil: return nil
+        case .idle: return isRemote ? .idle : .healthy
+        case .neverDelivered: return .notCaptured
+        case nil: return .unknown
+        case .compromised:
+            if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
+            if let zeros = note.exactZeroSeconds, isSignificant(zeros, of: note.deliveredSeconds), isRemote {
+                return note.permissionDenied == true ? .permissionDeniedSilence : .uncertainSilence
+            }
+            return .compromised
         }
+    }
+
+    /// The same bar `TrackAccounting` uses for a coverage deficit: ≥ 15 s AND ≥ 10 % of the whole.
+    private static func isSignificant(_ part: Double, of whole: Double) -> Bool {
+        part.isFinite && whole.isFinite && whole > 0
+            && part >= TrackAccounting.minimumDeficitSeconds && part / whole >= TrackAccounting.deficitRatio
+    }
+
+    private struct CaptureHeaderLine {
+        let text: String
+        let warrantsBanner: Bool
+    }
+
+    private static func captureLines(_ metadata: SummaryMetadata) -> [CaptureHeaderLine] {
+        var lines = [
+            metadata.remoteCapture.flatMap { sideLine("Remote audio", $0, isRemote: true) },
+            metadata.localCapture.flatMap { sideLine("Your microphone", $0, isRemote: false) },
+        ].compactMap { $0 }
+        if metadata.coverageNotRecorded {
+            lines.append(CaptureHeaderLine(text: "Capture coverage was not recorded", warrantsBanner: false))
+        }
+        if metadata.gapCount > 0 {
+            lines.append(CaptureHeaderLine(
+                text: "Recording gaps: \(metadata.gapCount) (total \(formatGap(metadata.gapSeconds)))",
+                warrantsBanner: metadata.gapSeconds > 0
+            ))
+        }
+        return lines
+    }
+
+    private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> CaptureHeaderLine? {
+        let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
+        let amounts = "(\(delivered) s delivered of \(expected) s expected)"
+        let silence = note.exactZeroSeconds.map(seconds) ?? "?"
+        let text: String
+        switch verdict(note, isRemote: isRemote) {
+        case .healthy: return nil
+        case .idle: return CaptureHeaderLine(text: "\(label): nothing was playing on this Mac (no remote side)", warrantsBanner: false)
+        case .notCaptured: text = "\(label): not captured \(amounts)"
+        case .partlyCaptured: text = "\(label): partly captured \(amounts)"
+        case .permissionDeniedSilence:
+            text = "\(label): not captured — system audio permission was denied; \(silence) s of digital silence were recorded instead"
+        case .uncertainSilence:
+            text = "\(label): uncertain — \(silence) s were exact digital silence and Parley could not confirm the permission; the other side may have been muted, or not captured"
+        case .compromised:
+            let detail = note.anomalyCount.map { "\($0) capture \($0 == 1 ? "anomaly" : "anomalies") recorded" }
+                ?? "anomaly count not recorded"
+            text = "\(label): captured, but compromised (\(detail))"
+        case .unknown: text = "\(label): capture status unknown (\(delivered) s of \(expected) s)"
+        }
+        return CaptureHeaderLine(text: text, warrantsBanner: true)
+    }
+
+    /// Whole seconds, or "?" for a value no recording could have (non-finite, negative, or beyond a
+    /// century) — a corrupted transcript must not crash summarizing (`Int(1e300)` traps).
+    private static func seconds(_ value: Double) -> String {
+        guard value.isFinite, value >= 0, value < 3_153_600_000 else { return "?" }
+        return String(format: "%.0f", value)
+    }
+
+    /// "3 min 10 s", "45 s", "1 h 2 min 5 s".
+    private static func formatGap(_ value: Double) -> String {
+        guard value.isFinite, value >= 0, value < 3_153_600_000 else { return "? s" }
+        let total = Int(value.rounded())
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        if h > 0 { return "\(h) h \(m) min \(s) s" }
+        if m > 0 { return "\(m) min \(s) s" }
+        return "\(s) s"
     }
 
     static func formatTranscript(_ segments: [SummarySegment], includeSource: Bool = false) -> String {
@@ -114,7 +215,7 @@ enum SummaryPromptBuilder {
     - Do not include small talk, greetings, or off-topic banter
     - Keep the total summary under 500 words
     - Use professional, concise language
-    - If a "Remote audio" or "Your microphone" line says a side was not captured, state that in the Summary section before anything else.
+    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, or compromised, state that in the Summary section before anything else.
     """
 
     static let dualStreamHint = """

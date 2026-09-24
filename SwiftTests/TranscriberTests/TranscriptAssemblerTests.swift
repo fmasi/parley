@@ -178,4 +178,15 @@ struct TranscriptAssemblerTests {
         let m = try #require(json["metadata"] as? [String: Any])
         #expect(m["processing_issue_count"] as? Int == 1 && m["processing_problem_chunks"] as? Int == 1)
     }
+
+    @Test func coverageAndGapsShareMetadataCapture() throws {
+        var remote = TrackAccounting(); remote.expectedSeconds = 60; remote.deliveredSeconds = 60
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, remoteCoverage: remote, remoteStatus: "healthy")
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false, provenance: p,
+                                                captureGaps: [CaptureGap(start: Date(timeIntervalSince1970: 0), end: Date(timeIntervalSince1970: 5), reason: "sleep")])
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        #expect(capture["remote"] != nil && (capture["gaps"] as? [Any])?.count == 1)
+    }
 }
