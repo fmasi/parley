@@ -1189,10 +1189,9 @@ private struct Harness {
         #expect(h.recordingMic.current == .none)
     }
 
-    // #155: the Flow-A stop-path catch (which also covers `ChunkedSessionRecovery.recover()`
-    // throwing) is the user's only signal on this path — the sentinel above is deleted
+    // #155: the stop-path catch is the user's only signal on this path — the sentinel is deleted
     // unconditionally, so relaunching will not retry. It must tell the user their raw audio is
-    // still on disk, mirroring the Flow B catch in `recoverAtLaunch`.
+    // still on disk (§7.4 P6: what the salvage did, from the outcome).
     @Test func stopFailureNotifiesCriticallyThatAudioWasPreserved() async throws {
         let h = try Harness()
         // A re-attached recording (no live pipeline) whose session already has a chunk on disk.
@@ -1213,6 +1212,70 @@ private struct Harness {
         #expect(critical.body.hasPrefix("Stopping the recording failed"))
         #expect(critical.body.contains("1 chunk recorded before it is kept on disk"))
         #expect(h.notified.value.isEmpty, "should escalate via the critical path, not the routine notify")
+    }
+
+    /// L6 fix round 1, item 1 (CRITICAL): the stop SUCCEEDED (the sentinel is already deleted) and
+    /// transcription then threw. The catch must use the sentinel read before the stop: the chunk is
+    /// kept on disk — never "no recorded audio" — and it must not say the stop failed.
+    @Test func transcriptionFailureAfterASuccessfulStopSaysTheAudioIsKept() async throws {
+        let h = try Harness()
+        h.config.update { $0.engine = .fluidAudio }   // constructor only; models are never loaded here
+        let sentinel = try h.writeSentinel(sessionId: "sess")
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        try SessionState.write(SessionState(
+            sessionId: "sess", meetingStart: Date(), engine: h.config.config.engine.rawValue, chunkDurationMinutes: 10,
+            chunks: [ProcessedChunk(index: 0, startTime: Date(), audioPath: outDir.appendingPathComponent("sess-0.m4a").path,
+                                    segments: [], speakerDatabase: [:])]
+        ), directory: outDir)
+        h.client.stopResult = AudioPaths(systemAudio: outDir.appendingPathComponent("sess-9.wav"),
+                                         micAudio: outDir.appendingPathComponent("sess-9_mic.wav"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: outDir.path)   // the transcript can't be written
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: outDir.path) }
+
+        await h.coordinator.stopRecording()
+
+        let critical = try #require(h.criticals.value.first)
+        #expect(critical.body.contains("kept on disk") && !critical.body.contains("no recorded audio"), "\(critical.body)")
+        #expect(critical.body.hasPrefix("The recording stopped"), "the stop itself succeeded")
+        #expect(critical.title == "Transcription Failed")
+    }
+
+    /// L6 fix round 1, item 2: a stop failure inside the FIRST chunk — the in-progress chunk is the
+    /// whole recording, so it is re-ingested (as the give-up path does), never reported as "no audio".
+    @Test func aStopFailureWithinTheFirstChunkSalvagesTheInProgressChunk() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let rotator = try #require(h.runner.chunkRotator)
+        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try Self.headerOnlyWAV().write(to: outDir.appendingPathComponent(rotator.currentBaseName + ".wav"))
+        h.client.stopError = FakeCaptureError()
+
+        await h.coordinator.stopRecording()
+
+        let critical = try #require(h.criticals.value.first)
+        #expect(!critical.body.contains("no recorded audio"), "\(critical.body)")
+        #expect(critical.body.hasPrefix("Stopping the recording failed"))
+    }
+
+    /// A 44-byte PCM WAV with no samples: a real chunk file that needs no model to process.
+    private static func headerOnlyWAV() -> Data {
+        var d = Data()
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+        d.append(contentsOf: Array("RIFF".utf8)); u32(36); d.append(contentsOf: Array("WAVE".utf8))
+        d.append(contentsOf: Array("fmt ".utf8)); u32(16); u16(1); u16(1); u32(48_000); u32(96_000); u16(2); u16(16)
+        d.append(contentsOf: Array("data".utf8)); u32(0)
+        return d
     }
 
     @Test func stopFailureWithNothingOnDiskSaysSo() async throws {
@@ -1279,7 +1342,9 @@ private struct Harness {
 
         await h.coordinator.handleXPCCrash()
 
-        #expect(h.appState.criticalError?.contains("could not restart capture") == true)
+        // L6 fix round 1, item 5: the banner says what the salvage did, never "has been saved" blindly.
+        #expect(h.appState.criticalError == "Recording failed — could not restart capture: fake capture failure. "
+                + RecoveryMessages.outcomeSentence(SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)))
         #expect(h.appState.isIdle)
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
@@ -1300,7 +1365,8 @@ private struct Harness {
         await h.coordinator.handleXPCCrash()
 
         #expect(h.client.startCalls.isEmpty)  // no restart attempt after give-up
-        #expect(h.appState.criticalError?.contains("crashed repeatedly") == true)
+        #expect(h.appState.criticalError == "Recording failed — capture crashed repeatedly. "
+                + RecoveryMessages.outcomeSentence(SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)))
         #expect(h.appState.isIdle)
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
@@ -1531,6 +1597,7 @@ private struct Harness {
                                  chunks: [ProcessedChunk(index: 0, startTime: Date(), audioPath: "sess-0.m4a", segments: [], speakerDatabase: [:])])
         let outcome = await h.coordinator.salvageAbandonedSession(sessionState: state, outputDir: outDir)
         guard case .finalizeFailed = outcome.kind else { Issue.record("expected finalizeFailed, got \(outcome.kind)"); return }
+        #expect(outcome.chunkCount == 1)
         #expect(h.appState.lastJsonPath == nil)
     }
 
@@ -1538,6 +1605,13 @@ private struct Harness {
     /// stop, and says loudly — critical notice + sticky alarm — that the recording STOPPED.
     @Test func launchSalvageIsPresentedAndSaysTheRecordingStopped() async throws {
         let h = try Harness()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { h.criticals.value.append(($0, $1)) },
+            presentTranscript: { url, _ in h.presented.value.append(url) },
+            presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) },
+            engineFactory: { _ in (FakeEngine(), FakeDiarizer()) }, recordingMicrophone: h.recordingMic)
         let sentinel = try h.writeSentinel(sessionId: "sess")
         let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         try SessionState.write(SessionState(
@@ -1547,16 +1621,52 @@ private struct Harness {
                                     speakerDatabase: [:])]
         ), directory: outDir)
 
-        await h.coordinator.recoverAtLaunch()   // helper not capturing → Flow B, chunked
+        await coordinator.recoverAtLaunch()   // helper not capturing → Flow B, chunked
 
         let json = outDir.appendingPathComponent("sess.json")
         #expect(h.presented.value == [json], "the recovered transcript goes through the normal completion path")
-        let critical = try #require(h.criticals.value.first)
-        #expect(critical.title == "Recording STOPPED")
-        #expect(critical.body == RecoveryMessages.relaunchStopped(
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.relaunchStopped(
             at: sentinel.startedAt, outcome: SalvageOutcome(kind: .transcriptWritten(json), chunkCount: 1)))
-        #expect(h.appState.activeAlarms[.recordingStopped]?.message == critical.body)
+        // L6 fix round 1, item 3: presented NOW (window + one notification), not at the next recording.
+        #expect(shown.value.count == 1 && shown.value.first?.new == [.recordingStopped])
+        #expect(h.criticals.value.isEmpty, "exactly one notification: the presenter's")
+        #expect(coordinator.presentedKinds.contains(.recordingStopped))
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.client.captureEndedCalls == 1)
+
+        // The next recording's first presentation does not re-open or re-post it.
+        h.appState.phase = .recording(since: Date())
+        coordinator.presentAlarms()
+        #expect(shown.value.count == 1)
+    }
+
+    /// Item 8: the failure branch — the engine cannot even be prepared; the chunk stays on disk.
+    @Test func launchSalvageFailureSaysTheChunksAreKeptOnDisk() async throws {
+        let h = try Harness()
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            engineFactory: { _ in throw FakeCaptureError() }, recordingMicrophone: h.recordingMic)
+        let sentinel = try h.writeSentinel(sessionId: "sess")
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        try SessionState.write(SessionState(
+            sessionId: "sess", meetingStart: Date(), engine: h.config.config.engine.rawValue, chunkDurationMinutes: 10,
+            chunks: [ProcessedChunk(index: 0, startTime: Date(), audioPath: outDir.appendingPathComponent("sess-0.m4a").path,
+                                    segments: [], speakerDatabase: [:])]
+        ), directory: outDir)
+        await coordinator.salvageAtLaunch(sentinel: sentinel, outputDir: outDir)
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.relaunchStopped(
+            at: sentinel.startedAt, outcome: SalvageOutcome(kind: .finalizeFailed(FakeCaptureError().localizedDescription), chunkCount: 1)))
+        #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// Item 8: the nil branch — nothing on disk to recover.
+    @Test func launchSalvageWithNothingOnDiskSaysSo() async throws {
+        let h = try Harness()
+        let sentinel = try h.writeSentinel(sessionId: "sess")
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        await h.coordinator.salvageAtLaunch(sentinel: sentinel, outputDir: outDir)
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.relaunchStopped(
+            at: sentinel.startedAt, outcome: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)))
     }
 }

@@ -43,8 +43,8 @@ public final class RecordingCoordinator {
     private var missedPolls = 0
     /// Consecutive polls answering `isCapturing == false`; 2 take the crash-recovery path.
     private var notCapturingPolls = 0
-    /// The kinds the last `presentAlarms` saw, so a kind is "new" only once per appearance.
-    private var presentedKinds: Set<AlarmKind> = []
+    /// The kinds the last `presentAlarms` saw, so a kind is "new" only once per appearance. Internal for tests.
+    private(set) var presentedKinds: Set<AlarmKind> = []
     /// The presenter's cadence while NOT recording (§6.3 "every 2 min while any alarm is active"): only
     /// while an alarm is active (one that outlives a recording) — no timer at all otherwise, so an idle
     /// app with nothing to say has zero wakeups. Tests shorten it.
@@ -406,9 +406,13 @@ public final class RecordingCoordinator {
         defer { stopInFlight = false }
         stopStatusPoll()
         Logger.state.info("Recording stopped")
+        // Read ONCE, before the stop: a successful stop deletes it, and the catch below must still know
+        // where the session is (L6 fix round 1).
+        let sentinel = RecordingSentinel.read(directory: sentinelDirectory)
+        var stoppedPaths: AudioPaths?
         do {
-            let sentinel = RecordingSentinel.read(directory: sentinelDirectory)
             let paths = try await captureClient.stop()
+            stoppedPaths = paths
             clearHelperMic()   // only now has the helper let go of the mic (#192)
             RecordingSentinel.delete(directory: sentinelDirectory)
 
@@ -512,32 +516,32 @@ public final class RecordingCoordinator {
 
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
-            // stop() failed, so unlike the success path there is no "helper has let go" moment to wait
-            // for: release the marker best-effort. The realistic causes (XPC crash, fatal failure) mean
-            // the helper is already gone and holds no mic.
+            // Either the helper's stop failed, or (stop succeeded) finishing the transcript did. A failed
+            // stop has no "helper has let go" moment to wait for: release the marker best-effort. The
+            // realistic causes (XPC crash, fatal failure) mean the helper is already gone.
             clearHelperMic()
-            // council FV2 defense-in-depth: stop() can throw (e.g. the helper already cleared
-            // isCapturing on a fatal failure that raced this stop). If a live chunked pipeline still
-            // holds transcribed chunks, salvage them into a transcript instead of discarding the
-            // session with a blind teardown.
-            let sentinel = RecordingSentinel.read(directory: sentinelDirectory)
+            let stopSucceeded = stoppedPaths != nil
+            // council FV2 defense-in-depth: if a live chunked pipeline still holds transcribed chunks,
+            // salvage them into a transcript instead of discarding the session with a blind teardown.
+            // A failed stop left the in-progress chunk unprocessed: re-ingest it (inside the first
+            // chunk it IS the recording); after a successful stop it was already handed over.
             let outcome: SalvageOutcome
             if transcriptionRunner.chunkProcessor != nil, let sentinel {
-                outcome = await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: false)
+                outcome = await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: !stopSucceeded)
             } else {
                 transcriptionRunner.teardownChunkedPipeline()
-                outcome = unsalvagedOutcome(sentinel: sentinel, why: error.localizedDescription)
+                outcome = unsalvagedOutcome(at: Self.sessionLocation(sentinel: sentinel, stoppedPaths: stoppedPaths),
+                                            why: error.localizedDescription)
             }
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
-            // #155: this catch is the Flow-A re-attach stop path's only signal to the user — the
-            // sentinel above is deleted unconditionally, so relaunching will not retry. It says what
-            // is on disk (§7.4 P6): a user who sees only "Transcription Failed" has no way to know
-            // their raw .wav/.m4a files are still safely there.
-            notifyCritical(
-                "Transcription Failed",
-                RecoveryMessages.stopFailed(after: outcome, error: error.localizedDescription)
-            )
+            // #155: this catch is the stop path's only signal to the user — the sentinel is deleted
+            // unconditionally, so relaunching will not retry. It says what the salvage did and what is
+            // on disk (§7.4 P6), and whether the stop itself failed or only the transcript.
+            let body = stopSucceeded
+                ? RecoveryMessages.transcriptionFailed(after: outcome, error: error.localizedDescription)
+                : RecoveryMessages.stopFailed(after: outcome, error: error.localizedDescription)
+            notifyCritical(RecoveryMessages.stopFailureTitle(after: outcome, stopSucceeded: stopSucceeded), body)
             appState.phase = .idle
         }
     }
@@ -803,7 +807,7 @@ public final class RecordingCoordinator {
             // since this branch returns before the normal re-ingestion below) so chunks already
             // transcribed aren't discarded with the session.
             let outcome = await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: true)
-            appState.criticalError = "Recording failed — microphone capture crashed repeatedly. Audio recorded before the failure has been saved."
+            appState.criticalError = "Recording failed — capture crashed repeatedly. " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
             captureClient.captureEnded()
@@ -880,7 +884,7 @@ public final class RecordingCoordinator {
             // council F3: the orphan was already re-ingested above, so just finalize what's been
             // processed rather than abandoning the whole session.
             let outcome = await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: false)
-            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Audio recorded before the failure has been saved."
+            appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
             captureClient.captureEnded()
@@ -1033,9 +1037,10 @@ public final class RecordingCoordinator {
             await presentCompletedTranscription(recovered)   // completion notice, rename + auto-summary
         }
         if case .transcribing = appState.phase { appState.phase = .idle }
-        let message = RecoveryMessages.relaunchStopped(at: lastKnownAlive(sentinel), outcome: outcome)
-        notifyCritical("Recording STOPPED", message)
-        appState.raiseAppAlarm(.recordingStopped, message: message)
+        // Raised AND presented now (window + one notification), not at the next recording's first poll.
+        // The presenter's notification is the only one: no separate critical alert (L6 fix round 1).
+        appState.raiseAppAlarm(.recordingStopped, message: RecoveryMessages.relaunchStopped(at: lastKnownAlive(sentinel), outcome: outcome))
+        presentAlarms()
         captureClient.captureEnded()
     }
 
@@ -1053,15 +1058,26 @@ public final class RecordingCoordinator {
             outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed).count
     }
 
-    /// No live pipeline to salvage from (a relaunch re-attach): say what is on disk. "Nothing to
-    /// salvage" would be false when chunks are there — they are kept, just not transcribed (§7.4 P6).
+    /// Nothing transcribed (no live pipeline, or a salvage that produced nothing): say what is on disk.
+    /// "Nothing to salvage" would be false when chunks are there — they are kept, just not transcribed
+    /// (§7.4 P6).
     private func unsalvagedOutcome(sentinel: RecordingSentinel?, why: String) -> SalvageOutcome {
-        guard let sentinel else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
-        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let count = chunksOnDisk(outputDir: outputDir, sessionId: stripSegmentSuffix(sentinel.systemAudioPath))
+        unsalvagedOutcome(at: Self.sessionLocation(sentinel: sentinel, stoppedPaths: nil), why: why)
+    }
+
+    private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) -> SalvageOutcome {
+        guard let location else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
+        let count = chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId)
         return count > 0
             ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: count)
             : SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
+    }
+
+    /// Where the session's audio is: the sentinel's (it survives a relaunch) or, without one, the
+    /// stopped capture's. Nil when neither is known.
+    private static func sessionLocation(sentinel: RecordingSentinel?, stoppedPaths: AudioPaths?) -> (outputDir: URL, sessionId: String)? {
+        guard sentinel != nil || stoppedPaths != nil else { return nil }
+        return fallbackSessionLocation(sentinel: sentinel, stoppedSystemAudioPath: stoppedPaths?.systemAudio.path ?? "")
     }
 
     /// The engines a launch recovery transcribes with: the injected factory (tests), else the runner's.
@@ -1086,20 +1102,36 @@ public final class RecordingCoordinator {
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         transcriptionRunner.stopChunkRotation()
 
+        var orphan: (index: Int, baseName: String)?
         if reingestOrphan, let rotator = transcriptionRunner.chunkRotator {
-            _ = reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
+            orphan = reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
         }
 
         await processor.awaitAllProcessed()
         let sessionState = await processor.getSessionState()
-        return await salvageAbandonedSession(sessionState: sessionState, outputDir: outputDir)
+        let outcome = await salvageAbandonedSession(sessionState: sessionState, outputDir: outputDir)
+        switch outcome.kind {
+        case .nothingToSalvage:
+            // Nothing transcribed, yet audio may be on disk (a chunk that could not be processed):
+            // report it as kept, not as "no recorded audio" (L6 fix round 1).
+            return unsalvagedOutcome(sentinel: sentinel, why: "its audio could not be processed")
+        case .transcriptWritten:
+            // The in-progress chunk was re-ingested but did not make it into the transcript: say its
+            // audio is on disk, untranscribed.
+            if let orphan, !sessionState.chunks.contains(where: { $0.index == orphan.index }),
+               FileManager.default.fileExists(atPath: outputDir.appendingPathComponent(orphan.baseName + ".wav").path) {
+                return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount, lastChunkKeptOnDisk: true)
+            }
+            return outcome
+        case .finalizeFailed:
+            return outcome
+        }
     }
 
     /// The salvage decision + execution half of `finalizeAbandonedSession`, split out verbatim
     /// behind an internal seam: the `!chunks.isEmpty` guard, provenance stamping, and the
     /// teardown-on-empty path are unit-testable with a crafted `SessionState` — the wrapper above
     /// requires a live `chunkProcessor`, which tests don't have.
-    @discardableResult
     func salvageAbandonedSession(sessionState: SessionState, outputDir: URL) async -> SalvageOutcome {
         var sessionState = sessionState
         guard !sessionState.chunks.isEmpty else {

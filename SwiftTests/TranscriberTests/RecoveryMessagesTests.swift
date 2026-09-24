@@ -12,8 +12,8 @@ import Testing
         #expect(m.contains("m.json") && m.contains("3 chunks"))
     }
     /// Review fix 6 [Important]: the old wording ("nothing had been recorded yet") claimed a cause
-    /// the type can't know — callers map "no processor" and "salvage returned nil" to
-    /// `.nothingToSalvage` even when audio exists.
+    /// the type can't know. Since L6 fix round 1, callers count the chunks on disk before choosing
+    /// `.nothingToSalvage`.
     @Test func nothingWrittenSaysSo() {
         let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
         #expect(m.contains("No transcript could be written: no recorded audio was found to salvage.") && !m.contains("has been transcribed"))
@@ -26,6 +26,47 @@ import Testing
         let m = RecoveryMessages.stopFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1), error: "helper gone")
         #expect(m.contains("helper gone") && m.contains("m.json"))
     }
+    // MARK: - L6 fix round 1
+
+    /// Item 1: a failure AFTER a successful stop must not say the stop failed.
+    @Test func transcriptionFailureAfterAStopSaysTheStopWorked() {
+        let m = RecoveryMessages.transcriptionFailed(
+            after: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 1), error: "disk full")
+        #expect(m.hasPrefix("The recording stopped"))
+        #expect(m.contains("kept on disk") && !m.contains("Stopping the recording failed"))
+    }
+
+    /// Item 9: the same error is printed once, not in the lead-in AND in the outcome sentence.
+    @Test func theErrorIsPrintedOnce() {
+        let outcome = SalvageOutcome(kind: .finalizeFailed("helper gone"), chunkCount: 2)
+        for m in [RecoveryMessages.stopFailed(after: outcome, error: "helper gone"),
+                  RecoveryMessages.transcriptionFailed(after: outcome, error: "helper gone")] {
+            #expect(m.components(separatedBy: "helper gone").count == 2, "\(m)")
+        }
+    }
+
+    /// Item 4: the title follows the outcome; a successful salvage never says "Failed".
+    @Test func stopTitlesFollowTheOutcome() {
+        let written = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1)
+        #expect(!RecoveryMessages.stopFailureTitle(after: written, stopSucceeded: false).contains("Failed"))
+        #expect(RecoveryMessages.stopFailureTitle(after: SalvageOutcome(kind: .finalizeFailed("x"), chunkCount: 1), stopSucceeded: true) == "Transcription Failed")
+        #expect(RecoveryMessages.stopFailureTitle(after: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0), stopSucceeded: false) == "Stopping the Recording Failed")
+        #expect(RecoveryMessages.stopFailureTitle(after: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0), stopSucceeded: true) == "Transcription Failed")
+    }
+
+    /// Item 2: a written transcript that could not include the in-progress chunk says so.
+    @Test func anUntranscribedLastChunkIsNamed() {
+        let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2, lastChunkKeptOnDisk: true))
+        #expect(m.contains("m.json") && m.contains("last chunk") && m.contains("kept on disk"))
+        #expect(!RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2)).contains("last chunk"))
+    }
+
+    /// Item 5: the menu banners reuse the outcome sentence.
+    @Test func theOutcomeSentenceIsAvailableForBanners() {
+        #expect(RecoveryMessages.outcomeSentence(SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
+                == "No transcript could be written: no recorded audio was found to salvage.")
+    }
+
     @Test func relaunchStoppedNamesTheClockTime() {
         let at = Date(timeIntervalSince1970: 0)
         let m = RecoveryMessages.relaunchStopped(at: at, outcome: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
