@@ -26,20 +26,29 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         case userRequest = "user request"
     }
 
-    private var panel: NSPanel?
+    private var panel: NSPanel? {
+        didSet { openState.isOpen = panel != nil }
+    }
+    /// The panel's presence, observable: the alarm window's rows follow it as it opens and closes (L round 6).
+    private let openState = RepairWindowOpenState()
     /// Everything the open window lists; new gaps found while it is open are merged in.
     private var listed: [CapturePermission] = []
     /// "Later" snoozes re-opening on repeated helper reports (the sticky banner keeps saying so).
     private var lastDismissedAt: Date?
     /// Collapses overlapping verify() calls (record start + a helper report can land together).
-    private var verifying = false
-    /// The most urgent trigger that arrived while another verify() was running. Re-run once afterwards
-    /// instead of dropping it: a helper report outranks the rest, and a tap on the menu row or a
-    /// Settings change must not be silently ignored.
-    private var pendingTrigger: Trigger?
+    /// One check at a time. A trigger arriving while one runs queues ONE re-run — a helper report
+    /// outranks the rest, and a tap on the menu row or a Settings change is never silently ignored — and
+    /// its caller WAITS for the running check and that re-run before answering (L round 6).
+    private lazy var check = CoalescingCheck<Trigger>(
+        perform: { [weak self] trigger in
+            guard let self, let permissionManager = self.permissionManager else { return }
+            await self.performVerify(trigger: trigger, permissionManager: permissionManager)
+        },
+        merge: { pending, incoming in pending == .captureEvidence ? .captureEvidence : incoming }
+    )
 
     /// Whether the repair window is on screen: the alarm window then leaves the permission rows to it.
-    var isPanelOpen: Bool { panel?.isVisible ?? false }
+    var isPanelOpen: Bool { openState.isOpen && (panel?.isVisible ?? false) }
 
     private weak var permissionManager: PermissionManager?
     private weak var appState: AppState?
@@ -59,18 +68,8 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     /// silent (L rounds 4-5).
     @discardableResult
     func verify(trigger: Trigger) async -> Bool {
-        guard let permissionManager else { return false }
-        if verifying {
-            if pendingTrigger != .captureEvidence { pendingTrigger = trigger }
-            return coversRemoteAlarm(trigger: trigger)
-        }
-        verifying = true
-        await performVerify(trigger: trigger, permissionManager: permissionManager)
-        verifying = false
-        if let next = pendingTrigger {
-            pendingTrigger = nil
-            await verify(trigger: next)
-        }
+        guard permissionManager != nil else { return false }
+        await check.run(trigger)
         return coversRemoteAlarm(trigger: trigger)
     }
 
@@ -203,6 +202,13 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     }
 
     private func postNotification(missing: [CapturePermission], recording: Bool) {
+        // One notification per alarm (L round 6): the alarm's own went out moments ago (its 3 s
+        // fallback while this window waited on a prompt) — this window opening is enough.
+        let last = CaptureAlarmWindowController.shared.lastNotificationAt(forAnyOf: [.remotePermissionDenied, .remoteCantConfirm])
+        guard !AlarmRealarmPolicy.repairNotificationDuplicates(lastAlarmNotificationAt: last, now: Date()) else {
+            Logger.permissions.info("Repair window opened — its notification skipped: the alarm's was just posted")
+            return
+        }
         let content = UNMutableNotificationContent()
         content.title = recording ? "Parley isn’t recording everything" : "Parley needs a permission"
         content.body = "\(CaptureReadiness.offPhrase(for: missing)). Use the window Parley just opened to fix it."
@@ -230,4 +236,12 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
             }
         }
     }
+}
+
+/// Whether the repair panel is up, observable (L round 6): SwiftUI views that leave the permission rows
+/// to it re-render when it opens or closes.
+@MainActor
+@Observable
+final class RepairWindowOpenState {
+    var isOpen = false
 }

@@ -238,7 +238,14 @@ struct MenuView: View {
             MenuActionRow(icon: alarm.kind.symbolName, title: alarm.kind.headline, subtitle: alarm.message) {
                 dismissPanel()
                 if alarm.kind.track == .system {
-                    Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }
+                    // Nothing missing app-side (#220's refusal although granted, "can't confirm"), or a
+                    // window that doesn't cover it: the alarm window explains instead (L round 6).
+                    Task {
+                        if await !PermissionRepairWindowController.shared.verify(trigger: .userRequest) {
+                            CaptureAlarmWindowController.shared.present(
+                                appState.alarms.sorted, newlyRaised: [], appState: appState, userRequest: true)
+                        }
+                    }
                 } else {
                     CaptureAlarmWindowController.shared.present(
                         appState.alarms.sorted, newlyRaised: [], appState: appState, userRequest: true)

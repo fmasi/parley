@@ -298,11 +298,15 @@ struct TranscriberApp: App {
 
     /// Any Parley window the user may be working in — Settings, the menu-bar dropdown, a panel: a
     /// hand-over would close it mid-edit (L2/L4 fix round 2, item 6). Only real ones count: on screen, a
-    /// non-zero frame, at most at the pop-up menu level (L rounds 3-4); the status item's own button
-    /// window never does, so no always-present window can defer the hand-over forever.
+    /// non-zero frame, at most at the pop-up menu level (L rounds 3-4), never the status item's own
+    /// button window. A window that stays up regardless defers the hand-over for at most
+    /// `LaunchAgentHealth.windowDeferralLimit`; after that the crash-protection row says why.
     @MainActor
-    static func anyParleyWindowVisible() -> Bool {
-        NSApp.windows.contains { window in
+    static func anyParleyWindowVisible() -> Bool { !deferringWindows().isEmpty }
+
+    @MainActor
+    static func deferringWindows() -> [NSWindow] {
+        NSApp.windows.filter { window in
             LaunchAgentHealth.windowDefersHandOver(
                 isVisible: window.isVisible, width: window.frame.width, height: window.frame.height,
                 level: window.level.rawValue, maxLevel: NSWindow.Level.popUpMenu.rawValue, className: window.className)
@@ -318,7 +322,14 @@ struct TranscriberApp: App {
         let health = await LaunchAgentManager.verifyAndRepair(holdsInstanceLock: holdsInstanceLock)
         let defaults = UserDefaults.standard
         let now = Date()
-        let busy = isBusy(appState), windowsOpen = anyParleyWindowVisible()
+        let busy = isBusy(appState)
+        let deferring = deferringWindows()
+        let windowsOpen = !deferring.isEmpty
+        if windowsOpen {
+            // What holds the hand-over back — class and level only: a window title can name a meeting (L round 6).
+            let described = deferring.map { "\($0.className)@\($0.level.rawValue)" }.joined(separator: ", ")
+            Logger.state.info("Crash-protection hand-over deferred by windows: \(described, privacy: .public)")
+        }
         // Windows alone (no work) defer the hand-over for a bounded time: track since when.
         if windowsOpen && !busy {
             if windowDeferralSince == nil { windowDeferralSince = now }

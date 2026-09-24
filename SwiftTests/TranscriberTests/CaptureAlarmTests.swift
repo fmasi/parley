@@ -69,6 +69,17 @@ import Testing
         #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: false) == [disk, denied])
     }
 
+    /// L round 6, item 23: one notification per alarm. Each kind has its own stable identifier (a repeat
+    /// replaces, never stacks), and the repair window skips its own notification when the alarm's was
+    /// posted in the last 30 s (the 3 s fallback, then the window opening after a prompt).
+    @Test func oneNotificationPerAlarm() {
+        #expect(AlarmKind.remotePermissionDenied.notificationIdentifier != AlarmKind.diskLow.notificationIdentifier)
+        #expect(AlarmKind.diskLow.notificationIdentifier == AlarmKind.diskLow.notificationIdentifier)
+        #expect(AlarmRealarmPolicy.repairNotificationDuplicates(lastAlarmNotificationAt: t0, now: t0 + 29))
+        #expect(!AlarmRealarmPolicy.repairNotificationDuplicates(lastAlarmNotificationAt: t0, now: t0 + 30))
+        #expect(!AlarmRealarmPolicy.repairNotificationDuplicates(lastAlarmNotificationAt: nil, now: t0))
+    }
+
     /// L round 4, item 7: a past event (acknowledgeable) is presented ONCE — never re-notified mid-call.
     @Test func pastEventsNeverRenotify() {
         var resumed = alarm(.recordingResumedWithGap, at: t0)

@@ -91,6 +91,10 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// The permission kinds keep their own repair window (§6.3): while it is open, the alarm window
     /// leaves their rows — and their notifications — to it.
     public var hasOwnRepairWindow: Bool { self == .remotePermissionDenied || self == .remoteCantConfirm }
+
+    /// One stable notification identifier per kind: a re-notify replaces that kind's banner, never
+    /// stacks another, and never replaces a different alarm's (L round 6).
+    public var notificationIdentifier: String { "parley-capture-alarm.\(rawValue)" }
 }
 
 public struct ActiveAlarm: Codable, Equatable, Sendable {
@@ -358,6 +362,16 @@ public enum AlarmRealarmPolicy {
 
     public static func shouldReopenWindow(lastDismissedAt: Date?, now: Date) -> Bool {
         CaptureReadiness.shouldPresentRepair(lastDismissedAt: lastDismissedAt, now: now)
+    }
+
+    /// The repair window's own notification is a duplicate when the alarm's notification for the same
+    /// permission problem went out in the last 30 s — e.g. the 3 s fallback, then the window opening
+    /// once a macOS prompt is answered (L round 6): one notification per alarm.
+    public static let repairNotificationDedupWindow: TimeInterval = 30
+
+    public static func repairNotificationDuplicates(lastAlarmNotificationAt: Date?, now: Date) -> Bool {
+        guard let lastAlarmNotificationAt else { return false }
+        return now.timeIntervalSince(lastAlarmNotificationAt) < repairNotificationDedupWindow
     }
 
     /// While NOT recording (owner ruling, L2/L4 fix round 2): the gap before the next re-notify of an

@@ -12,9 +12,18 @@ import os
 final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
     static let shared = CaptureAlarmWindowController()
 
-    /// One identifier for every alarm notification: a re-notify replaces the previous one instead of
-    /// stacking a new banner every 2 minutes.
-    static let notificationIdentifier = "parley-capture-alarm"
+    /// When each kind's notification last went out: the repair window skips its own when the alarm's
+    /// is that recent (L round 6). Identifiers are per kind (`AlarmKind.notificationIdentifier`).
+    private var lastNotificationAt: [AlarmKind: Date] = [:]
+
+    func lastNotificationAt(forAnyOf kinds: [AlarmKind]) -> Date? {
+        kinds.compactMap { lastNotificationAt[$0] }.max()
+    }
+
+    private func post(_ alarm: ActiveAlarm) {
+        lastNotificationAt[alarm.kind] = Date()
+        MenuView.postNotification(title: alarm.kind.headline, body: alarm.message, identifier: alarm.kind.notificationIdentifier)
+    }
 
     private var panel: NSPanel?
     /// "Later" (or the close button): the window stays closed until the snooze passes or a new kind arrives.
@@ -32,10 +41,7 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
             repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen,
             lastDismissedAt: lastDismissedAt, now: Date()
         )
-        if let alarm = presentation.notify {
-            MenuView.postNotification(title: alarm.kind.headline, body: alarm.message,
-                                      identifier: Self.notificationIdentifier)
-        }
+        if let alarm = presentation.notify { post(alarm) }
         // Otherwise snoozed; the sticky menu rows and the menu-bar icon still say it.
         if presentation.openWindow { show(appState: appState) }
     }
@@ -43,7 +49,7 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
     /// One alarm's notification, no window: a new permission alarm whose repair window has not answered
     /// within the cap (L round 5). The stable identifier lets a later presentation replace it.
     func notify(_ alarm: ActiveAlarm) {
-        MenuView.postNotification(title: alarm.kind.headline, body: alarm.message, identifier: Self.notificationIdentifier)
+        post(alarm)
     }
 
     /// The rows the window lists: every alarm, minus the permission ones while the repair window is up.
