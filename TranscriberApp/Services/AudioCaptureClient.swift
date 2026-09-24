@@ -48,9 +48,9 @@ final class AudioCaptureClient {
     /// The recording is NEVER stopped by this; it is a warning surface only.
     var onQualityAnomaly: (@Sendable (String, String) -> Void)?
 
-    /// Invoked (reverse channel) on the first heartbeat of a capture generation; the argument is the
-    /// track ("mic" | "system"). Clears the stale alarms a replaced helper left on that track (§6.2).
-    var onFirstFrames: (@Sendable (String) -> Void)?
+    /// Invoked (reverse channel) on the first heartbeat of a capture generation: (track, helper
+    /// session id). Clears the stale alarms a replaced helper left on that track (§6.2).
+    var onFirstFrames: (@Sendable (CaptureTrack, String) -> Void)?
 
     /// Invoked (reverse channel) when the helper pushes a changed alarm set (§6.2).
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
@@ -470,8 +470,12 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
         }
     }
 
-    func captureDidDeliverFirstFrames(track: String) {
-        Task { @MainActor [weak client] in client?.onFirstFrames?(track) }
+    func captureDidDeliverFirstFrames(track: String, helperSessionId: String) {
+        guard let captureTrack = CaptureTrack(rawValue: track) else {
+            Logger.audio.warning("Helper reported first frames on an unknown track — ignored")
+            return
+        }
+        Task { @MainActor [weak client] in client?.onFirstFrames?(captureTrack, helperSessionId) }
     }
 
     func captureAlarmsChanged(snapshot: Data) {

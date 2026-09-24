@@ -100,9 +100,11 @@ import Foundation
     /// user-facing description for the banner. Optional so an older app build talking to a newer
     /// helper (or vice versa) doesn't crash on an unrecognized selector.
     @objc optional func captureQualityAnomaly(kind: String, message: String)
-    /// First heartbeat of a capture generation (start / rebuild / wake) on `track` ("mic" | "system").
-    /// The app clears the stale alarms a replaced helper left on that track (§6.2).
-    @objc optional func captureDidDeliverFirstFrames(track: String)
+    /// First heartbeat of a capture generation (start / rebuild / wake) on `track` (a `CaptureTrack`
+    /// raw value: "mic" | "system"). `helperSessionId` names the helper registry that saw it, so the
+    /// app can clear the stale alarms a replaced helper left on that track even when this arrives
+    /// before the new helper's first snapshot (§6.2).
+    @objc optional func captureDidDeliverFirstFrames(track: String, helperSessionId: String)
     /// The helper's alarm set changed: `snapshot` is a JSON `CaptureStatusSnapshot` (§6.2).
     @objc optional func captureAlarmsChanged(snapshot: Data)
 }

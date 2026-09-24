@@ -14,7 +14,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
     var onBriefInterruption: (@Sendable () -> Void)?
     var onRestartInPlace: (@Sendable () -> Void)?
-    var onFirstFrames: (@Sendable (String) -> Void)?
+    var onFirstFrames: (@Sendable (CaptureTrack, String) -> Void)?
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
 
     struct StartCall: Equatable {

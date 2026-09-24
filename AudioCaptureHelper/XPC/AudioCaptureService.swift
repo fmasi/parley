@@ -10,8 +10,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
-    /// Identifies this helper PROCESS in every `CaptureStatusSnapshot`: a changed id tells the app its
-    /// helper was replaced (crash restart), so the old alarms turn stale instead of vanishing (§6.2).
+    /// Names the helper's alarm-REGISTRY INSTANCE, not the process, in every `CaptureStatusSnapshot`
+    /// and first-frames call: a changed id tells the app the registry it knew is gone (crash restart),
+    /// so its alarms turn stale instead of vanishing (§6.2). H2 renews it on every registry reset
+    /// (stop, stopAndFinalize, cleanupAfterFailure); until H2 adds the registry there is none to
+    /// reset, so it is fixed for the life of the process.
     let helperSessionId = UUID().uuidString
     /// One persistent serial queue for ALL stream callbacks across the session — initial stream
     /// and every in-place restart register on it, so writer swaps / finalization / sample appends
@@ -72,8 +75,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// diagnostic ring which is only read after the fact (#193/#196). `kind` is the
     /// `CaptureEventKind` raw value; `message` is a human-readable description.
     var onQualityAnomaly: ((String, String) -> Void)?
-    /// Invoked on the first heartbeat of a capture generation on a track ("mic" | "system").
-    var onFirstFrames: ((String) -> Void)?
+    /// Invoked on the first heartbeat of a capture generation: (track, `helperSessionId` at that moment).
+    var onFirstFrames: ((CaptureTrack, String) -> Void)?
     /// Invoked with a JSON `CaptureStatusSnapshot` whenever the alarm set changes (§6.2).
     var onAlarmsChanged: ((Data) -> Void)?
 

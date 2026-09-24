@@ -37,8 +37,9 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     var onBriefInterruption: (@Sendable () -> Void)? { get set }
     /// Fired when the helper restarted a stopped stream in place (#86).
     var onRestartInPlace: (@Sendable () -> Void)? { get set }
-    /// Fired on the first heartbeat of a capture generation; the argument is the track ("mic" | "system").
-    var onFirstFrames: (@Sendable (String) -> Void)? { get set }
+    /// Fired on the first heartbeat of a capture generation: (track, helperSessionId of the helper
+    /// registry that saw it) — feeds `CaptureAlarmRegistry.noteFirstFrames(track:helperSessionId:)`.
+    var onFirstFrames: (@Sendable (CaptureTrack, String) -> Void)? { get set }
     /// Fired when the helper pushes a changed alarm set (§6.2).
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)? { get set }
 
