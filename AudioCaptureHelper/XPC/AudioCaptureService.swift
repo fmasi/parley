@@ -107,7 +107,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// teardown path.
     private let livenessWatchdog = LivenessWatchdogDriver()
     /// Runs the tap's healing ladder from the system track's liveness verdicts (§5).
-    private let tapHealer = TapHealer()
+    private let tapHealer = TapHealer(scheduler: DispatchHealerScheduler(label: "audio-capture.tap-healer"))
     /// Mic side of "heal, then alarm" (§6.1). Touched on the watchdog queue only.
     private var micHealPolicy = MicHealPolicy()
     /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, gaps from
@@ -245,13 +245,24 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// Both may be called from the audio queue (write failure, exact zeros, permission verdicts) and
-    /// from the watchdog / config queues — never from inside `stateLock.sync`, and they do no HAL
-    /// read and no `audioQueue.sync` (a push encodes a handful of alarms; that is all).
-    private func raiseAlarm(_ kind: AlarmKind, _ message: String) {
-        let changed = stateLock.sync { alarms.raise(kind, message: message, now: Date()) }
-        guard changed else { return }
+    /// from the watchdog / config / healer queues — never from inside `stateLock.sync`, and they do no
+    /// HAL read and no `audioQueue.sync` (a push encodes a handful of alarms; that is all).
+    /// `raiseAlarm` is a no-op outside a live session (review round 1, defense in depth): nothing late from a stopped
+    /// session — a healer timer, a finalize-time write — can land in the NEXT session's fresh registry.
+    /// "Live" is `handler != nil && !isUserStopping`, not `isCapturing`: the writers run from the mic's
+    /// first buffer, before `isCapturing` is set, and a write failure latches (it is reported once per
+    /// episode), so dropping one there would leave a full disk unalarmed for the whole recording.
+    /// Returns true when newly raised.
+    @discardableResult
+    private func raiseAlarm(_ kind: AlarmKind, _ message: String) -> Bool {
+        let changed = stateLock.sync { () -> Bool in
+            guard handler != nil, !isUserStopping else { return false }
+            return alarms.raise(kind, message: message, now: Date())
+        }
+        guard changed else { return false }
         record(.alarmRaised, .anomaly, ["kind": kind.rawValue])
         onAlarmsChanged?(snapshot(tracks: trackHealth()).encoded())
+        return true
     }
 
     private func clearAlarm(_ kind: AlarmKind) {
@@ -995,13 +1006,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// The tap's rebuild results and aggregate events feed the healer; the healer's verdicts feed the
-    /// alarms (§5, §6.1): `remoteRecoveryFailed` raised when a rung threw or got stuck and cleared by the
-    /// next successful rung (scan C8), `remoteNotDelivering` raised on give-up and cleared on recovery.
+    /// alarms (§5, §6.1): on give-up `remoteNotDelivering` (plus `remoteRecoveryFailed` when a rebuild
+    /// threw), `remoteRecoveryFailed` when a rung got stuck, both cleared by recovery / the next
+    /// successful rung (scan C8).
     private func wireTapHealer(to tap: SystemTapSession) {
-        tapHealer.tap = tap
-        // A new session starts a new episode: forget the previous session's budget, exhaustion and
-        // dead-gate memory (its timers were cancelled at its stop). Tokens stay monotonic.
-        tapHealer.trigger(.wake)
         tap.onRebuildResult = { [weak self] rung, token, ok, _ in
             // A rebuild the ladder did not order (output change, rate drift) is still a rebuild (§7.1).
             if token == 0, ok { self?.noteRebuild() }
@@ -1012,17 +1020,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             if k == .tapRecoveryRung { self?.noteRebuild() }
             self?.record(k, s, d)
         }
-        tapHealer.onGiveUp = { [weak self] in
-            self?.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.")
+        // Heal first, then alarm (review round 1): an intermediate failed rung with another one queued
+        // raises nothing; the ladder's give-up does.
+        tapHealer.onGiveUp = { [weak self] rebuildFailed in
+            guard let self else { return }
+            let newlyGivenUp = self.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.")
+            if newlyGivenUp {
+                // Once per give-up episode: sets `system_audio_unrecovered` in provenance for tap sessions.
+                self.record(.systemAudioUnrecovered, .anomaly, ["source": "system-tap", "reason": "healing ladder gave up"])
+            }
+            if rebuildFailed {
+                self.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
+            }
         }
         tapHealer.onRecovered = { [weak self] in self?.clearAlarm(.remoteNotDelivering) }
         tapHealer.onStuck = { [weak self] in
             self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
         }
-        tapHealer.onRungFailed = { [weak self] rung in
-            self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture (\(rung.rawValue)). The other side may not be recorded.")
-        }
         tapHealer.onRungSucceeded = { [weak self] in self?.clearAlarm(.remoteRecoveryFailed) }
+        // Last: reset the healer and target this tap in one step on the healer's queue (review round 1).
+        tapHealer.startSession(tap: tap)
     }
 
     /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the
@@ -1265,3 +1282,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         raiseAlarm(.remoteRecoveryFailed, "Remote audio couldn’t be recovered — only your microphone is recording.")
     }
 }
+
+/// The healer (TranscriberCore) rebuilds the tap through this; results come back via `onRebuildResult`.
+extension SystemTapSession: TapRebuilding {}
