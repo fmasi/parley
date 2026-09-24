@@ -23,4 +23,11 @@ import Testing
     @Test func emptyListIsClosed() {
         #expect(OutputActivity.othersRunningOutput([], ownPid: 99) == false)
     }
+
+    /// §4.1: the probe fails OPEN — a process whose IsRunningOutput could not be read counts as
+    /// running (a missed alarm is worse than a check), except our own pid, which never opens the gate.
+    @Test func anUnreadableProcessOpensTheGateUnlessItIsOurs() {
+        #expect(OutputActivity.othersRunningOutput([P(pid: 2430, isRunningOutput: nil, outputDevices: [])], ownPid: 99))
+        #expect(OutputActivity.othersRunningOutput([P(pid: 99, isRunningOutput: nil, outputDevices: [])], ownPid: 99) == false)
+    }
 }
