@@ -157,13 +157,23 @@ public enum TranscriptAssembler {
         return start.isFinite && end.isFinite
     }
 
+    /// Atomic AND durable (round 3 item 2): the finalized marker written next vouches for this file,
+    /// so it must be on the disk itself, not in a cache, before the marker is.
     public static func write(_ json: [String: Any], to path: URL) throws {
         let data = try JSONSerialization.data(
             withJSONObject: json,
             options: [.prettyPrinted, .sortedKeys]
         )
-        try data.write(to: path, options: .atomic)
+        try DurableFile.replace(path, with: data)
         Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .sensitive)")
+    }
+
+    /// Whether `url` holds a readable transcript: JSON with a `metadata` object and a `segments` list.
+    public static func verifies(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return json["metadata"] is [String: Any] && json["segments"] is [[String: Any]]
     }
 
     /// Rewrite a transcript JSON's `audio_paths` / `audio_files` to reference every audio source

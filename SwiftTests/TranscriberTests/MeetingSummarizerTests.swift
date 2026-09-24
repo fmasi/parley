@@ -669,3 +669,17 @@ struct MeetingSummarizerTimelessSegmentTests {
         #expect(SummaryPromptBuilder.captureBanner(metadata)?.contains("> \(line)") == true)
     }
 }
+
+/// Round 3 item 5: the lower-bound mark is read off the transcript.
+struct MeetingSummarizerLowerBoundTests {
+    @Test func theLowerBoundMarkIsRead() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("lower-bound-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let remote: [String: Any] = ["status": "compromised", "expected_seconds": 600.0, "delivered_seconds": 600.0,
+                                     "exact_zero_seconds": 300.0, "exact_zero_seconds_is_lower_bound": true]
+        let json: [String: Any] = ["metadata": ["capture": ["remote": remote]], "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"]]]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let (_, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(metadata.remoteCapture?.exactZeroIsLowerBound == true)
+    }
+}

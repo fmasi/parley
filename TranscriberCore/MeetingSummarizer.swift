@@ -287,7 +287,8 @@ public enum MeetingSummarizer {
             permissionDenied: isRemote ? provenance?["system_permission_denied_confirmed"] as? Bool : nil,
             // This side's own content anomalies — the session-wide `quality_anomaly_count` would
             // blame one side for the other's faults.
-            anomalyCount: side["content_anomaly_count"] as? Int
+            anomalyCount: side["content_anomaly_count"] as? Int,
+            exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true
         )
     }
 

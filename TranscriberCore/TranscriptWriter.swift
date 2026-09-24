@@ -31,7 +31,16 @@ public enum TranscriptWriter {
             let prefix = speaker.isEmpty ? "" : "\(speaker): "
             result += "[\(ts)] \(prefix)\(text)\n"
         }
-        return result
+        return result + omissionNote(segments)
+    }
+
+    /// A trailing line when segments without a usable time were left out: the file itself says so,
+    /// not only the log (round 3 item 8). Empty when nothing was left out.
+    static func omissionNote(_ segments: [[String: Any]]) -> String {
+        let n = segments.filter { !TranscriptAssembler.hasUsableTime($0) }.count
+        guard n > 0 else { return "" }
+        let what = n == 1 ? "1 segment without a timestamp is" : "\(n) segments without timestamps are"
+        return "\nNote: \(what) in the JSON transcript.\n"
     }
 
     /// Format segments as SRT subtitle text. Flagged segments are skipped and the cue numbers stay
@@ -46,7 +55,8 @@ public enum TranscriptWriter {
             let prefix = speaker.isEmpty ? "" : "\(speaker): "
             result += "\(i + 1)\n\(start) --> \(end)\n\(prefix)\(text)\n\n"
         }
-        return result
+        // After the last cue's blank line, so every cue stays well formed.
+        return result + String(omissionNote(segments).dropFirst())
     }
 
     public enum WriterError: Error {

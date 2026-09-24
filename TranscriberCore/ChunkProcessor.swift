@@ -21,6 +21,8 @@ public final class ChunkProcessor {
     private nonisolated let stateStore: StateStore
     private nonisolated let wavHeaderSize = 44
     private nonisolated let taskPriority: TaskPriority
+    /// Where an archive-only chunk is split into scratch WAVs (the temp folder; a test's own folder).
+    private nonisolated let scratchDirectory: URL
     /// The recording file (base name, e.g. `meeting-0`) behind every chunk index this processor
     /// knows: the seeded session's settled chunks plus every chunk scheduled here. An index is never
     /// released. The same index from the SAME file again is a true duplicate (the orphan re-ingested
@@ -146,7 +148,8 @@ public final class ChunkProcessor {
         outputDirectory: URL,
         sessionState: SessionState,
         transcriber: any TranscriptionEngine,
-        diarizer: (any DiarizationProvider)?
+        diarizer: (any DiarizationProvider)?,
+        scratchDirectory: URL = FileManager.default.temporaryDirectory
     ) {
         self.config = config
         self.outputDirectory = outputDirectory
@@ -157,6 +160,7 @@ public final class ChunkProcessor {
         )
         self.transcriber = transcriber
         self.diarizer = diarizer
+        self.scratchDirectory = scratchDirectory
         self.taskPriority = switch config.resolvedQos {
         case .userInteractive: .high
         case .userInitiated: .medium
@@ -536,7 +540,7 @@ public final class ChunkProcessor {
     /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
     /// system stream missing, never dropped.
     private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int, micWavLeft: Bool) async -> (directory: URL, system: URL, mic: URL?)? {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
+        let directory = scratchDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let split = try await AudioSourceResolver.splitChannels(stereoAac: archive, outputDirectory: directory)

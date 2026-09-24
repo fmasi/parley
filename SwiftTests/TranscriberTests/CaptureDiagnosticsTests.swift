@@ -551,3 +551,18 @@ struct CaptureDiagnosticsConsistencyTests {
         #expect(app.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).eventsDropped == 1)
     }
 }
+
+/// Round 3 item 6: `isAnomalous` decides whether `<session>.diag.jsonl` is written. Scanned from the
+/// ring, a session whose anomalies were evicted wrote nothing.
+struct CaptureDiagnosticsIsAnomalousTests {
+    @Test func anEvictedAnomalyStillMakesTheSessionAnomalous() {
+        var d = CaptureDiagnostics(maxEvents: 2)
+        let t0 = Date(timeIntervalSinceReferenceDate: 3_000_000)
+        d.record(CaptureEvent(timestamp: t0, origin: .helper, kind: .rateDrift, severity: .anomaly))
+        for i in 1...5 { d.record(CaptureEvent(timestamp: t0.addingTimeInterval(Double(i)), origin: .helper, kind: .restartInPlace, severity: .warning)) }
+        #expect(!d.events.contains { $0.severity == .anomaly }, "the anomaly has left the ring")
+        #expect(d.isAnomalous)
+        d.resetSession()
+        #expect(!d.isAnomalous)
+    }
+}

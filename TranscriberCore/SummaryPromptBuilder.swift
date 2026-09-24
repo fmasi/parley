@@ -153,7 +153,8 @@ enum SummaryPromptBuilder {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
         let amounts = "(\(delivered) s delivered of \(expected) s expected)"
         let zeros = clampedZeros(note)
-        let silence = zeros.map(seconds) ?? "?"
+        // A figure summed over measured and unmeasured sessions is only a lower bound (round 3 item 5).
+        let silence = (note.exactZeroIsLowerBound ? "at least " : "") + (zeros.map(seconds) ?? "?")
         // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
         // not hide how much.
         let silenceSuffix = (zeros ?? 0).rounded() >= 1 && (zeros ?? 0).isFinite

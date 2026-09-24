@@ -303,6 +303,64 @@ public struct CaptureGap: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - DurableFile
+
+/// Writes a file so that it survives a power loss, not only a crash (R2a M6, round 3 item 2): a fresh
+/// temp file next to it, flushed to the disk itself with F_FULLFSYNC (plain `fsync` where the file
+/// system can't), renamed over the destination, then the folder synced (best effort). Used where a
+/// later step acts on the strength of the write: WAVs are deleted once session.json holds their
+/// chunk, and the finalized marker vouches for the transcript.
+enum DurableFile {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var synced: [String] = []
+
+    /// Test seam: every path fully synced, in order.
+    static var syncedForTesting: [String] { lock.withLock { synced } }
+
+    static func replace(_ url: URL, with data: Data) throws {
+        let directory = url.deletingLastPathComponent()
+        let tmp = directory.appendingPathComponent("\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        do {
+            try write(data, toNewFile: tmp, recordingAs: url)
+            guard Darwin.rename(tmp.path, url.path) == 0 else { throw posixError(errno) }
+            syncDirectory(directory)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
+        }
+    }
+
+    private static func write(_ data: Data, toNewFile url: URL, recordingAs final: URL) throws {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fd >= 0 else { throw posixError(errno) }
+        defer { close(fd) }
+        try data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let n = Darwin.write(fd, buffer.baseAddress! + offset, buffer.count - offset)
+                guard n > 0 else { throw posixError(n < 0 ? errno : EIO) }
+                offset += n
+            }
+        }
+        if fcntl(fd, F_FULLFSYNC) == 0 {
+            lock.withLock { synced.append(final.path) }
+        } else if fsync(fd) != 0 {
+            throw posixError(errno)
+        }
+    }
+
+    static func syncDirectory(_ directory: URL) {
+        let fd = open(directory.path, O_RDONLY)
+        guard fd >= 0 else { return }
+        if fcntl(fd, F_FULLFSYNC) != 0 { _ = fsync(fd) }
+        close(fd)
+    }
+
+    static func posixError(_ code: Int32) -> Error {
+        CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+    }
+}
+
 // MARK: - SessionState
 
 /// A session.json that belonged to another recording, moved aside rather than overwritten.
@@ -407,8 +465,8 @@ public struct SessionState: Codable {
     /// same file concurrently hung the process in the kernel (`renameatx_np`) in a test; a salvage and
     /// a live recording can share a day folder.
     private static let ioLock = NSLock()
-    /// Test seam: how many files were flushed with F_FULLFSYNC (read under the test's own ordering).
-    nonisolated(unsafe) static var fullSyncsForTesting = 0
+    /// Test seam: behave as a volume without `RENAME_EXCL` (exFAT, SMB).
+    nonisolated(unsafe) static var exclusiveRenameUnsupportedForTesting = false
 
     // MARK: - JSON encoder/decoder
 
@@ -467,15 +525,7 @@ public struct SessionState: Codable {
             displaced = DisplacedSession(sessionId: theirs, movedTo: aside)
         }
 
-        let tmp = directory.appendingPathComponent("\(fileName).\(UUID().uuidString).tmp")
-        do {
-            try writeDurably(data, to: tmp)
-            try rename(tmp, to: dest)
-            syncDirectory(directory)
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-            throw error
-        }
+        try DurableFile.replace(dest, with: data)
 
         Logger.state.debug("SessionState written — id: \(state.sessionId, privacy: .sensitive), chunks: \(state.chunks.count)")
         return displaced
@@ -485,40 +535,31 @@ public struct SessionState: Codable {
     /// never replaces an existing copy.
     private static func moveAsideExclusively(_ file: URL, directory: URL, sessionId: String?) throws -> URL {
         let preferred = asideURL(directory: directory, sessionId: sessionId)
-        if renamex_np(file.path, preferred.path, UInt32(RENAME_EXCL)) == 0 { return preferred }
-        guard errno == EEXIST, let sessionId else { throw posixError(errno) }
-        let unique = directory.appendingPathComponent("session-\(sessionId).\(UUID().uuidString).json")
-        guard renamex_np(file.path, unique.path, UInt32(RENAME_EXCL)) == 0 else { throw posixError(errno) }
-        return unique
-    }
-
-    /// Write `data` to a new file and flush it to the disk itself (F_FULLFSYNC), not just to the
-    /// drive's cache; plain `fsync` where the file system can't.
-    private static func writeDurably(_ data: Data, to url: URL) throws {
-        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
-        guard fd >= 0 else { throw posixError(errno) }
-        defer { close(fd) }
-        try data.withUnsafeBytes { buffer in
-            var offset = 0
-            while offset < buffer.count {
-                let n = Darwin.write(fd, buffer.baseAddress! + offset, buffer.count - offset)
-                guard n > 0 else { throw posixError(n < 0 ? errno : EIO) }
-                offset += n
-            }
-        }
-        if fcntl(fd, F_FULLFSYNC) == 0 {
-            fullSyncsForTesting += 1
-        } else if fsync(fd) != 0 {
-            throw posixError(errno)
+        let unique = { directory.appendingPathComponent("session-\(sessionId ?? "unreadable").\(UUID().uuidString).json") }
+        switch renameExclusively(file, to: preferred) {
+        case 0:
+            return preferred
+        case EEXIST:
+            let other = unique()
+            let code = renameExclusively(file, to: other)
+            guard code == 0 else { throw posixError(code) }
+            return other
+        case ENOTSUP, EINVAL:
+            // exFAT and SMB volumes have no RENAME_EXCL, and `recording_directory` may be one (round 3
+            // item 1). Check-then-rename instead: `ioLock` (held by the caller) serializes every write
+            // in this process, and only this process writes session files.
+            let target = FileManager.default.fileExists(atPath: preferred.path) ? unique() : preferred
+            try rename(file, to: target)
+            return target
+        case let code:
+            throw posixError(code)
         }
     }
 
-    /// The rename is only durable once the folder's entry is: best effort, never a failed write.
-    private static func syncDirectory(_ directory: URL) {
-        let fd = open(directory.path, O_RDONLY)
-        guard fd >= 0 else { return }
-        if fcntl(fd, F_FULLFSYNC) != 0 { _ = fsync(fd) }
-        close(fd)
+    /// `renamex_np(RENAME_EXCL)`; 0 or the errno.
+    private static func renameExclusively(_ from: URL, to: URL) -> Int32 {
+        if exclusiveRenameUnsupportedForTesting { return ENOTSUP }
+        return renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 ? 0 : errno
     }
 
     /// `session.json.<uuid>.tmp` left by a write that died. Only this process writes session.json and
@@ -530,9 +571,7 @@ public struct SessionState: Codable {
         }
     }
 
-    private static func posixError(_ code: Int32) -> Error {
-        CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
-    }
+    private static func posixError(_ code: Int32) -> Error { DurableFile.posixError(code) }
 
     /// POSIX `rename(2)`: atomic on one volume, replaces `to` if it exists.
     private static func rename(_ from: URL, to: URL) throws {
@@ -604,22 +643,14 @@ public struct SessionState: Codable {
 
     // MARK: - Finalized marker (R2a item 12)
 
-    /// Record, durably, that `sessionId` was finalized into `transcript`.
+    /// Record, durably, that `sessionId` was finalized into `transcript`. The caller writes the
+    /// transcript durably first: the marker must never vouch for a transcript still in a cache.
     public static func markFinalized(directory: URL, sessionId: String, transcript: String) throws {
         let marker: [String: String] = ["session_id": sessionId, "transcript": transcript,
                                         "finalized_at": ISO8601DateFormatter().string(from: Date())]
         let data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
         ioLock.lock(); defer { ioLock.unlock() }
-        let url = finalizedMarkerURL(directory: directory, sessionId: sessionId)
-        let tmp = directory.appendingPathComponent(".\(sessionId).finalized.\(UUID().uuidString).tmp")
-        do {
-            try writeDurably(data, to: tmp)
-            try rename(tmp, to: url)
-            syncDirectory(directory)
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-            throw error
-        }
+        try DurableFile.replace(finalizedMarkerURL(directory: directory, sessionId: sessionId), with: data)
     }
 
     /// Whether `sessionId` was marked finalized.

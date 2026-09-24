@@ -295,4 +295,22 @@ struct SummaryPromptBuilderTests {
         let m = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 600, expectedSeconds: 600, exactZeroSeconds: 900))
         #expect(SummaryPromptBuilder.captureLine(m) == "Your microphone: recorded only digital silence (600 s)")
     }
+
+    // MARK: - Round 3 item 5
+
+    /// An exact-zero figure summed over a measured and an unmeasured session is a lower bound: it is
+    /// worded "at least N s", never a plain total.
+    @Test func aLowerBoundSilenceIsWordedAtLeast() {
+        let partial = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120,
+                                                   exactZeroSeconds: 1740, permissionDenied: true, exactZeroIsLowerBound: true))
+        #expect(SummaryPromptBuilder.captureLine(partial)
+                == "Remote audio: partly captured — at least 1740 s of 3120 s was digital silence; system audio permission was not granted for part of the call")
+        let mic = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 3600, expectedSeconds: 3600, exactZeroSeconds: 3300,
+                                              exactZeroIsLowerBound: true))
+        #expect(SummaryPromptBuilder.captureLine(mic) == "Your microphone: captured, but at least 3300 s of 3600 s was digital silence")
+        let shortfall = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400,
+                                                     exactZeroIsLowerBound: true))
+        #expect(SummaryPromptBuilder.captureLine(shortfall)
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); at least 400 s of it was digital silence")
+    }
 }

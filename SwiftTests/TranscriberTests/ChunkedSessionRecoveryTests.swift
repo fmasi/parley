@@ -326,4 +326,93 @@ struct ChunkedSessionRecoveryTests {
         #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "nothing re-ingested")
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.wav").path), "the preserved WAVs are untouched")
     }
+
+    // MARK: - Round 3 (items 2, 3, 4)
+
+    /// A finalized session "m" with preserved WAVs: returns the directory, the transcript and the runner.
+    private func finalizedSession(format: String = "json") async throws -> (dir: URL, transcript: URL, config: Config, runner: TranscriptionRunner) {
+        let dir = try makeTempDir()
+        var config = Config.default
+        config.preserveSourceWAV = true
+        config.outputFormat = format
+        let processor = await ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-0.wav"), seconds: 1)
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: 0, systemPath: dir.appendingPathComponent("m-0.wav").path,
+                                                                     micPath: dir.appendingPathComponent("m-0_mic.wav").path,
+                                                                     startTime: Date(timeIntervalSince1970: 0)))
+        let runner = await TranscriptionRunner()
+        let result = try await runner.finalize(sessionState: await processor.getSessionState(), outputDirectory: dir, config: config)
+        return (dir, result.jsonPath, config, runner)
+    }
+
+    /// Item 2: the transcript is flushed to the disk BEFORE the marker that vouches for it.
+    @Test func theTranscriptIsDurableBeforeTheMarker() async throws {
+        let before = DurableFile.syncedForTesting.count
+        let (dir, transcript, _, _) = try await finalizedSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let synced = Array(DurableFile.syncedForTesting.dropFirst(before))
+        let transcriptAt = try #require(synced.firstIndex(of: transcript.path))
+        let markerAt = try #require(synced.firstIndex(of: dir.appendingPathComponent(".m.finalized").path))
+        #expect(transcriptAt < markerAt)
+    }
+
+    /// Items 2 + 3: a finalized session's leftover session.json (a crash after the marker, before its
+    /// deletion) is cleaned up once the transcript is verified, a missing TXT is re-written from the
+    /// transcript, and the next recording records no false displacement.
+    @Test func aVerifiedFinalizedSessionIsCleanedUpNotReFinalized() async throws {
+        let (dir, transcript, config, runner) = try await finalizedSession(format: "txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let leftover = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1)
+        try SessionState.write(leftover, directory: dir)
+        let txt = dir.appendingPathComponent("m.txt")
+        try FileManager.default.removeItem(at: txt)
+        let bytes = try Data(contentsOf: transcript)
+        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                              transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        let after = try Data(contentsOf: transcript)
+        #expect(result?.jsonPath == transcript && after == bytes)
+        #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "the leftover session.json is gone")
+        #expect(FileManager.default.fileExists(atPath: txt.path), "the TXT is re-written from the transcript")
+        #expect(try SessionState.write(SessionState(sessionId: "next", meetingStart: Date(), engine: "fluid_audio", chunkDurationMinutes: 1), directory: dir) == nil,
+                "the next recording displaces nothing")
+    }
+
+    /// Item 2: the marker vouches for a transcript that does NOT parse (damaged). session.json is kept
+    /// and the session is finalized again from it — never deleted on the marker's word alone.
+    @Test func anUnverifiableTranscriptKeepsSessionJsonAndIsFinalizedAgain() async throws {
+        let (dir, transcript, config, runner) = try await finalizedSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1,
+                                 chunks: [ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                                                         segments: [.init(start: 0, end: 5, text: "from session.json", speaker: "Speaker 1", source: "remote")],
+                                                         speakerDatabase: ["Speaker 1": [1, 0, 0]])])
+        try SessionState.write(state, directory: dir)
+        try Data("{ damaged".utf8).write(to: transcript)
+        #expect(CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                              transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        let rewritten = try #require(result).jsonPath
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: rewritten)) as? [String: Any])
+        #expect((json["segments"] as? [[String: Any]])?.compactMap { $0["text"] as? String } == ["from session.json"])
+        #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "deleted only after the new transcript was written")
+    }
+
+    /// Item 4: the marker alone — the transcript renamed or removed by the user, no session.json. The
+    /// preserved WAVs are NOT orphans; nothing is re-ingested, nothing is written.
+    @Test func aMarkerAloneNeverReIngests() async throws {
+        let (dir, transcript, config, runner) = try await finalizedSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.moveItem(at: transcript, to: dir.appendingPathComponent("Renamed by me.json"))
+        #expect(CrashRecoveryPlanner.isFinalized(outputDirectory: dir, sessionId: "m"))
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: []).isEmpty)
+        #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                              transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        #expect(result == nil)
+        #expect(!FileManager.default.fileExists(atPath: transcript.path), "no transcript is re-created")
+        #expect(SessionState.read(directory: dir, sessionId: "m") == nil)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.wav").path), "the preserved WAV is untouched")
+    }
 }

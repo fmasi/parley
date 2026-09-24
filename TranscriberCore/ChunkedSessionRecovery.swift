@@ -12,13 +12,28 @@ public enum ChunkedSessionRecovery {
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
                         runner: TranscriptionRunner, provenance: CaptureProvenance? = nil) async throws -> TranscriptionResult? {
         // A finalized session is finished (R2a item 12): a lingering recovery file never re-ingests its
-        // chunks or re-finalizes over its transcript (renames and edits would be lost). A leftover
-        // session.json of it (a crash between the transcript write and its deletion) is removed.
+        // chunks (preserved WAVs, archives) or re-finalizes over its transcript — renames and edits
+        // would be lost.
         if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
-            Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) already finalized — the recovery file lingered; nothing re-ingested or re-finalized")
-            SessionState.delete(directory: outputDirectory, sessionId: sessionId)
             let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
-            return FileManager.default.fileExists(atPath: transcript.path) ? TranscriptionResult(jsonPath: transcript) : nil
+            if TranscriptAssembler.verifies(transcript) {
+                // Verified: a leftover session.json (a crash between the marker and its deletion) goes,
+                // so the next recording records no false displacement, and a missing TXT/SRT is
+                // re-written from the transcript (round 3 items 2, 3).
+                Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) already finalized — the recovery file lingered; nothing re-ingested or re-finalized")
+                SessionState.delete(directory: outputDirectory, sessionId: sessionId)
+                rewriteMissingFormatFile(of: transcript)
+                return TranscriptionResult(jsonPath: transcript)
+            }
+            // The transcript is missing or unreadable. Never delete session.json on the marker's word:
+            // when this session's state is there, finalize again from it — its chunks only, no orphans.
+            guard var state = SessionState.read(directory: outputDirectory, sessionId: sessionId), !state.chunks.isEmpty else {
+                Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) finalized, its transcript gone or unreadable and no session state — nothing re-ingested")
+                return nil
+            }
+            Logger.state.error("Recovery found \(sessionId, privacy: .sensitive) finalized but its transcript unreadable — finalizing again from session.json")
+            if let provenance { state.provenance = provenance }
+            return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
         }
         let existingState = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         // `orphanChunks` only needs completed indices, not the whole baseState, so it's computed
@@ -75,6 +90,22 @@ public enum ChunkedSessionRecovery {
         }
         if let provenance { state.provenance = provenance }
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
+    }
+
+    /// The TXT/SRT a finalized transcript's `output_format` asks for, re-written when missing.
+    private static func rewriteMissingFormatFile(of transcript: URL) {
+        guard let data = try? Data(contentsOf: transcript),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let format = (json["metadata"] as? [String: Any])?["output_format"] as? String,
+              ["txt", "srt"].contains(format)
+        else { return }
+        let file = transcript.deletingPathExtension().appendingPathExtension(format)
+        guard !FileManager.default.fileExists(atPath: file.path) else { return }
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: transcript)
+        } catch {
+            Logger.files.error("Could not re-write the finalized transcript's \(format, privacy: .public): \(error, privacy: .private)")
+        }
     }
 
     /// When an orphan chunk began: its WAV's creation date (the helper created it at the rotation).

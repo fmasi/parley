@@ -44,8 +44,15 @@ public enum CrashRecoveryPlanner {
             || FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("\(sessionId).json").path)
     }
 
+    /// Whether recovery has work to do. A finalized session has none — unless its transcript can't be
+    /// read back and its own session state is still there: then it is finalized again from that state
+    /// (round 3 item 2), never from re-ingested orphans.
     public static func isChunkedSessionRecoverable(outputDirectory: URL, sessionId: String) -> Bool {
-        guard !isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) else { return false }
+        if isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
+            let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
+            guard !TranscriptAssembler.verifies(transcript) else { return false }
+            return SessionState.read(directory: outputDirectory, sessionId: sessionId).map { !$0.chunks.isEmpty } ?? false
+        }
         let state = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         if let state, !state.chunks.isEmpty { return true }
         let completed = Set(state?.chunks.map(\.index) ?? [])

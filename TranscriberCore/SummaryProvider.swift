@@ -35,9 +35,12 @@ public struct CaptureSideNote: Equatable, Sendable {
     /// Content-compromising capture anomalies recorded on THIS side (`content_anomaly_count`); nil
     /// when not recorded.
     public let anomalyCount: Int?
+    /// `exactZeroSeconds` sums measured and unmeasured sessions: at least that much (round 3 item 5).
+    public let exactZeroIsLowerBound: Bool
 
     public init(status: String, deliveredSeconds: Double, expectedSeconds: Double,
-                exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil) {
+                exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil, exactZeroIsLowerBound: Bool = false) {
+        self.exactZeroIsLowerBound = exactZeroIsLowerBound
         self.status = status
         self.deliveredSeconds = deliveredSeconds
         self.expectedSeconds = expectedSeconds

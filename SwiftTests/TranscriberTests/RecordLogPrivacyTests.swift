@@ -11,31 +11,56 @@ import Testing
 /// `String(describing:)`, is a failure unless it is on the explicit allowlist below, with its reason.
 @Suite struct RecordLogPrivacyTests {
 
+    /// One allowed source LINE (trimmed, exact): an allowlisted file gets no pass for any other line
+    /// (R2 round 3 item 7). Entries for other streams' sites go when those streams fix them.
     struct Allowed {
         let file: String
-        let expression: String
+        let line: String
         let reason: String
     }
 
     static let allowlist: [Allowed] = [
         // #134: provider/HTTP failures are public on purpose so they are diagnosable; the text is
         // the provider's own (or URLError's), never a path. `invalidEndpoint` is sanitized apart.
-        Allowed(file: "MeetingSummarizer.swift", expression: "error.localizedDescription", reason: "#134 provider error text"),
-        Allowed(file: "MeetingSummarizer.swift", expression: "error.code.rawValue", reason: "#134 URLError code"),
+        Allowed(file: "MeetingSummarizer.swift",
+                line: #"Logger.transcription.error("Summary generation failed: \(error.localizedDescription, privacy: .public)")"#,
+                reason: "#134 provider error text"),
+        Allowed(file: "MeetingSummarizer.swift",
+                line: #""Summary generation failed: \(error.code.rawValue, privacy: .public) \(error.localizedDescription, privacy: .public)""#,
+                reason: "#134 URLError code and text"),
         // Enum values: no path, no free text.
-        Allowed(file: "AppState.swift", expression: "String(describing: oldValue)", reason: "recording phase enum"),
-        Allowed(file: "AppState.swift", expression: "String(describing: self.phase)", reason: "recording phase enum"),
-        Allowed(file: "FluidAudioEngine.swift", expression: "String(describing: audioSource)", reason: "AudioSourceType enum"),
-        Allowed(file: "PermissionManager.swift", expression: "String(describing: self.microphone)", reason: "permission status enum"),
-        Allowed(file: "PermissionManager.swift", expression: "String(describing: self.screenRecording)", reason: "permission status enum"),
-        Allowed(file: "PermissionManager.swift", expression: "String(describing: self.systemAudioRecording)", reason: "permission status enum"),
-        Allowed(file: "PermissionManager.swift", expression: "String(describing: self.calendar)", reason: "permission status enum"),
-        Allowed(file: "PermissionManager.swift", expression: "String(describing: self.notifications)", reason: "permission status enum"),
-        // Other streams' files, left to them (reported in task-R2c-report.md, Round 2):
-        Allowed(file: "WavFileWriter.swift", expression: "error", reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
-        Allowed(file: "CaptureAlarm.swift", expression: "error", reason: "alarm registry (stream H2); an EncodingError, reported to H2"),
-        Allowed(file: "RecordingCoordinator.swift", expression: "error", reason: "\"Restart failed\" (stream L); its context changed on cr/l, reported to L"),
+        Allowed(file: "AppState.swift",
+                line: #"Logger.state.info("State: \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.phase), privacy: .public)")"#,
+                reason: "recording phase enum"),
+        Allowed(file: "FluidAudioEngine.swift",
+                line: #"Logger.transcription.info("Transcribing: \(audioPath.lastPathComponent, privacy: .sensitive) with FluidAudio (source: \(String(describing: audioSource), privacy: .public))")"#,
+                reason: "AudioSourceType enum"),
+        Allowed(file: "PermissionManager.swift",
+                line: #"Logger.permissions.info("Permissions — mic: \(String(describing: self.microphone), privacy: .public), screen: \(String(describing: self.screenRecording), privacy: .public), system audio: \(String(describing: self.systemAudioRecording), privacy: .public) (source \(self.systemAudioSource.rawValue, privacy: .public)), calendar: \(String(describing: self.calendar), privacy: .public), notifications: \(String(describing: self.notifications), privacy: .public)")"#,
+                reason: "permission status enums"),
+        Allowed(file: "PermissionManager.swift", line: #"Logger.permissions.debug("Microphone permission: \(String(describing: self.microphone), privacy: .public)")"#, reason: "permission status enum"),
+        Allowed(file: "PermissionManager.swift", line: #"Logger.permissions.debug("Screen recording permission: \(String(describing: self.screenRecording), privacy: .public)")"#, reason: "permission status enum"),
+        Allowed(file: "PermissionManager.swift", line: #"Logger.permissions.info("System Audio Recording permission: \(String(describing: self.systemAudioRecording), privacy: .public)")"#, reason: "permission status enum"),
+        Allowed(file: "PermissionManager.swift", line: #"Logger.permissions.debug("Calendar permission: \(String(describing: self.calendar), privacy: .public)")"#, reason: "permission status enum"),
+        Allowed(file: "PermissionManager.swift", line: #"Logger.permissions.debug("Notifications permission: \(String(describing: self.notifications), privacy: .public)")"#, reason: "permission status enum"),
+        // Other streams' sites, left to them (task-R2c-report.md, Round 2):
+        Allowed(file: "WavFileWriter.swift",
+                line: #"Logger.files.error("WAV write failure (\(context, privacy: .public)): \(self.path, privacy: .sensitive): \(error, privacy: .public)")"#,
+                reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
+        Allowed(file: "WavFileWriter.swift", line: #"Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")"#,
+                reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
+        Allowed(file: "WavFileWriter.swift", line: #"Logger.files.error("WAV header repair failed: \(path, privacy: .sensitive): \(error, privacy: .public)")"#,
+                reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
+        Allowed(file: "CaptureAlarm.swift", line: #"Logger.audio.error("Capture status snapshot could not be encoded: \(error, privacy: .public)")"#,
+                reason: "alarm registry (stream H2); an EncodingError, reported to H2"),
+        Allowed(file: "RecordingCoordinator.swift", line: #"Logger.state.error("Restart failed: \(error, privacy: .public)")"#,
+                reason: "stream L's site; its context changed on cr/l, reported to L"),
     ]
+
+    static func isAllowed(file: String, line: Substring) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return allowlist.contains { $0.file == file && $0.line == trimmed }
+    }
 
     static let sensitiveWords = ["error", "Error", "localizedDescription", "path", "url", "URL", "lastPathComponent"]
 
@@ -82,7 +107,7 @@ import Testing
             for (offset, line) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 for body in Self.interpolations(in: line) {
                     guard let expression = Self.leakyPublicExpression(body) else { continue }
-                    if Self.allowlist.contains(where: { $0.file == file && $0.expression == expression }) { continue }
+                    if Self.isAllowed(file: file, line: line) { continue }
                     offenders.append("\(file):\(offset + 1) \(expression)")
                 }
             }
@@ -96,5 +121,14 @@ import Testing
         let flagged = Self.interpolations(in: line).compactMap(Self.leakyPublicExpression)
         #expect(flagged == ["type(of: error)", "url.lastPathComponent"])
         #expect(Self.leakyPublicExpression("String(describing: x), privacy: .public") == "String(describing: x)")
+    }
+
+    /// Round 3 item 7: an allowlisted file gets no pass for a NEW line — only the exact lines listed.
+    @Test func anAllowlistedFileGetsNoPassForANewLine() {
+        #expect(Self.isAllowed(file: "WavFileWriter.swift",
+                               line: #"            Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")"#))
+        #expect(!Self.isAllowed(file: "WavFileWriter.swift", line: #"Logger.files.error("Something new: \(error, privacy: .public)")"#))
+        #expect(!Self.isAllowed(file: "ChunkProcessor.swift",
+                                line: #"Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")"#))
     }
 }

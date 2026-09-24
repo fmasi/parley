@@ -350,9 +350,28 @@ struct ChunkSessionTests {
     @Test("aWriteIsFullySyncedBeforeTheRename")
     func aWriteIsFullySyncedBeforeTheRename() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let before = SessionState.fullSyncsForTesting
+        let before = DurableFile.syncedForTesting.count
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
-        #expect(SessionState.fullSyncsForTesting > before)
+        #expect(DurableFile.syncedForTesting.dropFirst(before).contains(dir.appendingPathComponent("session.json").path))
+    }
+
+    /// Round 3 item 1 (IMPORTANT): `RENAME_EXCL` is not supported on exFAT or SMB (ENOTSUP), and
+    /// `recording_directory` can be an external drive: every write that had to move another session
+    /// aside threw. It falls back to check-then-rename under the lock — still never replacing a copy.
+    @Test("anExclusiveRenameThatIsNotSupportedFallsBackAndNeverReplaces")
+    func anExclusiveRenameThatIsNotSupportedFallsBackAndNeverReplaces() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        SessionState.exclusiveRenameUnsupportedForTesting = true
+        defer { SessionState.exclusiveRenameUnsupportedForTesting = false }
+        try SessionState.write(session("morning", chunks: [0]), directory: dir)
+        let first = try #require(try SessionState.write(session("afternoon", chunks: [0]), directory: dir))
+        #expect(first.movedTo.lastPathComponent == "session-morning.json")
+        let firstAside = try Data(contentsOf: first.movedTo)
+        try SessionState.write(session("morning", chunks: [0, 1]), directory: dir)
+        let second = try #require(try SessionState.write(session("afternoon", chunks: [0, 1]), directory: dir))
+        #expect(second.movedTo.lastPathComponent != "session-morning.json")
+        #expect(try Data(contentsOf: first.movedTo) == firstAside, "the existing copy is not replaced")
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 2)
     }
 
     /// R2a M8: a tmp left by a write that died (crash, power loss) is swept at the next write.

@@ -311,12 +311,12 @@ struct ChunkProcessorTests {
     // MARK: - R2 council
 
     private func processor(dir: URL, preserve: Bool = false, engine: any TranscriptionEngine = FakeEngine(),
-                           state: SessionState? = nil) -> ChunkProcessor {
+                           state: SessionState? = nil, scratch: URL? = nil) -> ChunkProcessor {
         var config = Config.default
         config.preserveSourceWAV = preserve
         return ChunkProcessor(config: config, outputDirectory: dir,
             sessionState: state ?? SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio", chunkDurationMinutes: 10),
-            transcriber: engine, diarizer: FakeDiarizer())
+            transcriber: engine, diarizer: FakeDiarizer(), scratchDirectory: scratch ?? FileManager.default.temporaryDirectory)
     }
 
     /// C-I4: the WAVs used to be deleted before the chunk reached session.json, so a crash in that
@@ -424,8 +424,9 @@ struct ChunkProcessorTests {
         let archive = try await AudioArchiver.archiveSystemOnly(systemAudio: sys, outputDirectory: dir, bitrateKbps: 64).archivePath
         #expect(!FileManager.default.fileExists(atPath: sys.path))
         let before = try Data(contentsOf: archive)
-        let scratchBefore = Self.scratchDirectories()
-        let processor = processor(dir: dir)
+        // Round 3 item 9: this test's own scratch parent, so a parallel test can't make it fail.
+        let scratch = try makeTempDir(); defer { try? FileManager.default.removeItem(at: scratch) }
+        let processor = processor(dir: dir, scratch: scratch)
         await processor.processLastChunk(chunk0(in: dir))
         let chunk = try #require(await processor.getSessionState().chunks.first)
         #expect(chunk.audioPath == "meeting-0.m4a")
@@ -435,7 +436,7 @@ struct ChunkProcessorTests {
         #expect(try Data(contentsOf: archive) == before, "the only copy is never re-encoded")
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["meeting-0.m4a", "session.json"],
                 "nothing else in the folder")
-        #expect(Self.scratchDirectories() == scratchBefore, "no scratch audio is left behind")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).isEmpty, "no scratch audio is left behind")
     }
 
     // MARK: - R2b item 11
@@ -478,12 +479,6 @@ struct ChunkProcessorTests {
     }
 
     // MARK: - R2 round 2 (R2a M2, M4, M5)
-
-    /// Where `splitArchive` puts its scratch WAVs.
-    static func scratchDirectories() -> Set<String> {
-        Set(((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? [])
-            .filter { $0.hasPrefix("parley-archive-") })
-    }
 
     /// R2a M2: the system WAV gone and the archive present is archive-only whatever the mic WAV —
     /// the archiver deleted the system WAV and died before the mic one. The archive is transcribed as

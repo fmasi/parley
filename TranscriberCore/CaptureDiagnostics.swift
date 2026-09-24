@@ -589,7 +589,9 @@ public struct CaptureDiagnostics: Sendable {
         for event in combined { record(event) }
     }
 
-    public var isAnomalous: Bool { events.contains { $0.severity == .anomaly } }
+    /// Whether `<session>.diag.jsonl` is written: from the out-of-ring tally, so a session whose
+    /// anomalies were evicted still writes it (round 3 item 6).
+    public var isAnomalous: Bool { anomalyTally > 0 }
     /// Count handled benign route changes via the in-place restart they each trigger. (The pinned
     /// 48kHz/mono system tap never emits `.formatChanged`, so counting that would always read 0 for
     /// the AirPods HFP↔A2DP scenario this exists to surface — council F5.)
