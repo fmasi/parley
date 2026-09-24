@@ -141,17 +141,24 @@ public enum TranscriptRediarizer {
         case noAudioForChannel(String)
         case invalidSpeakerCount(Int)
         case producedNoLabels(String)
-        /// A chunk listed in `audio_paths` is not on disk (file name).
-        case chunkMissing(String)
-        /// A chunk that contributes silence to this channel has no recorded duration (file name).
-        case chunkDurationUnknown(String)
+        /// A chunk listed in `audio_paths` is not on disk: its 1-based position and the chunk count.
+        /// By position, never file name — file names name the meeting and this text reaches the UI.
+        case chunkMissing(chunk: Int, of: Int)
+        /// A chunk that contributes silence to this channel has no known length (not recorded, and
+        /// its file cannot be read): 1-based position and the chunk count.
+        case chunkDurationUnknown(chunk: Int, of: Int)
+        /// The recording has capture gaps and the chunks' wall-clock offsets were not recorded, so
+        /// its timeline cannot be rebuilt without shifting every chunk after a gap.
+        case timelineUnknown
 
         public var errorDescription: String? {
             switch self {
-            case .chunkMissing(let name):
-                return "Chunk \(name) is missing — re-detect cannot rebuild the timeline without it."
-            case .chunkDurationUnknown(let name):
-                return "The length of chunk \(name) is unknown — re-detect cannot rebuild the timeline without it."
+            case .chunkMissing(let chunk, let total):
+                return "Chunk \(chunk) of \(total) is missing — re-detect cannot rebuild the timeline without it."
+            case .chunkDurationUnknown(let chunk, let total):
+                return "The length of chunk \(chunk) of \(total) is unknown — re-detect cannot rebuild the timeline without it."
+            case .timelineUnknown:
+                return "This recording has capture gaps and its chunk timing was not recorded — re-detect cannot rebuild the timeline."
             case .unreadableTranscript: return "Could not read the transcript."
             case .noAudioForChannel(let c): return "No \(c) audio is available for this recording."
             case .invalidSpeakerCount(let n): return "\(n) is not a valid number of speakers."
@@ -171,7 +178,6 @@ public enum TranscriptRediarizer {
         source: String,
         speakerCount: Int,
         diarizer: any DiarizationProvider,
-        vadSpeechThreshold: Double = 0.5,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
@@ -194,8 +200,12 @@ public enum TranscriptRediarizer {
         var metadata = json["metadata"] as? [String: Any] ?? [:]
         let audioPaths = (metadata["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        // One entry per `audio_paths` element, stamped at archive time (#204); 0 = unreadable then.
+        // One entry per `audio_paths` element: `chunk_durations` stamped at archive time (#204;
+        // 0 = unreadable then), `chunk_offsets` the wall-clock seconds from the meeting start the
+        // transcript placed each at (finalize).
         let chunkDurations = metadata["chunk_durations"] as? [Double] ?? []
+        let chunkOffsets = metadata["chunk_offsets"] as? [Double]
+        let hasCaptureGaps = !((metadata["capture"] as? [String: Any])?["gaps"] as? [Any] ?? []).isEmpty
 
         // Decode ONCE, at the target format (16 kHz mono Float), and hand that buffer to the
         // diarizer (#204) — the old path decoded the channel's audio up to four separate times
@@ -211,8 +221,8 @@ public enum TranscriptRediarizer {
         // recordings, which is most of them.
         onProgress?(Progress(phase: .decodingAudio))
         let decoded = try await decodeChannelAudio(
-            layout: layout, source: source, chunkDurations: chunkDurations,
-            scratchDirectory: scratchDirectory, onProgress: onProgress)
+            layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
+            hasCaptureGaps: hasCaptureGaps, scratchDirectory: scratchDirectory, onProgress: onProgress)
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
@@ -237,8 +247,9 @@ public enum TranscriptRediarizer {
         }
         // No second VAD pass (P5). These segments already passed the speech/quality gate when the
         // recording was transcribed; gating them again against a fresh speech map dropped text that
-        // had survived once, and a relabel must never lose words.
-        let speechMap: [SpeechRegion]? = nil
+        // had survived once, and a relabel must never lose words. A full-coverage map (every moment
+        // is speech) filters nothing but keeps the "low diarizer quality → Unknown" step, which a
+        // nil map would switch off along with the gate.
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
         // are both in hand, rather than hoping the clusterer honours the request.
@@ -257,11 +268,12 @@ public enum TranscriptRediarizer {
                     confidence: (dict["confidence"] as? Double).map(Float.init))
             }
 
+        let horizon = (transcriptSegments.map(\.end).max() ?? 0) + 1
         let result = StreamLabeling.withDiarization(
             segments: transcriptSegments,
             diarizationResult: diarization,
-            speechMap: speechMap,
-            vadSpeechThreshold: vadSpeechThreshold,
+            speechMap: [SpeechRegion(start: 0, end: horizon, probability: 1)],
+            vadSpeechThreshold: 0.5,
             // nil, not the config value: `speakerCountIsUserStated: true` disables absorption
             // outright, so passing a share would imply a knob that has no effect on this path.
             minSpeakerShare: nil,
@@ -314,18 +326,23 @@ public enum TranscriptRediarizer {
         // wastes the work; cancelling after this leaves a transcript the user asked us not to write.
         try Task.checkCancellation()
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        // Keep the transcript as it was before this re-detect (P5): the exact bytes read above,
-        // written first — if the backup cannot be written, the transcript is not overwritten.
-        try data.write(to: backupURL(for: url), options: .atomic)
+        // Keep the transcript as the pipeline wrote it (P5): written once, before the FIRST
+        // re-detect, and never overwritten — after two re-detects the original labels would
+        // otherwise be gone. If it cannot be written, the transcript is not overwritten either.
+        let backup = backupURL(for: url)
+        if !FileManager.default.fileExists(atPath: backup.path) {
+            try data.write(to: backup, options: .atomic)
+        }
         try out.write(to: url, options: .atomic)
         Logger.transcription.info(
             "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)
     }
 
-    /// `<transcript>.rediarize-backup.json` next to the transcript; each re-detect overwrites it.
+    /// `<transcript>.json.bak` next to the transcript: the transcript before its first re-detect.
+    /// Deliberately not `.json`, so a folder scan never reads it as a second meeting (#152).
     static func backupURL(for transcript: URL) -> URL {
-        transcript.deletingPathExtension().appendingPathExtension("rediarize-backup.json")
+        transcript.appendingPathExtension("bak")
     }
 
     /// What a chunk file can contribute to one channel's audio.
@@ -361,7 +378,16 @@ public enum TranscriptRediarizer {
         case path(URL)
     }
 
-    /// Decode the requested channel to mono Float samples at the diarizer/VAD target rate
+    /// A skipped chunk's length: the cached `chunk_durations` entry when it is usable (> 0 — 0 is the
+    /// "unreadable at archive time" sentinel), else read from the file itself. Refused only when
+    /// neither can say.
+    private static func skippedChunkDuration(_ chunk: URL, index: Int, of total: Int, cached: [Double]) throws -> Double {
+        if index < cached.count, cached[index].isFinite, cached[index] > 0 { return cached[index] }
+        if let read = SpeakerSampleLocator.durations(of: [chunk]).first ?? nil, read > 0 { return read }
+        throw RediarizeError.chunkDurationUnknown(chunk: index + 1, of: total)
+    }
+
+    /// Decode the requested channel to mono Float samples at the diarizer target rate
     /// (16 kHz), concatenating chunks in THAT domain when needed — about 3x smaller than the
     /// 48kHz stereo Int16 source (matches `AudioDecode`'s own "3x smaller" note below), and it
     /// lets the caller skip the old file-based concatenation step
@@ -381,6 +407,8 @@ public enum TranscriptRediarizer {
         layout: AudioLayout,
         source: String,
         chunkDurations: [Double],
+        chunkOffsets: [Double]?,
+        hasCaptureGaps: Bool,
         scratchDirectory: URL,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
@@ -400,14 +428,21 @@ public enum TranscriptRediarizer {
             // No silent filtering: a missing chunk's audio would vanish from the middle of the
             // timeline and every later chunk would slide earlier by its length. When NONE is left
             // (the storage quota evicted the recording's audio), the recording simply has no audio.
-            let missing = chunks.filter { !FileManager.default.fileExists(atPath: $0.path) }
+            let missing = chunks.indices.filter { !FileManager.default.fileExists(atPath: chunks[$0].path) }
             if missing.count == chunks.count { throw RediarizeError.noAudioForChannel(source) }
-            if let first = missing.first { throw RediarizeError.chunkMissing(first.lastPathComponent) }
+            if let first = missing.first { throw RediarizeError.chunkMissing(chunk: first + 1, of: chunks.count) }
             // A channel no chunk carries (the remote side of a mic-only recording) has no audio at
             // all — say so before padding anything.
             guard chunks.contains(where: { channelRole(of: $0, wantsLocal: wantsLocal) != .skip }) else {
                 throw RediarizeError.noAudioForChannel(source)
             }
+            // Each chunk goes at the wall-clock offset the transcript used for it, so labels land on
+            // the right words across a relaunch or sleep gap. Without recorded offsets the chunks
+            // are laid end to end — correct only when nothing is missing between them.
+            let offsets = chunkOffsets.flatMap { $0.count == chunks.count && $0.allSatisfy(\.isFinite) ? $0 : nil }
+            if offsets == nil, hasCaptureGaps, chunks.count > 1 { throw RediarizeError.timelineUnknown }
+            // Cached lengths are trusted only when they line up one-to-one with the chunks.
+            let cachedDurations = chunkDurations.count == chunks.count ? chunkDurations : []
             var combined: [Float] = []
             for (index, chunk) in chunks.enumerated() {
                 // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
@@ -424,15 +459,20 @@ public enum TranscriptRediarizer {
                         onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(chunks.count)))
                     }
                 }
+                if let offsets {
+                    let target = Int((max(0, offsets[index]) * AudioDecode.targetSampleRate).rounded())
+                    if combined.count < target {
+                        combined.append(contentsOf: [Float](repeating: 0, count: target - combined.count))
+                    }
+                }
                 let decodedChunk: [Float]
                 switch role {
                 case .skip:
-                    // This chunk holds only the other channel: it contributes silence of its own
-                    // length, so the chunks after it stay on the transcript's timeline.
-                    guard index < chunkDurations.count, chunkDurations[index] > 0 else {
-                        throw RediarizeError.chunkDurationUnknown(chunk.lastPathComponent)
-                    }
-                    decodedChunk = [Float](repeating: 0, count: Int(chunkDurations[index] * AudioDecode.targetSampleRate))
+                    // This chunk holds only the other channel. With offsets the next chunk's offset
+                    // re-aligns the timeline; without, it contributes silence of its own length.
+                    if offsets != nil { continue }
+                    let duration = try skippedChunkDuration(chunk, index: index, of: chunks.count, cached: cachedDurations)
+                    decodedChunk = [Float](repeating: 0, count: Int(duration * AudioDecode.targetSampleRate))
                 case .useDirectly:
                     decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: chunk)
                 case .needsSplit:

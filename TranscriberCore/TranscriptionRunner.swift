@@ -422,6 +422,10 @@ public final class TranscriptionRunner {
         // merged audio stays on the transcript's wall-clock timeline (P9).
         let audioPaths: [URL]
         var mergedAudio: [String: Any]?
+        // Where the transcript placed each audio file on its wall-clock timeline (seconds from the
+        // meeting start, as TranscriptMerger does) — re-detect rebuilds the same timeline from it.
+        let perChunkOffsets = sortedChunks.map { $0.startTime.timeIntervalSince(sessionState.meetingStart) }
+        var chunkOffsets = perChunkOffsets
         if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
             do {
                 let concatResult = try await AudioConcatenator.concatenate(
@@ -433,6 +437,8 @@ public final class TranscriptionRunner {
                     deleteSources: !(config.preserveSourceWAV ?? false)
                 )
                 audioPaths = [concatResult.outputPath]
+                // The merged file starts at the earliest chunk and carries its gaps as silence.
+                chunkOffsets = [perChunkOffsets.min() ?? 0]
                 mergedAudio = [
                     "passthrough": concatResult.usedPassthrough,
                     "gaps_inserted_seconds": concatResult.gapsInsertedSeconds,
@@ -477,7 +483,9 @@ public final class TranscriptionRunner {
             recordedAt: sessionState.meetingStart,
             captureGaps: sessionState.gaps,
             processingIssues: processingIssues,
-            mergedAudio: mergedAudio
+            mergedAudio: mergedAudio,
+            chunkDurations: audioPaths.map(TranscriptAssembler.duration(of:)),
+            chunkOffsets: chunkOffsets
         )
 
         let baseName = sessionState.sessionId

@@ -277,7 +277,6 @@ struct RenameDialog: View {
         rediarizeStartedAt = Date()
         stopPlayback()
         let path = jsonPath
-        let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
         rediarizeTask = Task {
             do {
                 let outcome = try await TranscriptRediarizer.rediarize(
@@ -285,7 +284,6 @@ struct RenameDialog: View {
                     source: channel,
                     speakerCount: count,
                     diarizer: diarizer,
-                    vadSpeechThreshold: vadThreshold,
                     // Fires from off-main work (chunk decode loop, the diarizer's own background
                     // progress callback) — hop back to the main actor per update rather than
                     // requiring the whole signature be @MainActor, which the diarizer isn't.

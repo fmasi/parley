@@ -210,4 +210,14 @@ struct ChunkSessionTests {
                                                               transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner())
         #expect(result == nil)
     }
+
+    /// R7: a session.json written before P10/P11 (segments with no flags) still decodes — a
+    /// recovery across an upgrade must not lose the session.
+    @Test("preFlagSessionSegmentsDecode")
+    func preFlagSessionSegmentsDecode() throws {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let data = Data(#"{"sessionId":"s","meetingStart":"2026-09-24T16:00:00Z","engine":"fluid_audio","chunkDurationMinutes":5,"chunks":[{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","speakerDatabase":{},"segments":[{"start":0,"end":1,"text":"hi","speaker":"S","source":"remote","qualityScore":0.9}]}]}"#.utf8)
+        let seg = try #require(try decoder.decode(SessionState.self, from: data).chunks.first?.segments.first)
+        #expect(seg.text == "hi" && !seg.filtered && !seg.echo && !seg.duplicate)
+    }
 }

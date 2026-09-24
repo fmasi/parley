@@ -189,4 +189,18 @@ struct TranscriptAssemblerTests {
         let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
         #expect(capture["remote"] != nil && (capture["gaps"] as? [Any])?.count == 1)
     }
+
+    @Test func flagsAreWrittenOnlyWhenSet() throws {
+        let json = TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: 0, end: 1, speaker: "A", text: "plain", source: "remote"),
+                       LabeledSegment(start: 1, end: 2, speaker: "A", text: "echo", source: "local", echo: true),
+                       LabeledSegment(start: 2, end: 3, speaker: "Unknown", text: "noise", source: "remote", filtered: true),
+                       LabeledSegment(start: 3, end: 4, speaker: "A", text: "again", source: "remote", duplicate: true)],
+            audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil, diarization: false, dualStream: true)
+        let segs = try #require(json["segments"] as? [[String: Any]])
+        #expect(segs[0]["filtered"] == nil && segs[0]["echo"] == nil && segs[0]["duplicate"] == nil)
+        #expect(segs[1]["echo"] as? Bool == true && segs[1]["filtered"] == nil)
+        #expect(segs[2]["filtered"] as? Bool == true)
+        #expect(segs[3]["duplicate"] as? Bool == true)
+    }
 }

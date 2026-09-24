@@ -522,13 +522,26 @@ struct TranscriptRediarizerTimelineTests {
         #expect(d.samplesSeen == 11 * 16_000)
     }
 
+    /// R6 review round 1: with no `chunk_durations` the skipped chunk's length is read from its file.
+    @Test func aMissingDurationFallsBackToTheFile() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(withDurations: false); defer { cleanup() }
+        let d = CountingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: d)
+        #expect(d.samplesSeen == 11 * 16_000)
+    }
+
+    /// ...and refused only when the file cannot say either. The message names the chunk by
+    /// position, never by file name (file names name the meeting).
     @Test func aSkipChunkWithUnknownDurationIsRefused() async throws {
         let (t, _, cleanup) = try makeTwoChunkRecording(withDurations: false); defer { cleanup() }
+        let mic0 = t.deletingLastPathComponent().appendingPathComponent("call-0_mic.wav")
+        try Data("not audio".utf8).write(to: mic0)
         do {
             _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
             Issue.record("expected chunkDurationUnknown")
-        } catch TranscriptRediarizer.RediarizeError.chunkDurationUnknown(let name) {
-            #expect(name == "call-0_mic.wav")
+        } catch TranscriptRediarizer.RediarizeError.chunkDurationUnknown(let chunk, let total) {
+            #expect(chunk == 1 && total == 2)
+            #expect(TranscriptRediarizer.RediarizeError.chunkDurationUnknown(chunk: 1, of: 2).errorDescription?.contains("call-") == false)
         }
     }
 
@@ -538,18 +551,54 @@ struct TranscriptRediarizerTimelineTests {
         do {
             _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
             Issue.record("expected chunkMissing")
-        } catch TranscriptRediarizer.RediarizeError.chunkMissing(let name) {
-            #expect(name == "call-1.wav")
+        } catch TranscriptRediarizer.RediarizeError.chunkMissing(let chunk, let total) {
+            #expect(chunk == 2 && total == 2)
+            #expect(TranscriptRediarizer.RediarizeError.chunkMissing(chunk: 2, of: 2).errorDescription == "Chunk 2 of 2 is missing — re-detect cannot rebuild the timeline without it.")
         }
     }
 
-    @Test func aBackupIsWrittenBeforeOverwriting() async throws {
+    /// R6 review round 1: the backup holds the pipeline's ORIGINAL, written once and never
+    /// overwritten, and does not end in `.json` (folder scanners would read it as a second meeting).
+    @Test func aBackupIsWrittenOnceAndKeepsTheOriginal() async throws {
         let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
         let before = try Data(contentsOf: t)
         _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
-        let backup = t.deletingPathExtension().appendingPathExtension("rediarize-backup.json")
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 2, diarizer: FakeDiarizer())
+        let backup = t.appendingPathExtension("bak")
+        #expect(backup.lastPathComponent == "t.json.bak")
         #expect(try Data(contentsOf: backup) == before)
         #expect(try Data(contentsOf: t) != before)
+    }
+
+    /// R6 review round 1: a re-detect must not drop words — no second VAD pass.
+    @Test func theUnflaggedSegmentCountIsUnchanged() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        func unflagged() throws -> Int {
+            let json = try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any]
+            return (json?["segments"] as? [[String: Any]] ?? []).filter { !TranscriptAssembler.isFlagged($0) }.count
+        }
+        let before = try unflagged()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+        #expect(try unflagged() == before)
+    }
+
+    /// R6 review round 1: without a speech map the "low diarizer quality → Unknown" step was
+    /// skipped; a full-coverage map keeps it (and filters nothing).
+    @Test func lowDiarizerQualityStillReadsUnknown() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        struct LowQualityDiarizer: DiarizationProvider {
+            func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { result }
+            func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { result }
+            var result: DiarizationResult {
+                DiarizationResult(segments: [DiarizedSegment(start: 0, end: 5, speaker: "S2", qualityScore: 0.9),
+                                             DiarizedSegment(start: 10, end: 11, speaker: "S1", qualityScore: 0.1)],
+                                  speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+            }
+        }
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 2, diarizer: LowQualityDiarizer())
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any]
+        let seg = try #require((json?["segments"] as? [[String: Any]])?.first { $0["text"] as? String == "hi" })
+        #expect(seg["speaker"] as? String == "Remote Unknown")
     }
 
     /// P10/P11: a flagged segment (echo / filtered) is not relabeled and keeps its flag — otherwise
@@ -593,5 +642,114 @@ struct TranscriptRediarizerTimelineTests {
         let after = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
         let issues = try #require((after["metadata"] as? [String: Any])?["processing_issues"] as? [[String: Any]])
         #expect(issues.map { "\($0["code"]!)/\($0["track"]!)" } == ["clusters_absorbed/local", "asr_failed/remote"])
+    }
+
+    // MARK: - Pipeline-produced transcripts (R6 review round 1)
+
+    /// Labels S1, S2, … one per contiguous stretch of non-zero samples, so the labels show where the
+    /// diarizer SAW the audio.
+    struct EnergyDiarizer: DiarizationProvider {
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { DiarizationResult(segments: []) }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+            let window = 1_600
+            var segments: [DiarizedSegment] = []
+            var db: [String: [Float]] = [:]
+            var runStart: Int?
+            func close(_ end: Int) {
+                guard let s = runStart else { return }
+                let name = "S\(segments.count + 1)"
+                segments.append(DiarizedSegment(start: Double(s) / 16_000, end: Double(end) / 16_000, speaker: name))
+                db[name] = segments.count == 1 ? [1, 0, 0] : [0, 1, 0]
+                runStart = nil
+            }
+            var i = 0
+            while i < audio.count {
+                let upper = min(audio.count, i + window)
+                let active = audio[i..<upper].contains { $0 != 0 }
+                if active, runStart == nil { runStart = i }
+                if !active { close(i) }
+                i = upper
+            }
+            close(audio.count)
+            return DiarizationResult(segments: segments, speakerDatabase: db)
+        }
+    }
+
+    private func writeToneWav(at url: URL, seconds: Double) throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let frames = AVAudioFrameCount(seconds * 16000)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        for i in 0..<Int(frames) { buffer.floatChannelData![0][i] = Float(sin(2.0 * .pi * 440 * Double(i) / 16000)) * 0.5 }
+        try AVAudioFile(forWriting: url, settings: format.settings).write(from: buffer)
+    }
+
+    /// Finalize a session whose chunks fell back to WAV, the way the pipeline writes it.
+    @MainActor
+    private func finalizedTranscript(in dir: URL, chunks: [ProcessedChunk], meetingStart: Date) async throws -> URL {
+        let state = SessionState(sessionId: "call", meetingStart: meetingStart, engine: "fluid_audio", chunkDurationMinutes: 10, chunks: chunks)
+        return try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default).jsonPath
+    }
+
+    /// (a) finalize stamps `chunk_durations` (and offsets), so a skipped chunk is padded without
+    /// any hand-written metadata.
+    @Test func aPipelineTranscriptIsPaddedAcrossASkippedChunk() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-pipe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try writeToneWav(at: dir.appendingPathComponent("call-0_mic.wav"), seconds: 10)
+        try writeToneWav(at: dir.appendingPathComponent("call-1.wav"), seconds: 1)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let t = try await finalizedTranscript(in: dir, chunks: [
+            ProcessedChunk(index: 0, startTime: t0, audioPath: "call-0_mic.wav",
+                           segments: [.init(start: 1, end: 2, text: "mine", speaker: "Local Speaker 1", source: "local")],
+                           speakerDatabase: [:], localSpeakerDatabase: ["Local Speaker 1": [1, 0, 0]], isDualStream: true),
+            ProcessedChunk(index: 1, startTime: t0.addingTimeInterval(10), audioPath: "call-1.wav",
+                           segments: [.init(start: 0.2, end: 0.8, text: "hi", speaker: "Remote Speaker 1", source: "remote")],
+                           speakerDatabase: ["Remote Speaker 1": [0, 1, 0]], isDualStream: true),
+        ], meetingStart: t0)
+        let meta = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect((meta["chunk_durations"] as? [Double])?.count == 2)
+        let d = CountingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: d)
+        #expect(d.samplesSeen == 11 * 16_000)
+    }
+
+    /// R6 review round 1: a 60 s relaunch gap between two chunks. The transcript places chunk 1 at
+    /// its wall-clock offset; re-detect must too, or its labels land on the wrong words.
+    @Test func aCaptureGapKeepsLabelsOnTheRightWords() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-gap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try writeToneWav(at: dir.appendingPathComponent("call-0.wav"), seconds: 2)
+        try writeToneWav(at: dir.appendingPathComponent("call-1.wav"), seconds: 2)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let t = try await finalizedTranscript(in: dir, chunks: [
+            ProcessedChunk(index: 0, startTime: t0, audioPath: "call-0.wav",
+                           segments: [.init(start: 0.5, end: 1.5, text: "first", speaker: "Speaker 1", source: "remote")],
+                           speakerDatabase: ["Speaker 1": [1, 0, 0]]),
+            ProcessedChunk(index: 1, startTime: t0.addingTimeInterval(62), audioPath: "call-1.wav",
+                           segments: [.init(start: 0.5, end: 1.5, text: "second", speaker: "Speaker 1", source: "remote")],
+                           speakerDatabase: ["Speaker 1": [0, 1, 0]]),
+        ], meetingStart: t0)
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 2, diarizer: EnergyDiarizer())
+        let segs = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])?["segments"] as? [[String: Any]])
+        let first = try #require(segs.first { $0["text"] as? String == "first" })
+        let second = try #require(segs.first { $0["text"] as? String == "second" })
+        #expect(first["speaker"] as? String == "Remote Speaker 1")
+        #expect(second["speaker"] as? String == "Remote Speaker 2")
+    }
+
+    /// Without recorded offsets, a transcript with capture gaps cannot be re-timed: refuse.
+    @Test func gapsWithoutOffsetsAreRefused() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
+        var metadata = try #require(json["metadata"] as? [String: Any])
+        metadata["capture"] = ["gaps": [["start": "1970-01-01T00:00:10Z", "end": "1970-01-01T00:01:10Z", "seconds": 60.0, "reason": "app relaunch"]]]
+        json["metadata"] = metadata
+        try JSONSerialization.data(withJSONObject: json).write(to: t)
+        await #expect(throws: TranscriptRediarizer.RediarizeError.self) {
+            _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+        }
     }
 }

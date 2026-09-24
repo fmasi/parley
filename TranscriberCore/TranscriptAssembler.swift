@@ -17,7 +17,9 @@ public enum TranscriptAssembler {
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
         processingIssues: [[String: Any]]? = nil,
-        mergedAudio: [String: Any]? = nil
+        mergedAudio: [String: Any]? = nil,
+        chunkDurations: [Double]? = nil,
+        chunkOffsets: [Double]? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -81,6 +83,11 @@ public enum TranscriptAssembler {
         if let mergedAudio {
             metadata["merged_audio"] = mergedAudio
         }
+        // One entry per `audio_paths` element: each file's length (0 = unreadable) and the
+        // wall-clock seconds from the meeting start at which the transcript placed it — what
+        // re-detect needs to rebuild the same timeline (R6).
+        if let chunkDurations { metadata["chunk_durations"] = chunkDurations }
+        if let chunkOffsets { metadata["chunk_offsets"] = chunkOffsets }
         // Disclosure (#138): the transcript testifies whether its contents left the machine.
         // A transcript is airgapped at assembly time — summaries are generated later (and only
         // on explicit user opt-in against a configured endpoint), so MeetingSummarizer updates
@@ -164,7 +171,7 @@ public enum TranscriptAssembler {
         Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .sensitive) → \(paths.count) source(s)")
     }
 
-    private static func duration(of url: URL) -> Double {
+    static func duration(of url: URL) -> Double {
         guard let file = try? AVAudioFile(forReading: url),
               file.processingFormat.sampleRate > 0, file.length > 0
         else { return 0 }

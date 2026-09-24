@@ -202,7 +202,9 @@ public enum TranscriptRenamer {
             return false
         }
 
-        for i in segments.indices {
+        // Unflagged segments only: a flagged one (an echo, gate noise, a repeat) keeps the label it
+        // had when it was flagged, and after a re-detect that label can belong to someone else.
+        for i in segments.indices where !TranscriptAssembler.isFlagged(segments[i]) {
             if let speaker = segments[i]["speaker"] as? String,
                let newName = mapping[speaker] {
                 segments[i]["speaker"] = newName

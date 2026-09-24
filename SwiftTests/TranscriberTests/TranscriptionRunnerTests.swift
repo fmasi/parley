@@ -182,4 +182,30 @@ import Testing
         #expect(!ChunkIssue.Code.seedEngineChanged.affectsContent && ChunkIssue.Code.seedMismatch.affectsContent)
         runner.teardownChunkedPipeline()
     }
+
+    /// R7: a flag set on a chunk segment survives session.json → merger → finalize → JSON, and the
+    /// flagged text stays out of the TXT.
+    @Test func flagsSurviveEveryHopToTheTranscript() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a", segments: [
+            .init(start: 0, end: 1, text: "kept words", speaker: "Remote Speaker 1", source: "remote"),
+            .init(start: 1, end: 2, text: "gate noise", speaker: "Remote Unknown", source: "remote", filtered: true),
+            .init(start: 2, end: 3, text: "mic bleed", speaker: "Local Speaker 1", source: "local", echo: true),
+            .init(start: 3, end: 4, text: "kept words", speaker: "Remote Speaker 1", source: "remote", duplicate: true),
+        ], speakerDatabase: ["Remote Speaker 1": [1, 0, 0]], localSpeakerDatabase: ["Local Speaker 1": [0, 1, 0]], isDualStream: true)
+        try SessionState.write(SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio",
+                                            chunkDurationMinutes: 10, chunks: [chunk]), directory: dir)
+        let state = try #require(SessionState.read(directory: dir))
+        var config = Config.default
+        config.outputFormat = "txt"
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: config)
+        let segs = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["segments"] as? [[String: Any]])
+        #expect(segs.count == 4)
+        #expect(segs.first { $0["text"] as? String == "gate noise" }?["filtered"] as? Bool == true)
+        #expect(segs.first { $0["text"] as? String == "mic bleed" }?["echo"] as? Bool == true)
+        #expect(segs.filter { $0["duplicate"] as? Bool == true }.count == 1)
+        let txt = try String(contentsOf: result.jsonPath.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8)
+        #expect(txt.contains("kept words") && !txt.contains("gate noise") && !txt.contains("mic bleed"))
+        #expect(txt.components(separatedBy: "kept words").count == 2, "the duplicate is hidden too")
+    }
 }
