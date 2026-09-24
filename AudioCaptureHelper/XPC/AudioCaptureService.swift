@@ -607,10 +607,25 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(true)
     }
 
-    /// F4 stub: H7 pauses/re-arms the monitors here.
+    /// The app forwards sleep/wake (§8.10): nothing is judged while the machine sleeps, and on wake
+    /// both tracks are re-armed and healed; the re-armed monitors are the heartbeat check.
     func systemPowerEvent(kind: String, reply: @escaping () -> Void) {
-        Logger.audio.info("System power event: \(kind, privacy: .public)")
-        reply()
+        defer { reply() }
+        guard stateLock.sync(execute: { isCapturing }) else { return }
+        switch kind {
+        case "sleep":
+            Logger.audio.info("System sleep: liveness paused")
+            livenessWatchdog.pause()
+            tapHealer.cancelAll()   // paired with trigger(.wake) below (C4)
+        case "wake":
+            Logger.audio.info("System wake: re-arming both tracks, healing the tap and the mic")
+            tapHealer.trigger(.wake)   // forgets the episode; never rebuilds blind — the re-armed monitor decides
+            livenessWatchdog.arm(track: .mic)
+            livenessWatchdog.arm(track: .system)
+            stateLock.sync { micSession }?.heal()
+        default:
+            Logger.audio.warning("Unknown power event \(kind, privacy: .public)")
+        }
     }
 
     func updateMicrophone(
