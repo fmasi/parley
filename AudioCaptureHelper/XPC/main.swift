@@ -29,7 +29,6 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         } as? AudioCaptureClientProtocol
         let send = reverseQueue
         service.onRestartInPlace = { send.async { client?.captureDidRestartInPlace() } }
-        service.onFailFatally = { reason in send.async { client?.captureDidFailFatally(reason: reason) } }
         service.onMicDeviceChanged = { deviceId in send.async { client?.micDeviceChanged?(to: deviceId) } }
         service.onSystemAudioUnrecoverable = { reason in send.async { client?.captureSystemAudioUnrecoverable(reason: reason) } }
         // `onQualityAnomaly` can be invoked directly from the real-time audio queue (exact-zero mic
