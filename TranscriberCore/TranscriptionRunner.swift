@@ -731,7 +731,12 @@ public final class TranscriptionRunner {
 
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .sensitive) (\(fileSize) bytes)")
 
-        let segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
+        let rawSegments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
+        // This path has no chunk issues (the CLI `run()` semantics are a non-goal, §13): log the count.
+        let (segments, dropped) = SpeakerAssignment.deduplicate(rawSegments)
+        if dropped > 0 {
+            Logger.transcription.info("\(label.capitalized, privacy: .public): dropped \(dropped, privacy: .public) zero-length or stuttered segment(s)")
+        }
 
         // Capture detected language from engine output
         if let lang = segments.lazy.compactMap(\.language).first {

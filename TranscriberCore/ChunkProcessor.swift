@@ -342,7 +342,7 @@ public final class ChunkProcessor {
 
         Logger.transcription.info("Transcribing \(label, privacy: .public): \(audioPath.lastPathComponent, privacy: .sensitive) (\(fileSize) bytes)")
 
-        let segments: [TranscriptSegment]
+        var segments: [TranscriptSegment]
         do {
             segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
         } catch {
@@ -352,6 +352,11 @@ public final class ChunkProcessor {
         }
 
         var issues: [ChunkIssue] = []
+        let dedup = SpeakerAssignment.deduplicate(segments)
+        segments = dedup.segments
+        if dedup.dropped > 0 {
+            issues.append(ChunkIssue(code: .duplicatesDropped, track: source, count: dedup.dropped))
+        }
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
         if let diarizer {

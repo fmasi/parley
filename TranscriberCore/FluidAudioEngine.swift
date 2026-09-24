@@ -120,7 +120,8 @@ public actor FluidAudioEngine: TranscriptionEngine {
         Logger.transcription.info("FluidAudio complete: \(segments.count) segments in \(seconds)s (confidence: \(confidence))")
 
         scheduleUnload()
-        return SpeakerAssignment.deduplicate(segments)
+        // Deduplication happens in the callers' transcribeStream, where the dropped count is recorded (P2).
+        return segments
     }
 
     // MARK: - Lifecycle

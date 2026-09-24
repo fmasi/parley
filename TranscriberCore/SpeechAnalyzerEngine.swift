@@ -138,7 +138,8 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
 
         Logger.transcription.info("SpeechAnalyzer complete: \(segments.count) segments in \(seconds)s")
 
-        return SpeakerAssignment.deduplicate(segments)
+        // Deduplication happens in the callers' transcribeStream, where the dropped count is recorded (P2).
+        return segments
     }
 }
 #endif // compiler(>=6.2)

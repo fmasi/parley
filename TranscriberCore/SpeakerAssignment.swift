@@ -67,21 +67,29 @@ public enum SpeakerAssignment {
     /// exclude it, or it will fire on nearly every real meeting and become noise.
     public static let unknownSpeaker = "Unknown"
 
-    /// Remove zero-duration and consecutively repeated segments.
-    public static func deduplicate(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
+    /// Remove zero-duration segments and a repeat that ABUTS the previous segment (a decoder
+    /// stutter). A repeat further away is a real repeated answer and is kept (P2).
+    ///
+    /// Returns how many segments were dropped so the caller can record it (`duplicates_dropped`):
+    /// removing words from a record must never be silent.
+    public static func deduplicate(_ segments: [TranscriptSegment], maxGapSeconds: Double = 0.25)
+        -> (segments: [TranscriptSegment], dropped: Int) {
         var cleaned: [TranscriptSegment] = []
-        var lastText: String?
-
+        var dropped = 0
         for seg in segments {
-            if seg.start == seg.end { continue }
-            let trimmed = seg.text.trimmingCharacters(in: .whitespaces)
-            if trimmed == lastText { continue }
-            lastText = trimmed
+            if seg.start == seg.end { dropped += 1; continue }
+            let trimmed = seg.text.trimmingCharacters(in: .whitespaces).lowercased()
+            if let prev = cleaned.last,
+               prev.text.trimmingCharacters(in: .whitespaces).lowercased() == trimmed,
+               seg.start <= prev.end + maxGapSeconds {
+                dropped += 1
+                continue
+            }
             cleaned.append(seg)
         }
 
         Logger.transcription.debug("Deduplicate: \(segments.count) → \(cleaned.count) segments")
-        return cleaned
+        return (cleaned, dropped)
     }
 
     /// The diarized speaker (raw diarizer ID) that owns a word's time span: greatest time-overlap,
@@ -475,7 +483,7 @@ public enum SpeakerAssignment {
 
                     // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
                     // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
-                    // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
+                    // guard: transcribeStream calls SpeakerAssignment.deduplicate() before assign() ever runs, which
                     // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
                     // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
                     // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither

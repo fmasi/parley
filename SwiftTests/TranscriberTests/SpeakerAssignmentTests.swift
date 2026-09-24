@@ -6,45 +6,26 @@ struct SpeakerAssignmentTests {
 
     // MARK: - Deduplication
 
-    @Test func deduplicateRemovesZeroDuration() {
-        let segments = [
-            TranscriptSegment(start: 0.0, end: 0.0, text: "ghost", language: nil),
-            TranscriptSegment(start: 1.0, end: 2.0, text: "real", language: nil),
-        ]
-        let result = SpeakerAssignment.deduplicate(segments)
-        #expect(result.count == 1)
-        #expect(result[0].text == "real")
+    /// P2: "Yes." … "Yes." minutes apart are two answers. 20 same-stream repeats 0.6–80 s apart
+    /// survived in real transcripts only because the case differed.
+    @Test func aRepeatFarApartSurvives() {
+        let segs = [TranscriptSegment(start: 0, end: 1, text: "Yes.", language: nil), TranscriptSegment(start: 11, end: 12, text: "Yes.", language: nil)]
+        let r = SpeakerAssignment.deduplicate(segs)
+        #expect(r.segments.count == 2 && r.dropped == 0)
     }
-
-    @Test func deduplicateRemovesConsecutiveDuplicates() {
-        let segments = [
-            TranscriptSegment(start: 0.0, end: 1.0, text: "hello", language: nil),
-            TranscriptSegment(start: 1.0, end: 2.0, text: "hello", language: nil),
-            TranscriptSegment(start: 2.0, end: 3.0, text: "world", language: nil),
-        ]
-        let result = SpeakerAssignment.deduplicate(segments)
-        #expect(result.count == 2)
-        #expect(result[0].text == "hello")
-        #expect(result[1].text == "world")
+    @Test func anAbuttingRepeatIsDroppedAndCounted() {
+        let segs = [TranscriptSegment(start: 0, end: 1, text: "Yes.", language: nil), TranscriptSegment(start: 1.1, end: 2, text: " yes. ", language: nil)]
+        let r = SpeakerAssignment.deduplicate(segs)
+        #expect(r.segments.count == 1 && r.dropped == 1)
     }
-
-    @Test func deduplicateTrimsWhitespace() {
-        let segments = [
-            TranscriptSegment(start: 0.0, end: 1.0, text: " hello ", language: nil),
-            TranscriptSegment(start: 1.0, end: 2.0, text: "hello", language: nil),
-        ]
-        let result = SpeakerAssignment.deduplicate(segments)
-        #expect(result.count == 1)
+    @Test func zeroDurationIsStillDropped() {
+        let r = SpeakerAssignment.deduplicate([TranscriptSegment(start: 5, end: 5, text: "x", language: nil)])
+        #expect(r.segments.isEmpty && r.dropped == 1)
     }
-
-    @Test func deduplicatePreservesNonConsecutiveDuplicates() {
-        let segments = [
-            TranscriptSegment(start: 0.0, end: 1.0, text: "hello", language: nil),
-            TranscriptSegment(start: 1.0, end: 2.0, text: "world", language: nil),
-            TranscriptSegment(start: 2.0, end: 3.0, text: "hello", language: nil),
-        ]
-        let result = SpeakerAssignment.deduplicate(segments)
-        #expect(result.count == 3)
+    @Test func nonConsecutiveRepeatsAreKept() {
+        let segs = [TranscriptSegment(start: 0, end: 1, text: "hello", language: nil), TranscriptSegment(start: 1, end: 2, text: "world", language: nil),
+                    TranscriptSegment(start: 2, end: 3, text: "hello", language: nil)]
+        #expect(SpeakerAssignment.deduplicate(segs).segments.count == 3)
     }
 
     // MARK: - Speaker Assignment
