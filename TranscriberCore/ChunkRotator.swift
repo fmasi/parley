@@ -73,6 +73,12 @@ public final class ChunkRotator {
                   clock: .start(now: startTime), onChunkFinalized: onChunkFinalized)
     }
 
+    /// A rotator torn down without `stop()` (the pipeline's teardown drops it) takes its timer with it (L10
+    /// review 54). On the main actor, where the timer was added to the run loop.
+    isolated deinit {
+        timer?.invalidate()
+    }
+
     /// Test seam (`@testable import`): the active rotation timer, so tests can confirm it was
     /// added to the run loop in `.common` mode (#197) without waiting on a real firing.
     var activeTimerForTesting: Timer? { timer }
@@ -100,9 +106,13 @@ public final class ChunkRotator {
     /// continues at a fresh chunk, and return the plan whose names the caller uses for the orphan
     /// (the current index) and the recovery segment. The caller MUST enqueue the orphan chunk
     /// (using `currentBaseName` / `currentChunkInfo`) BEFORE calling this — once it returns, the
-    /// index has advanced (#92).
+    /// index has advanced (#92). The new chunk starts at `now`, by default the rotator's monotonic
+    /// clock (L11 review 68).
     @discardableResult
-    public func recoverFromCrash(now: Date = Date()) -> ChunkRecoveryPlan {
+    public func recoverFromCrash(now: Date? = nil) -> ChunkRecoveryPlan {
+        // A timed-out rotation the helper completed late is settled first: the orphan is the chunk the
+        // helper was really writing (L9 review 46).
+        reconcileLateRotation()
         let planned = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
         // The recovery segment's name must not be a file already on disk (same rule as rotate()).
         let recoveryIndex = nextFreeIndex(after: currentChunkIndex)
@@ -110,7 +120,8 @@ public final class ChunkRotator {
             orphanIndex: planned.orphanIndex, recoveryIndex: recoveryIndex,
             orphanBaseName: planned.orphanBaseName, recoveryBaseName: "\(sessionBaseName)-\(recoveryIndex)")
         currentChunkIndex = plan.recoveryIndex
-        currentChunkStartTime = now
+        currentChunkStartTime = now ?? clock.now()
+        lateAttempts = []   // the crashed helper completes nothing more
         Logger.audio.info("ChunkRotator recovered: orphan chunk \(plan.orphanIndex, privacy: .public), resuming at \(plan.recoveryIndex, privacy: .public)")
         return plan
     }
@@ -118,7 +129,13 @@ public final class ChunkRotator {
     /// Start the rotation timer.
     public func start() {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .sensitive)")
-        let newTimer = Timer(timeInterval: chunkDuration, repeats: true) { [weak self] _ in
+        let newTimer = Timer(timeInterval: chunkDuration, repeats: true) { [weak self] timer in
+            // A rotator torn down without `stop()` takes its timer with it: never a repeating timer left
+            // waking an idle app (L10 review 54). The run loop calls this on the main thread, where it was added.
+            guard self != nil else {
+                timer.invalidate()
+                return
+            }
             Task { @MainActor in
                 self?.rotate()
             }
@@ -140,6 +157,11 @@ public final class ChunkRotator {
     /// The rotation in flight. Each one chains after the previous, so two never overlap (both would
     /// name the same next chunk).
     private var rotation: Task<Void, Never>?
+    /// Rotations the helper did not answer in time (§8.8), oldest first: the chunk index each asked it to open,
+    /// all asked while this rotator still named the current chunk. One may still complete in the helper — which
+    /// then writes that chunk while this rotator names the old one — so they are settled before the next
+    /// rotation, at Stop and at a crash (L9 review 46).
+    private var lateAttempts: [Int] = []
 
     private func rotate() {
         let previous = rotation
@@ -162,10 +184,57 @@ public final class ChunkRotator {
         await performRotation()
     }
 
+    /// A rotation that timed out may have completed in the helper after all: if a chunk it asked for is on
+    /// disk, the helper sealed the current chunk and is writing that one. Then every sealed chunk is emitted
+    /// from ITS OWN files, in order, and the helper's index adopted — each chunk processed once, from its own
+    /// audio. Called before every rotation, by Stop (after the helper's stop) and by a crash recovery.
+    /// Returns whether it reconciled; an attempt that did not complete (yet) stays pending.
+    @discardableResult
+    public func reconcileLateRotation() -> Bool {
+        let opened = lateAttempts.filter { fileExists(index: $0, suffix: ".wav") }
+        guard let writing = opened.last else { return false }
+        Logger.audio.error("ChunkRotator: a timed-out rotation of chunk \(self.currentChunkIndex, privacy: .public) completed late — the helper is writing \(writing, privacy: .public)")
+        emitSealed(opened.dropLast(), last: nil)
+        currentChunkIndex = writing
+        // When the helper opened it: the file's creation, never before the chunk it sealed began.
+        currentChunkStartTime = max(creationDate(index: writing) ?? clock.now(), currentChunkStartTime)
+        // Attempts made after the one that opened `writing` would seal IT if they complete: still pending.
+        lateAttempts = lateAttempts.filter { $0 > writing }
+        onRotated?()
+        return true
+    }
+
+    /// Emits the current chunk from its own files, then each chunk in `between` (opened and sealed by late
+    /// rotations) from its own files, then — when the helper's reply names it — `last` from the reply.
+    private func emitSealed(_ between: ArraySlice<Int>, last: (index: Int, paths: (systemPath: String, micPath: String))?) {
+        var start = currentChunkStartTime
+        onChunkFinalized(ownFiles(index: currentChunkIndex, startTime: start))
+        for index in between {
+            start = max(creationDate(index: index) ?? start, start)
+            onChunkFinalized(ownFiles(index: index, startTime: start))
+        }
+        if let last {
+            start = max(creationDate(index: last.index) ?? start, start)
+            onChunkFinalized(FinalizedChunk(index: last.index, systemPath: last.paths.systemPath, micPath: last.paths.micPath, startTime: start))
+        }
+    }
+
+    private func ownFiles(index: Int, startTime: Date) -> FinalizedChunk {
+        let base = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(sessionBaseName)-\(index)").path
+        return FinalizedChunk(index: index, systemPath: base + ".wav", micPath: base + "_mic.wav", startTime: startTime)
+    }
+
+    private func creationDate(index: Int) -> Date? {
+        let path = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(sessionBaseName)-\(index).wav").path
+        return (try? FileManager.default.attributesOfItem(atPath: path))?[.creationDate] as? Date
+    }
+
     private func performRotation() async {
+        reconcileLateRotation()
         let oldIndex = currentChunkIndex
         let oldStartTime = currentChunkStartTime
-        let nextIndex = nextFreeIndex(after: oldIndex)
+        // Past every timed-out attempt's name too: the helper may still create it (L9 review 46).
+        let nextIndex = nextFreeIndex(after: max(oldIndex, lateAttempts.max() ?? oldIndex))
         let nextBaseName = "\(sessionBaseName)-\(nextIndex)"
 
         Logger.audio.info("Rotating chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public)")
@@ -175,18 +244,25 @@ public final class ChunkRotator {
                 outputDirectory: outputDirectory,
                 newBaseName: nextBaseName
             )
+            // The helper answered, so every earlier attempt is settled. It sealed the chunk it was writing:
+            // normally the current one — but if a timed-out attempt completed just before (after the check
+            // above), the reply names that attempt's chunk, and the chunks before it come from their own files.
+            let sealedName = URL(fileURLWithPath: paths.systemPath).lastPathComponent
+            if let late = lateAttempts.firstIndex(where: { "\(sessionBaseName)-\($0).wav" == sealedName }) {
+                let between = lateAttempts[..<late].filter { fileExists(index: $0, suffix: ".wav") }
+                emitSealed(between[...], last: (lateAttempts[late], paths))
+            } else {
+                onChunkFinalized(FinalizedChunk(index: oldIndex, systemPath: paths.systemPath, micPath: paths.micPath,
+                                                startTime: oldStartTime))
+            }
+            lateAttempts = []
             self.currentChunkIndex = nextIndex
             self.currentChunkStartTime = clock.now()
-            let finalized = FinalizedChunk(
-                index: oldIndex,
-                systemPath: paths.systemPath,
-                micPath: paths.micPath,
-                startTime: oldStartTime
-            )
-            self.onChunkFinalized(finalized)
             self.onRotated?()
         } catch {
             Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
+            // Timed out: the helper may still complete it — remembered, settled before the next rotation.
+            if error is CaptureCallTimeout { lateAttempts.append(nextIndex) }
             onRotationFailed?(error)
         }
     }
@@ -205,7 +281,11 @@ public final class ChunkRotator {
 
     private func chunkFilesExist(index: Int) -> Bool {
         // Every artefact a chunk leaves: its two WAVs and, once processed, its archive.
+        [".wav", "_mic.wav", ".m4a"].contains { fileExists(index: index, suffix: $0) }
+    }
+
+    private func fileExists(index: Int, suffix: String) -> Bool {
         let base = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(sessionBaseName)-\(index)")
-        return [".wav", "_mic.wav", ".m4a"].contains { FileManager.default.fileExists(atPath: base.path + $0) }
+        return FileManager.default.fileExists(atPath: base.path + suffix)
     }
 }

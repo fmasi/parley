@@ -110,6 +110,12 @@ public final class RecordingCoordinator {
     private var retryPendingWhenIdle = false
     /// A retry of the pending sessions is running (they are serialized).
     private var pendingRetryRunning = false
+    /// The bound on the free-space read at a rotation (L11 review 70): a hung volume skips that rotation's
+    /// check, never the UI. Tests shorten it.
+    var rotationDiskReadDeadline: Duration = .seconds(2)
+    /// The disk check of the latest rotation, off the main actor; an older one that lands later is ignored.
+    private var rotationDiskCheck: Task<Void, Never>?
+    private var rotationDiskCheckGeneration = 0
     /// The bound on a helper stop that ends a capture on a failure or relaunch path (§8.6). Tests shorten it.
     var helperStopDeadline: Duration = .seconds(20)
 
@@ -640,6 +646,9 @@ public final class RecordingCoordinator {
 
             if let rotator = transcriptionRunner.chunkRotator,
                let processor = transcriptionRunner.chunkProcessor {
+                // A rotation that timed out may have completed in the helper: the chunk it sealed is processed
+                // from its own files, and the last chunk is the one the helper was writing (L9 review 46).
+                rotator.reconcileLateRotation()
                 // Process the last chunk via the chunked pipeline
                 let lastChunk = ChunkRotator.FinalizedChunk(
                     index: rotator.currentChunkInfo.index,
@@ -1969,12 +1978,38 @@ public final class RecordingCoordinator {
     }
 
     /// A rotation worked: rotation is not broken any more, and the disk is checked for the next chunk —
-    /// `diskLow` below one chunk, cleared only above two (hysteresis, `DiskSpaceCheck.rotationVerdict`).
+    /// `diskLow` below one chunk, cleared only above two (hysteresis, `DiskSpaceCheck.rotationVerdict`). The
+    /// read runs off the main actor, bounded (L11 review 70): a hung network volume never stalls the UI, and a
+    /// read that does not answer skips this rotation's check — logged, never guessed.
     private func rotationSucceeded() {
         guard appState.isRecording else { return }
         appState.clearAppAlarm(.rotationFailed)
-        guard let dir = transcriptionRunner.chunkRotator?.sessionLocation.outputDir,
-              let free = freeBytesProvider(Self.nearestExistingDirectory(dir)) else { return }
+        guard let dir = transcriptionRunner.chunkRotator?.sessionLocation.outputDir else { return }
+        let provider = freeBytesProvider, bound = Self.seconds(rotationDiskReadDeadline)
+        rotationDiskCheckGeneration += 1
+        let generation = rotationDiskCheckGeneration
+        rotationDiskCheck = Task { [weak self] in
+            let free: Int?
+            do {
+                free = try await withDeadline(seconds: bound, label: "rotation disk read") {
+                    await Task.detached { provider(Self.nearestExistingDirectory(dir)) }.value
+                }
+            } catch {
+                Logger.state.error("The free-space read at a rotation did not answer within \(bound, privacy: .public) s — this rotation's disk check is skipped")
+                return
+            }
+            guard let self, let free, generation == self.rotationDiskCheckGeneration else { return }
+            self.applyRotationDiskVerdict(free: free)
+        }
+    }
+
+    /// Returns once the latest rotation's disk check has finished. Internal for tests.
+    func awaitRotationDiskCheckForTesting() async {
+        await rotationDiskCheck?.value
+    }
+
+    private func applyRotationDiskVerdict(free: Int) {
+        guard appState.isRecording else { return }
         let verdict = DiskSpaceCheck.rotationVerdict(freeBytes: free, chunkMinutes: configManager.config.validatedChunkDuration,
                                                      currentlyLow: appState.activeAlarms[.diskLow] != nil)
         switch verdict {
@@ -2299,6 +2334,9 @@ public final class RecordingCoordinator {
     private func reingestOrphanChunk(
         rotator: ChunkRotator, processor: ChunkProcessor, outputDir: URL
     ) -> (index: Int, baseName: String) {
+        // A timed-out rotation the helper completed late: the orphan is the chunk it was really writing, and
+        // the chunk it sealed goes through the pipeline from its own files (L9 review 46).
+        rotator.reconcileLateRotation()
         let orphan = rotator.currentChunkInfo
         let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
         processor.processChunk(Self.orphanChunk(

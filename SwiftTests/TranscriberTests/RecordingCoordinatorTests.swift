@@ -201,6 +201,8 @@ private struct Harness {
     /// The free space every disk check reads (L8): plenty unless a test says otherwise, so no test
     /// depends on the machine's real disk.
     let freeBytes: Box<Int?> = Box(Int.max)
+    /// Runs inside every disk read, on whatever thread reads (L follow-up 33, L11 review 70).
+    let diskReadHook: Box<(@Sendable () -> Void)?> = Box(nil)
     let recordingMic: RecordingMicrophone
 
     /// `@unchecked Sendable`: tests hand it to `@Sendable` seams (the disk provider); the main actor owns it.
@@ -217,7 +219,7 @@ private struct Harness {
         let presented = presented
         let repairRequests = repairRequests
         let repairPresents = repairPresents
-        let freeBytes = freeBytes
+        let freeBytes = freeBytes, diskReadHook = diskReadHook
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -230,7 +232,7 @@ private struct Harness {
             onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
             engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
             recordingMicrophone: recordingMic,
-            freeBytesProvider: { _ in freeBytes.value }
+            freeBytesProvider: { _ in diskReadHook.value?(); return freeBytes.value }
         )
     }
 
@@ -2852,14 +2854,65 @@ private struct Harness {
         let chunk = DiskSpaceCheck.bytesPerChunk(chunkMinutes: h.config.config.validatedChunkDuration)
         h.freeBytes.value = chunk - 1
         await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
         #expect(h.appState.activeAlarms[.diskLow] != nil)
         #expect(h.client.recordedEvents.contains { $0.kind == .diskLow && $0.severity == .warning && $0.detail["free_mb"] != nil })
         h.freeBytes.value = chunk + 1
         await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
         #expect(h.appState.activeAlarms[.diskLow] != nil, "still low: under two chunks")
         h.freeBytes.value = 2 * chunk
         await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
         #expect(h.appState.activeAlarms[.diskLow] == nil)
+    }
+
+    /// L11 review 70: the rotation's free-space read runs off the main actor — a hung network volume never
+    /// stalls the UI — and is bounded: past its deadline the check is skipped for this rotation (logged),
+    /// never an alarm from a read that did not answer.
+    @Test func theRotationDiskReadIsOffTheMainActorAndBounded() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let onMain = Harness.Box<Bool?>(nil)
+        h.diskReadHook.value = { onMain.value = Thread.isMainThread }
+        await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
+        #expect(onMain.value == false)
+
+        h.coordinator.rotationDiskReadDeadline = .milliseconds(100)
+        h.diskReadHook.value = { Thread.sleep(forTimeInterval: 1) }
+        h.freeBytes.value = 1_000   // it WOULD be low — but the read does not answer in time
+        let began = ContinuousClock.now
+        await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
+        #expect(ContinuousClock.now - began < .milliseconds(600), "bounded at 100 ms, never the 1 s read")
+        #expect(h.appState.activeAlarms[.diskLow] == nil, "skipped for this rotation")
+        #expect(h.appState.isRecording)
+    }
+
+    /// L9 review 46: a rotation that timed out and then completed in the helper is reconciled at Stop: the
+    /// sealed chunk is emitted from its own files and the stop's last chunk is the helper's, not relabelled.
+    @Test func aRotationCompletedLateIsReconciledAtStop() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let next = String(rotator.currentBaseName.dropLast(2)) + "-1"
+        h.client.rotateError = CaptureCallTimeout(call: "rotateChunk", seconds: 10)
+        await rotator.rotateForTesting()
+        for suffix in [".wav", "_mic.wav"] {   // the helper completed it anyway: it is writing chunk 1
+            try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(next + suffix))
+        }
+        h.client.stopResult = AudioPaths(systemAudio: outDir.appendingPathComponent(next + ".wav"),
+                                         micAudio: outDir.appendingPathComponent(next + "_mic.wav"))
+        await h.coordinator.stopRecording()
+        #expect(rotator.currentChunkInfo.index == 1, "the stop's last chunk is the helper's chunk 1")
+        #expect(h.presented.value.count == 1)
     }
 
     /// R2's hook: a session.json write that fails (here a capture gap's) is a sticky alarm and a
@@ -3632,6 +3685,7 @@ private struct Harness {
         #expect(h.client.rotateCalls == 1 && rotator.currentChunkInfo.index == 2, "the live file handed over")
         h.freeBytes.value = 1_000   // below one chunk
         await rotator.rotateForTesting()
+        await h.coordinator.awaitRotationDiskCheckForTesting()
         #expect(h.appState.activeAlarms[.diskLow] != nil)
     }
 
