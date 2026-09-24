@@ -37,8 +37,17 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// — system audio keeps recording — so the service records an anomaly and continues; the partial
     /// mic WAV captured up to the loss remains valid.
     var onUnavailable: ((String) -> Void)?
+    /// Invoked after every successful (re)build of the session (start, user switch, recovery): the
+    /// liveness watchdog re-arms the mic track from here (§4.2).
+    var onGenerationChanged: (() -> Void)?
     /// Records a diagnostic event (route change, recovery, error) into the helper's anomaly ring.
     var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
+
+    /// Stamped on every delivered sample buffer, before it is forwarded: a heartbeat means "the OS
+    /// called us" (§4.2). Lock-only, read from the watchdog's queue.
+    private let heartbeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    /// Session generation, bumped on every successful (re)build. Guarded by `stateLock`.
+    private var generation = 0
 
     /// Guards `session`, the device ids, and the recovery flags. A leaf lock — its critical sections
     /// never call out (no `configQueue`, no `startRunning`), so it can't deadlock with `configQueue`.
@@ -85,6 +94,11 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// `.micSwitch`) — a `buildAndStart` fallback updates this even when the requested id differs
     /// (council CONV-1, sibling of MIC-CURRENT-MISLABEL). Reads under the leaf `stateLock`.
     var resolvedDeviceId: String? { stateLock.sync { currentDeviceId } }
+
+    /// The last delivered sample buffer, in `DispatchTime` uptime nanoseconds (0 = never). Lock-only.
+    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0 } }
+    /// The current session generation (0 = never built).
+    func generationValue() -> Int { stateLock.sync { generation } }
 
     /// Build and start the session for `deviceId` (`nil` = system default). Throws if the mic is
     /// unavailable or unauthorized, so `startCapture` can surface a clear, actionable error.
@@ -199,6 +213,8 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             raced.stopRunning()
             throw MicCaptureError.stopped
         }
+        stateLock.sync { generation += 1 }
+        onGenerationChanged?()
 
         Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(resolvedId ?? "default", privacy: .public))")
     }
@@ -409,6 +425,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        heartbeat.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
         onSampleBuffer(sampleBuffer)
     }
 }

@@ -136,23 +136,43 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
-    /// Start the #196 off-audio-queue liveness watchdog. `handler`'s arrival getters are lock-guarded
-    /// and safe to call from the watchdog's own queue.
-    private func startLivenessWatchdog(handler: AudioOutputHandler, isUsingSystemTap: Bool) {
-        livenessWatchdog.lastMicArrivalNanos = { [weak handler] in handler?.lastMicBufferArrivalNanos() ?? 0 }
-        livenessWatchdog.lastSystemArrivalNanos = { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
-        livenessWatchdog.isUsingSystemTap = isUsingSystemTap
-        livenessWatchdog.onGap = { [weak self] kind, message in
-            self?.record(kind, .anomaly, ["reason": message])
-            self?.onQualityAnomaly?(kind.rawValue, message)
-        }
-        // A tap that stops delivering while output plays gives the exact-zero detector nothing to see.
-        // In #220 the tap delivered zeros for 46 s, then no buffers at all for 51 minutes.
-        livenessWatchdog.onSystemGap = isUsingSystemTap ? { [weak self] in
-            guard let self else { return }
-            self.audioQueue.async { self.apply(self.tapGuard.deliveryGap(now: self.guardNow())) }
-        } : nil
+    /// Start the off-audio-queue liveness watchdog (§4.2) on the sessions' heartbeats, and re-arm a
+    /// track on every (re)build of its source. Both tracks are armed now: first frames are due in 5 s.
+    private func startLivenessWatchdog(handler: AudioOutputHandler, mic: MicCaptureSession, tap: SystemTapSession?) {
+        livenessWatchdog.lastMicHeartbeatNanos = { [weak mic] in mic?.lastHeartbeatNanos() ?? 0 }
+        // Tap: the callback's own heartbeat. SCK: the arrival stamp (gotcha #63) — SCK keeps the watchdog (§13).
+        livenessWatchdog.lastSystemHeartbeatNanos = tap.map { tap in { [weak tap] in tap?.lastHeartbeatNanos() ?? 0 } }
+            ?? { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
+        livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
+        mic.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .mic) }
+        tap?.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }
         livenessWatchdog.start()
+        livenessWatchdog.arm(track: .mic)
+        livenessWatchdog.arm(track: .system)
+    }
+
+    /// Verdicts arrive on the watchdog queue. H1: record + transient banner + first-frames evidence;
+    /// H2 adds the alarm registry; H4 routes the system track into the ladder and the mic into MicHealPolicy.
+    /// `helperSessionId` reads `stateLock`; this never runs inside a `stateLock.sync` block.
+    private func handleLiveness(track: CaptureTrack, verdict: TrackLivenessMonitor.Verdict) {
+        let t = track.rawValue
+        switch verdict {
+        case .firstFrames:
+            record(.firstFrames, .info, ["track": t])
+            onFirstFrames?(track, helperSessionId)
+        case .neverDelivered(let s):
+            record(.neverDelivered, .anomaly, ["track": t, "seconds": "\(Int(s))"])
+            onQualityAnomaly?(CaptureEventKind.neverDelivered.rawValue, track == .mic
+                ? "The microphone isn’t delivering any audio." : "The other side of the call isn’t reaching Parley although audio is playing.")
+        case .stalled(let s):
+            record(.livenessGap, .anomaly, ["track": t, "seconds": "\(Int(s))"])
+            onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, track == .mic
+                ? "The microphone stopped delivering audio \(Int(s))s ago." : "System audio stopped delivering \(Int(s))s ago.")
+        case .cleared(let reason):
+            record(.livenessRecovered, .info, ["track": t, "reason": "\(reason)"])
+        case .healthy:
+            break
+        }
     }
 
     func startCapture(
@@ -243,7 +263,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     // already-recording system WAV (council F2). A mic-start failure fails the start
                     // loudly so the user fixes permissions before the meeting — mid-session mic loss
                     // degrades to system-only instead, which is handled separately.
-                    let resolvedMic = try self.startMicSession(
+                    let (micSession, resolvedMic) = try self.startMicSession(
                         handler: outputHandler, microphoneDeviceId: microphoneDeviceId
                     )
                     // Record capture-start provenance with the mic that ACTUALLY resolved — not the
@@ -268,7 +288,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     }
                     Logger.audio.info("Capture started — mic AVCaptureSession + system source \(source.rawValue, privacy: .public); awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
-                    self.startLivenessWatchdog(handler: outputHandler, isUsingSystemTap: source == .coreAudioTap)
+                    self.startLivenessWatchdog(handler: outputHandler, mic: micSession, tap: self.stateLock.sync { self.tapSession })
                     if source == .coreAudioTap { self.startTapGuardTimer() }
                     reply(true, nil)
                 } catch {
@@ -511,8 +531,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             t.setEventHandler { [weak self] in
                 guard let self else { return }
                 // The HAL read only happens while a grant rebuild still owes proof.
-                let outputRunning = self.tapGuard.wantsOutputState
-                    ? SystemTapSession.isOutputDeviceRunningSomewhere() : nil
+                let outputRunning = self.tapGuard.wantsOutputState ? self.livenessWatchdog.othersRunningOutput() : nil
                 self.apply(self.tapGuard.tick(now: self.guardNow(), outputRunning: outputRunning))
             }
             t.resume()
@@ -650,10 +669,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// callbacks into the service. Throws — failing the whole start — if the mic can't be brought up,
     /// since the user expects their own voice recorded. Mid-session mic loss is handled separately by
     /// MicCaptureSession and is NOT fatal (system audio keeps recording).
-    /// Returns the device the mic ACTUALLY resolved to (`nil` = system default), so the caller can
-    /// record honest `.captureStart` provenance even when the requested device fell back (council CONV-1).
-    @discardableResult
-    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?) throws -> String? {
+    /// Returns the session and the device the mic ACTUALLY resolved to (`nil` = system default), so the
+    /// caller can record honest `.captureStart` provenance even when the requested device fell back
+    /// (council CONV-1), and wire the session's heartbeat into the liveness watchdog.
+    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?) throws -> (session: MicCaptureSession, deviceId: String?) {
         let mic = MicCaptureSession(deliveryQueue: audioQueue) { [weak handler] buffer in
             handler?.appendMicSampleBuffer(buffer)
         }
@@ -681,7 +700,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return false
         }
         if stopping { mic.stop() }
-        return mic.resolvedDeviceId
+        return (mic, mic.resolvedDeviceId)
     }
 
     /// Start the Core Audio output-tap system source (#103), wiring its diagnostics + unavailability

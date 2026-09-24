@@ -41,6 +41,15 @@ final class SystemTapSession {
     /// Invoked on the config queue after every successful build or rebuild, so the caller can check the
     /// System Audio Recording permission the new aggregate started with (#220).
     var onBuilt: (() -> Void)?
+    /// Invoked on the config queue after every successful build or rebuild, once the new aggregate
+    /// generation is committed: the liveness watchdog re-arms the system track from here (§4.2).
+    var onGenerationChanged: (() -> Void)?
+
+    /// Stamped as the FIRST statement of every IOProc callback, whatever the guards below decide: a
+    /// heartbeat means "the OS called us" (§4.2). Lock-only, read from the watchdog's queue.
+    private let heartbeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    /// Aggregate generation, bumped on every successful build/rebuild. Guarded by `stateLock`.
+    private var generation = 0
 
     /// Converts each tap buffer (float32 @ output rate, stereo) → 48 kHz mono Int16. Reused across
     /// IOProc invocations; only ever touched on `deliveryQueue` (serial), so no lock needed.
@@ -112,6 +121,11 @@ final class SystemTapSession {
     // buildAggregateAndStart() throws — doesn't leak the HAL-level process tap. The caller (startSystemTap)
     // never retains the session on a throw, so this is the only place that cleanup runs. Idempotent.
     deinit { stop() }
+
+    /// The last IOProc callback, in `DispatchTime` uptime nanoseconds (0 = never). Lock-only.
+    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0 } }
+    /// The current aggregate generation (0 = never built).
+    func generationValue() -> Int { stateLock.sync { generation } }
 
     // MARK: - Lifecycle
 
@@ -346,6 +360,7 @@ final class SystemTapSession {
             aggregateID = agg
             procID = proc
         }
+        stateLock.sync { generation += 1 }
         Logger.audio.info("System tap aggregate started — output \(Self.deviceName(output), privacy: .public), delivery format \(asbd.mSampleRate)Hz \(asbd.mChannelsPerFrame)ch (converter → 48000Hz 1ch)")
         // Surface the REAL tap delivery format for provenance/diagnostics — the WAV is always the
         // normalized 48 kHz mono, but the source rate is what reveals a chipmunk-class mismatch.
@@ -359,6 +374,7 @@ final class SystemTapSession {
             "normalized": "48000Hz/1ch",
         ])
         onBuilt?()
+        onGenerationChanged?()
     }
 
     /// The `AudioStreamBasicDescription` the aggregate device's input stream will actually deliver to
@@ -439,6 +455,7 @@ final class SystemTapSession {
     private func handleTapBuffers(
         _ inInputData: UnsafePointer<AudioBufferList>, _ inInputTime: UnsafePointer<AudioTimeStamp>
     ) {
+        heartbeat.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
         let (format, bpf, stopping) = stateLock.sync { (tapFormat, bytesPerFrame, isStopping) }
         guard !stopping, let format, bpf > 0 else { return }
 
@@ -668,29 +685,6 @@ final class SystemTapSession {
         var addr = defaultOutputAddress
         let st = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
         return st == noErr ? id : AudioObjectID(kAudioObjectUnknown)
-    }
-
-    /// Whether the CURRENT default output device reports itself as running (gotcha #66): unlike
-    /// ScreenCaptureKit, the tap's IOProc delivers NO buffers while nothing holds the output device
-    /// open — a recording started before joining a call legitimately receives zero system-audio
-    /// buffers until the call connects. The #196 liveness watchdog must gate its tap-track check on
-    /// this, or it reproduces the exact false positive gotcha #66 documents (a healthy recording
-    /// measured 97.6% zero/leading-silence in its first 30s and tripped a naive detector).
-    ///
-    /// Fails OPEN (returns `true` — "assume running") on any read failure, matching this file's
-    /// existing convention (`deviceExists`): a missed idle-output period costs one spurious
-    /// liveness-gap anomaly, which is far cheaper than silently disabling the watchdog for a session.
-    static func isOutputDeviceRunningSomewhere() -> Bool {
-        let device = defaultOutputDevice()
-        guard device != kAudioObjectUnknown else { return true }
-        var running: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &running) == noErr else { return true }
-        return running != 0
     }
 
     /// Compare frames actually delivered against elapsed wall time. Runs on the audio queue, so it

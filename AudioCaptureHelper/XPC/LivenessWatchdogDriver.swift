@@ -1,88 +1,109 @@
 import Foundation
+import os
 import TranscriberCore
 
-/// Off-audio-queue 1 Hz driver for the #196 capture-liveness watchdog.
+/// Off-audio-queue 1 Hz driver for the per-track `TrackLivenessMonitor`s (§4.2). Owns the timer
+/// on its OWN serial queue — a callback that stopped cannot notice its own silence.
 ///
-/// Owns a `DispatchSourceTimer` on its OWN serial queue — never the audio/delivery queue that the
-/// real-time IOProc/SCStream callbacks run on. That is the entire point: a track that stops
-/// delivering can never notice its own silence from inside the callback that isn't firing, so
-/// detecting a gap has to live outside the path that might be the thing that's stuck.
+/// Strictly 1 Hz: `TrackLivenessMonitor.gateCloseTicks` debounces the gate by counting ticks, so
+/// nothing else may call `tick()`. `check` runs every tick whether or not a monitor is armed (it
+/// tracks the gate while unarmed and owes a `.cleared(.gateClosed)` after `pause`).
 ///
-/// All the actual judgement is `LivenessGapDetector` (pure, unit-tested); this class only owns the
-/// timer and wires it to the handler's arrival timestamps + the tap's `isRunningSomewhere` gate.
+/// The system track's heartbeat source is whatever captures system audio (the tap's callback, or
+/// the SCK arrival stamp): SCK inherits the liveness watchdog and its alarms for free (§13).
 final class LivenessWatchdogDriver {
-    private let queue = DispatchQueue(label: "audio-capture.liveness-watchdog")
+    let queue = DispatchQueue(label: "audio-capture.liveness-watchdog")
     private var timer: DispatchSourceTimer?
+    private var monitors = LivenessWatchdogDriver.freshMonitors()
+    private let outputActivity = OutputActivityProbe()
+    private let gateOpenLock = OSAllocatedUnfairLock<Bool>(initialState: true)
 
-    private var micDetector = LivenessGapDetector(track: "mic")
-    private var systemDetector = LivenessGapDetector(track: "system")
+    var lastMicHeartbeatNanos: (() -> UInt64)?
+    var lastSystemHeartbeatNanos: (() -> UInt64)?
+    /// Every non-healthy verdict, on `queue`: (track, verdict).
+    var onVerdict: ((CaptureTrack, TrackLivenessMonitor.Verdict) -> Void)?
+    /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
+    var onGate: ((Bool, UInt64) -> Void)?
+    /// The last tick's gate reading. Cheap and lock-only, so `trackHealth()` (H6) can read it from
+    /// the audio queue; `othersRunningOutput()` is a HAL read and must not run there.
+    var lastGateOpen: Bool { gateOpenLock.withLock { $0 } }
 
-    /// Last mic / system buffer arrival, read each tick. Both closures must be cheap and safe to
-    /// call from a background queue — `AudioOutputHandler`'s getters already are (lock-guarded,
-    /// same pattern as the #86 restart probe).
-    var lastMicArrivalNanos: (() -> UInt64)?
-    var lastSystemArrivalNanos: (() -> UInt64)?
-    /// Whether the system-audio track is the Core Audio tap. The tap legitimately delivers nothing
-    /// while system output is idle (gotcha #66), so its gap check must additionally gate on
-    /// `SystemTapSession.isOutputDeviceRunningSomewhere()`. SCK keeps delivering zero-filled buffers
-    /// even in silence, so it needs no such gate.
-    var isUsingSystemTap = false
-    /// Invoked (on `queue`) when either track opens a liveness gap.
-    var onGap: ((CaptureEventKind, String) -> Void)?
-    /// Also invoked (on `queue`) when the SYSTEM track opens a gap, so the tap's permission guard can
-    /// check whether a denial is the cause (#220).
-    var onSystemGap: (() -> Void)?
+    private static func freshMonitors() -> [CaptureTrack: TrackLivenessMonitor] {
+        [.mic: TrackLivenessMonitor(track: CaptureTrack.mic.rawValue),
+         .system: TrackLivenessMonitor(track: CaptureTrack.system.rawValue)]
+    }
 
-    /// `start`/`stop` are called from at least four `AudioCaptureService` teardown
-    /// paths with no shared lock, so a concurrent `stop()`+`stop()` or `start()`+`stop()` would be
-    /// an unsynchronised read/write on `timer`. Serializing both onto `queue` (already the timer's
-    /// own serial queue, and never touched by `tick()` itself) fixes the race without adding a
-    /// separate lock. Dispatched `async`, not `sync`: `start()` is called from inside a Swift
-    /// `Task`, and a synchronous `queue.sync` there would block a cooperative-thread-pool thread —
-    /// nothing requires the caller to wait for the timer to actually be armed before proceeding,
-    /// and `async` onto the same serial queue still fully serializes the mutations relative to
-    /// every other `start`/`stop` call.
     func start() {
         queue.async { [weak self] in
             guard let self else { return }
             self.stopLocked()
+            self.monitors = Self.freshMonitors()
             let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + 1, repeating: 1)
+            t.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
             t.setEventHandler { [weak self] in self?.tick() }
             self.timer = t
             t.resume()
         }
     }
 
-    /// Idempotent.
-    func stop() {
-        queue.async { [weak self] in self?.stopLocked() }
+    func stop() { queue.async { [weak self] in self?.stopLocked() } }
+
+    /// Start / rebuild / wake of one track: judge from now, expect first frames within 5 s.
+    func arm(track: CaptureTrack) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        queue.async { [weak self] in self?.monitors[track]?.arm(nowNanos: now) }
     }
 
-    /// Must only be called while already running on `queue`.
+    /// Sleep: nothing is judged until the next arm. The tick keeps running (an owed
+    /// `.cleared(.gateClosed)` is still delivered), the OS pauses it with the machine.
+    func pause() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            for track in CaptureTrack.allCases { self.monitors[track]?.pause() }
+        }
+    }
+
+    /// Synchronous HAL read of the process-level gate (the tap guard timer until H4, and `accelerate`).
+    func othersRunningOutput() -> Bool { outputActivity.othersRunningOutput() }
+
+    /// An aggregate listener (`goin`→0, `stpd`, `diff`) said IO may have stopped. Accelerators never
+    /// rebuild blindly (§5): one second later, if no heartbeat has arrived since the event and the
+    /// track is expected, report a stall now instead of waiting for the 3 s threshold. The monitor's
+    /// episode is opened on the heartbeat that was judged, so its own tick does not report the same
+    /// stall again and only a NEWER heartbeat clears it (C3 round 1). The gate is checked first: a
+    /// `goin`→0 that IS the last output process leaving must not raise a false stall (C3 concern).
+    func accelerate(track: CaptureTrack) {
+        let eventNanos = DispatchTime.now().uptimeNanoseconds
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            let heartbeat = self.heartbeat(of: track)
+            let expected = track == .mic || self.outputActivity.othersRunningOutput()
+            guard heartbeat <= eventNanos, expected else { return }
+            guard var m = self.monitors[track], m.openEpisodeExternally(stamp: heartbeat) else { return }
+            self.monitors[track] = m
+            self.onVerdict?(track, .stalled(seconds: 1))
+        }
+    }
+
+    private func heartbeat(of track: CaptureTrack) -> UInt64 {
+        (track == .mic ? lastMicHeartbeatNanos : lastSystemHeartbeatNanos)?() ?? 0
+    }
+
     private func stopLocked() {
-        timer?.cancel()
-        timer = nil
+        timer?.cancel(); timer = nil
     }
 
     private func tick() {
         let now = DispatchTime.now().uptimeNanoseconds
-
-        if let lastMicArrivalNanos {
-            if case .gap(let seconds) = micDetector.check(
-                nowNanos: now, lastArrivalNanos: lastMicArrivalNanos(), gateOpen: true
-            ) {
-                onGap?(.livenessGap, "The microphone stopped delivering audio \(Int(seconds))s ago.")
-            }
-        }
-        if let lastSystemArrivalNanos {
-            let gateOpen = isUsingSystemTap ? SystemTapSession.isOutputDeviceRunningSomewhere() : true
-            if case .gap(let seconds) = systemDetector.check(
-                nowNanos: now, lastArrivalNanos: lastSystemArrivalNanos(), gateOpen: gateOpen
-            ) {
-                onGap?(.livenessGap, "System audio stopped delivering \(Int(seconds))s ago.")
-                onSystemGap?()
-            }
+        let gateOpen = outputActivity.othersRunningOutput()
+        gateOpenLock.withLock { $0 = gateOpen }
+        onGate?(gateOpen, now)
+        for track in CaptureTrack.allCases {
+            guard var m = monitors[track] else { continue }
+            // The mic is always expected; only the tap has a gate (§4.3).
+            let v = m.check(nowNanos: now, lastHeartbeatNanos: heartbeat(of: track), gateOpen: track == .mic ? true : gateOpen)
+            monitors[track] = m
+            if v != .healthy { onVerdict?(track, v) }
         }
     }
 }
