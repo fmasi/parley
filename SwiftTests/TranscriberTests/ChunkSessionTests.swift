@@ -153,4 +153,13 @@ struct ChunkSessionTests {
         let withIssue = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{},"issues":[{"code":"asr_failed","track":"remote"}]}"#.utf8)
         #expect(try decoder.decode(ProcessedChunk.self, from: withIssue).issues == [ChunkIssue(code: .asrFailed, track: "remote", count: nil)])
     }
+
+    @Test("readWithMismatchedSessionIdReturnsNil")
+    func readWithMismatchedSessionIdReturnsNil() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(makeSession(chunks: []), directory: dir)   // makeSession's sessionId is the fixture's
+        let id = try #require(SessionState.read(directory: dir)?.sessionId)
+        #expect(SessionState.read(directory: dir, sessionId: id) != nil)
+        #expect(SessionState.read(directory: dir, sessionId: id + "-other") == nil)
+    }
 }

@@ -328,6 +328,14 @@ struct OpenAISummaryProviderRetryTests {
         #expect(content.contains("Done."))
         #expect(MockURLProtocol.requestCount == 1)
     }
+
+    @Test func finishReasonLengthMarksTheResponseTruncated() async throws {
+        MockURLProtocol.reset()
+        let body = ##"{"choices":[{"message":{"role":"assistant","content":"# Summary\ncut"},"finish_reason":"length"}]}"##
+        MockURLProtocol.responses = [(200, [:], Data(body.utf8))]
+        let r = try await makeProvider().summarizeDetailed(segments: [], metadata: SummaryMetadata(sessionName: "s", date: Date(), durationSeconds: 1, speakers: []))
+        #expect(r.truncated && r.markdown.contains("cut"))
+    }
 }
 
 /// Minimal stub URLProtocol that replays a scripted sequence of responses. The last entry

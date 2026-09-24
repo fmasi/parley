@@ -40,6 +40,10 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+        try await summarizeDetailed(segments: segments, metadata: metadata).markdown
+    }
+
+    public func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
         // Calibrate on first encounter with this model
         await calibrateIfNeeded()
 
@@ -79,6 +83,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
+        var truncated = false
 
         if let stats {
             Logger.transcription.info(
@@ -91,17 +96,18 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 actualInputTokens: stats.inputTokens
             )
             if Self.isLikelyTruncated(contextLength: resolvedContextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens) {
+                truncated = true
                 Logger.transcription.warning(
                     "Summary may be truncated — output used \(stats.outputTokens)/\(resolvedContextLength - stats.inputTokens) available tokens. Consider increasing context window."
                 )
             }
         }
 
-        return content
+        return SummaryResponse(markdown: content, truncated: truncated)
     }
 
     /// Single retry with recalibrated context — no further retries to avoid loops.
-    private func retryRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+    private func retryRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
         let (request, inputChars, resolvedContextLength) = try await buildRequest(segments: segments, metadata: metadata)
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -119,6 +125,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
+        var truncated = false
 
         if let stats {
             Logger.transcription.info(
@@ -129,15 +136,15 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
             )
-            let availableOutput = resolvedContextLength - stats.inputTokens
-            if availableOutput > 0 && stats.outputTokens >= availableOutput - 5 {
+            if Self.isLikelyTruncated(contextLength: resolvedContextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens) {
+                truncated = true
                 Logger.transcription.warning(
-                    "Summary may be truncated (retry) — output used \(stats.outputTokens)/\(availableOutput) available tokens."
+                    "Summary may be truncated (retry) — output used \(stats.outputTokens)/\(resolvedContextLength - stats.inputTokens) available tokens."
                 )
             }
         }
 
-        return content
+        return SummaryResponse(markdown: content, truncated: truncated)
     }
 
     private func calibrateIfNeeded() async {

@@ -26,7 +26,7 @@ public enum CrashRecoveryPlanner {
             .sorted { $0.index < $1.index }
     }
     public static func isChunkedSessionRecoverable(outputDirectory: URL, sessionId: String) -> Bool {
-        let state = SessionState.read(directory: outputDirectory)
+        let state = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         if let state, !state.chunks.isEmpty { return true }
         let completed = Set(state?.chunks.map(\.index) ?? [])
         return !orphanChunks(outputDirectory: outputDirectory, sessionId: sessionId, completedIndices: completed).isEmpty
@@ -39,7 +39,7 @@ public enum CrashRecoveryPlanner {
     /// and the chunk-index namespace can collide, and colliding either drops the restart file as
     /// "already completed" or truncates an in-progress chunk's WAV on create (#135).
     public static func nextFreeChunkIndex(outputDirectory: URL, sessionId: String) -> Int {
-        let completed = SessionState.read(directory: outputDirectory)?.chunks.map(\.index) ?? []
+        let completed = SessionState.read(directory: outputDirectory, sessionId: sessionId)?.chunks.map(\.index) ?? []
         let onDisk = onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId).map(\.index)
         guard let maxIndex = (completed + onDisk).max() else { return 0 }
         return maxIndex + 1

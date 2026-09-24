@@ -35,6 +35,27 @@ public struct SummaryMetadata: Sendable {
     }
 }
 
+/// A summary plus whether the model stopped because it hit its output limit (P14).
+public struct SummaryResponse: Equatable, Sendable {
+    public let markdown: String
+    /// The model ran out of output tokens: the summary may end mid-thought or miss later sections.
+    public let truncated: Bool
+
+    public init(markdown: String, truncated: Bool) {
+        self.markdown = markdown
+        self.truncated = truncated
+    }
+}
+
 public protocol SummaryProvider: Sendable {
     func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String
+    /// `summarize`, plus whether the output was truncated. Providers that can tell override it; the
+    /// default says "not truncated", which is all a provider without that signal can say.
+    func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse
+}
+
+extension SummaryProvider {
+    public func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
+        SummaryResponse(markdown: try await summarize(segments: segments, metadata: metadata), truncated: false)
+    }
 }

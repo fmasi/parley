@@ -9,7 +9,7 @@ public enum ChunkedSessionRecovery {
     public static func recover(outputDirectory: URL, sessionId: String, config: Config,
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
                         runner: TranscriptionRunner, provenance: CaptureProvenance? = nil) async throws -> TranscriptionResult? {
-        let existingState = SessionState.read(directory: outputDirectory)
+        let existingState = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         // `orphanChunks` only needs completed indices, not the whole baseState, so it's computed
         // before baseState — the all-orphan fallback below needs the orphan list to derive
         // meetingStart.

@@ -28,12 +28,15 @@ public enum MeetingSummarizer {
 
         Logger.transcription.info("Generating summary for '\(metadata.sessionName)' (\(segments.count) segments)")
 
-        let markdown = try await provider.summarize(segments: segments, metadata: metadata)
+        let response = try await provider.summarizeDetailed(segments: segments, metadata: metadata)
+
+        // A summary cut off at the model's output limit reads as complete — say so first (P14).
+        let banner = response.truncated ? Self.truncationBanner : ""
 
         // Deterministically stamp the source transcript filename as a footer so
         // the notes can always be traced back to their source — independent of
         // whether the LLM chose to mention it.
-        let body = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = banner + response.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         let stamped = "\(body)\n\n---\n*Source transcript: `\(transcriptPath.lastPathComponent)`*\n"
 
         let baseName = transcriptPath.deletingPathExtension().lastPathComponent
@@ -47,6 +50,8 @@ public enum MeetingSummarizer {
 
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
     }
+
+    static let truncationBanner = "> ⚠️ This summary may be incomplete: the model reached its output limit.\n\n"
 
     /// Rewrite the transcript JSON's `metadata.disclosure` block in place (#138), preserving all
     /// other keys. Atomic. A transcript with no readable metadata is left unchanged.

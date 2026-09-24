@@ -422,6 +422,25 @@ struct MeetingSummarizerTests {
         )
         #expect(abs(resolved.timeIntervalSince(recordedAt)) < 1)
     }
+
+    @Test func truncatedSummaryGetsABannerFirst() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trunc-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("m.json")
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "A"]]]).write(to: transcript)
+        try await MeetingSummarizer.summarize(transcriptPath: transcript, provider: TruncatingProvider(), endpoint: "http://localhost")
+        let md = try String(contentsOf: dir.appendingPathComponent("m-summary.md"), encoding: .utf8)
+        #expect(md.hasPrefix("> ⚠️ This summary may be incomplete"))
+        #expect(md.contains("# Summary\ncut"))
+    }
+}
+
+private struct TruncatingProvider: SummaryProvider {
+    func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String { "# Summary\ncut" }
+    func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
+        SummaryResponse(markdown: "# Summary\ncut", truncated: true)
+    }
 }
 
 private final class CapturingProvider: SummaryProvider, @unchecked Sendable {

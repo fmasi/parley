@@ -231,6 +231,7 @@ public final class ChunkProcessor {
         // An ASR-failed chunk keeps its WAV(s) next to the .m4a so it can be re-transcribed (P3):
         // the AAC is lossy, and the words it failed to yield exist nowhere else.
         let preserveSourceWAV = (config.preserveSourceWAV ?? false) || issues.contains { $0.code == .asrFailed }
+        var archivePath: URL?
         do {
             let archiveResult: AudioArchiveResult
             if micFileExists {
@@ -250,15 +251,8 @@ public final class ChunkProcessor {
                 )
             }
             audioPath = archiveResult.archivePath.lastPathComponent
+            archivePath = archiveResult.archivePath
             Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .sensitive)")
-
-            // Enforce storage quota
-            try StorageManager.enforceQuota(
-                in: outputDirectory,
-                limitHours: config.audioArchiveLimitHours,
-                bitrateKbps: config.archiveBitrateKbps,
-                protectedFile: archiveResult.archivePath
-            )
         } catch {
             // Archive failed — keep the WAV(s) as a last-resort fallback. Record whichever one
             // actually holds audio: on a speakerphone recording the system WAV is an empty header
@@ -272,6 +266,22 @@ public final class ChunkProcessor {
             )
             Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .public)")
             issues.append(ChunkIssue(code: .archiveFailed, track: nil, count: nil))
+        }
+
+        // Enforce the storage quota (P13). Outside the archive `catch`: a quota failure used to land
+        // there and relabel an archived chunk as "archival failed", pointing the transcript at WAVs
+        // that were already deleted. No archive, no quota pass. Scope stays the day folder (#224).
+        if let archivePath {
+            do {
+                try StorageManager.enforceQuota(
+                    in: outputDirectory,
+                    limitHours: config.audioArchiveLimitHours,
+                    bitrateKbps: config.archiveBitrateKbps,
+                    protectedFile: archivePath
+                )
+            } catch {
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .public)")
+            }
         }
 
         // 7. Create ProcessedChunk

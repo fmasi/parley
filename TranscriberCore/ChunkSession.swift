@@ -306,6 +306,19 @@ public struct SessionState: Codable {
         return state
     }
 
+    /// Read session state only if it belongs to `sessionId` (P12). A session.json left in the same
+    /// folder by a different recording must never be merged into this one: nil on a mismatch.
+    public static func read(directory: URL, sessionId: String) -> SessionState? {
+        guard let state = read(directory: directory) else { return nil }
+        guard state.sessionId == sessionId else {
+            Logger.state.warning(
+                "SessionState belongs to \(state.sessionId, privacy: .sensitive), not \(sessionId, privacy: .sensitive) — ignoring it"
+            )
+            return nil
+        }
+        return state
+    }
+
     /// Delete session state from disk. No-op if file does not exist.
     public static func delete(directory: URL) {
         let url = fileURL(directory: directory)

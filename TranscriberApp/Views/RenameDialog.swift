@@ -45,6 +45,10 @@ struct RenameDialog: View {
     /// Refreshed after a successful re-detect, since names may have changed (cleared on this
     /// channel; untouched on the other).
     @State private var cachedChannelNames: [String: [String: String]]
+    /// Quiet voices the pipeline merged into a channel's main speaker (`clusters_absorbed`, P7),
+    /// per channel. Read once when the dialog appears; a channel's entry is dropped after it is
+    /// re-detected, since the user has then stated the count and absorption did not run.
+    @State private var absorbedClusters: [String: Int] = [:]
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -133,6 +137,14 @@ struct RenameDialog: View {
                                 .font(.caption)
                                 .disabled(rediarizing != nil)
                         }
+                    }
+                    if let absorbed = absorbedClusters[channel], absorbed > 0 {
+                        Text(absorbed == 1
+                             ? "1 quiet voice was merged into the main speaker — set a count and Re-detect to undo"
+                             : "\(absorbed) quiet voices were merged into the main speaker — set a count and Re-detect to undo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -311,6 +323,7 @@ struct RenameDialog: View {
                         speakers = refreshed
                     }
                     cachedChannelNames = namesNow
+                    absorbedClusters[channel] = nil
                     sampleIndices = [:]
                     // Drop the stated count so the stepper falls back to what the diarizer actually
                     // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,
@@ -392,6 +405,13 @@ struct RenameDialog: View {
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+        .task {
+            // Off the main actor: a long meeting's transcript is several hundred KB.
+            let path = jsonPath
+            absorbedClusters = await Task.detached(priority: .userInitiated) {
+                Self.absorbedClusterCounts(in: path)
+            }.value
+        }
         .onDisappear {
             // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
             // created, and closing the dialog is the common exit.
@@ -400,6 +420,23 @@ struct RenameDialog: View {
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil
         }
+    }
+
+    /// Per channel, how many minority clusters the pipeline absorbed into the dominant speaker, from
+    /// the transcript's `metadata.processing_issues` (`clusters_absorbed` entries, summed across
+    /// chunks). Empty when absent or unreadable.
+    nonisolated static func absorbedClusterCounts(in jsonPath: URL) -> [String: Int] {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = root["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return [:] }
+        var counts: [String: Int] = [:]
+        for issue in issues where issue["code"] as? String == ChunkIssue.Code.clustersAbsorbed.rawValue {
+            guard let track = issue["track"] as? String else { continue }
+            counts[track, default: 0] += issue["count"] as? Int ?? 1
+        }
+        return counts
     }
 
     /// One card per detected speaker: label + sample controls, name field,
