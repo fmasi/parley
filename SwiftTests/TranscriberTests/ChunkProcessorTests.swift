@@ -376,30 +376,27 @@ struct ChunkProcessorTests {
     }
 
     /// B-I3: `awaitAllProcessed` snapshotted its task list once, so a chunk scheduled while it waited
-    /// (a late rotation reply) was processed but left out of the final merge.
+    /// (a late rotation reply) was processed but left out of the final merge. No sleeps (R2a M9):
+    /// gates decide when each chunk's recognition may finish.
     @Test func awaitAllProcessedCoversAChunkScheduledWhileWaiting() async throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
         try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-1.wav"), seconds: 1)
-        struct SlowEngine: TranscriptionEngine {
-            let name = "Slow"
-            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
-                try await Task.sleep(for: .milliseconds(400))
-                return [TranscriptSegment(start: 0, end: 1, text: "hi", language: "en")]
-            }
-            func isReady() -> Bool { true }
-            func prepare() async throws {}
-        }
-        let processor = processor(dir: dir, engine: SlowEngine())
+        let gates = Gates()
+        let processor = processor(dir: dir, engine: GatedEngine(gates: gates))
         processor.processChunk(chunk0(in: dir))
+        await gates.arrival("meeting-0")
         let waiter = Task { @MainActor in
             await processor.awaitAllProcessed()
             return await processor.getSessionState().chunks.map(\.index)
         }
-        try await Task.sleep(for: .milliseconds(150))   // the waiter is now awaiting chunk 0
+        await Task.yield()   // the waiter (main actor, enqueued first) is now awaiting chunk 0
         processor.processChunk(ChunkRotator.FinalizedChunk(index: 1, systemPath: dir.appendingPathComponent("meeting-1.wav").path,
                                                            micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
                                                            startTime: Date(timeIntervalSince1970: 600)))
+        // Chunk 1 may finish only once chunk 0 is persisted: a waiter that stops at chunk 0 returns first.
+        processor.onSessionWriteSucceeded = { Task { await gates.open("meeting-1") } }
+        await gates.open("meeting-0")
         #expect(await waiter.value.sorted() == [0, 1])
     }
 
@@ -427,6 +424,7 @@ struct ChunkProcessorTests {
         let archive = try await AudioArchiver.archiveSystemOnly(systemAudio: sys, outputDirectory: dir, bitrateKbps: 64).archivePath
         #expect(!FileManager.default.fileExists(atPath: sys.path))
         let before = try Data(contentsOf: archive)
+        let scratchBefore = Self.scratchDirectories()
         let processor = processor(dir: dir)
         await processor.processLastChunk(chunk0(in: dir))
         let chunk = try #require(await processor.getSessionState().chunks.first)
@@ -436,7 +434,8 @@ struct ChunkProcessorTests {
         #expect(!chunk.issues.contains { $0.affectsContent }, "nothing was lost: \(chunk.issues)")
         #expect(try Data(contentsOf: archive) == before, "the only copy is never re-encoded")
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["meeting-0.m4a", "session.json"],
-                "no scratch audio is left behind")
+                "nothing else in the folder")
+        #expect(Self.scratchDirectories() == scratchBefore, "no scratch audio is left behind")
     }
 
     // MARK: - R2b item 11
@@ -477,4 +476,119 @@ struct ChunkProcessorTests {
         #expect(SessionState.read(directory: dir, sessionId: "meeting")?.issues.contains(
             SessionIssue(chunk: 0, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil))) == true, "and persisted")
     }
+
+    // MARK: - R2 round 2 (R2a M2, M4, M5)
+
+    /// Where `splitArchive` puts its scratch WAVs.
+    static func scratchDirectories() -> Set<String> {
+        Set(((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? [])
+            .filter { $0.hasPrefix("parley-archive-") })
+    }
+
+    /// R2a M2: the system WAV gone and the archive present is archive-only whatever the mic WAV —
+    /// the archiver deleted the system WAV and died before the mic one. The archive is transcribed as
+    /// is; the leftover mic WAV is cleaned up once the chunk is persisted (preserve_source_wav off).
+    @Test func aMissingSystemWavWithAnArchiveIsArchiveOnlyWhateverTheMicWav() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let archive = try await AudioArchiver.archive(systemAudio: sys, micAudio: mic, outputDirectory: dir, bitrateKbps: 64,
+                                                      preserveSourceWAV: true).archivePath
+        try FileManager.default.removeItem(at: sys)
+        let before = try Data(contentsOf: archive)
+        let processor = processor(dir: dir)
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.audioPath == "meeting-0.m4a" && chunk.issues.contains(ChunkIssue(code: .transcribedFromArchive, track: nil, count: nil)))
+        #expect(chunk.isDualStream, "a mic WAV was there: the chunk had a mic stream")
+        #expect(try Data(contentsOf: archive) == before, "never re-archived over itself")
+        #expect(!FileManager.default.fileExists(atPath: mic.path), "the leftover mic WAV goes once the chunk is persisted")
+    }
+
+    /// R2a M4: the success and failure hooks run on the main actor from different tasks, so an older
+    /// write's success could land after a newer write's failure and clear the alarm. Deliveries carry
+    /// the write's sequence number; one older than the last delivered is dropped.
+    @Test func anOutOfOrderWriteOutcomeIsDropped() {
+        let processor = processor(dir: FileManager.default.temporaryDirectory)
+        final class Sink { var events: [String] = [] }
+        let sink = Sink()
+        processor.onSessionWriteSucceeded = { sink.events.append("ok") }
+        processor.onSessionWriteFailure = { sink.events.append("failed \($0.map(String.init) ?? "-")") }
+        processor.deliverWriteOutcome(sequence: 2, failedChunk: .some(3))
+        processor.deliverWriteOutcome(sequence: 1, failedChunk: nil)        // older success, late
+        processor.deliverWriteOutcome(sequence: 3, failedChunk: nil)
+        processor.deliverWriteOutcome(sequence: 3, failedChunk: nil)        // the same one twice
+        #expect(sink.events == ["failed 3", "ok"])
+    }
+
+    /// R2a M5: another live recording writing the folder's session.json after us displaces us, and we
+    /// displace it back — one `session_file_displaced` per displaced session, not one per write.
+    @Test func aDisplacedSessionIsRecordedOncePerSession() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "morning", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0])
+        let processor = processor(dir: dir)
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 2), reason: "sleep"))
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "morning", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0, 1])
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 3), end: Date(timeIntervalSince1970: 4), reason: "sleep"))
+        let issues = try #require(SessionState.read(directory: dir, sessionId: "meeting")).issues
+        #expect(issues.filter { $0.issue.code == .sessionFileDisplaced }.count == 1)
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 2)
+    }
+
+    /// R2a M5: the chunk WAS persisted (the first write); only the second write, the one carrying the
+    /// displacement note, failed. That is not a failed session write: no alarm, no issue, WAVs go.
+    @Test func aFailedFollowUpWriteAfterADisplacementIsNotASessionWriteFailure() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "morning", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0])
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = processor(dir: dir)
+        final class Sink { var failures: [Int?] = []; var successes = 0 }
+        let sink = Sink()
+        processor.onSessionWriteFailure = { sink.failures.append($0) }
+        processor.onSessionWriteSucceeded = { sink.successes += 1 }
+        await processor.failSessionWritesForTesting(after: 1)
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(sink.failures.isEmpty && sink.successes == 1)
+        #expect(SessionState.read(directory: dir, sessionId: "meeting")?.chunks.map(\.audioPath) == ["meeting-0.m4a"])
+        #expect(!(await processor.getSessionState().issues.contains { $0.issue.code == .sessionWriteFailed }))
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-0.wav").path))
+    }
+}
+
+/// Lets a test decide when each chunk's recognition may finish: `pass` blocks until the gate named
+/// after the audio file is opened; `arrival` waits until a chunk has reached its gate.
+actor Gates {
+    private var opened: Set<String> = []
+    private var arrived: Set<String> = []
+    private var blocked: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var watchers: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func pass(_ name: String) async {
+        arrived.insert(name)
+        watchers.removeValue(forKey: name)?.forEach { $0.resume() }
+        guard !opened.contains(name) else { return }
+        await withCheckedContinuation { blocked[name, default: []].append($0) }
+    }
+
+    func open(_ name: String) {
+        opened.insert(name)
+        blocked.removeValue(forKey: name)?.forEach { $0.resume() }
+    }
+
+    func arrival(_ name: String) async {
+        guard !arrived.contains(name) else { return }
+        await withCheckedContinuation { watchers[name, default: []].append($0) }
+    }
+}
+
+struct GatedEngine: TranscriptionEngine {
+    let name = "Gated"
+    let gates: Gates
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+        await gates.pass(audioPath.deletingPathExtension().lastPathComponent)
+        return [TranscriptSegment(start: 0, end: 1, text: "hi", language: "en")]
+    }
+    func isReady() -> Bool { true }
+    func prepare() async throws {}
 }

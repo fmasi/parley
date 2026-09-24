@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Rehydrate a chunked recording session after a crash: read `session.json` — or the session's
 /// moved-aside `session-<id>.json` (C-I3) — or start from an empty state, re-ingest any orphan chunk
@@ -10,6 +11,15 @@ public enum ChunkedSessionRecovery {
     public static func recover(outputDirectory: URL, sessionId: String, config: Config,
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
                         runner: TranscriptionRunner, provenance: CaptureProvenance? = nil) async throws -> TranscriptionResult? {
+        // A finalized session is finished (R2a item 12): a lingering recovery file never re-ingests its
+        // chunks or re-finalizes over its transcript (renames and edits would be lost). A leftover
+        // session.json of it (a crash between the transcript write and its deletion) is removed.
+        if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
+            Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) already finalized — the recovery file lingered; nothing re-ingested or re-finalized")
+            SessionState.delete(directory: outputDirectory, sessionId: sessionId)
+            let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
+            return FileManager.default.fileExists(atPath: transcript.path) ? TranscriptionResult(jsonPath: transcript) : nil
+        }
         let existingState = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         // `orphanChunks` only needs completed indices, not the whole baseState, so it's computed
         // before baseState — the all-orphan fallback below needs the orphan list to derive

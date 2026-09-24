@@ -48,7 +48,12 @@ public final class ChunkProcessor {
     private actor StateStore {
         var sessionState: SessionState
         let directory: URL
-        private var failWritesForTesting = false
+        /// Every persist attempt's number, in the order the writes happened (R2a M4).
+        private var writeSequence: UInt64 = 0
+        /// Sessions this one has displaced from the folder's session.json, recorded once each (R2a M5).
+        private var displacedSessions: Set<String> = []
+        /// Test seam: writes that may still succeed before every later one fails (nil = no fault).
+        private var successfulWritesLeftForTesting: Int?
 
         init(sessionState: SessionState, directory: URL) {
             self.sessionState = sessionState
@@ -77,24 +82,63 @@ public final class ChunkProcessor {
             sessionState
         }
 
-        /// Write the current state. When the folder's session.json belonged to another recording,
-        /// it was moved aside (never overwritten); that is recorded here and written with the state.
-        func persist() throws {
-            if failWritesForTesting { throw CocoaError(.fileWriteUnknown) }
-            if try SessionState.write(sessionState, directory: directory) != nil {
+        /// Write the current state; returns this write's sequence number and whether it failed.
+        /// When the folder's session.json belonged to another recording it was moved aside (never
+        /// overwritten); that is recorded once per displaced session and written with the state. If
+        /// only that follow-up write fails, the state (and the chunk) WAS persisted: not a failure —
+        /// the note stays in memory for the next write (R2a M5).
+        func persist() -> (sequence: UInt64, error: (any Error)?) {
+            writeSequence += 1
+            do {
+                let displaced = try write()
+                guard let displaced else { return (writeSequence, nil) }
+                let key = displaced.sessionId ?? displaced.movedTo.lastPathComponent
+                guard displacedSessions.insert(key).inserted else { return (writeSequence, nil) }
                 sessionState.issues.append(SessionIssue(
                     chunk: nil, issue: ChunkIssue(code: .sessionFileDisplaced, track: nil, count: nil)
                 ))
-                try SessionState.write(sessionState, directory: directory)
+                do {
+                    try write()
+                } catch {
+                    Logger.state.error("session.json was written, but not the note that another session was moved aside (it will be written next time): \(error, privacy: .private)")
+                }
+                return (writeSequence, nil)
+            } catch {
+                return (writeSequence, error)
             }
         }
 
-        func setFailWritesForTesting() { failWritesForTesting = true }
+        @discardableResult
+        private func write() throws -> DisplacedSession? {
+            if let left = successfulWritesLeftForTesting {
+                guard left > 0 else { throw CocoaError(.fileWriteUnknown) }
+                successfulWritesLeftForTesting = left - 1
+            }
+            return try SessionState.write(sessionState, directory: directory)
+        }
+
+        func setFailWritesForTesting(after successes: Int) { successfulWritesLeftForTesting = successes }
     }
 
-    /// Test seam: every later session.json write fails.
-    func failSessionWritesForTesting() async {
-        await stateStore.setFailWritesForTesting()
+    /// Test seam: every later session.json write fails (after `successes` more that succeed).
+    func failSessionWritesForTesting(after successes: Int = 0) async {
+        await stateStore.setFailWritesForTesting(after: successes)
+    }
+
+    /// The last write outcome handed to the coordinator. Outcomes are delivered from different tasks,
+    /// so an older write's success could land after a newer write's failure and clear its alarm: one
+    /// older than this is dropped (R2a M4).
+    private var lastDeliveredWriteSequence: UInt64 = 0
+
+    /// Hand one write's outcome to the coordinator, in write order. `failedChunk` is nil for a
+    /// success, `.some(chunkIndex)` for a failure (an inner nil = a session-level write).
+    func deliverWriteOutcome(sequence: UInt64, failedChunk: Int??) {
+        guard sequence > lastDeliveredWriteSequence else {
+            Logger.state.info("Session write \(sequence, privacy: .public) outcome arrived after \(self.lastDeliveredWriteSequence, privacy: .public) — dropped")
+            return
+        }
+        lastDeliveredWriteSequence = sequence
+        if let failedChunk { onSessionWriteFailure?(failedChunk) } else { onSessionWriteSucceeded?() }
     }
 
     public init(
@@ -226,16 +270,15 @@ public final class ChunkProcessor {
     /// `onSessionWriteFailure` with the failure recorded in the session's issues so the next
     /// successful write persists it — a session that cannot be saved is not recoverable.
     private nonisolated func persist(chunkIndex: Int?, context: String) async -> Bool {
-        do {
-            try await stateStore.persist()
-            await MainActor.run { self.onSessionWriteSucceeded?() }
+        let (sequence, error) = await stateStore.persist()
+        guard let error else {
+            await MainActor.run { self.deliverWriteOutcome(sequence: sequence, failedChunk: nil) }
             return true
-        } catch {
-            Logger.state.error("Failed to write session.json \(context, privacy: .public): \(error, privacy: .private)")
-            await stateStore.noteSessionWriteFailure(chunkIndex: chunkIndex)
-            await MainActor.run { self.onSessionWriteFailure?(chunkIndex) }
-            return false
         }
+        Logger.state.error("Failed to write session.json \(context, privacy: .public): \(error, privacy: .private)")
+        await stateStore.noteSessionWriteFailure(chunkIndex: chunkIndex)
+        await MainActor.run { self.deliverWriteOutcome(sequence: sequence, failedChunk: .some(chunkIndex)) }
+        return false
     }
 
     // MARK: - Private
@@ -257,7 +300,8 @@ public final class ChunkProcessor {
         var archiveIssues: [ChunkIssue] = []
         if let archive = Self.archiveOnlyChunk(chunk) {
             existingArchive = archive
-            if let split = await splitArchive(archive, chunkIndex: chunk.index) {
+            if let split = await splitArchive(archive, chunkIndex: chunk.index,
+                                              micWavLeft: FileManager.default.fileExists(atPath: chunk.micPath)) {
                 archiveIssues.append(ChunkIssue(code: .transcribedFromArchive, track: nil, count: nil))
                 scratch = split.directory
                 systemURL = split.system
@@ -444,6 +488,11 @@ public final class ChunkProcessor {
                 if micFileExists { try? FileManager.default.removeItem(at: micURL) }
             }
         }
+        // An archive-only chunk's leftover mic WAV (R2a M2): the archive holds that channel; it goes
+        // under the same rule, once the chunk is persisted.
+        if existingArchive != nil, persisted, !preserveSourceWAV, FileManager.default.fileExists(atPath: chunk.micPath) {
+            try? FileManager.default.removeItem(atPath: chunk.micPath)
+        }
 
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info(
@@ -468,14 +517,15 @@ public final class ChunkProcessor {
         }
     }
 
-    /// The chunk's `.m4a` when it is the only artefact left: neither WAV exists, the archive does.
-    /// A caller that names the archive itself as the system path gets it back too — archiving it
-    /// again would remove the source as "stale output" before encoding it.
+    /// The chunk's `.m4a` when its system WAV is gone and the archive exists — whatever the mic WAV:
+    /// the archiver deletes the system WAV first, so a mic WAV alone is a leftover of an archived chunk
+    /// (R2a M2). A caller that names the archive itself as the system path gets it back too —
+    /// archiving it again would remove the source as "stale output" before encoding it.
     nonisolated static func archiveOnlyChunk(_ chunk: ChunkRotator.FinalizedChunk) -> URL? {
         let system = URL(fileURLWithPath: chunk.systemPath)
         let fm = FileManager.default
         if system.pathExtension == "m4a" { return fm.fileExists(atPath: system.path) ? system : nil }
-        guard !fm.fileExists(atPath: system.path), !fm.fileExists(atPath: chunk.micPath) else { return nil }
+        guard !fm.fileExists(atPath: system.path) else { return nil }
         let archive = system.deletingPathExtension().appendingPathExtension("m4a")
         return fm.fileExists(atPath: archive.path) ? archive : nil
     }
@@ -485,13 +535,14 @@ public final class ChunkProcessor {
     /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
     /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
     /// system stream missing, never dropped.
-    private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int) async -> (directory: URL, system: URL, mic: URL?)? {
+    private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int, micWavLeft: Bool) async -> (directory: URL, system: URL, mic: URL?)? {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let split = try await AudioSourceResolver.splitChannels(stereoAac: archive, outputDirectory: directory)
             let siblings = await stateStore.getSessionState().chunks
-            let dual = siblings.isEmpty ? Self.hasSignal(split.local) : siblings.contains(where: \.isDualStream)
+            // A mic WAV left behind is proof the chunk had a mic stream.
+            let dual = micWavLeft || (siblings.isEmpty ? Self.hasSignal(split.local) : siblings.contains(where: \.isDualStream))
             if !dual { try? FileManager.default.removeItem(at: split.local) }
             Logger.transcription.error("Chunk \(chunkIndex, privacy: .public) has no WAVs, only its archive — transcribing it from \(archive.lastPathComponent, privacy: .sensitive)")
             return (directory, split.remote, dual ? split.local : nil)

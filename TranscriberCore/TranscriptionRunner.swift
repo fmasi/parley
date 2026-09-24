@@ -411,6 +411,13 @@ public final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
+        // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
+        // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
+        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV.
+        if !(config.preserveSourceWAV ?? false) {
+            Self.removeLeftoverWAVs(of: sortedChunks, in: outputDirectory)
+        }
+
         // 5. Audio paths from chunks — must be in index order so AudioConcatenator
         // stitches them chronologically. (#56)
         let chunkAudioPaths = sortedChunks.map {
@@ -502,6 +509,13 @@ public final class TranscriptionRunner {
         let baseName = sessionState.sessionId
         let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
         try TranscriptAssembler.write(json, to: jsonPath)
+        // Durably: this session is finished. A lingering recovery file must never re-finalize over it
+        // (R2a item 12). A failure here leaves the transcript itself as the (weaker) marker.
+        do {
+            try SessionState.markFinalized(directory: outputDirectory, sessionId: baseName, transcript: jsonPath.lastPathComponent)
+        } catch {
+            Logger.state.error("Could not mark the session finalized: \(error, privacy: .private)")
+        }
 
         // 8. Write format file
         do {
@@ -529,6 +543,25 @@ public final class TranscriptionRunner {
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// See step 4b of `finalize`.
+    static func removeLeftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) {
+        let fm = FileManager.default
+        for chunk in chunks where chunk.audioPath.hasSuffix(".m4a") && !chunk.issues.contains(where: { $0.code == .asrFailed }) {
+            guard fm.fileExists(atPath: directory.appendingPathComponent(chunk.audioPath).path) else { continue }
+            let base = (chunk.audioPath as NSString).deletingPathExtension
+            for name in [base + ".wav", base + "_mic.wav"] {
+                let url = directory.appendingPathComponent(name)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                do {
+                    try fm.removeItem(at: url)
+                    Logger.files.info("Removed a leftover WAV of archived chunk \(chunk.index, privacy: .public)")
+                } catch {
+                    Logger.files.error("Could not remove a leftover WAV of chunk \(chunk.index, privacy: .public): \(error, privacy: .private)")
+                }
+            }
+        }
     }
 
     /// The `merged_audio` block of a transcript an earlier finalize wrote, if any.
@@ -630,15 +663,17 @@ public final class TranscriptionRunner {
         var sessionState = seededState ?? fresh
         // A seed from ANOTHER session is refused (C-I5): accepted, it kept the other id, so this
         // recording finalized as the other's `<id>.json`, merged into the other's `<id>.m4a` and
-        // took the other meeting's chunks into its record. This session starts fresh under its own
-        // id; the refusal is recorded as a problem. The seed's own file is untouched and stays
-        // recoverable under its id. An engine change between crash and resume (a Settings change)
-        // is recorded as information only, and still seeds.
+        // took the other meeting's chunks into its record. This session continues from its OWN state
+        // when that is on disk (R2a M3: never an empty overwrite of it), else starts fresh; the
+        // refusal is recorded as a problem. The seed's own file is untouched and stays recoverable
+        // under its id. An engine change between crash and resume (a Settings change) is recorded as
+        // information only, and still seeds.
         if let seededState, seededState.sessionId != sessionBaseName {
+            let own = SessionState.read(directory: outputDirectory, sessionId: sessionBaseName)
             Logger.state.error(
-                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — not seeding; starting this session fresh"
+                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — not seeding; continuing from \(own == nil ? "a fresh state" : "this session's own state", privacy: .public)"
             )
-            sessionState = fresh
+            sessionState = own ?? fresh
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil)))
         } else if let seededState, seededState.engine != config.engine.rawValue {
             Logger.state.info(

@@ -25,16 +25,27 @@ public enum CrashRecoveryPlanner {
 
     /// Chunks on disk that `session.json` does not hold. An archive with no WAV counts (C-I4: a crash
     /// between archiving a chunk and writing session.json left only its `.m4a`; `ChunkProcessor`
-    /// transcribes it from the archive) — unless the session was already finalized: once its
-    /// transcript `<sessionId>.json` exists, its chunk archives are its audio, not orphans.
+    /// transcribes it from the archive). A FINALIZED session has no orphans at all: its WAVs (kept by
+    /// preserve_source_wav, or after a failed recognition) and archives are its record's audio, and
+    /// re-ingesting them re-finalized over the finished transcript (R2a item 12).
     public static func orphanChunks(outputDirectory: URL, sessionId: String, completedIndices: Set<Int>) -> [OrphanChunk] {
-        let finalized = FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("\(sessionId).json").path)
+        guard !isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) else { return [] }
         return onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
-            .filter { !completedIndices.contains($0.index) && ($0.hasWav || !finalized) }
+            .filter { !completedIndices.contains($0.index) }
             .map { OrphanChunk(index: $0.index, baseName: $0.baseName) }
             .sorted { $0.index < $1.index }
     }
+
+    /// Whether `sessionId` was finalized: its durable marker, or — for a session finalized before the
+    /// marker existed — its transcript `<sessionId>.json`. Recovery never re-ingests or re-finalizes
+    /// such a session (R2a item 12).
+    public static func isFinalized(outputDirectory: URL, sessionId: String) -> Bool {
+        SessionState.isMarkedFinalized(directory: outputDirectory, sessionId: sessionId)
+            || FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("\(sessionId).json").path)
+    }
+
     public static func isChunkedSessionRecoverable(outputDirectory: URL, sessionId: String) -> Bool {
+        guard !isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) else { return false }
         let state = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         if let state, !state.chunks.isEmpty { return true }
         let completed = Set(state?.chunks.map(\.index) ?? [])

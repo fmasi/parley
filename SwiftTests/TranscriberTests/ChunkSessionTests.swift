@@ -284,7 +284,7 @@ struct ChunkSessionTests {
 
     /// B-M11: concurrent writers shared one `session.json.tmp`; the loser's rename threw a false
     /// `sessionWriteFailed`. A unique tmp per write, still renamed atomically, and none left behind.
-    @Test("concurrentWritesNeverFailAndLeaveNoTmp")
+    @Test("concurrentWritesNeverFailAndLeaveNoTmp", .timeLimit(.minutes(1)))
     func concurrentWritesNeverFailAndLeaveNoTmp() async throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let state = session("afternoon", chunks: [0, 1])
@@ -300,6 +300,69 @@ struct ChunkSessionTests {
         #expect(SessionState.read(directory: dir, sessionId: "afternoon")?.chunks.count == 2)
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0 != "session.json" }
         #expect(leftovers.isEmpty, "no tmp file (or aside copy of itself) is left: \(leftovers)")
+    }
+
+    // MARK: - R2 round 2 (R2a M1, M6, M8, M9)
+
+    /// R2a M9: two recordings' writers interleaved — each id's state survives, one in session.json
+    /// and the other aside; no write fails.
+    @Test("interleavedWritersOfTwoSessionsBothSurvive", .timeLimit(.minutes(1)))
+    func interleavedWritersOfTwoSessionsBothSurvive() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = session("morning", chunks: [0, 1]), b = session("afternoon", chunks: [0])
+        let failures = await withTaskGroup(of: Int.self) { group in
+            for i in 0..<48 {
+                let state = i.isMultiple(of: 2) ? a : b
+                group.addTask {
+                    do { try SessionState.write(state, directory: dir); return 0 } catch { return 1 }
+                }
+            }
+            return await group.reduce(0, +)
+        }
+        #expect(failures == 0)
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 2)
+        #expect(SessionState.read(directory: dir, sessionId: "afternoon")?.chunks.count == 1)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).allSatisfy { !$0.hasSuffix(".tmp") })
+    }
+
+    /// R2a M1: moving a file aside replaced an existing aside copy on the strength of an invariant.
+    /// It is exclusive now: an existing copy is never replaced; the new one gets a unique suffix, and
+    /// reads and deletes see every copy.
+    @Test("anExistingAsideCopyIsNeverReplaced")
+    func anExistingAsideCopyIsNeverReplaced() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(session("morning", chunks: [0]), directory: dir)
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)          // morning(1) → session-morning.json
+        let firstAside = try Data(contentsOf: dir.appendingPathComponent("session-morning.json"))
+        try SessionState.write(session("morning", chunks: [0, 1, 2]), directory: dir)      // afternoon aside, morning back
+        let displaced = try #require(try SessionState.write(session("afternoon", chunks: [0, 1]), directory: dir))
+        #expect(displaced.movedTo.lastPathComponent != "session-morning.json", "the existing aside copy is not replaced")
+        #expect(try Data(contentsOf: dir.appendingPathComponent("session-morning.json")) == firstAside)
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 3, "the newest state wins on read")
+        SessionState.delete(directory: dir, sessionId: "morning")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("session-morning") }.isEmpty,
+                "delete removes every copy")
+        #expect(SessionState.read(directory: dir, sessionId: "afternoon")?.chunks.count == 2)
+    }
+
+    /// R2a M6: "delete the WAVs only after persist" must survive a power loss, so the tmp is flushed
+    /// to the disk (F_FULLFSYNC), not just to the cache, before it is renamed.
+    @Test("aWriteIsFullySyncedBeforeTheRename")
+    func aWriteIsFullySyncedBeforeTheRename() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let before = SessionState.fullSyncsForTesting
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
+        #expect(SessionState.fullSyncsForTesting > before)
+    }
+
+    /// R2a M8: a tmp left by a write that died (crash, power loss) is swept at the next write.
+    @Test("aStaleTmpIsSweptAtTheNextWrite")
+    func aStaleTmpIsSweptAtTheNextWrite() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let stale = dir.appendingPathComponent("session.json.\(UUID().uuidString).tmp")
+        try Data("{".utf8).write(to: stale)
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
     }
 }
 

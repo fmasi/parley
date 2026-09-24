@@ -284,4 +284,46 @@ struct ChunkedSessionRecoveryTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("session-m.json").path))
         #expect(SessionState.read(directory: dir, sessionId: "later")?.chunks.count == 1, "the later recording's session is untouched")
     }
+
+    /// R2a item 12 (IMPORTANT, D12): with preserve_source_wav on (the owner's setting) the WAVs survive
+    /// finalize. A lingering sentinel then re-ingested every one and RE-FINALIZED over the finished
+    /// transcript, losing renames. A finalized session is marked durably; recovery never re-ingests or
+    /// re-finalizes it — it hands back the transcript as it is.
+    @Test func aFinalizedSessionIsNeverReFinalized() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var config = Config.default
+        config.preserveSourceWAV = true
+        let processor = await ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        for i in 0...1 {
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-\(i).wav"), seconds: 1)
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: i, systemPath: dir.appendingPathComponent("m-\(i).wav").path,
+                                                                         micPath: dir.appendingPathComponent("m-\(i)_mic.wav").path,
+                                                                         startTime: Date(timeIntervalSince1970: Double(i) * 60)))
+        }
+        let runner = await TranscriptionRunner()
+        let result = try await runner.finalize(sessionState: await processor.getSessionState(), outputDirectory: dir, config: config)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.wav").path), "preserved: the WAVs are still there")
+        #expect(CrashRecoveryPlanner.isFinalized(outputDirectory: dir, sessionId: "m"))
+
+        // The user renames a speaker in the finished transcript.
+        var json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        var segments = try #require(json["segments"] as? [[String: Any]])
+        segments[0]["speaker"] = "Alice"
+        json["segments"] = segments
+        try TranscriptAssembler.write(json, to: result.jsonPath)
+        let renamed = try Data(contentsOf: result.jsonPath)
+
+        // Relaunch with the sentinel still there.
+        #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: []).isEmpty)
+        let again = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                             transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        #expect(again?.jsonPath == result.jsonPath, "the finished transcript, handed back")
+        #expect(try Data(contentsOf: result.jsonPath) == renamed, "never re-finalized: the rename survives")
+        #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "nothing re-ingested")
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.wav").path), "the preserved WAVs are untouched")
+    }
 }

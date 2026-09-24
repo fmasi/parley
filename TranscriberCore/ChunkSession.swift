@@ -371,24 +371,44 @@ public struct SessionState: Codable {
     // MARK: - File location
 
     /// One per day folder (the folder is the session's output directory). Its id is checked on every
-    /// write and delete; a file of another session is moved aside to `session-<id>.json`, never
-    /// overwritten (C-I3).
+    /// write and delete; a file of another session is moved aside to `session-<id>.json` (or, when
+    /// that name is taken, `session-<id>.<uuid>.json`), never overwritten (C-I3, R2a M1).
     private static let fileName = "session.json"
 
     private static func fileURL(directory: URL) -> URL {
         directory.appendingPathComponent(fileName)
     }
 
-    /// Where a displaced session's file goes: `session-<id>.json`, or a unique name when its id can't
-    /// be read (it is not known to be anybody's, so it is not known to be expendable).
+    /// `session-<id>.json`, or for an id that can't be read `session-unreadable-<uuid>.json` (it is not
+    /// known to be anybody's, so it is not known to be expendable).
     private static func asideURL(directory: URL, sessionId: String?) -> URL {
         directory.appendingPathComponent("session-\(sessionId ?? "unreadable-\(UUID().uuidString)").json")
+    }
+
+    /// Every aside copy of `sessionId`'s state: `session-<id>.json` and `session-<id>.<uuid>.json`.
+    private static func asideURLs(directory: URL, sessionId: String) -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        let plain = "session-\(sessionId).json", prefix = "session-\(sessionId)."
+        return names.filter { name in
+            if name == plain { return true }
+            guard name.hasPrefix(prefix), name.hasSuffix(".json") else { return false }
+            let middle = name.dropFirst(prefix.count).dropLast(".json".count)
+            return UUID(uuidString: String(middle)) != nil
+        }.sorted().map { directory.appendingPathComponent($0) }
+    }
+
+    /// Durable marker that `sessionId` was finalized (R2a item 12): `.<id>.finalized` next to its
+    /// transcript. A lingering recovery file must never re-ingest or re-finalize such a session.
+    private static func finalizedMarkerURL(directory: URL, sessionId: String) -> URL {
+        directory.appendingPathComponent(".\(sessionId).finalized")
     }
 
     /// Serializes every session.json write and delete in this process. Two writers renaming over the
     /// same file concurrently hung the process in the kernel (`renameatx_np`) in a test; a salvage and
     /// a live recording can share a day folder.
     private static let ioLock = NSLock()
+    /// Test seam: how many files were flushed with F_FULLFSYNC (read under the test's own ordering).
+    nonisolated(unsafe) static var fullSyncsForTesting = 0
 
     // MARK: - JSON encoder/decoder
 
@@ -421,26 +441,26 @@ public struct SessionState: Codable {
 
     // MARK: - Static I/O
 
-    /// Atomically write session state to disk: a uniquely named temp file in the same folder, renamed
-    /// over `session.json` (B-M11: a shared temp name let concurrent writers fail or hang each other).
+    /// Atomically and durably write session state: a uniquely named temp file in the same folder,
+    /// flushed to the disk (F_FULLFSYNC, R2a M6 — the WAVs are deleted on the strength of this write,
+    /// so it must survive a power loss), then renamed over `session.json` (B-M11). Temp files left by
+    /// a write that died are swept first (R2a M8).
     ///
     /// When `session.json` holds ANOTHER session (or one whose id can't be read), that file is moved
-    /// aside to `session-<id>.json` first and returned, so the caller can record it: the next
-    /// recording in a day folder used to overwrite an unfinalized session's recognised text (C-I3).
-    /// If it can't be moved aside, nothing is written and this throws.
+    /// aside first — exclusively, never over an existing copy (R2a M1) — and returned, so the caller
+    /// can record it: the next recording in a day folder used to overwrite an unfinalized session's
+    /// recognised text (C-I3). If it can't be moved aside, nothing is written and this throws.
     @discardableResult
     public static func write(_ state: SessionState, directory: URL) throws -> DisplacedSession? {
         let data = try makeEncoder().encode(state)
         ioLock.lock(); defer { ioLock.unlock() }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        sweepStaleTemporaryFiles(in: directory)
         let dest = fileURL(directory: directory)
 
         var displaced: DisplacedSession?
         if let theirs = storedSessionId(at: dest), theirs != state.sessionId {
-            let aside = asideURL(directory: directory, sessionId: theirs)
-            // An older aside copy of the same session is superseded: every write goes to
-            // session.json, so the file being moved is that session's newest state.
-            try rename(dest, to: aside)
+            let aside = try moveAsideExclusively(dest, directory: directory, sessionId: theirs)
             Logger.state.error(
                 "session.json belonged to \(theirs ?? "a session whose id can't be read", privacy: .sensitive), not \(state.sessionId, privacy: .sensitive) — moved it aside to \(aside.lastPathComponent, privacy: .sensitive) instead of overwriting it"
             )
@@ -449,8 +469,9 @@ public struct SessionState: Codable {
 
         let tmp = directory.appendingPathComponent("\(fileName).\(UUID().uuidString).tmp")
         do {
-            try data.write(to: tmp)
+            try writeDurably(data, to: tmp)
             try rename(tmp, to: dest)
+            syncDirectory(directory)
         } catch {
             try? FileManager.default.removeItem(at: tmp)
             throw error
@@ -460,15 +481,67 @@ public struct SessionState: Codable {
         return displaced
     }
 
-    /// POSIX `rename(2)`: atomic on one volume, replaces `to` if it exists.
-    private static func rename(_ from: URL, to: URL) throws {
-        guard Darwin.rename(from.path, to.path) == 0 else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)])
+    /// `session-<id>.json`, or `session-<id>.<uuid>.json` when that name is taken: `RENAME_EXCL`
+    /// never replaces an existing copy.
+    private static func moveAsideExclusively(_ file: URL, directory: URL, sessionId: String?) throws -> URL {
+        let preferred = asideURL(directory: directory, sessionId: sessionId)
+        if renamex_np(file.path, preferred.path, UInt32(RENAME_EXCL)) == 0 { return preferred }
+        guard errno == EEXIST, let sessionId else { throw posixError(errno) }
+        let unique = directory.appendingPathComponent("session-\(sessionId).\(UUID().uuidString).json")
+        guard renamex_np(file.path, unique.path, UInt32(RENAME_EXCL)) == 0 else { throw posixError(errno) }
+        return unique
+    }
+
+    /// Write `data` to a new file and flush it to the disk itself (F_FULLFSYNC), not just to the
+    /// drive's cache; plain `fsync` where the file system can't.
+    private static func writeDurably(_ data: Data, to url: URL) throws {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fd >= 0 else { throw posixError(errno) }
+        defer { close(fd) }
+        try data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let n = Darwin.write(fd, buffer.baseAddress! + offset, buffer.count - offset)
+                guard n > 0 else { throw posixError(n < 0 ? errno : EIO) }
+                offset += n
+            }
+        }
+        if fcntl(fd, F_FULLFSYNC) == 0 {
+            fullSyncsForTesting += 1
+        } else if fsync(fd) != 0 {
+            throw posixError(errno)
         }
     }
 
-    /// Read session state from disk. Returns nil if file is missing or corrupt.
-    public static func read(directory: URL) -> SessionState? {
+    /// The rename is only durable once the folder's entry is: best effort, never a failed write.
+    private static func syncDirectory(_ directory: URL) {
+        let fd = open(directory.path, O_RDONLY)
+        guard fd >= 0 else { return }
+        if fcntl(fd, F_FULLFSYNC) != 0 { _ = fsync(fd) }
+        close(fd)
+    }
+
+    /// `session.json.<uuid>.tmp` left by a write that died. Only this process writes session.json and
+    /// every write holds `ioLock`, so any temp file seen here is stale.
+    private static func sweepStaleTemporaryFiles(in directory: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasPrefix("\(fileName).") && name.hasSuffix(".tmp") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
+    private static func posixError(_ code: Int32) -> Error {
+        CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+    }
+
+    /// POSIX `rename(2)`: atomic on one volume, replaces `to` if it exists.
+    private static func rename(_ from: URL, to: URL) throws {
+        guard Darwin.rename(from.path, to.path) == 0 else { throw posixError(errno) }
+    }
+
+    /// Read whatever session.json holds, whichever session it is. Internal (R2a M10): outside this
+    /// module a session is only ever read by its id.
+    static func read(directory: URL) -> SessionState? {
         read(url: fileURL(directory: directory))
     }
 
@@ -485,14 +558,20 @@ public struct SessionState: Codable {
     }
 
     /// Read session state only if it belongs to `sessionId` (P12): `session.json` when it is this
-    /// session's, else this session's moved-aside `session-<id>.json` (C-I3). A file of a different
-    /// recording is never merged into this one: nil when neither matches.
+    /// session's — the live file, always its newest state — else the most complete of this session's
+    /// moved-aside copies (C-I3). A file of a different recording is never merged into this one: nil
+    /// when nothing matches.
     public static func read(directory: URL, sessionId: String) -> SessionState? {
         let current = read(directory: directory)
         if let current, current.sessionId == sessionId { return current }
-        if let aside = read(url: asideURL(directory: directory, sessionId: sessionId)), aside.sessionId == sessionId {
+        let asides = asideURLs(directory: directory, sessionId: sessionId).compactMap { url -> (SessionState, Date)? in
+            guard let state = read(url: url), state.sessionId == sessionId else { return nil }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return (state, modified)
+        }
+        if let best = asides.max(by: { ($0.0.chunks.count, $0.1) < ($1.0.chunks.count, $1.1) }) {
             Logger.state.info("SessionState \(sessionId, privacy: .sensitive) found moved aside — using it")
-            return aside
+            return best.0
         }
         if let current {
             Logger.state.warning(
@@ -503,10 +582,10 @@ public struct SessionState: Codable {
     }
 
     /// Delete `sessionId`'s session state: `session.json` only when it is this session's (another
-    /// recording may own it now), and its moved-aside copy. No-op when neither exists.
+    /// recording may own it now), and every moved-aside copy of it. No-op when none exists.
     public static func delete(directory: URL, sessionId: String) {
         ioLock.lock(); defer { ioLock.unlock() }
-        for url in [fileURL(directory: directory), asideURL(directory: directory, sessionId: sessionId)] {
+        for url in [fileURL(directory: directory)] + asideURLs(directory: directory, sessionId: sessionId) {
             guard let stored = storedSessionId(at: url) else { continue }
             guard stored == sessionId else {
                 if url.lastPathComponent == fileName {
@@ -521,5 +600,30 @@ public struct SessionState: Codable {
                 Logger.state.warning("SessionState delete failed: \(error, privacy: .private)")
             }
         }
+    }
+
+    // MARK: - Finalized marker (R2a item 12)
+
+    /// Record, durably, that `sessionId` was finalized into `transcript`.
+    public static func markFinalized(directory: URL, sessionId: String, transcript: String) throws {
+        let marker: [String: String] = ["session_id": sessionId, "transcript": transcript,
+                                        "finalized_at": ISO8601DateFormatter().string(from: Date())]
+        let data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        ioLock.lock(); defer { ioLock.unlock() }
+        let url = finalizedMarkerURL(directory: directory, sessionId: sessionId)
+        let tmp = directory.appendingPathComponent(".\(sessionId).finalized.\(UUID().uuidString).tmp")
+        do {
+            try writeDurably(data, to: tmp)
+            try rename(tmp, to: url)
+            syncDirectory(directory)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
+        }
+    }
+
+    /// Whether `sessionId` was marked finalized.
+    public static func isMarkedFinalized(directory: URL, sessionId: String) -> Bool {
+        FileManager.default.fileExists(atPath: finalizedMarkerURL(directory: directory, sessionId: sessionId).path)
     }
 }
