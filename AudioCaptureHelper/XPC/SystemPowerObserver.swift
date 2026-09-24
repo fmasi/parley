@@ -12,7 +12,9 @@ import os
 /// - `kIOMessageSystemHasPoweredOn` → `.poweredOn(fullWake:)`. It is also sent for a DarkWake / Power Nap,
 ///   so it carries whether the graphics capability is up (`isFullWake()`): only a full wake may end the
 ///   pause, since a DarkWake's audio devices may be off.
-/// Events arrive on the queue given to `init`.
+/// Messages arrive on the observer's OWN queue and are acknowledged there at once — never behind the
+/// watchdog's work (a per-tick HAL read), which would delay system sleep by up to 30 s (round 3 D).
+/// Events are then forwarded, asynchronously, to the queue given to `init`.
 final class SystemPowerObserver {
     enum Event {
         case willSleep
@@ -30,11 +32,15 @@ final class SystemPowerObserver {
     private var notificationPort: IONotificationPortRef?
     private var notifier: io_object_t = 0
     private let onEvent: (Event) -> Void
+    /// Where power messages are received and acknowledged. Nothing else runs here.
+    private let powerQueue = DispatchQueue(label: "audio-capture.system-power")
+    private let forwardQueue: DispatchQueue
     /// Registration succeeded. When it didn't, the sleep pause falls back to a plain uptime expiry.
     private(set) var isRegistered = false
 
     init(queue: DispatchQueue, onEvent: @escaping (Event) -> Void) {
         self.onEvent = onEvent
+        self.forwardQueue = queue
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         rootPort = IORegisterForSystemPower(refcon, &notificationPort, { refcon, _, messageType, messageArgument in
             guard let refcon else { return }
@@ -44,7 +50,7 @@ final class SystemPowerObserver {
             Logger.audio.error("IORegisterForSystemPower failed — the sleep pause relies on the app's wake and a 30 s expiry")
             return
         }
-        IONotificationPortSetDispatchQueue(notificationPort, queue)
+        IONotificationPortSetDispatchQueue(notificationPort, powerQueue)
         isRegistered = true
     }
 
@@ -55,18 +61,26 @@ final class SystemPowerObserver {
         IOServiceClose(rootPort)
     }
 
+    /// On `powerQueue`: acknowledge first, then forward. A will-sleep forwarded after the acknowledgement
+    /// may run only after the wake; the forward queue is FIFO, so it still precedes the power-on and the
+    /// app's wake, both of which it then ends as usual.
     private func handle(_ messageType: UInt32, _ argument: UnsafeMutableRawPointer?) {
         switch messageType {
         case Self.canSystemSleep:
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
         case Self.systemWillSleep:
-            onEvent(.willSleep)
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
+            forward(.willSleep)
         case Self.systemHasPoweredOn:
-            onEvent(.poweredOn(fullWake: Self.isFullWake()))
+            forward(.poweredOn(fullWake: Self.isFullWake()))
         default:
             break
         }
+    }
+
+    private func forward(_ event: Event) {
+        let onEvent = self.onEvent
+        forwardQueue.async { onEvent(event) }
     }
 
     /// Whether the machine is in a full (user) wake: the graphics capability in IOPMrootDomain's

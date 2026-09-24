@@ -621,7 +621,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.onRealAudio?(track, self.helperSessionId)
             }
 
-            self.stateLock.sync {
+            // The file open above is synchronous and can outlast the start's deadline: install only while
+            // this start may still proceed (round 3 C). Otherwise its writers are its own to close.
+            let installed = self.stateLock.sync { () -> Bool in
+                guard lifecycle.startMayProceed(token) else { return false }
                 self.systemPath = sysPath
                 self.micPath = micFilePath
                 self.handler = outputHandler
@@ -629,6 +632,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.isRestarting = false
                 self.systemStreamGivenUp = false
                 self.tapSession = nil
+                return true
+            }
+            guard installed else {
+                systemWriter.finalize()
+                micWriter.finalize()
+                abandonUninstalledStart(token, files: [sysPath, micFilePath], answer: answer, deadline: deadline)
+                return
             }
 
             if powerObserver == nil {
@@ -717,6 +727,21 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
+    /// A start stopped (or timed out) before it installed anything: delete its own files — unless a newer
+    /// start exists, which may be writing the same paths — and, if no one else ended it, end it here.
+    private func abandonUninstalledStart(_ token: Int, files: [String], answer: (Bool, String?) -> Void,
+                                         deadline: DispatchWorkItem) {
+        let (current, owns, aborted) = stateLock.sync {
+            (lifecycle.isCurrentStart(token), lifecycle.beginEndingStart(token), lifecycle.startAborted)
+        }
+        if current { for path in files { try? FileManager.default.removeItem(atPath: path) } }
+        guard owns else { return }   // the deadline ended it and answered
+        deadline.cancel()
+        let waitingStops = tearDownStart(token)
+        answer(false, aborted ? CaptureReplies.cancelledWhileStarting : CaptureReplies.startCancelled)
+        answerStopsAwaitingStart(waitingStops)
+    }
+
     /// The start's deadline fired (round 2 item 1). If the start is still coming up — stuck in the OS —
     /// abandon it: tear down what it built (its stuck source is abandoned, as a stop does), free the
     /// session, reply, and answer the stops that waited on it. The start itself, if it ever returns,
@@ -790,11 +815,19 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private func runStopSequence(handler h: AudioOutputHandler?, mic: MicCaptureSession?, tap: SystemTapSession?,
                                  end: () -> Void) {
         let limit = Lifecycle.sourceStopTimeoutSeconds
+        let audioQueue = self.audioQueue
         let outcome = StopSequence.run(
             seal: { audioQueue.sync { h?.finalizeAll() } },
             stopMic: mic.map { mic in { mic.stop() } },
             stopTap: tap.map { tap in { tap.stop() } },
             timeout: limit, end: end)
+        if outcome.sealAbandoned {
+            // The audio queue is wedged (a disk stall): the session ended anyway. Its writers are never
+            // reused, and whatever reaches them before the late seal runs is dropped (round 3 E).
+            h?.abandon()
+            Logger.audio.error("Sealing the recording did not finish within \(Int(limit), privacy: .public)s (the audio queue is stalled) — the session ended; the files are sealed when the queue frees")
+            record(.writeFailure, .anomaly, ["track": "both", "reason": "seal timed out — audio queue stalled"])
+        }
         if outcome.micAbandoned {
             Logger.audio.error("Microphone stop did not return within \(Int(limit), privacy: .public)s — abandoned; the recording is already sealed")
             record(.streamStopError, .anomaly, ["source": "mic", "reason": "stop timed out — abandoned"])
@@ -1285,11 +1318,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// `remoteRecoveryFailed` alarm, never a teardown.
     /// `options` is the start's own copy (`startCapture` consumes `pendingOptions`, F4 round 1).
     private func startSystemTap(handler: AudioOutputHandler, options: CaptureOptions, token: Int) throws {
-        let epoch = audioQueue.sync { () -> Int in
+        // Only while this start may proceed (round 3 C): a start whose deadline fired must not reset the
+        // guard of the session that followed. Checked inside the audio-queue block, so a newer session's
+        // own reset (also on this queue, after its claim) always lands after this one.
+        let epoch = audioQueue.sync { () -> Int? in
+            guard stateLock.sync(execute: { lifecycle.startMayProceed(token) }) else { return nil }
             tapGuard = TapPermissionGuard(softAlarmSeconds: options.remoteExactZeroSoftAlarmSeconds.map(Double.init))
             tapGuardEpoch += 1
             return tapGuardEpoch
         }
+        guard let epoch else { throw CancellationError() }
         let tap = SystemTapSession(
             deliveryQueue: audioQueue, tapAutoStart: options.tapAutoStart,
             dropFramesForDiagnostics: options.debugDropTapFrames
@@ -1304,7 +1342,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
-        wireTapHealer(to: tap)
+        try wireTapHealer(to: tap, token: token)
         // srst: the ladder forgets the episode and runs one immediate `rebuildTap` rung, whose rebuild
         // re-registers the system listeners; the mic's AVCaptureSession is reopened too. The output
         // probe needs nothing — it reads the process list afresh every tick.
@@ -1344,7 +1382,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// alarms (§5, §6.1): on give-up `remoteNotDelivering` (plus `remoteRecoveryFailed` when a rebuild
     /// threw), `remoteRecoveryFailed` when a rung got stuck, both cleared by recovery / the next
     /// successful rung (scan C8).
-    private func wireTapHealer(to tap: SystemTapSession) {
+    private func wireTapHealer(to tap: SystemTapSession, token: Int) throws {
         tap.onRebuildResult = { [weak self] rung, token, ok, _ in
             // A rebuild the ladder did not order (output change, rate drift) is still a rebuild (§7.1).
             if token == 0, ok { self?.noteRebuild() }
@@ -1373,8 +1411,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
         }
         tapHealer.onRungSucceeded = { [weak self] in self?.clearAlarm(.remoteRecoveryFailed) }
-        // Last: reset the healer and target this tap in one step on the healer's queue (review round 1).
-        tapHealer.startSession(tap: tap)
+        // Last: reset the healer and target this tap in one step on the healer's queue (review round 1) —
+        // enqueued under `stateLock` with the token check, so a start whose deadline fired can never
+        // retarget the healer of the session that followed: that one's claim comes after (round 3 C).
+        let targeted = stateLock.sync { () -> Bool in
+            guard lifecycle.startMayProceed(token) else { return false }
+            tapHealer.startSession(tap: tap)   // an async hop onto the healer's queue: no call-out under the lock
+            return true
+        }
+        guard targeted else { throw CancellationError() }
     }
 
     /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the

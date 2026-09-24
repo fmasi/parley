@@ -169,6 +169,14 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// so a source that is still being stopped (up to the stop bound) writes nothing and raises no
     /// banner or anomaly after the seal (round 2 item 8). Audio-queue confined.
     private var sealed = false
+    /// Set from any thread when Stop's bounded seal timed out on a wedged audio queue (round 3 E): the
+    /// session has ended, so every append still queued behind the stall is dropped until the late seal.
+    private let abandoned = OSAllocatedUnfairLock(initialState: false)
+
+    /// Stop gave up waiting for the seal: drop every later append. Any thread.
+    func abandon() { abandoned.withLock { $0 = true } }
+
+    private var accepting: Bool { !sealed && !abandoned.withLock { $0 } }
 
     func finalizeAll() {
         sealed = true
@@ -279,7 +287,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard !sealed else { return }
+        guard accepting else { return }
         // Liveness stamp (#86) moved BELOW the sticky format gate — see the stamp site after it.
         //
         // It used to be stamped here, on every arrival, before any format-drop early return. That
@@ -402,7 +410,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
     /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
     func appendSystemSamples(_ samples: [Int16], pts: CMTime) {
-        guard !sealed else { return }
+        guard accepting else { return }
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
@@ -445,7 +453,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// called on the capture service's audio queue — the same serial queue as system-audio callbacks,
     /// writer swaps, and finalize — so all writer access stays single-threaded.
     func appendMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard !sealed else { return }
+        guard accepting else { return }
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }

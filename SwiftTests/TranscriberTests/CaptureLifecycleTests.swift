@@ -95,6 +95,25 @@ import Testing
         #expect(l.phase == .starting && l.startMayProceed(next))
     }
 
+    /// Round 3 (C): every step of a start that installs shared state — the handler and paths, the tap
+    /// guard, the healer's target — is guarded by its token, so a start whose deadline fired while it was
+    /// blocked can install nothing into the session that follows.
+    @Test func aTimedOutStartCannotInstallIntoTheNextSession() throws {
+        var l = Lifecycle()
+        let claimOld = l.claimStart()
+        let old = try #require(claimOld)
+        #expect(l.startMayProceed(old), "before its deadline: may install")
+        let owns = l.beginEndingStart(old)
+        #expect(owns)
+        #expect(!l.startMayProceed(old), "after its deadline fired: may not, even mid-teardown")
+        _ = l.startEnded(old)
+        let claimNew = l.claimStart()
+        let new = try #require(claimNew)
+        #expect(!l.startMayProceed(old), "nor into the next session")
+        #expect(l.startMayProceed(new))
+        #expect(l.isCurrentStart(new) && !l.isCurrentStart(old), "whose files it must not delete either")
+    }
+
     @Test func theStartDeadlineOutlastsTheAppsStartDeadline() {
         #expect(Lifecycle.startTimeoutSeconds == 20)
         #expect(Lifecycle.sourceStopTimeoutSeconds == 3)
@@ -214,7 +233,7 @@ import Testing
         #expect(log.entries.first == "seal")
         #expect(log.entries.last == "end")
         #expect(Set(log.entries.dropFirst().dropLast()) == ["mic", "tap"])
-        #expect(outcome == StopSequence.Outcome(micAbandoned: false, tapAbandoned: false))
+        #expect(outcome == StopSequence.Outcome(sealAbandoned: false, micAbandoned: false, tapAbandoned: false))
     }
 
     @Test func theSessionEndsEvenWhenAStopNeverReturns() {
@@ -230,6 +249,28 @@ import Testing
         #expect(log.entries == ["seal", "end"])
         #expect(outcome.micAbandoned && !outcome.tapAbandoned)
         #expect(waited < 1.5, "bounded")
+    }
+
+    /// Round 3 (E): a wedged audio queue (a disk stall) must not wedge Stop, or the start deadline's
+    /// teardown, which frees the claim: the seal is bounded too, and the session still ends.
+    @Test func aSealThatNeverReturnsStillEndsTheSession() {
+        let log = Log()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let start = DispatchTime.now()
+        let outcome = StopSequence.run(
+            seal: { release.wait() },
+            stopMic: { log.add("mic") }, stopTap: nil,
+            timeout: 0.2, end: { log.add("end") })
+        let waited = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+        #expect(outcome.sealAbandoned)
+        #expect(log.entries == ["mic", "end"], "the sources still stop, and the session still ends")
+        #expect(waited < 1.5, "bounded")
+    }
+
+    @Test func aSealThatReturnsIsNotAbandoned() {
+        let outcome = StopSequence.run(seal: {}, stopMic: nil, stopTap: nil, timeout: 1, end: {})
+        #expect(!outcome.sealAbandoned)
     }
 
     /// Two stuck sources cost ONE bound, not two: they stop concurrently.

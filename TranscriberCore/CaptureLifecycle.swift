@@ -78,6 +78,10 @@ public struct CaptureLifecycle<StopReply> {
         }
     }
 
+    /// `token` names the newest start (whatever its phase): a stale start must not delete files by path,
+    /// since a newer one may be writing the same paths (round 3 C).
+    public func isCurrentStart(_ token: Int) -> Bool { session == token }
+
     /// Whether start `token` may take its next step (open the mic, start the system source, register
     /// what it opened). False once it is aborted, ending, or no longer the current start.
     public func startMayProceed(_ token: Int) -> Bool {
@@ -139,29 +143,38 @@ public struct CaptureLifecycle<StopReply> {
 
 extension CaptureLifecycle: Sendable where StopReply: Sendable {}
 
-/// The headline ordering of a stop (B-I1, round 2 item 4): SEAL the files, then stop the sources —
-/// concurrently, under ONE bound — then END the session whatever the sources did. A source whose
-/// teardown blocks (a rung stuck on the tap's config queue, `AudioDeviceStop` on a paused context,
-/// `stopRunning` on a HAL lock, gotcha #68) is abandoned: it keeps running on its own thread.
+/// The headline ordering of a stop (B-I1, round 2 item 4; round 3 E): SEAL the files (bounded), then stop
+/// the sources — concurrently, under ONE bound — then END the session whatever the seal and the sources
+/// did. A seal on a wedged audio queue (a disk stall), or a source whose teardown blocks (a rung stuck on
+/// the tap's config queue, `AudioDeviceStop` on a paused context, `stopRunning` on a HAL lock, gotcha
+/// #68), is abandoned: it keeps running on its own thread, and the caller drops what it writes late.
 public enum StopSequence {
     public struct Outcome: Equatable, Sendable {
+        /// The seal did not return within its bound: the caller must drop any late write.
+        public let sealAbandoned: Bool
         public let micAbandoned: Bool
         public let tapAbandoned: Bool
-        public init(micAbandoned: Bool, tapAbandoned: Bool) {
-            self.micAbandoned = micAbandoned; self.tapAbandoned = tapAbandoned
+        public init(sealAbandoned: Bool = false, micAbandoned: Bool, tapAbandoned: Bool) {
+            self.sealAbandoned = sealAbandoned; self.micAbandoned = micAbandoned; self.tapAbandoned = tapAbandoned
         }
     }
 
-    /// Blocks up to `timeout` (plus `seal` and `end`): never call it on a queue a stop needs.
+    /// Blocks up to 2 × `timeout` (the seal's bound, then the sources'), plus `end`: never call it on a
+    /// queue the seal or a stop needs.
     @discardableResult
     public static func run(
-        seal: () -> Void,
+        seal: @escaping () -> Void,
         stopMic: (() -> Void)?,
         stopTap: (() -> Void)?,
         timeout: Double,
         end: () -> Void
     ) -> Outcome {
-        seal()
+        let sealed = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            seal()
+            sealed.signal()
+        }
+        let sealAbandoned = sealed.wait(timeout: .now() + timeout) == .timedOut
         let group = DispatchGroup()
         let finished = OSAllocatedUnfairLock(initialState: (mic: stopMic == nil, tap: stopTap == nil))
         if let stopMic {
@@ -183,7 +196,7 @@ public enum StopSequence {
         _ = group.wait(timeout: .now() + timeout)
         let done = finished.withLock { $0 }
         end()
-        return Outcome(micAbandoned: !done.mic, tapAbandoned: !done.tap)
+        return Outcome(sealAbandoned: sealAbandoned, micAbandoned: !done.mic, tapAbandoned: !done.tap)
     }
 }
 

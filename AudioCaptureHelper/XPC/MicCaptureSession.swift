@@ -301,10 +301,14 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// coreaudiod restarted (`srst`): listener registrations do not survive it — the HAL header says to
     /// re-establish them — so without this, auto-follow and re-pin are dead for the rest of the session
     /// (B-M2). A silent mic is still caught by liveness; this restores FOLLOWING. Skipped once stopping.
+    /// Asynchronous, on `configQueue` with the session's other HAL work — never on the caller's queue
+    /// (the liveness watchdog's, which must keep ticking, round 3 D).
     func reregisterDeviceMonitoring() {
-        if stateLock.sync(execute: { isStopping }) { return }
-        stopDeviceMonitoring()
-        startDeviceMonitoring()
+        configQueue.async { [weak self] in
+            guard let self, !self.stateLock.sync(execute: { self.isStopping }) else { return }
+            self.stopDeviceMonitoring()
+            self.startDeviceMonitoring()
+        }
     }
 
     /// Detach the HAL listener + the runtime-error observer. Idempotent.

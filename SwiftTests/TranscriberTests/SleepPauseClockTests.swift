@@ -20,13 +20,14 @@ import Testing
     }
 
     /// Item 18: a DarkWake is awake time too, so an uptime clock started at the pause would expire in a
-    /// long Power Nap and judge tracks whose devices are off.
-    @Test func aDarkWakeNeverEndsThePause() {
+    /// long Power Nap and judge tracks whose devices are off. Round 3 (B): not "never" either — a power-on
+    /// that reads DarkWake starts the LONG clock.
+    @Test func aDarkWakeDoesNotEndThePauseBeforeTheLongExpiry() {
         var c = SleepPauseClock()
         c.pause(nowNanos: 100 * s)
         let dark = c.poweredOn(fullWake: false, nowNanos: 110 * s)
         #expect(dark == nil)
-        for t: UInt64 in 111...400 {
+        for t: UInt64 in 111..<(110 + 300) {
             let resumed = c.tick(nowNanos: t * s, fullWake: false)
             #expect(resumed == nil)
         }
@@ -115,5 +116,84 @@ import Testing
         c.pause(nowNanos: 100 * s)
         let resumed = c.wake()
         #expect(resumed == [])
+    }
+
+    // MARK: - Round 3 (item 18, A/B): the state machine, table-tested
+
+    @Test func theLongExpiryIsFiveMinutes() {
+        #expect(SleepPauseClock.darkPowerOnExpirySeconds == 300)
+    }
+
+    /// A: the ~5 s "darkwakelinger" before a clamshell sleep reads full-wake with no power-on since the
+    /// pause: that is the machine still going TO sleep, not waking.
+    @Test func aFullWakeReadingWithNoPowerOnOrDarkWakeSinceThePauseIsIgnored() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 100 * s)
+        for t: UInt64 in 101...105 {
+            let resumed = c.tick(nowNanos: t * s, fullWake: true)
+            #expect(resumed == nil)
+        }
+        #expect(c.isPaused)
+    }
+
+    /// B: a power-on that reads DarkWake, then ticks that keep reading DarkWake, still end at 5 min.
+    @Test func aDarkPowerOnExpiresAtFiveMinutes() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 100 * s)
+        _ = c.poweredOn(fullWake: false, nowNanos: 200 * s)
+        let early = c.tick(nowNanos: 499 * s, fullWake: false)
+        let due = c.tick(nowNanos: 500 * s, fullWake: false)
+        #expect(early == nil)
+        #expect(due != nil)
+    }
+
+    @Test func anUnknownPowerOnExpiresAtThirtySeconds() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 100 * s)
+        _ = c.poweredOn(fullWake: nil, nowNanos: 200 * s)
+        let early = c.tick(nowNanos: 229 * s, fullWake: nil)
+        let due = c.tick(nowNanos: 230 * s, fullWake: nil)
+        #expect(early == nil)
+        #expect(due != nil)
+    }
+
+    /// A dark-to-full promotion seen by the ticks alone (no power-on message at all).
+    @Test func aDarkTickThenAFullTickWakes() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 100 * s)
+        let dark = c.tick(nowNanos: 200 * s, fullWake: false)
+        let full = c.tick(nowNanos: 201 * s, fullWake: true)
+        #expect(dark == nil)
+        #expect(full != nil)
+    }
+
+    /// After any power-on, a full-wake tick promotes at once.
+    @Test func aFullTickAfterADarkPowerOnPromotesAtOnce() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 100 * s)
+        _ = c.poweredOn(fullWake: false, nowNanos: 200 * s)
+        let full = c.tick(nowNanos: 201 * s, fullWake: true)
+        #expect(full != nil)
+    }
+
+    /// The app's wake ends the pause at any point of the table, exactly once.
+    @Test func theAppsWakeEndsThePauseAtAnyPointOnce() {
+        let steps: [(inout SleepPauseClock) -> Void] = [
+            { _ in },
+            { _ = $0.tick(nowNanos: 101 * 1_000_000_000, fullWake: true) },
+            { _ = $0.tick(nowNanos: 101 * 1_000_000_000, fullWake: false) },
+            { _ = $0.poweredOn(fullWake: false, nowNanos: 101 * 1_000_000_000) },
+            { _ = $0.poweredOn(fullWake: nil, nowNanos: 101 * 1_000_000_000) },
+        ]
+        for (i, step) in steps.enumerated() {
+            var c = SleepPauseClock()
+            c.pause(nowNanos: 100 * s)
+            step(&c)
+            let first = c.wake()
+            let second = c.wake()
+            #expect(first != nil, "step \(i)")
+            #expect(second == nil, "step \(i)")
+            #expect(!c.isPaused, "step \(i)")
+        }
     }
 }
