@@ -20,6 +20,7 @@ struct SettingsView: View {
     @Bindable var permissionManager: PermissionManager
     @State private var config: Config
     @State private var saveStatus: String?
+    @State private var isPreflighting = false
     @State private var statusClearTask: Task<Void, Never>?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
@@ -198,7 +199,7 @@ struct SettingsView: View {
             Spacer()
             Button("Save") { save() }
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(isDownloading)
+                .disabled(isDownloading || isPreflighting)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -535,6 +536,30 @@ struct SettingsView: View {
                 SummaryAPIKeyStore.save(summaryApiKey)
             }
         }
+        // §11.2: the chosen engine is preflighted (one synthetic second transcribed) before the
+        // config is committed, so a broken engine never gets saved silently — Save stays disabled
+        // (isPreflighting) until this resolves.
+        isPreflighting = true
+        Task {
+            do {
+                let (engine, _) = try TranscriptionRunner().prepareEngine(config: config)
+                try await EnginePreflight.run(engine: engine)
+                await MainActor.run {
+                    isPreflighting = false
+                    commitSave()
+                }
+            } catch {
+                await MainActor.run {
+                    isPreflighting = false
+                    saveStatus = "Not saved — this engine cannot transcribe on this Mac: \(error)"
+                }
+            }
+        }
+    }
+
+    /// The remainder of Save once the chosen engine has been preflighted successfully:
+    /// commits `config` to disk and everything that follows from that.
+    private func commitSave() {
         config.lastMicrophoneDeviceId = settingsMicId
         let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }

@@ -17,6 +17,7 @@ struct SetupView: View {
     @State private var downloadTask: Task<Void, Never>?
     @State private var folderCheckDenied = false
     @State private var checkingFolder = false
+    @State private var enginePreflightError: String?
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
@@ -222,14 +223,24 @@ struct SetupView: View {
                 configManager.update { $0.recordingDirectory = recordingDirectory }
                 checkingFolder = true
                 folderCheckDenied = false
+                enginePreflightError = nil
                 Task {
                     let granted = await verifyFolderAccess(recordingDirectory)
-                    checkingFolder = false
-                    if granted {
-                        onReady()
-                    } else {
+                    if !granted {
+                        checkingFolder = false
                         folderCheckDenied = true
+                        return
                     }
+                    do {
+                        let (engine, _) = try TranscriptionRunner().prepareEngine(config: configManager.config)
+                        try await EnginePreflight.run(engine: engine)
+                    } catch {
+                        enginePreflightError = "This engine cannot transcribe on this Mac: \(error)"
+                        checkingFolder = false
+                        return
+                    }
+                    checkingFolder = false
+                    onReady()
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -287,6 +298,12 @@ struct SetupView: View {
                         .frame(width: 30, alignment: .trailing)
                 }
                 .padding(.leading, 38)
+            }
+
+            if let enginePreflightError {
+                AlertBanner(severity: .critical, message: enginePreflightError) {
+                    self.enginePreflightError = nil
+                }
             }
         }
     }
