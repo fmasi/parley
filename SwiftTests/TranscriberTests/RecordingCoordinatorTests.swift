@@ -810,6 +810,9 @@ private struct Harness {
         #expect(h.client.startCalls.count == 1)
         #expect(h.client.startCalls[0].baseName == "sess-1")
         #expect(h.client.startCalls[0].microphoneDeviceId == sentinel.micDeviceUID)
+        // F4: the base name moved on (sess-0 -> sess-1) but the session id is the one the original
+        // capture belonged to — L11 resets the diagnostics ring only when it changes.
+        #expect(h.client.startCalls[0].sessionId == "sess", "an in-session restart must keep the session id")
 
         let rewritten = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(rewritten.segment == sentinel.segment + 1)
@@ -1009,7 +1012,8 @@ private struct Harness {
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         let call = try #require(h.client.startCalls.first)
         #expect(call.options == CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: nil, debugDropTapFrames: true))
-        #expect(call.sessionId.hasSuffix("-Test") && call.baseName == call.sessionId + "-0", "the session id is the chunk base name (HHmmss-name) without the chunk index")
+        #expect(call.sessionId.hasSuffix("-Test"), "the session id is the chunk base name (HHmmss-name)")
+        #expect(call.baseName == call.sessionId + "-0", "the session id is the chunk base name without the chunk index")
     }
 }
 

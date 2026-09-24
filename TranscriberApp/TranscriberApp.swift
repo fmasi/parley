@@ -367,7 +367,9 @@ struct TranscriberApp: App {
                     outputDirectory: outputDir,
                     baseName: baseName,
                     microphoneDeviceId: sentinel.micDeviceUID,
-                    systemAudioSource: ConfigManager.shared.config.systemAudioSource
+                    systemAudioSource: ConfigManager.shared.config.systemAudioSource,
+                    options: CaptureOptions(config: ConfigManager.shared.config),
+                    sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
                 )
                 try RecordingSentinel.write(newSentinel)
                 appState.phase = .recording(since: sentinel.startedAt)
@@ -431,7 +433,9 @@ struct TranscriberApp: App {
                         outputDirectory: outputDir,
                         baseName: baseName,
                         microphoneDeviceId: sentinel.micDeviceUID,
-                        systemAudioSource: ConfigManager.shared.config.systemAudioSource
+                        systemAudioSource: ConfigManager.shared.config.systemAudioSource,
+                        options: CaptureOptions(config: ConfigManager.shared.config),
+                        sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
                     )
                     try RecordingSentinel.write(newSentinel)
                     appState.interruptionWarning = "Recording briefly interrupted. Resuming."

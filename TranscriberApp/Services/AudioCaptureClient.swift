@@ -475,7 +475,10 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
     }
 
     func captureAlarmsChanged(snapshot: Data) {
-        guard let decoded = CaptureStatusSnapshot.decode(snapshot) else { return }
+        guard let decoded = CaptureStatusSnapshot.decode(snapshot) else {
+            Logger.audio.warning("Helper pushed an alarm snapshot this build cannot decode — ignored")
+            return
+        }
         Task { @MainActor [weak client] in client?.onAlarmsChanged?(decoded) }
     }
 }

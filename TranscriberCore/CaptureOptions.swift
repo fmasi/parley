@@ -27,8 +27,13 @@ public struct CaptureOptions: Codable, Equatable, Sendable {
 
     public func encoded() -> Data { (try? JSONEncoder().encode(self)) ?? Data() }
 
+    /// `nil` unless `data` is a complete `CaptureOptions`. The helper's `configureCapture` uses this
+    /// so it can reply "not understood" instead of silently recording with defaults.
+    public static func decodeStrict(_ data: Data) -> CaptureOptions? {
+        try? JSONDecoder().decode(CaptureOptions.self, from: data)
+    }
+
     public static func decode(_ data: Data?) -> CaptureOptions {
-        guard let data, let o = try? JSONDecoder().decode(CaptureOptions.self, from: data) else { return CaptureOptions() }
-        return o
+        data.flatMap(decodeStrict) ?? CaptureOptions()
     }
 }

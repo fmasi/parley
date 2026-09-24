@@ -26,4 +26,13 @@ import Testing
         #expect(CaptureOptions.decode(nil) == CaptureOptions())
         #expect(CaptureOptions.decode(Data("nope".utf8)) == CaptureOptions())
     }
+    /// F4 fix: the helper replies "not understood" to options it cannot read, instead of silently
+    /// recording with defaults the app did not ask for.
+    @Test func strictDecodeRejectsWhatItCannotRead() {
+        let o = CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 300, debugDropTapFrames: true)
+        #expect(CaptureOptions.decodeStrict(o.encoded()) == o)
+        #expect(CaptureOptions.decodeStrict(Data("nope".utf8)) == nil)
+        #expect(CaptureOptions.decodeStrict(Data()) == nil)
+        #expect(CaptureOptions.decodeStrict(Data(#"{"tapAutoStart":false}"#.utf8)) == nil, "a partial payload is not understood either")
+    }
 }

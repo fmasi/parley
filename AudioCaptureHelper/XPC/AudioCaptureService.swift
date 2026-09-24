@@ -31,8 +31,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// per session. The tap self-heals output-device switches internally (HAL listener), so the
     /// SCK-specific #86 restart/autoheal machinery does not apply to it. nil when not capturing or on SCK.
     private var tapSession: SystemTapSession?
-    /// Set by `configureCapture`, read by the NEXT `startCapture`. Guarded by `stateLock`. Defaults to
-    /// today's behaviour, so an app that never configures records exactly as before.
+    /// Set by `configureCapture`, CONSUMED by the next `startCapture` (reset to the defaults there), so
+    /// a start without a fresh configure records with today's behaviour — never with an earlier
+    /// session's options (a leftover `debugDropTapFrames` would drop remote audio). Guarded by `stateLock`.
     private var pendingOptions = CaptureOptions()
     /// Set true while the app is deliberately stopping, so a stop-induced `didStopWithError`
     /// is classified as `.ignore` rather than a route-change restart.
@@ -173,7 +174,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Per-session reset (#101): a skipped finalize (crash) leaves stale events in the helper ring,
         // which would otherwise be drained into the next session's provenance. Clear them up front.
         diagnostics.clear()
-        let options = stateLock.sync { pendingOptions }
+        let options: CaptureOptions = stateLock.sync {
+            let configured = pendingOptions
+            pendingOptions = CaptureOptions()
+            return configured
+        }
 
         Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
 
@@ -332,8 +337,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(CaptureStatusSnapshot(helperSessionId: helperSessionId, isCapturing: capturing, alarms: [], tracks: []).encoded())
     }
 
+    /// Replies false ("not understood") for a payload it cannot read, and leaves `pendingOptions` as is.
     func configureCapture(optionsJSON: Data, reply: @escaping (Bool) -> Void) {
-        let options = CaptureOptions.decode(optionsJSON)
+        guard let options = CaptureOptions.decodeStrict(optionsJSON) else {
+            Logger.audio.warning("Capture options not understood — ignored")
+            reply(false)
+            return
+        }
         stateLock.sync { pendingOptions = options }
         Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public)")
         reply(true)
