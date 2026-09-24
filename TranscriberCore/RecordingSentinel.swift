@@ -20,6 +20,9 @@ public struct RecordingSentinel: Codable, Equatable {
     /// Stop marked it before asking the helper (§8.8): a crash during the stop or its finalize is
     /// salvaged at relaunch, never resumed — the user stopped that recording.
     public var stopping: Bool
+    /// A deliberate quit or logout came while the stopped recording's transcript was being finished (L
+    /// follow-up 42): the next launch says so, never "Parley crashed".
+    public var quitDuringFinalize: Bool
 
     public init(
         startedAt: Date,
@@ -31,7 +34,8 @@ public struct RecordingSentinel: Codable, Equatable {
         chunkIndex: Int = 0,
         lastAliveAt: Date? = nil,
         bootSessionUUID: String? = nil,
-        stopping: Bool = false
+        stopping: Bool = false,
+        quitDuringFinalize: Bool = false
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -43,6 +47,7 @@ public struct RecordingSentinel: Codable, Equatable {
         self.lastAliveAt = lastAliveAt
         self.bootSessionUUID = bootSessionUUID
         self.stopping = stopping
+        self.quitDuringFinalize = quitDuringFinalize
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -59,6 +64,7 @@ public struct RecordingSentinel: Codable, Equatable {
         lastAliveAt = try container.decodeIfPresent(Date.self, forKey: .lastAliveAt)
         bootSessionUUID = try container.decodeIfPresent(String.self, forKey: .bootSessionUUID)
         stopping = try container.decodeIfPresent(Bool.self, forKey: .stopping) ?? false
+        quitDuringFinalize = try container.decodeIfPresent(Bool.self, forKey: .quitDuringFinalize) ?? false
     }
 
     // MARK: - File location
@@ -180,7 +186,8 @@ public struct RecordingSentinel: Codable, Equatable {
             chunkIndex: chunkIndex,
             lastAliveAt: lastAliveAt,
             bootSessionUUID: bootSessionUUID,
-            stopping: stopping
+            stopping: stopping,
+            quitDuringFinalize: quitDuringFinalize
         )
     }
 }

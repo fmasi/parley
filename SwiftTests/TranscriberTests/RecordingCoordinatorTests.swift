@@ -221,6 +221,15 @@ private struct Harness {
         )
     }
 
+    /// Polls `condition` (up to about 2 s): a deadline, never a fixed number of yields.
+    static func until(_ condition: () -> Bool) async {
+        var waited = 0
+        while !condition(), waited < 400 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            waited += 1
+        }
+    }
+
     /// A WAV with a header and no audio: processing it never loads a model (`streamEmpty`).
     static func headerOnlyWAV() -> Data {
         var d = Data()
@@ -1094,7 +1103,7 @@ private struct Harness {
             guard !fired.value else { return }
             fired.value = true
             client.onServiceCrash?()                      // the helper dies while start() is awaited
-            for _ in 0..<20 { await Task.yield() }        // the crash callback runs now, phase still .idle
+            await Harness.until { h.coordinator.crashDuringStart }   // noted, the phase still .idle
         }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         for _ in 0..<50 where client.startCalls.count < 2 { await Task.yield() }
@@ -1117,7 +1126,7 @@ private struct Harness {
         client.onStartAsync = {
             guard client.startCalls.count == 1 else { return }
             client.onServiceCrash?()
-            for _ in 0..<20 { await Task.yield() }
+            await Harness.until { h.coordinator.crashDuringStart }
         }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         client.startError = nil
@@ -1945,7 +1954,7 @@ private struct Harness {
 
         await h.coordinator.handleXPCCrash()
 
-        #expect(h.appState.criticalError == "Recording failed — no recovery data available.")
+        #expect(h.appState.criticalError?.hasPrefix("Recording failed — no recovery data available.") == true)
         #expect(h.appState.isIdle)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
         #expect(h.client.startCalls.isEmpty)
@@ -3268,5 +3277,90 @@ private struct Harness {
     @Test func aFolderNotOnAnExternalVolumeHasNoMountCheck() {
         let noVolumes = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { _ in false })
         #expect(RecordingCoordinator.folderReachable(URL(fileURLWithPath: "/Users/x/Documents/Recordings/day"), probe: noVolumes))
+    }
+}
+
+// MARK: - L follow-ups: teardown on every end path, quit is not a crash
+
+@MainActor
+@Suite struct RecordingCoordinatorEndPathTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+    }
+
+    /// 28: a crash whose recovery file is missing still ends the recording properly — the live pipeline
+    /// is salvaged and torn down (no rotation timer left running), and the user is told what was kept.
+    @Test func aCrashWithoutTheSentinelTearsTheLivePipelineDown() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        RecordingSentinel.delete(directory: h.tmp)   // e.g. deleted mid-recording
+        await h.coordinator.handleXPCCrash()
+        #expect(h.appState.isIdle && h.client.startCalls.count == 1)
+        #expect(rotator.activeTimerForTesting == nil, "the rotation timer stopped")
+        #expect(h.runner.chunkRotator == nil && h.runner.chunkProcessor == nil, "the pipeline torn down")
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
+    }
+
+    /// 29: a live pipeline, a crash reported during a failed stop, and exactly one ingest of the chunk in
+    /// progress: the stop path owns it all, no restart.
+    @Test func aCrashDuringAFailedStopIngestsTheOrphanOnce() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(rotator.currentBaseName + ".wav"))
+        h.client.stopError = FakeCaptureError()
+        h.client.onStop = { await h.coordinator.handleXPCCrash() }
+        await h.coordinator.stopRecording()
+        #expect(h.client.startCalls.count == 1, "no restart")
+        let critical = try #require(h.criticals.value.first)
+        #expect(h.criticals.value.count == 1 && critical.body.contains("1 chunk"), "\(critical.body)")
+    }
+
+    /// 42: a deliberate quit while the transcript is being finished marks the recovery file, so the next
+    /// launch does not call it a crash.
+    @Test func aQuitDuringFinalizeMarksTheSentinel() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        h.runner.finalizeDelayForTesting = .seconds(2)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.appState.isTranscribing }
+        #expect(await h.coordinator.prepareForQuit(confirm: { Issue.record("no question while finishing"); return true }))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
+        stopping.cancel()
+    }
+
+    /// 42: the next launch words it as a quit, never a crash.
+    @Test func aRelaunchAfterAQuitDuringFinalizeSaysSo() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        s.stopping = true; s.quitDuringFinalize = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        let outDir = URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent()
+        try SessionState.write(SessionState(
+            sessionId: "sess", meetingStart: Date(), engine: h.config.config.engine.rawValue, chunkDurationMinutes: 10,
+            chunks: [ProcessedChunk(index: 0, startTime: Date(), audioPath: outDir.appendingPathComponent("sess-0.m4a").path,
+                                    segments: [.init(start: 0, end: 1, text: "hello", speaker: "Speaker 1", source: "remote", qualityScore: nil)],
+                                    speakerDatabase: [:])]
+        ), directory: outDir)
+        await h.coordinator.recoverAtLaunch()
+        let message = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(message == "Parley was quit while finishing the transcript; it recovered 1 chunk to sess.json.", "\(message)")
     }
 }

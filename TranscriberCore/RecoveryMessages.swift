@@ -87,6 +87,17 @@ public enum RecoveryMessages {
         return " (\(error))"
     }
 
+    /// Parley was quit (or the user logged out) while the stopped recording's transcript was being finished
+    /// (L follow-up 42): a deliberate exit, not a crash.
+    public static func quitWhileFinishing(outcome: SalvageOutcome) -> String {
+        if case .transcriptWritten(let url) = outcome.kind {
+            let what = outcome.chunkCount > 0 ? chunkPhrase(outcome.chunkCount).noun : "the recording"
+            let tail = outcome.lastChunkKeptOnDisk ? " The last chunk is kept on disk, not transcribed." : ""
+            return "Parley was quit while finishing the transcript; it recovered \(what) to \(url.lastPathComponent)." + tail
+        }
+        return "Parley was quit while finishing the transcript. " + outcomeSentence(outcome)
+    }
+
     /// A pre-0.6 single-file recording was found (L follow-up 25): kept, never "no recorded audio". Names
     /// the folder, not the meeting.
     public static func relaunchStoppedKeepingOlderFormat(at: Date, folder: String) -> String {

@@ -162,7 +162,7 @@ public final class RecordingCoordinator {
     /// The helper crashed (or failed fatally) while a start awaited it: the phase was still `.idle`, and
     /// the client reports a crash once per capture generation, so dropping it would leave a dead
     /// recording. Handled as soon as the recording is up; moot if the start fails.
-    private var crashDuringStart = false
+    private(set) var crashDuringStart = false
 
     /// The UI committed to a Start (the session dialog closed): in flight from this very turn. The
     /// caller's Task always reaches `startRecording`, which takes it over at its first line — even
@@ -327,7 +327,12 @@ public final class RecordingCoordinator {
             return
         }
         startRunning = true
-        defer { startRunning = false }
+        defer {
+            startRunning = false
+            // A crash reported during this start — even during its failure path's helper stop — is this
+            // start's, handled or moot by now: never inherited (L follow-up 29).
+            crashDuringStart = false
+        }
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
         // Every await below takes what is left of this one deadline (§8.8, addendum).
@@ -1191,14 +1196,22 @@ public final class RecordingCoordinator {
 
         guard let sentinel = RecordingSentinel.read(directory: sentinelDirectory) else {
             Logger.state.error("No sentinel found during crash recovery")
-            appState.criticalError = "Recording failed — no recovery data available."
+            captureClient.captureEnded()
+            // No recovery file to restart from, but a live pipeline still knows its session: salvage it
+            // there (the rotation stops, the pipeline is torn down) — never leave it running behind an idle
+            // app (L follow-up 28).
+            let outcome: SalvageOutcome
+            if let location = transcriptionRunner.chunkRotator?.sessionLocation {
+                outcome = await finalizeAbandonedSession(at: location, reingestOrphan: true)
+            } else {
+                transcriptionRunner.stopChunkRotation()
+                transcriptionRunner.teardownChunkedPipeline()
+                outcome = SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
+            }
+            appState.criticalError = "Recording failed — no recovery data available. " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            captureClient.captureEnded()
-            notifyCritical(
-                "Recording Failed",
-                "Microphone capture crashed. No recovery data found."
-            )
+            notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
             return
         }
 
@@ -1284,8 +1297,12 @@ public final class RecordingCoordinator {
             // Re-checked after the await (§8.6): nothing else ends a recording mid-restart today, but a
             // restart must never announce itself for a recording that is no longer running.
             guard appState.isRecording, !stopInFlight else {
+                // Unreachable: a restart is serialized under `recoveryInFlight`, and a Stop defers to it.
+                assertionFailure("The recording ended while its capture restarted")
                 awaitingRecoveryFrames = false
-                Logger.state.warning("The recording ended while its capture restarted — not resuming it")
+                Logger.state.error("The recording ended while its capture restarted — stopping the helper")
+                // Never a capturing helper behind an idle app (L follow-up 29).
+                _ = await boundedHelperStop("stop after an abandoned restart")
                 return
             }
             // The old helper's alarms stay: the new helper's snapshot turns them stale, and only its
@@ -1739,6 +1756,7 @@ public final class RecordingCoordinator {
     /// still `.idle` then, L5 review) — is stopped, bounded, so what was captured is finalized or at least
     /// left to the relaunch's salvage.
     public func systemWillPowerOff() async {
+        defer { markExitDuringFinalize() }
         guard appState.isRecording || isStartInFlight else { return }
         Logger.state.info("System powering off while recording — stopping")
         await stopForExit(label: "power off stop")
@@ -1747,10 +1765,27 @@ public final class RecordingCoordinator {
     /// Quit. Idle → true. While recording, or while a start is in flight → `confirm()`: true → the start is
     /// awaited, then a bounded stop (30 s), then true; false → false (Parley stays).
     public func prepareForQuit(confirm: () async -> Bool) async -> Bool {
-        guard appState.isRecording || isStartInFlight else { return true }
+        guard appState.isRecording || isStartInFlight else {
+            markExitDuringFinalize()
+            return true
+        }
         guard await confirm() else { return false }
         await stopForExit(label: "quit stop")
+        markExitDuringFinalize()
         return true
+    }
+
+    /// The app is about to end while a stopped recording's transcript is still being finished (its
+    /// sentinel is there, marked `stopping`): say so in the sentinel, so the next launch words it as a
+    /// quit, never "Parley crashed" (L follow-up 42).
+    private func markExitDuringFinalize() {
+        guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.stopping, !sentinel.quitDuringFinalize else { return }
+        sentinel.quitDuringFinalize = true
+        do {
+            try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+        } catch {
+            Logger.state.error("Could not mark the recovery file as quit during finalize: \(error, privacy: .private)")
+        }
     }
 
     /// Before the process ends: let a start in flight resolve (it is bounded by `startDeadline`), then
@@ -1934,9 +1969,14 @@ public final class RecordingCoordinator {
         // The presenter's notification is the only one: no separate critical alert (L6 fix round 1).
         // An older-format (pre-0.6, single-file) recording is not a chunk: kept, and never "no recorded
         // audio" (L follow-up 25). The message names its folder, not the meeting.
-        let message = outcome.kind == .nothingToSalvage && Self.legacyAudioExists(sentinel)
-            ? RecoveryMessages.relaunchStoppedKeepingOlderFormat(at: stoppedAt, folder: abbreviatedDisplayPath(outputDir.path))
-            : RecoveryMessages.relaunchStopped(at: stoppedAt, outcome: outcome)
+        let message: String
+        if sentinel.quitDuringFinalize {
+            message = RecoveryMessages.quitWhileFinishing(outcome: outcome)   // a quit, not a crash (L follow-up 42)
+        } else if outcome.kind == .nothingToSalvage, Self.legacyAudioExists(sentinel) {
+            message = RecoveryMessages.relaunchStoppedKeepingOlderFormat(at: stoppedAt, folder: abbreviatedDisplayPath(outputDir.path))
+        } else {
+            message = RecoveryMessages.relaunchStopped(at: stoppedAt, outcome: outcome)
+        }
         appState.raiseAppAlarm(.recordingStopped, message: message)
         presentAlarms()
         captureClient.captureEnded()

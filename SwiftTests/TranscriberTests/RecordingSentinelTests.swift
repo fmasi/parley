@@ -273,6 +273,17 @@ struct RecordingSentinelTests {
         #expect(s.lastAliveAt == nil && s.bootSessionUUID == nil && !s.stopping)
     }
 
+    /// L follow-up 42: the quit mark round-trips, defaults to false, and survives a segment advance.
+    @Test func theQuitDuringFinalizeMarkRoundTrips() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        #expect(!s.quitDuringFinalize)
+        s.quitDuringFinalize = true
+        try RecordingSentinel.write(s, directory: dir)
+        #expect(RecordingSentinel.read(directory: dir)?.quitDuringFinalize == true)
+        #expect(s.incrementedSegment(systemAudioPath: "/tmp/s-1.wav", micAudioPath: "/tmp/s-1_mic.wav").quitDuringFinalize)
+    }
+
     /// A crash restart advances the segment: the liveness, the boot session and the stop mark carry over.
     @Test func incrementedSegmentKeepsLivenessBootSessionAndStopping() {
         var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
