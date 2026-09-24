@@ -22,10 +22,20 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     /// `contentAnomalies` is the count of CONTENT-compromising events on this track (rate drift,
     /// exact-zero mic, permission denied, converter failure, write failure, sustained format drop) —
     /// never healed liveness events (scan C12); `makeProvenance` (E1) computes it.
+    ///
+    /// Precedence (review fix 1): `.neverDelivered` is checked BEFORE the content-anomaly check, so a
+    /// track that delivered nothing never reads as merely `.compromised` — R1 must not print "partly
+    /// captured (0 s delivered…)" for a side that captured nothing at all.
+    ///
+    /// Threshold (review fix 2, controller ruling): below 1 s expected, the existing startup window
+    /// still applies (tap `.idle`, mic `.healthy`) — a session that short is just short. At or above
+    /// 1 s, 0 delivered is `.neverDelivered` on BOTH tracks: "never healthy when nothing was captured
+    /// while audio was expected". The old 5 s debounce belongs to the live alarm, not to this
+    /// after-the-fact record.
     public func status(isTap: Bool, contentAnomalies: Int) -> Status {
-        if contentAnomalies > 0 { return .compromised }
         if isTap, expectedSeconds < 1, deliveredSeconds == 0 { return .idle }
-        if expectedSeconds >= 5, deliveredSeconds == 0 { return .neverDelivered }
+        if expectedSeconds >= 1, deliveredSeconds == 0 { return .neverDelivered }
+        if contentAnomalies > 0 { return .compromised }
         let deficit = expectedSeconds - deliveredSeconds
         if expectedSeconds > 0, deficit >= Self.minimumDeficitSeconds, deficit / expectedSeconds >= Self.deficitRatio {
             return .compromised
@@ -54,14 +64,28 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         return Dictionary(uniqueKeysWithValues: zip(Self.keys.map { "\(prefix)_\($0)" }, values))
     }
 
+    /// Review fix 3 (controller ruling: crash risk): rejects a non-finite value (`nan`/`inf`) on any
+    /// Double field. Letting one through to `asMetadataDictionary` and then `JSONSerialization`
+    /// raises an uncatchable ObjC exception — reject it here instead, at the parse boundary.
     public init?(detail: [String: String], prefix: String) {
-        guard let e = detail["\(prefix)_expected_seconds"].flatMap(Double.init) else { return nil }
+        guard let expectedRaw = detail["\(prefix)_expected_seconds"], let e = Double(expectedRaw), e.isFinite else { return nil }
         expectedSeconds = e
+
+        func finiteOrDefault(_ suffix: String, _ def: Double) -> Double? {
+            guard let raw = detail["\(prefix)_\(suffix)"] else { return def }
+            guard let d = Double(raw) else { return def }
+            return d.isFinite ? d : nil
+        }
+        guard let delivered = finiteOrDefault("delivered_seconds", 0) else { return nil }
+        deliveredSeconds = delivered
+        guard let exactZero = finiteOrDefault("exact_zero_seconds", 0) else { return nil }
+        exactZeroSeconds = exactZero
+        guard let padded = finiteOrDefault("padded_seconds", 0) else { return nil }
+        paddedSeconds = padded
+        guard let longestGap = finiteOrDefault("longest_gap_seconds", 0) else { return nil }
+        longestGapSeconds = longestGap
+
         heartbeatCallbacks = detail["\(prefix)_heartbeat_callbacks"].flatMap(Int.init) ?? 0
-        deliveredSeconds = detail["\(prefix)_delivered_seconds"].flatMap(Double.init) ?? 0
-        exactZeroSeconds = detail["\(prefix)_exact_zero_seconds"].flatMap(Double.init) ?? 0
-        paddedSeconds = detail["\(prefix)_padded_seconds"].flatMap(Double.init) ?? 0
-        longestGapSeconds = detail["\(prefix)_longest_gap_seconds"].flatMap(Double.init) ?? 0
         gapCount = detail["\(prefix)_gap_count"].flatMap(Int.init) ?? 0
         rebuilds = detail["\(prefix)_rebuilds"].flatMap(Int.init) ?? 0
     }

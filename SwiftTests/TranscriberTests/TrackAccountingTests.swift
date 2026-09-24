@@ -51,4 +51,52 @@ import Testing
         #expect(sum.expectedSeconds == 20 && sum.rebuilds == 4 && sum.longestGapSeconds == 3)
         #expect(TrackAccounting(detail: [:], prefix: "remote") == nil)
     }
+
+    // MARK: - Fix round 1
+
+    /// Review fix 1 [Important]: a never-delivered track must read `.neverDelivered`, not
+    /// `.compromised`, even when a content anomaly is also present on it — otherwise R1 prints
+    /// "partly captured (0 s delivered…)" for a side that captured nothing at all.
+    @Test func neverDeliveredTakesPrecedenceOverContentAnomaly() {
+        var a = TrackAccounting()
+        a.expectedSeconds = 2736
+        #expect(a.status(isTap: true, contentAnomalies: 1) == .neverDelivered)
+    }
+
+    /// Review fix 2 [Important, controller ruling]: 0 delivered with ≥1 s expected is
+    /// `.neverDelivered` on BOTH tracks — "never healthy when nothing was captured while audio was
+    /// expected". Below 1 s the existing startup window still applies (tap `.idle`, mic `.healthy`);
+    /// the old 5 s debounce belonged to the live alarm, not to this after-the-fact record.
+    @Test func zeroDeliveredAtOrAboveOneSecondExpectedIsNeverDeliveredOnBothTracks() {
+        for isTap in [true, false] {
+            var underOneSecond = TrackAccounting()
+            underOneSecond.expectedSeconds = 0.9
+            #expect(underOneSecond.status(isTap: isTap, contentAnomalies: 0) == (isTap ? .idle : .healthy),
+                    "under 1 s keeps the existing startup window (isTap: \(isTap))")
+
+            for expected in [3.0, 5.0] {
+                var a = TrackAccounting()
+                a.expectedSeconds = expected
+                #expect(a.status(isTap: isTap, contentAnomalies: 0) == .neverDelivered,
+                        "expected \(expected) s, 0 delivered, isTap: \(isTap)")
+            }
+        }
+    }
+
+    /// Review fix 3 [Important, controller ruling: crash risk]: a non-finite value reaching
+    /// `asMetadataDictionary` via `JSONSerialization` raises an uncatchable ObjC exception — reject
+    /// it at the parse boundary instead.
+    @Test func nonFiniteDetailValuesAreRejected() {
+        #expect(TrackAccounting(detail: ["remote_expected_seconds": "10", "remote_delivered_seconds": "nan"], prefix: "remote") == nil)
+        #expect(TrackAccounting(detail: ["remote_expected_seconds": "inf"], prefix: "remote") == nil)
+        #expect(TrackAccounting(detail: ["remote_expected_seconds": "-inf"], prefix: "remote") == nil)
+    }
+
+    /// Review fix 4: pin the exact key set R1 parses by name. Characterization test — the keys
+    /// were already correct, no implementation change was needed for this one.
+    @Test func metadataDictionaryKeysArePinned() {
+        let keys = Set(TrackAccounting().asMetadataDictionary(status: .healthy).keys)
+        #expect(keys == ["status", "expected_seconds", "delivered_seconds", "exact_zero_seconds",
+                          "padded_seconds", "longest_gap_seconds", "gap_count", "rebuilds", "heartbeat_callbacks"])
+    }
 }
