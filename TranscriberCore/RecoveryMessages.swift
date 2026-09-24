@@ -68,6 +68,20 @@ public enum RecoveryMessages {
         "Stopping the recording failed (\(error)). " + describe(outcome)
     }
 
+    /// A stale-boot salvage: the Mac restarted (or lost power) during the recording (R2 follow-up 1).
+    /// "Parley crashed" would name the wrong cause.
+    public static func relaunchStoppedByRestart(at: Date, outcome: SalvageOutcome) -> String {
+        let cause = "Recording STOPPED at \(clock(at)) — your Mac restarted during the recording. "
+        guard case .transcriptWritten(let url) = outcome.kind, outcome.chunkCount > 0 else { return cause + describe(outcome) }
+        let (noun, _, _) = chunkPhrase(outcome.chunkCount)
+        let failed = min(outcome.untranscribedChunkCount, outcome.chunkCount)
+        if failed == outcome.chunkCount {
+            return cause + "Parley recovered \(noun) to \(url.lastPathComponent), but speech recognition failed on \(outcome.chunkCount == 1 ? "it" : "all of them")."
+        }
+        let recognitionFailed = failed > 0 ? "; speech recognition failed on \(failed) of them" : ""
+        return cause + "Parley recovered \(noun) to \(url.lastPathComponent)\(recognitionFailed)."
+    }
+
     public static func relaunchStopped(at: Date, outcome: SalvageOutcome) -> String {
         "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. " + describe(outcome)
     }

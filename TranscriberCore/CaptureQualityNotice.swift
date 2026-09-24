@@ -12,23 +12,26 @@ import Foundation
 /// knowledge existed; nothing carried it to the human. This type is that carrier.
 public enum CaptureQualityNotice {
 
-    /// Notification title for a completed transcription.
-    public static func completionTitle(anomalyCount: Int) -> String {
-        completionTitle(anomalyCount: anomalyCount, problemChunkCount: 0, segmentCount: 1)
-    }
+    /// What each `…(inTranscriptAt:)` reader answers when the transcript can't be read back (missing,
+    /// unreadable, not a transcript). Not an alarm about the audio — but not "nothing wrong" either:
+    /// answering 0/0/1 for a file nobody read turned it into a plain "Transcription Complete". The
+    /// title and body then say the transcript could not be checked. A sentinel rather than an
+    /// optional, so the one call site (`RecordingCoordinator.presentCompletedTranscription`) needs no
+    /// change to be honest.
+    public static let unreadable = -1
 
-    /// Notification body. Names the count so the user knows to look, and where.
-    public static func completionBody(fileName: String, anomalyCount: Int) -> String {
-        completionBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: 0, segmentCount: 1)
-    }
+    private static let couldNotCheck = "Parley couldn't re-read the transcript to check it"
 
-    /// Notification title for a completed transcription — exactly one of four, with precedence
-    /// no speech > capture anomalies > processing problems > complete (§7.3).
+    /// Notification title for a completed transcription — exactly one of five, with precedence
+    /// unreadable > no speech > capture anomalies > processing problems > complete (§7.3).
     ///
-    /// An empty transcript leads: "Transcription Complete" over a file with no words in it is the
-    /// most misleading thing this notice could say. Anomalies beat processing problems because they
-    /// mean the AUDIO itself may be wrong; the body still names every non-zero count.
+    /// A transcript that could not be re-read leads: none of the other four can be known, and
+    /// "Complete" would be a clean bill for a file nobody checked. An empty transcript comes next:
+    /// "Transcription Complete" over a file with no words in it is the most misleading thing this
+    /// notice could say. Anomalies beat processing problems because they mean the AUDIO itself may
+    /// be wrong; the body still names every non-zero count.
     public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int) -> String {
+        if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "Transcription finished — \(couldNotCheck)" }
         if segmentCount == 0 { return "Transcription Complete — no speech was transcribed" }
         if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
         if problemChunkCount > 0 { return "Transcription Complete — \(problemPhrase(problemChunkCount))" }
@@ -37,6 +40,7 @@ public enum CaptureQualityNotice {
 
     /// Notification body: the file name, then every non-zero count.
     public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int) -> String {
+        if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }
         if anomalyCount > 0 {
@@ -63,15 +67,15 @@ public enum CaptureQualityNotice {
     /// Reading it back from the artifact (rather than threading it through every call site) means the
     /// crash-recovery and salvage paths get the same treatment as a clean stop for free — those are
     /// exactly the paths where a compromised capture is most likely and least examined.
-    /// Returns 0 when absent or unreadable: never invent an alarm.
+    /// Returns 0 when the field is absent (never invent an alarm), `unreadable` when the transcript
+    /// itself can't be read back.
     ///
     /// - Important: synchronous file I/O. A long meeting's transcript can reach several hundred KB,
     ///   so call this OFF the main actor (`RecordingCoordinator` uses a detached task) — blocking
     ///   the UI to decide how to phrase a notification would be a poor trade.
     public static func anomalyCount(inTranscriptAt url: URL) -> Int {
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let metadata = root["metadata"] as? [String: Any],
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
               let provenance = metadata["capture_provenance"] as? [String: Any]
         else { return 0 }
         // Transcripts written before this field existed simply have no quality signal — absent means
@@ -82,21 +86,22 @@ public enum CaptureQualityNotice {
 
     /// Distinct chunks with a content-affecting processing issue, computed from
     /// `metadata.processing_issues` itself — never a stored summary key that could disagree with it.
-    /// 0 when absent or unreadable (never invent an alarm). Synchronous file I/O — call off the main
-    /// actor, like `anomalyCount(inTranscriptAt:)`.
+    /// 0 when absent (never invent an alarm), `unreadable` when the transcript can't be read back.
+    /// Synchronous file I/O — call off the main actor, like `anomalyCount(inTranscriptAt:)`.
     public static func problemChunkCount(inTranscriptAt url: URL) -> Int {
-        guard let metadata = readRoot(url)?["metadata"] as? [String: Any],
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
               let issues = metadata["processing_issues"] as? [[String: Any]]
         else { return 0 }
         return ChunkIssue.problemCounts(in: issues).chunks
     }
 
     /// How many readable segments the transcript holds — flagged ones (`filtered` / `echo`) are
-    /// hidden from every rendering, so they are not speech anyone can read. An unreadable file
-    /// answers 1, not 0: failing to read the file is not evidence that no speech was transcribed,
-    /// and "no speech" is an alarm.
+    /// hidden from every rendering, so they are not speech anyone can read. A file that can't be
+    /// read back, or holds no segment list, answers `unreadable`, not 0: failing to read it is not
+    /// evidence that no speech was transcribed, and "no speech" is an alarm.
     public static func segmentCount(inTranscriptAt url: URL) -> Int {
-        guard let segments = readRoot(url)?["segments"] as? [[String: Any]] else { return 1 }
+        guard let segments = readRoot(url)?["segments"] as? [[String: Any]] else { return unreadable }
         return segments.filter { !TranscriptAssembler.isFlagged($0) }.count
     }
 

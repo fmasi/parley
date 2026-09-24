@@ -93,4 +93,22 @@ import Testing
                       chunk(3, [ChunkIssue(code: .asrFailed, track: "local", count: nil)])]
         #expect(SalvageOutcome.untranscribedChunkCount(in: chunks) == 2)
     }
+
+    /// R2 follow-up 1: a stale-boot salvage (the Mac rebooted or lost power mid-recording) said
+    /// "Parley crashed and could not resume it" — the wrong cause. It names the restart instead.
+    @Test func aStaleBootSalvageNamesTheRestartNotACrash() {
+        let at = Date(timeIntervalSince1970: 1_790_000_000)
+        let clock = RecoveryMessages.clock(at)
+        let written = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3))
+        #expect(written == "Recording STOPPED at \(clock) — your Mac restarted during the recording. Parley recovered 3 chunks to m.json.")
+        #expect(!written.contains("crashed"))
+        let one = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1, untranscribedChunkCount: 1))
+        #expect(one.hasSuffix("your Mac restarted during the recording. Parley recovered 1 chunk to m.json, but speech recognition failed on it."))
+        let some = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 4, untranscribedChunkCount: 1))
+        #expect(some.hasSuffix("Parley recovered 4 chunks to m.json; speech recognition failed on 1 of them."))
+        let kept = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 2))
+        #expect(kept == "Recording STOPPED at \(clock) — your Mac restarted during the recording. The 2 chunks recorded before it are kept on disk but could not be transcribed: disk full.")
+        let nothing = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
+        #expect(nothing.hasSuffix("your Mac restarted during the recording. No transcript could be written: no recorded audio was found to salvage."))
+    }
 }

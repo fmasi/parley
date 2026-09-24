@@ -178,9 +178,17 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         let provider = IntegrationCapturingProvider()
         try await MeetingSummarizer.summarize(transcriptPath: result.jsonPath, provider: provider, endpoint: "http://127.0.0.1:1234/v1")
         let summary = try String(contentsOf: dir.appendingPathComponent("weekly-sync-summary.md"), encoding: .utf8)
-        let title = CaptureQualityNotice.completionTitle(anomalyCount: CaptureQualityNotice.anomalyCount(inTranscriptAt: result.jsonPath))
+        let title = Self.completionTitle(transcriptAt: result.jsonPath)
         return Record(provenance: provenance, metadata: metadata, summaryMetadata: try #require(provider.metadata),
                       summaryMarkdown: summary, completionTitle: title)
+    }
+
+    /// The notice exactly as `RecordingCoordinator.presentCompletedTranscription` builds it: the three
+    /// counts read back off the transcript, then the three-argument title.
+    nonisolated static func completionTitle(transcriptAt url: URL) -> String {
+        CaptureQualityNotice.completionTitle(anomalyCount: CaptureQualityNotice.anomalyCount(inTranscriptAt: url),
+                                             problemChunkCount: CaptureQualityNotice.problemChunkCount(inTranscriptAt: url),
+                                             segmentCount: CaptureQualityNotice.segmentCount(inTranscriptAt: url))
     }
 
     /// (a) Both sides healthy — including a benign AirPods route change the #86 restart healed — says
@@ -522,9 +530,8 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(p.qualityAnomalyCount >= 2, "a rate drift and an unrecovered remote stream were recorded")
 
         let url = d.appendingPathComponent("weekly-sync.json")
-        try TranscriptAssembler.write(["metadata": assemble(p), "segments": []], to: url)
-        #expect(CaptureQualityNotice.completionTitle(anomalyCount: CaptureQualityNotice.anomalyCount(inTranscriptAt: url))
-                == "Transcription Complete — capture anomalies")
+        try TranscriptAssembler.write(["metadata": assemble(p), "segments": [["start": 0.0, "end": 2.0, "speaker": "Remote Speaker 1", "text": "hello"]]], to: url)
+        #expect(CaptureRecordIntegrationCoverageToSummaryTests.completionTitle(transcriptAt: url) == "Transcription Complete — capture anomalies")
     }
 }
 
