@@ -405,4 +405,37 @@ struct CaptureProvenanceTests {
         #expect(dict["engine"] as? String == "e")
         #expect(dict["route_changes"] as? Int == 0)
     }
+
+    // MARK: - Confirmed permission denial (round 3 item 6)
+
+    private func provenance(_ events: [CaptureEvent]) -> CaptureProvenance {
+        var d = CaptureDiagnostics()
+        for e in events { d.record(e) }
+        return d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+    }
+
+    private func denied(_ status: String, at offset: TimeInterval) -> CaptureEvent {
+        CaptureEvent(timestamp: Date(timeIntervalSinceReferenceDate: 3_000_000 + offset), origin: .helper,
+                     kind: .systemAudioPermissionDenied, severity: .anomaly, detail: ["status": status])
+    }
+
+    private func helperEvent(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, at offset: TimeInterval) -> CaptureEvent {
+        CaptureEvent(timestamp: Date(timeIntervalSinceReferenceDate: 3_000_000 + offset), origin: .helper, kind: kind, severity: severity)
+    }
+
+    @Test func onlyAConfirmedDenialSetsTheConfirmedFlag() {
+        #expect(provenance([denied("denied", at: 1)]).systemPermissionDeniedConfirmed)
+        #expect(!provenance([denied("unconfirmed", at: 1)]).systemPermissionDeniedConfirmed)
+        let restartFailed = provenance([helperEvent(.systemAudioUnrecovered, .anomaly, at: 1)])
+        #expect(restartFailed.systemAudioUnrecovered && !restartFailed.systemPermissionDeniedConfirmed,
+                "a failed restart alone is not a permission denial")
+        #expect(!provenance([denied("denied", at: 1), helperEvent(.systemAudioPermissionRestored, .info, at: 2)]).systemPermissionDeniedConfirmed)
+    }
+
+    @Test func theConfirmedFlagIsStampedAndDecodedTolerantly() throws {
+        let p = provenance([denied("denied", at: 1)])
+        #expect(p.asMetadataDictionary()["system_permission_denied_confirmed"] as? Bool == true)
+        let legacy = Data(#"{"engine":"e","route_changes":0,"retries":0,"recovered":false,"anomaly_count":0}"#.utf8)
+        #expect(try !JSONDecoder().decode(CaptureProvenance.self, from: legacy).systemPermissionDeniedConfirmed)
+    }
 }

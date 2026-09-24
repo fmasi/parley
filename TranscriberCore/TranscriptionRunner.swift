@@ -557,22 +557,46 @@ public final class TranscriptionRunner {
         return (transcriber, diarizer)
     }
 
-    /// Set up chunked recording pipeline.
-    ///
-    /// `seededState` resumes a persisted session after a relaunch (L7): its chunks, id and
-    /// `meetingStart` carry over so completed chunks are not re-done. The rotator is still anchored
-    /// at the CURRENT time — the monotonic clock behind it cannot be persisted, so a resume
-    /// re-anchors at resume time rather than at the seeded `meetingStart`.
-    ///
-    /// `firstChunkIndex` is the index of the chunk being recorded now. Default: one past the highest
-    /// seeded index, or 0 — a resume must never restart at an index the session already holds.
+    /// Set up the chunked recording pipeline for a NEW session. `firstChunkIndex` is the index of
+    /// the chunk being recorded now (0 for a fresh recording).
     public func setupChunkedPipeline(
         captureClient: any ChunkRotationClient,
         outputDirectory: URL,
         sessionBaseName: String,
         config: Config,
-        seededState: SessionState? = nil,
-        firstChunkIndex: Int? = nil
+        firstChunkIndex: Int = 0
+    ) throws {
+        try setupPipeline(captureClient: captureClient, outputDirectory: outputDirectory, sessionBaseName: sessionBaseName,
+                          config: config, seededState: nil, firstChunkIndex: firstChunkIndex)
+    }
+
+    /// Set up the chunked pipeline RESUMING a persisted session after a relaunch (L7): its chunks,
+    /// id and `meetingStart` carry over so completed chunks are not re-done. `firstChunkIndex` is
+    /// required here — the index the capture restarted at (the relaunch plan's) — because a resume
+    /// that restarted at an index the session already holds lost every word after it. An index at
+    /// or below the seeded maximum is clamped to max + 1 (logged `.error`).
+    ///
+    /// The rotator is still anchored at the CURRENT time — the monotonic clock behind it cannot be
+    /// persisted, so a resume re-anchors at resume time rather than at the seeded `meetingStart`.
+    public func setupChunkedPipeline(
+        captureClient: any ChunkRotationClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config,
+        seededState: SessionState,
+        firstChunkIndex: Int
+    ) throws {
+        try setupPipeline(captureClient: captureClient, outputDirectory: outputDirectory, sessionBaseName: sessionBaseName,
+                          config: config, seededState: seededState, firstChunkIndex: firstChunkIndex)
+    }
+
+    private func setupPipeline(
+        captureClient: any ChunkRotationClient,
+        outputDirectory: URL,
+        sessionBaseName: String,
+        config: Config,
+        seededState: SessionState?,
+        firstChunkIndex: Int
     ) throws {
         if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
@@ -600,6 +624,14 @@ public final class TranscriptionRunner {
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedEngineChanged, track: nil, count: nil)))
         }
 
+        var startIndex = firstChunkIndex
+        if let seededMax = sessionState.chunks.map(\.index).max(), startIndex <= seededMax {
+            Logger.state.error(
+                "Resume asked to start at chunk \(firstChunkIndex, privacy: .public), but the session already holds chunk \(seededMax, privacy: .public) — starting at \(seededMax + 1, privacy: .public)"
+            )
+            startIndex = seededMax + 1
+        }
+
         let processor = ChunkProcessor(
             config: config,
             outputDirectory: outputDirectory,
@@ -614,7 +646,7 @@ public final class TranscriptionRunner {
             outputDirectory: outputDirectory.path,
             sessionBaseName: sessionBaseName,
             chunkDurationMinutes: config.validatedChunkDuration,
-            startIndex: firstChunkIndex ?? sessionState.chunks.map(\.index).max().map { $0 + 1 } ?? 0,
+            startIndex: startIndex,
             startTime: Date()
         ) { [weak processor] chunk in
             processor?.processChunk(chunk)

@@ -47,10 +47,9 @@ public enum ChunkedSessionRecovery {
                 index: orphan.index, systemPath: sysURL.path,
                 micPath: micURL.path, startTime: start))
         }
-        // Defensive no-op on this sequential path: `processLastChunk` above is awaited inline per
-        // orphan, and `inFlightTasks` is only ever populated by the fire-and-forget `processChunk`
-        // (used by the live rotation path, not recovery). Kept as belt-and-suspenders in case this
-        // method's contract changes to enqueue background work.
+        // Defensive on this sequential path: `processLastChunk` above already awaits each orphan's
+        // task. `awaitAllProcessed` awaits every task the processor scheduled, so it also covers any
+        // background work a future change to this method might enqueue.
         await processor.awaitAllProcessed()
         var state = await processor.getSessionState()
         guard !state.chunks.isEmpty else {

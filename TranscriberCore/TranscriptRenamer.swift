@@ -112,6 +112,9 @@ public enum TranscriptRenamer {
         // Prefer durations already stamped in metadata (#204) over opening every chunk file.
         let cachedDurations = metadata?["chunk_durations"] as? [Double]
         let chunkDurations = SpeakerSampleLocator.durations(for: layout, cached: cachedDurations)
+        // Where finalize placed each chunk on the wall-clock timeline: across a capture gap the
+        // chunks are not end to end, and samples after the gap would otherwise play wrong audio.
+        let chunkOffsets = metadata?["chunk_offsets"] as? [Double]
 
         // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
         // clean speech from crosstalk.
@@ -153,7 +156,8 @@ public enum TranscriptRenamer {
                     start: candidate.start,
                     end: candidate.end,
                     layout: layout,
-                    chunkDurations: chunkDurations
+                    chunkDurations: chunkDurations,
+                    chunkOffsets: chunkOffsets
                 ) else { continue }
                 samples.append(SpeakerSample(
                     text: candidate.text,

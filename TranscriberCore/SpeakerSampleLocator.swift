@@ -136,6 +136,7 @@ public enum SpeakerSampleLocator {
         end: TimeInterval,
         layout: AudioLayout,
         chunkDurations: [TimeInterval?],
+        chunkOffsets: [TimeInterval]? = nil,
         maxSampleDuration: TimeInterval = defaultMaxSampleDuration
     ) -> SpeakerSampleLocation? {
         let isLocal = (source == "local")
@@ -148,6 +149,7 @@ public enum SpeakerSampleLocator {
             guard let hit = ChunkLocator.locate(
                 start: start, end: end,
                 chunkDurations: chunkDurations,
+                chunkOffsets: chunkOffsets,
                 maxDuration: maxSampleDuration
             ), chunks.indices.contains(hit.index) else { return nil }
             let url = chunks[hit.index]

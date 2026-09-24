@@ -283,4 +283,23 @@ struct ChunkProcessorTests {
         #expect(!chunk.issues.contains { $0.code == .archiveFailed })
         #expect(FileManager.default.fileExists(atPath: old.path), "the quota delete really failed")
     }
+
+    /// Round 3 item 1: a file already processed under ANOTHER index (a collided chunk, re-indexed)
+    /// arriving again — e.g. a relaunch orphan scan re-ingesting its preserved WAV — is a duplicate.
+    @Test func aKnownSourceUnderAnotherIndexIsSkipped() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-1.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        let reindexed = ProcessedChunk(index: 5, startTime: Date(timeIntervalSince1970: 0), audioPath: "meeting-1.m4a",
+                                       segments: [], speakerDatabase: [:])
+        let processor = ChunkProcessor(config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio",
+                                       chunkDurationMinutes: 10, chunks: [reindexed]),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+            index: 1, systemPath: sys.path, micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
+            startTime: Date(timeIntervalSince1970: 600)))
+        #expect(await processor.getSessionState().chunks.map(\.index) == [5])
+        #expect(FileManager.default.fileExists(atPath: sys.path), "a skipped duplicate is not archived")
+    }
 }

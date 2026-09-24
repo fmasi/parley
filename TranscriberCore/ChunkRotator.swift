@@ -149,8 +149,8 @@ public final class ChunkRotator {
     }
 
     private func chunkFilesExist(index: Int) -> Bool {
+        // Every artefact a chunk leaves: its two WAVs and, once processed, its archive.
         let base = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(sessionBaseName)-\(index)")
-        return FileManager.default.fileExists(atPath: base.path + ".wav")
-            || FileManager.default.fileExists(atPath: base.path + "_mic.wav")
+        return [".wav", "_mic.wav", ".m4a"].contains { FileManager.default.fileExists(atPath: base.path + $0) }
     }
 }

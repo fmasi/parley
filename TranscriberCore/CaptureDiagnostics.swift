@@ -257,6 +257,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// How many ring events were evicted before this stamp was built (#101/L14) — the ring's own
     /// admission that it does not hold the session's whole story. Always emitted (default 0).
     public let eventsDropped: Int
+    /// True only when the helper CONFIRMED the System Audio Recording permission was not granted
+    /// (a `systemAudioPermissionDenied` whose status is `denied`/`notDetermined`, not
+    /// `unconfirmed`) and it was not restored afterwards. `systemAudioUnrecovered` cannot answer
+    /// this: a failed stream restart sets it too, and "permission denied" is a claim to confirm.
+    public let systemPermissionDeniedConfirmed: Bool
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -276,6 +281,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case localStatus = "local_status"
         case remoteStatus = "remote_status"
         case eventsDropped = "events_dropped"
+        case systemPermissionDeniedConfirmed = "system_permission_denied_confirmed"
     }
 
     public init(
@@ -295,7 +301,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         remoteCoverage: TrackAccounting? = nil,
         localStatus: String? = nil,
         remoteStatus: String? = nil,
-        eventsDropped: Int = 0
+        eventsDropped: Int = 0,
+        systemPermissionDeniedConfirmed: Bool = false
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -314,6 +321,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.localStatus = localStatus
         self.remoteStatus = remoteStatus
         self.eventsDropped = eventsDropped
+        self.systemPermissionDeniedConfirmed = systemPermissionDeniedConfirmed
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -344,6 +352,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         localStatus = try c.decodeIfPresent(String.self, forKey: .localStatus)
         remoteStatus = try c.decodeIfPresent(String.self, forKey: .remoteStatus)
         eventsDropped = try c.decodeIfPresent(Int.self, forKey: .eventsDropped) ?? 0
+        systemPermissionDeniedConfirmed = try c.decodeIfPresent(Bool.self, forKey: .systemPermissionDeniedConfirmed) ?? false
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -357,6 +366,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "quality_anomaly_count": qualityAnomalyCount,
             "system_audio_unrecovered": systemAudioUnrecovered,
             "events_dropped": eventsDropped,
+            "system_permission_denied_confirmed": systemPermissionDeniedConfirmed,
         ]
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
@@ -428,6 +438,11 @@ public struct CaptureDiagnostics: Sendable {
     /// evidence (the `rateDrift`, the `captureStop`) aged out of the bounded ring.
     private var contentAnomalyTallies: [String: Int] = [:]
     private var coverageTallies: [String: TrackAccounting] = [:]
+    /// The latest CONFIRMED permission denial and the latest restore (out-of-ring, same lifetime as
+    /// the tallies). Timestamps rather than a flag, so the answer does not depend on the order in
+    /// which merges first present the events.
+    private var lastConfirmedDenial: Date?
+    private var lastPermissionRestore: Date?
 
     /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
     /// events the ring already evicted (read back from the live log) alongside events the ring
@@ -460,6 +475,12 @@ public struct CaptureDiagnostics: Sendable {
         if e.kind == .launchRecovery { launchRecoveries += 1 }
         if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
             contentAnomalyTallies[track, default: 0] += 1
+        }
+        if e.kind == .systemAudioPermissionDenied, Self.confirmedDenialStatuses.contains(e.detail["status"] ?? "") {
+            lastConfirmedDenial = max(lastConfirmedDenial ?? e.timestamp, e.timestamp)
+        }
+        if e.kind == .systemAudioPermissionRestored {
+            lastPermissionRestore = max(lastPermissionRestore ?? e.timestamp, e.timestamp)
         }
         if e.kind == .captureStop {
             for prefix in ["local", "remote"] {
@@ -500,6 +521,8 @@ public struct CaptureDiagnostics: Sendable {
         launchRecoveries = 0
         contentAnomalyTallies.removeAll()
         coverageTallies.removeAll()
+        lastConfirmedDenial = nil
+        lastPermissionRestore = nil
         countedKeys.removeAll()
         droppedKeys.removeAll()
     }
@@ -538,6 +561,16 @@ public struct CaptureDiagnostics: Sendable {
         }
         let restored = events.lastIndex(where: { $0.kind == .systemAudioPermissionRestored })
         return restored.map { $0 < denied } ?? true
+    }
+
+    /// The permission statuses that CONFIRM a denial: TCC answered "not granted". `unconfirmed` (the
+    /// helper inferred it from sustained silence) does not.
+    static let confirmedDenialStatuses: Set<String> = ["denied", "notDetermined"]
+
+    /// True when the session's latest confirmed permission denial was not followed by a restore.
+    public var systemPermissionDeniedConfirmed: Bool {
+        guard let denied = lastConfirmedDenial else { return false }
+        return lastPermissionRestore.map { $0 < denied } ?? true
     }
 
     /// Newline-delimited JSON of all events (the `.diag.jsonl` payload).
@@ -610,7 +643,8 @@ public struct CaptureDiagnostics: Sendable {
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
             remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue },
-            eventsDropped: droppedCount
+            eventsDropped: droppedCount,
+            systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed
         )
     }
 

@@ -180,6 +180,15 @@ struct SummaryPromptBuilderTests {
         #expect(SummaryPromptBuilder.systemMessage(metadata: healthy).contains("Dual-Stream Audio Context"))
     }
 
+    /// Round 3 item 6: every-second digital silence after a failed restart (no confirmed denial)
+    /// must never be called a permission denial.
+    @Test func aFailedRestartAloneNeverSaysPermissionDenied() {
+        let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736,
+                                             exactZeroSeconds: 2736, permissionDenied: false))
+        let line = SummaryPromptBuilder.captureLine(m) ?? ""
+        #expect(!line.contains("permission was denied") && line.contains("uncertain"))
+    }
+
     @Test func theRuleNamesEveryIncompleteCase() {
         #expect(SummaryPromptBuilder.systemPrompt.contains("not captured, partly captured, uncertain, or compromised"))
     }

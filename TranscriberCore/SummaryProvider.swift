@@ -27,8 +27,9 @@ public struct CaptureSideNote: Equatable, Sendable {
     /// Seconds of exact digital zero among those delivered; nil when not recorded.
     public let exactZeroSeconds: Double?
     /// Remote side only: true when the helper confirmed the System Audio Recording permission was
-    /// denied and it was never restored (`capture_provenance.system_audio_unrecovered`); nil when the
-    /// transcript does not record it. Only `true` is evidence — anything else is "not confirmed".
+    /// not granted and it was never restored (`capture_provenance.system_permission_denied_confirmed`);
+    /// nil when the transcript does not record it. Only `true` is evidence — anything else is "not
+    /// confirmed".
     public let permissionDenied: Bool?
     /// Content-compromising capture anomalies recorded for the session; nil when not recorded.
     public let anomalyCount: Int?

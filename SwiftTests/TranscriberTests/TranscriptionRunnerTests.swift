@@ -76,10 +76,10 @@ import Testing
                                    segments: [], speakerDatabase: [:])
         let seeded = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
         let runner = TranscriptionRunner()
-        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default,
+                                        seededState: seeded, firstChunkIndex: 1)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.chunks.map(\.index) == [0] && state.sessionId == "m")
-        // Critical (review round 1): the rotator must not restart at 0 over the seeded chunk 0.
         #expect(runner.chunkRotator?.currentChunkInfo.index == 1)
         runner.teardownChunkedPipeline()
     }
@@ -164,7 +164,7 @@ import Testing
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let seeded = SessionState(sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10)
         let runner = TranscriptionRunner()
-        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded, firstChunkIndex: 0)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))
         runner.teardownChunkedPipeline()
@@ -176,7 +176,7 @@ import Testing
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let seeded = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "some_other_engine", chunkDurationMinutes: 10)
         let runner = TranscriptionRunner()
-        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded, firstChunkIndex: 0)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.issues.map(\.issue.code) == [.seedEngineChanged])
         #expect(!ChunkIssue.Code.seedEngineChanged.affectsContent && ChunkIssue.Code.seedMismatch.affectsContent)
@@ -207,5 +207,19 @@ import Testing
         let txt = try String(contentsOf: result.jsonPath.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8)
         #expect(txt.contains("kept words") && !txt.contains("gate noise") && !txt.contains("mic bleed"))
         #expect(txt.components(separatedBy: "kept words").count == 2, "the duplicate is hidden too")
+    }
+
+    /// Round 3 item 2: a `firstChunkIndex` at or below the seeded max would restart over a settled
+    /// chunk — it is clamped to max + 1.
+    @Test func aFirstChunkIndexInsideTheSeedIsClamped() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunks = (0...2).map { ProcessedChunk(index: $0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-\($0).m4a", segments: [], speakerDatabase: [:]) }
+        let seeded = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: Config.default.engine.rawValue,
+                                  chunkDurationMinutes: 10, chunks: chunks)
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default,
+                                        seededState: seeded, firstChunkIndex: 1)
+        #expect(runner.chunkRotator?.currentChunkInfo.index == 3)
+        runner.teardownChunkedPipeline()
     }
 }

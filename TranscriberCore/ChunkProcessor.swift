@@ -5,7 +5,8 @@ import os
 /// Processes finalized chunks in the background: transcribe both streams,
 /// diarize, VAD, speaker assignment, archive to AAC, and persist to session.json.
 ///
-/// The class is `@MainActor` so the `inFlightTasks` bookkeeping is serialized without a lock (#52).
+/// The class is `@MainActor` so the per-chunk bookkeeping (`sourceByIndex`, `tasksByIndex`) is
+/// serialized without a lock (#52).
 /// The heavy per-chunk work (`processChunkAsync` / `transcribeStream`) is `nonisolated` so the ML
 /// transcription, diarization, VAD and AAC encoding run off the main actor — only enqueueing and
 /// awaiting tasks touches the main actor. Immutable dependencies are `nonisolated let` so the
@@ -120,11 +121,13 @@ public final class ChunkProcessor {
         let source = Self.sourceBaseName(ofFile: URL(fileURLWithPath: chunk.systemPath).lastPathComponent)
         var chunk = chunk
         var extraIssues: [ChunkIssue] = []
+        // The same file again — under its own index, or under another one (a collided chunk that was
+        // re-indexed, then re-ingested by a relaunch orphan scan) — is a duplicate.
+        if let knownIndex = sourceByIndex.first(where: { $0.value == source })?.key {
+            Logger.transcription.info("Chunk \(chunk.index, privacy: .public) is a file already processed or in flight as chunk \(knownIndex, privacy: .public) — skipping the duplicate")
+            return tasksByIndex[knownIndex]
+        }
         if let known = sourceByIndex[chunk.index] {
-            if known == source {
-                Logger.transcription.info("Chunk \(chunk.index, privacy: .public) already processed or in flight — skipping the duplicate")
-                return tasksByIndex[chunk.index]
-            }
             // Never skip audio because its index is taken: that silently dropped every word
             // recorded after a resume. Process it under a fresh index and say so.
             let fresh = (sourceByIndex.keys.max() ?? chunk.index) + 1

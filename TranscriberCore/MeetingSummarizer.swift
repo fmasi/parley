@@ -252,7 +252,9 @@ public enum MeetingSummarizer {
             deliveredSeconds: validSeconds(side["delivered_seconds"]) ?? .nan,
             expectedSeconds: validSeconds(side["expected_seconds"]) ?? .nan,
             exactZeroSeconds: validSeconds(side["exact_zero_seconds"]),
-            permissionDenied: isRemote ? provenance?["system_audio_unrecovered"] as? Bool : nil,
+            // The CONFIRMED-denial field only: `system_audio_unrecovered` is also set by a failed
+            // stream restart, and "permission denied" is a claim Parley must be able to back.
+            permissionDenied: isRemote ? provenance?["system_permission_denied_confirmed"] as? Bool : nil,
             anomalyCount: provenance?["quality_anomaly_count"] as? Int
         )
     }

@@ -100,6 +100,7 @@ struct ChunkRotatorTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try Data().write(to: dir.appendingPathComponent("meeting-1.wav"))
         try Data().write(to: dir.appendingPathComponent("meeting-2_mic.wav"))
+        try Data().write(to: dir.appendingPathComponent("meeting-3.m4a"))   // an archived chunk (round 3)
 
         final class Recorder: ChunkRotationClient {
             var requested: [String] = []
@@ -114,8 +115,8 @@ struct ChunkRotatorTests {
                                    chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0),
                                    onChunkFinalized: { sink.finalized.append($0.index) })
         await rotator.rotateForTesting()
-        #expect(client.requested == ["meeting-3"])
-        #expect(rotator.currentChunkInfo.index == 3)
+        #expect(client.requested == ["meeting-4"])
+        #expect(rotator.currentChunkInfo.index == 4)
         #expect(sink.finalized == [0])
     }
 }

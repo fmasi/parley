@@ -485,7 +485,7 @@ struct MeetingSummarizerTests {
                     "remote": ["status": "compromised", "delivered_seconds": 2736.0, "expected_seconds": 2736.0, "exact_zero_seconds": 2736.0],
                     "gaps": [["seconds": 120.0, "reason": "sleep"], ["seconds": 70.0, "reason": "app relaunch"]],
                 ] as [String: Any],
-                "capture_provenance": ["system_audio_unrecovered": true, "quality_anomaly_count": 1],
+                "capture_provenance": ["system_permission_denied_confirmed": true, "system_audio_unrecovered": true, "quality_anomaly_count": 1],
             ],
             "segments": [] as [Any],
         ]).write(to: url)
@@ -506,7 +506,7 @@ struct MeetingSummarizerTests {
         var remote = TrackAccounting(); remote.expectedSeconds = 2736; remote.deliveredSeconds = 2736; remote.exactZeroSeconds = 2736
         let provenance = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
                                            recovered: false, anomalyCount: 1, qualityAnomalyCount: 1, systemAudioUnrecovered: true,
-                                           remoteCoverage: remote, remoteStatus: "compromised")
+                                           remoteCoverage: remote, remoteStatus: "compromised", systemPermissionDeniedConfirmed: true)
         let json = TranscriptAssembler.assemble(
             segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil, diarization: false, dualStream: true,
             provenance: provenance,
@@ -519,6 +519,24 @@ struct MeetingSummarizerTests {
         let line = try #require(SummaryPromptBuilder.captureLine(meta))
         #expect(line.contains("Remote audio: not captured — system audio permission was denied; 2736 s of digital silence were recorded instead"))
         #expect(line.contains("Recording gaps: 1 (total 2 min 0 s)"))
+    }
+
+    /// Round 3 item 6: only the CONFIRMED-denial field says "permission denied"; the older
+    /// `system_audio_unrecovered` (also set by a failed restart) does not.
+    @Test func permissionDeniedComesOnlyFromTheConfirmedField() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("perm-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        func parse(_ provenance: [String: Any]) throws -> CaptureSideNote? {
+            try JSONSerialization.data(withJSONObject: [
+                "metadata": ["capture": ["remote": ["status": "compromised", "delivered_seconds": 60.0, "expected_seconds": 60.0, "exact_zero_seconds": 60.0]],
+                             "capture_provenance": provenance],
+                "segments": [] as [Any],
+            ]).write(to: url)
+            return try MeetingSummarizer.parseTranscriptForTesting(at: url).1.remoteCapture
+        }
+        #expect(try parse(["system_audio_unrecovered": true])?.permissionDenied == nil)
+        #expect(try parse(["system_audio_unrecovered": true, "system_permission_denied_confirmed": false])?.permissionDenied == false)
+        #expect(try parse(["system_permission_denied_confirmed": true])?.permissionDenied == true)
     }
 }
 
