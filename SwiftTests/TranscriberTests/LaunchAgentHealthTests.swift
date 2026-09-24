@@ -85,6 +85,28 @@ import Testing
         #expect(s == .loadedButNotThisProcess)
     }
 
+    /// Fix round 2, item 1c: the on-disk plist matches, but launchd's ACTUALLY loaded job (e.g.
+    /// loaded before an update overwrote the plist in place) points elsewhere. That is stalePath —
+    /// never a pid-based hand-over, which would just kickstart the WRONG binary.
+    @Test func loadedJobPointingElsewhereIsStalePathEvenWhenThePlistMatches() {
+        let staleProgram = "/Users/x/Downloads/Parley.app/Contents/MacOS/Parley"
+        let s = LaunchAgentHealth.assess(
+            plistProgramPath: exe, executablePath: exe, loaded: true,
+            loadedProgramPath: staleProgram, loadedPID: 1, currentPID: 9999
+        )
+        #expect(s == .stalePath(found: staleProgram))
+        #expect(LaunchAgentHealth.action(for: s) == .rewriteAndBootstrap)
+    }
+
+    /// Fix round 2, item 3: reopening from Finder just recreates `loadedButNotThisProcess` (it's
+    /// still not the launchd job) — "Quit and reopen" is not honest advice here. Parley re-enables
+    /// crash protection on its own via the hand-over, the next time it isn't recording.
+    @Test func loadedButNotThisProcessMessageDoesNotSayQuitAndReopen() {
+        let message = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess)
+        #expect(message?.contains("Quit and reopen") == false)
+        #expect(message?.contains("automatically") == true)
+    }
+
     @Test func onlyUnhealthyStatesHaveAUserMessage() {
         #expect(LaunchAgentHealth.userMessage(for: .healthy) == nil)
         #expect(LaunchAgentHealth.userMessage(for: .missing(staleLoadedJob: false))?.contains("Crash protection") == true)

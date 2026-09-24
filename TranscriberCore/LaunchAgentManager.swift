@@ -43,12 +43,16 @@ public struct ProcessLaunchctlRunner: LaunchctlRunning {
                     process.waitUntilExit()
                     let status = process.terminationStatus
                     let output = String(data: data, encoding: .utf8) ?? ""
-                    // Non-zero exits at `.error` so `log show` can diagnose a failed repair (fix
-                    // round 1, item 5); this line carries no path, only verbs/ids.
+                    // The verb (bootstrap/enable/bootout/print/kickstart) is `.public` so `log show`
+                    // can be filtered/counted by it; the rest of the args (a plist path, gui/<uid>
+                    // domain) stay `.private` (fix round 2, item 3). Non-zero exits log at `.error`
+                    // so `log show` can diagnose a failed repair (fix round 1, item 5).
+                    let verb = args.first ?? "?"
+                    let rest = args.dropFirst().joined(separator: " ")
                     if status == 0 {
-                        Logger.config.info("LaunchAgentManager: launchctl \(args.joined(separator: " ")) → \(status)")
+                        Logger.config.info("LaunchAgentManager: launchctl \(verb, privacy: .public) \(rest, privacy: .private) → \(status)")
                     } else {
-                        Logger.config.error("LaunchAgentManager: launchctl \(args.joined(separator: " ")) → \(status, privacy: .public)")
+                        Logger.config.error("LaunchAgentManager: launchctl \(verb, privacy: .public) \(rest, privacy: .private) → \(status, privacy: .public)")
                     }
                     continuation.resume(returning: LaunchctlResult(status: status, output: output))
                 } catch {
@@ -92,7 +96,7 @@ public enum LaunchAgentManager {
             <string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(executablePath)</string>
+                <string>\(xmlEscape(executablePath))</string>
             </array>
             <key>KeepAlive</key>
             <dict>
@@ -106,18 +110,47 @@ public enum LaunchAgentManager {
         """
     }
 
+    /// Escapes the five XML predefined entities (fix round 2, item 3): an unescaped `&`, `<`, `>`,
+    /// `"` or `'` in the executable path would break the plist's XML. `&` is replaced FIRST so the
+    /// entities this introduces aren't themselves re-escaped.
+    private static func xmlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    /// Reverses `xmlEscape`, in the opposite order (`&amp;` LAST, so a literal `&amp;` in the
+    /// original path — already unlikely — isn't corrupted by an earlier substitution unescaping
+    /// part of it). Needed so `programPath(inPlist:)` round-trips a `generatePlist`-written path
+    /// exactly: without it, any path with an XML special character would compare unequal to the
+    /// raw `executablePath` on every subsequent `verifyAndRepair` call and look permanently stale.
+    private static func xmlUnescape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
     // MARK: - Health
 
     /// `ProgramArguments[0]` of a plist string, or nil if absent. Regex on the generated shape:
     /// this manager writes the only plist it ever reads.
     public static func programPath(inPlist xml: String) -> String? {
-        firstMatch(#"<key>ProgramArguments</key>\s*<array>\s*<string>([^<]+)</string>"#, in: xml)
+        firstMatch(#"<key>ProgramArguments</key>\s*<array>\s*<string>([^<]+)</string>"#, in: xml).map(xmlUnescape)
     }
 
     /// `program = ` from `launchctl print gui/<uid>/<label>` output, or nil if absent (not loaded,
     /// or this launchd version's output doesn't include the line). (Fix round 1, item 3.)
+    ///
+    /// The capture is `(.+?)\s*$`, not `(\S+)` (fix round 2, item 1a): `\S+` truncated any install
+    /// path containing a space at the first space — "/Applications/Parley 2.app/…/Parley" became
+    /// "/Applications/Parley" — which then never matched `executablePath`, so `staleLoadedJob` came
+    /// out true for a job that WAS this process, and `verifyAndRepair` booted it out.
     public static func loadedProgramPath(inPrintOutput output: String) -> String? {
-        firstMatch(#"(?m)^\s*program\s*=\s*(\S+)"#, in: output)
+        firstMatch(#"(?m)^\s*program\s*=\s*(.+?)\s*$"#, in: output)
     }
 
     /// `pid = ` from `launchctl print` output, or nil if absent (loaded but not currently running,
@@ -166,25 +199,40 @@ public enum LaunchAgentManager {
         func currentPlistPath() -> String? {
             (try? String(contentsOf: plistURL, encoding: .utf8)).flatMap(programPath(inPlist:))
         }
-        func assessNow() async -> LaunchAgentHealth.State {
+        func query() async -> (state: LaunchAgentHealth.State, pid: pid_t?) {
             let job = await queryLoadedJob(uid: uid, runner: runner)
-            return LaunchAgentHealth.assess(
+            let state = LaunchAgentHealth.assess(
                 plistProgramPath: currentPlistPath(), executablePath: exePath, loaded: job.loaded,
                 loadedProgramPath: job.programPath, loadedPID: job.pid, currentPID: currentPID
             )
+            return (state, job.pid)
         }
 
-        let state = await assessNow()
+        let before = await query()
+        let state = before.state
+        // NEVER bootout the job whose pid IS this process, no matter what the state says (fix
+        // round 2, item 1b) — an absolute safety net independent of the classification above, in
+        // case a program-path comparison is ever wrong (e.g. a symlink, an unusual launchd report).
+        let isSelf = currentPID != nil && before.pid == currentPID
         switch LaunchAgentHealth.action(for: state) {
-        case .none, .handOverToJob:
+        case .none:
+            return state
+        case .handOverToJob:
+            // Non-healthy but not auto-repaired here (round 1, item 4): whether a hand-over is safe
+            // needs recording/CLI-mode context this function doesn't have. Log it anyway so
+            // `log show` surfaces it the same as a failed repair (fix round 2, item 3).
+            Logger.config.error("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) — not auto-repaired here")
             return state
         case .installAndBootstrap:
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
         case .bootoutInstallAndBootstrap, .rewriteAndBootstrap:
-            // A stale job must be booted out first or bootstrap fails with "already loaded".
-            _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
+            // A stale job must be booted out first or bootstrap fails with "already loaded" —
+            // unless it would boot out THIS process (item 1b above).
+            if !isSelf {
+                _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
+            }
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
@@ -192,7 +240,7 @@ public enum LaunchAgentManager {
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
         }
-        let after = await assessNow()
+        let after = (await query()).state
         // Paths never appear `.public` (Global Constraints); state NAMES carry no user data.
         if after == .healthy {
             Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → \(LaunchAgentHealth.logName(for: after), privacy: .public)")
@@ -209,16 +257,35 @@ public enum LaunchAgentManager {
 
     /// `.loadedButNotThisProcess`: launchd's job is a DIFFERENT process than this one (Finder
     /// launch, a Sparkle relaunch, or quit-and-reopen), so this process's crash would not be
-    /// relaunched. Runs `launchctl kickstart gui/<uid>/<label>` so launchd (re)starts its own copy
-    /// of the job, and returns whether launchd accepted that. On success, the launchd-spawned copy
-    /// is now starting; the caller (L3) must then make THIS process yield (`exit(0)`) so only one
-    /// copy survives — that exit/yield wiring is out of this Manager's scope. On failure, this
-    /// process must stay running (better a process KeepAlive can't protect than none at all); the
-    /// state still maps to `LaunchAgentHealth.userMessage` for "crash protection is off".
+    /// relaunched. Runs `launchctl kickstart gui/<uid>/<label>` (no `-k`) so launchd starts its own
+    /// copy of the job — call it B — and returns whether launchd accepted that.
     ///
-    /// Callers MUST gate this with `LaunchAgentHealth.shouldAttemptHandOver` first (never while
+    /// The full hand-over protocol (fix round 2, item 2 — a design correction: round 1's plan was
+    /// "kickstart then yield", which as DOCUMENTED left NO instance running. This process, A, still
+    /// holds the single-instance flock when launchd starts B; B's duplicate-instance check would
+    /// see the lock held and exit 0 immediately — `SuccessfulExit: false` means launchd does not
+    /// relaunch a clean exit — and then A would exit too, having handed off to nothing):
+    /// 1. This process, A, calls `handOverToJob`.
+    /// 2. On success, A releases the single-instance lock and exits 0. On failure, A keeps running
+    ///    (better a process KeepAlive can't protect than none at all); the state still maps to
+    ///    `LaunchAgentHealth.userMessage` for "crash protection is off".
+    /// 3. B, launchd-spawned, recognises it IS the launchd job (`SingleInstancePolicy.decide(isLaunchdJob:
+    ///    true, lockHeldByOther: true)` → `.waitForLock`) and WAITS up to
+    ///    `SingleInstancePolicy.lockWaitTimeout` for A to release the lock, instead of yielding —
+    ///    every OTHER duplicate launch still yields immediately (`.yield`).
+    ///
+    /// `LaunchAgentHealth.shouldAttemptHandOver`'s `lastHandOverAt` guard must be persisted ACROSS
+    /// PROCESSES (e.g. `UserDefaults`, by L3): A does not survive a successful hand-over to
+    /// remember it in memory, so an in-memory `lastHandOverAt` would reset to nil on every attempt
+    /// and the cooldown would never actually apply.
+    ///
+    /// Callers MUST gate this call with `LaunchAgentHealth.shouldAttemptHandOver` first (never while
     /// recording, never in CLI mode, never twice within `handOverCooldown`) — this method performs
-    /// no such guard itself, since it has no idea whether a recording is in progress.
+    /// no such guard itself, since it has no idea whether a recording is in progress. The exit/yield
+    /// wiring (steps 2–3) and `SingleInstancePolicy`'s call site (detecting `isLaunchdJob`, e.g. via
+    /// the `XPC_SERVICE_NAME` environment variable equalling `label`) belong to task L3; this
+    /// Manager provides only the kickstart call and `SingleInstancePolicy`'s pure decision table —
+    /// no app files are touched here.
     public static func handOverToJob(uid: uid_t = getuid(), runner: LaunchctlRunning = ProcessLaunchctlRunner()) async -> Bool {
         let result = await runner.run(["kickstart", "gui/\(uid)/\(label)"])
         return result.status == 0

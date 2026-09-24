@@ -48,6 +48,11 @@ public enum LaunchAgentHealth {
         }
         if plistProgramPath != executablePath { return .stalePath(found: plistProgramPath) }
         guard loaded else { return .notLoaded }
+        // The on-disk plist matches, but launchd's ACTUALLY loaded job might not — e.g. loaded from
+        // a stale plist before an update overwrote the file in place. That is ALSO stalePath: never
+        // a pid-based hand-over decision for a job that would just restart the WRONG binary.
+        // (Fix round 2, item 1c.)
+        if let loadedProgramPath, loadedProgramPath != executablePath { return .stalePath(found: loadedProgramPath) }
         // Only judged when the caller supplies a pid to compare against (production always does —
         // see `LaunchAgentManager.verifyAndRepair` — but existing call sites that only care about
         // path/loaded-ness can omit it and get the pre-fix-round-1 behaviour).
@@ -69,8 +74,14 @@ public enum LaunchAgentHealth {
     public static func userMessage(for state: State) -> String? {
         switch state {
         case .healthy: return nil
-        case .missing, .notLoaded, .stalePath, .loadedButNotThisProcess:
+        case .missing, .notLoaded, .stalePath:
             return "Crash protection is off — if Parley crashes mid-recording it will not relaunch. Quit and reopen Parley to repair it."
+        case .loadedButNotThisProcess:
+            // "Quit and reopen" is not honest here (fix round 2, item 3): reopening from Finder
+            // just recreates this same state, since it still isn't the process launchd's KeepAlive
+            // tracks. The hand-over (`LaunchAgentManager.handOverToJob`, gated by
+            // `shouldAttemptHandOver`) re-enables protection on its own once not recording.
+            return "Crash protection is off — Parley will re-enable it automatically the next time you're not recording."
         }
     }
 

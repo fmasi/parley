@@ -43,6 +43,22 @@ struct LaunchAgentManagerTests {
         #expect(!plist.contains(keepAliveBoolean))
     }
 
+    /// Fix round 2, item 3: an unescaped "&" (or <, >, ", ') in the path breaks the plist's XML.
+    @Test func generatePlistEscapesXMLSpecialCharactersInThePath() {
+        let pathWithAmpersand = "/Applications/Parley & Friends.app/Contents/MacOS/Parley"
+        let plist = LaunchAgentManager.generatePlist(executablePath: pathWithAmpersand)
+        #expect(plist.contains("Parley &amp; Friends"))
+        #expect(!plist.contains("Parley & Friends"))
+    }
+
+    /// `programPath(inPlist:)` must unescape symmetrically, or a freshly-written plist would look
+    /// "stale" against the raw `executablePath` on every subsequent `verifyAndRepair` call.
+    @Test func programPathRoundTripsAnEscapedAmpersand() {
+        let pathWithAmpersand = "/Applications/Parley & Friends.app/Contents/MacOS/Parley"
+        let plist = LaunchAgentManager.generatePlist(executablePath: pathWithAmpersand)
+        #expect(LaunchAgentManager.programPath(inPlist: plist) == pathWithAmpersand)
+    }
+
     // MARK: - install
 
     @Test func installWritesPlistFile() async throws {
@@ -135,6 +151,13 @@ struct LaunchAgentManagerTests {
     @Test func loadedProgramPathIsParsedFromPrintOutput() {
         #expect(LaunchAgentManager.loadedProgramPath(inPrintOutput: samplePrintOutput) == "/Applications/Parley.app/Contents/MacOS/Parley")
         #expect(LaunchAgentManager.loadedProgramPath(inPrintOutput: "") == nil)
+    }
+
+    /// Fix round 2, item 1a: the old regex captured `(\S+)`, truncating any path containing a
+    /// space — "/Applications/Parley 2.app/.../Parley" became "/Applications/Parley".
+    @Test func loadedProgramPathWithASpaceIsNotTruncated() {
+        let output = "program = /Applications/Parley 2.app/Contents/MacOS/Parley\npid = 4242\n"
+        #expect(LaunchAgentManager.loadedProgramPath(inPrintOutput: output) == "/Applications/Parley 2.app/Contents/MacOS/Parley")
     }
 
     @Test func loadedPIDIsParsedFromPrintOutput() {
@@ -317,6 +340,116 @@ struct LaunchAgentManagerTests {
         #expect(state == .loadedButNotThisProcess)
         let calls = await runner.calls
         #expect(calls == [["print", job(uid)]])
+    }
+
+    /// Fix round 2, item 3 (a "realistic" test, not placeholder pid 1): launchd's KeepAlive job is
+    /// still running from before a crash (pid 41213); the user then double-clicked Parley.app in
+    /// Finder, producing a second, unrelated process (pid 52217) that isn't the job launchd tracks.
+    @Test func verifyAndRepairReportsLoadedButNotThisProcessAfterARealisticFinderRelaunch() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        try await LaunchAgentManager.install(executablePath: exe, launchAgentsDir: dir, loadAgent: false)
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [LaunchctlResult(status: 0, output: "program = \(exe)\npid = 41213\n")]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 52217, runner: runner
+        )
+        #expect(state == .loadedButNotThisProcess)
+        let calls = await runner.calls
+        #expect(calls == [["print", job(uid)]])
+    }
+
+    /// Fix round 2, item 1a (the reported regression, end to end): a space in the install path used
+    /// to truncate the parsed `program =`, so it never matched the executablePath comparison,
+    /// `staleLoadedJob` came out true, and `verifyAndRepair` booted out the job that WAS this
+    /// process — SIGTERMing it after a crash relaunch.
+    @Test func missingWithASpaceInThePathAndTheLoadedJobBeingUsNeverBootsOut() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let exeWithSpace = "/Applications/Parley 2.app/Contents/MacOS/Parley"
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [
+                LaunchctlResult(status: 0, output: "program = \(exeWithSpace)\npid = 4242\n"),
+                LaunchctlResult(status: 0, output: "program = \(exeWithSpace)\npid = 4242\n"),
+            ]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exeWithSpace, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .healthy)
+        let calls = await runner.calls
+        #expect(!calls.contains { $0.first == "bootout" })
+        #expect(calls == [
+            ["print", job(uid)],
+            ["enable", job(uid)],
+            ["bootstrap", gui(uid), plistPath],
+            ["print", job(uid)],
+        ])
+    }
+
+    /// Fix round 2, item 1b: an absolute safety net independent of any state classification — never
+    /// bootout the job whose pid IS this process, no matter what the program-path comparison says
+    /// (adversarial/defensive: pid wins over a mismatched program string).
+    @Test func neverBootsOutWhenTheLoadedPidIsThisProcessRegardlessOfTheProgramPath() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [
+                LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n"),
+                LaunchctlResult(status: 0, output: "program = /some/other/path\npid = 4242\n"),
+            ]
+        ])
+        _ = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        let calls = await runner.calls
+        #expect(!calls.contains { $0.first == "bootout" })
+        #expect(calls == [
+            ["print", job(uid)],
+            ["enable", job(uid)],
+            ["bootstrap", gui(uid), plistPath],
+            ["print", job(uid)],
+        ])
+    }
+
+    /// Fix round 2, item 1c (end to end): the on-disk plist already matches, but the loaded job
+    /// (per `print`) points elsewhere — repaired as stalePath (bootout + rewrite + enable +
+    /// bootstrap), never routed into a hand-over.
+    @Test func plistMatchesButTheLoadedJobPointsElsewhereIsRepairedAsStalePath() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+        let staleProgram = "/Users/x/Downloads/Parley.app/Contents/MacOS/Parley"
+        try await LaunchAgentManager.install(executablePath: exe, launchAgentsDir: dir, loadAgent: false)
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [
+                LaunchctlResult(status: 0, output: "program = \(staleProgram)\npid = 1\n"),
+                LaunchctlResult(status: 0, output: "program = \(exe)\npid = 4242\n"),
+            ]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .healthy)
+        let calls = await runner.calls
+        #expect(calls == [
+            ["print", job(uid)],
+            ["bootout", job(uid)],
+            ["enable", job(uid)],
+            ["bootstrap", gui(uid), plistPath],
+            ["print", job(uid)],
+        ])
     }
 
     // MARK: - install runs enable before bootstrap (item 1)
