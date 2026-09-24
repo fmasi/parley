@@ -5,31 +5,63 @@ import Foundation
 /// point at the binary that is running.
 public enum LaunchAgentHealth {
     public enum State: Equatable, Sendable {
-        case healthy
-        case missing
+        /// No plist on disk. `staleLoadedJob` is true only when launchd nonetheless still has the
+        /// job loaded AND it points at a DIFFERENT program than this one — that leftover must be
+        /// booted out before a fresh plist can be bootstrapped. When false (no job loaded, or the
+        /// loaded job points at THIS program — very likely this very process), it must NOT be
+        /// booted out: an unconditional bootout would SIGTERM the app at launch. (Review finding,
+        /// fix round 1, item 3.)
+        case missing(staleLoadedJob: Bool)
         case stalePath(found: String)
         case notLoaded
+        /// Loaded, path matches, but the loaded job's pid is not this process's pid (or launchd
+        /// reports no pid at all): the app was launched some other way (Finder, a Sparkle relaunch,
+        /// quit-and-reopen) and is not the job launchd's KeepAlive tracks, so a crash of THIS
+        /// process would not be relaunched. (Owner-ruled robustness gap, fix round 1, item 4.)
+        case loadedButNotThisProcess
+        case healthy
     }
 
     public enum Action: Equatable, Sendable {
         case none
         case installAndBootstrap
+        /// `.missing(staleLoadedJob: true)`: bootout the stale leftover job first.
+        case bootoutInstallAndBootstrap
         case rewriteAndBootstrap
         case bootstrap
+        /// `.loadedButNotThisProcess`: `launchctl kickstart` launchd's own copy, then this process
+        /// yields. See `LaunchAgentManager.handOverToJob` and `shouldAttemptHandOver` below.
+        case handOverToJob
     }
 
-    public static func assess(plistProgramPath: String?, executablePath: String, loaded: Bool) -> State {
-        guard let plistProgramPath else { return .missing }
+    public static func assess(
+        plistProgramPath: String?,
+        executablePath: String,
+        loaded: Bool,
+        loadedProgramPath: String? = nil,
+        loadedPID: pid_t? = nil,
+        currentPID: pid_t? = nil
+    ) -> State {
+        guard let plistProgramPath else {
+            let staleLoadedJob = loaded && loadedProgramPath != nil && loadedProgramPath != executablePath
+            return .missing(staleLoadedJob: staleLoadedJob)
+        }
         if plistProgramPath != executablePath { return .stalePath(found: plistProgramPath) }
-        return loaded ? .healthy : .notLoaded
+        guard loaded else { return .notLoaded }
+        // Only judged when the caller supplies a pid to compare against (production always does —
+        // see `LaunchAgentManager.verifyAndRepair` — but existing call sites that only care about
+        // path/loaded-ness can omit it and get the pre-fix-round-1 behaviour).
+        if let currentPID, loadedPID != currentPID { return .loadedButNotThisProcess }
+        return .healthy
     }
 
     public static func action(for state: State) -> Action {
         switch state {
         case .healthy: return .none
-        case .missing: return .installAndBootstrap
+        case .missing(let staleLoadedJob): return staleLoadedJob ? .bootoutInstallAndBootstrap : .installAndBootstrap
         case .stalePath: return .rewriteAndBootstrap
         case .notLoaded: return .bootstrap
+        case .loadedButNotThisProcess: return .handOverToJob
         }
     }
 
@@ -37,7 +69,7 @@ public enum LaunchAgentHealth {
     public static func userMessage(for state: State) -> String? {
         switch state {
         case .healthy: return nil
-        case .missing, .notLoaded, .stalePath:
+        case .missing, .notLoaded, .stalePath, .loadedButNotThisProcess:
             return "Crash protection is off — if Parley crashes mid-recording it will not relaunch. Quit and reopen Parley to repair it."
         }
     }
@@ -46,9 +78,27 @@ public enum LaunchAgentHealth {
     public static func logName(for state: State) -> String {
         switch state {
         case .healthy: return "healthy"
-        case .missing: return "missing"
+        case .missing(let staleLoadedJob): return staleLoadedJob ? "missing(staleLoadedJob)" : "missing"
         case .stalePath: return "stalePath"
         case .notLoaded: return "notLoaded"
+        case .loadedButNotThisProcess: return "loadedButNotThisProcess"
         }
+    }
+
+    // MARK: - Hand-over guard (owner-ruled robustness gap, fix round 1, item 4)
+
+    /// Minimum time between two `.handOverToJob` attempts, to avoid a kickstart loop.
+    public static let handOverCooldown: TimeInterval = 30
+
+    /// Whether it is safe to attempt `.handOverToJob` right now. Pure; the caller (L3) supplies the
+    /// facts — this type has no idea whether a recording is in progress or a kickstart was already
+    /// tried. Never during a recording (killing this process mid-recording would lose audio still
+    /// buffered here), never in CLI mode (there is no menu-bar app instance to hand over to, and a
+    /// one-shot CLI invocation is not what KeepAlive is meant to protect), and never twice within
+    /// `handOverCooldown` of the last attempt.
+    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
+        guard !isRecording, !isCLI else { return false }
+        if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown { return false }
+        return true
     }
 }
