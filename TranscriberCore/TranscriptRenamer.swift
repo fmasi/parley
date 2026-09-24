@@ -119,7 +119,9 @@ public enum TranscriptRenamer {
         var segmentCounts: [String: Int] = [:]
         var orderedIds: [String] = []
 
-        for seg in segments {
+        // Flagged segments (VAD-filtered noise, mic-bleed echo) are never offered as a sample: an
+        // echo is the OTHER side's voice, and auditioning it would name the wrong person (P10/P11).
+        for seg in segments where !TranscriptAssembler.isFlagged(seg) {
             guard let speaker = seg["speaker"] as? String,
                   let text = seg["text"] as? String,
                   let start = seg["start"] as? Double,

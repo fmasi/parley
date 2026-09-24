@@ -23,7 +23,9 @@ public enum TranscriptRediarizer {
         source: String,
         relabeled: [LabeledSegment]
     ) -> [[String: Any]] {
-        var kept = segments.filter { ($0["source"] as? String) != source }
+        // Flagged segments (`filtered` / `echo`) on this channel are kept exactly as they were:
+        // they are not relabeled, and replacing the channel wholesale must not drop them (P10/P11).
+        var kept = segments.filter { ($0["source"] as? String) != source || TranscriptAssembler.isFlagged($0) }
         kept.append(contentsOf: relabeled.map { seg in
             var dict: [String: Any] = [
                 "start": seg.start,
@@ -244,7 +246,7 @@ public enum TranscriptRediarizer {
         try Task.checkCancellation()
 
         let transcriptSegments = rawSegments
-            .filter { ($0["source"] as? String) == source }
+            .filter { ($0["source"] as? String) == source && !TranscriptAssembler.isFlagged($0) }
             .compactMap { dict -> TranscriptSegment? in
                 guard let start = dict["start"] as? Double,
                       let end = dict["end"] as? Double,

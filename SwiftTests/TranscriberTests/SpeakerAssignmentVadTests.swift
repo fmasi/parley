@@ -36,7 +36,7 @@ struct SpeakerAssignmentVadTests {
         #expect(result[0].speaker == "Unknown")
     }
 
-    @Test func lowSpeechLowQualityFiltered() {
+    @Test func lowSpeechLowQualityFiltered() throws {
         let transcript = [
             transcript(0.0, 5.0, "real speech"),
             transcript(5.0, 10.0, "noise segment"),
@@ -50,8 +50,10 @@ struct SpeakerAssignmentVadTests {
             transcriptSegments: transcript, diarizationSegments: diarization,
             speechMap: speechMap, vadSpeechThreshold: 0.5, qualityScoreThreshold: 0.3
         )
-        #expect(result.count == 1)
-        #expect(result[0].text == "real speech")
+        #expect(result.count == 2, "filtered text is kept, flagged")
+        let flagged = try #require(result.first { $0.filtered })
+        #expect(flagged.speaker == "Unknown")
+        #expect(result.first { !$0.filtered }?.text == "real speech")
     }
 
     @Test func lowSpeechHighQualityTrustsDiarizer() {

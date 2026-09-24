@@ -551,4 +551,24 @@ struct TranscriptRediarizerTimelineTests {
         #expect(try Data(contentsOf: backup) == before)
         #expect(try Data(contentsOf: t) != before)
     }
+
+    /// P10/P11: a flagged segment (echo / filtered) is not relabeled and keeps its flag — otherwise
+    /// a re-detect would silently bring hidden echo text back into the TXT, SRT and summary.
+    @Test func flaggedSegmentsSurviveARedetectUnchanged() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
+        var segments = try #require(json["segments"] as? [[String: Any]])
+        segments.append(["start": 10.3, "end": 10.7, "text": "bleed", "speaker": "Remote Unknown", "source": "remote", "filtered": true])
+        json["segments"] = segments
+        try JSONSerialization.data(withJSONObject: json).write(to: t)
+
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+
+        let after = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
+        let out = try #require(after["segments"] as? [[String: Any]])
+        let flagged = try #require(out.first { $0["text"] as? String == "bleed" })
+        #expect(flagged["filtered"] as? Bool == true)
+        #expect(flagged["speaker"] as? String == "Remote Unknown")
+        #expect(out.count == 2)
+    }
 }

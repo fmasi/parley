@@ -19,10 +19,11 @@ public enum TranscriptWriter {
         return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
-    /// Format segments as plain text with timestamps.
+    /// Format segments as plain text with timestamps. Flagged segments (`filtered` / `echo`) are
+    /// kept in the JSON record but not rendered (P10/P11).
     static func formatTXT(segments: [[String: Any]]) -> String {
         var result = ""
-        for seg in segments {
+        for seg in segments where !TranscriptAssembler.isFlagged(seg) {
             let ts = formatTimestampShort(seg["start"] as? Double ?? 0)
             let speaker = seg["speaker"] as? String ?? ""
             let text = seg["text"] as? String ?? ""
@@ -32,10 +33,11 @@ public enum TranscriptWriter {
         return result
     }
 
-    /// Format segments as SRT subtitle text.
+    /// Format segments as SRT subtitle text. Flagged segments are skipped and the cue numbers stay
+    /// consecutive.
     static func formatSRT(segments: [[String: Any]]) -> String {
         var result = ""
-        for (i, seg) in segments.enumerated() {
+        for (i, seg) in segments.filter({ !TranscriptAssembler.isFlagged($0) }).enumerated() {
             let start = formatTimestamp(seg["start"] as? Double ?? 0)
             let end = formatTimestamp(seg["end"] as? Double ?? 0)
             let speaker = seg["speaker"] as? String ?? ""

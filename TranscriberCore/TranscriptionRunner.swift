@@ -269,7 +269,7 @@ public final class TranscriptionRunner {
                 embeddingDim: embeddingDim > 0 ? embeddingDim : nil
             )
             allSegments = dedupResult.segments
-            echoRemoved = dedupResult.removedCount
+            echoRemoved = dedupResult.flaggedCount
         }
 
         let uniqueLanguages = Set(detectedLanguages)
@@ -394,7 +394,9 @@ public final class TranscriptionRunner {
                 speaker: seg.speaker,
                 text: seg.text,
                 source: seg.source,
-                confidence: seg.qualityScore
+                confidence: seg.qualityScore,
+                filtered: seg.filtered,
+                echo: seg.echo
             )
         }
 

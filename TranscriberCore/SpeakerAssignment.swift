@@ -47,8 +47,14 @@ public struct LabeledSegment: Sendable {
     public var source: String
     public var confidence: Float?
     public var language: String?
+    /// Failed the VAD/quality gate (low speech AND low diarizer quality). Kept in the JSON record,
+    /// labelled `Unknown`, and hidden from TXT/SRT/summary — never deleted (P10).
+    public var filtered = false
+    /// Local mic bleed of a remote speaker (echo dedup). Kept in the JSON record, hidden from
+    /// TXT/SRT/summary — never deleted (P11).
+    public var echo = false
 
-    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil, language: String? = nil) {
+    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil, language: String? = nil, filtered: Bool = false, echo: Bool = false) {
         self.start = start
         self.end = end
         self.speaker = speaker
@@ -56,7 +62,12 @@ public struct LabeledSegment: Sendable {
         self.source = source
         self.confidence = confidence
         self.language = language
+        self.filtered = filtered
+        self.echo = echo
     }
+
+    /// Hidden from every human-facing rendering (TXT, SRT, summary, rename samples).
+    public var isFlagged: Bool { filtered || echo }
 }
 
 public enum SpeakerAssignment {
@@ -667,18 +678,21 @@ public enum SpeakerAssignment {
                 )
             }
 
-            if shouldInclude {
-                results.append(LabeledSegment(
-                    start: seg.start, end: seg.end, speaker: finalSpeaker,
-                    text: seg.text.trimmingCharacters(in: .whitespaces),
-                    source: "", confidence: seg.confidence, language: seg.language
-                ))
-            }
+            // A segment that fails the gate is KEPT, flagged and unattributed (P10): the words are
+            // part of the record, and the gate is a guess about noise — hiding them from the
+            // readable transcript is reversible, deleting them was not.
+            results.append(LabeledSegment(
+                start: seg.start, end: seg.end,
+                speaker: shouldInclude ? finalSpeaker : unknownSpeaker,
+                text: seg.text.trimmingCharacters(in: .whitespaces),
+                source: "", confidence: seg.confidence, language: seg.language,
+                filtered: !shouldInclude
+            ))
         }
 
-        let filtered = transcriptSegments.count - results.count
+        let filtered = results.filter(\.filtered).count
         if filtered > 0 {
-            Logger.transcription.info("VAD quality filter: \(filtered) segments filtered from \(transcriptSegments.count) total")
+            Logger.transcription.info("VAD quality filter: \(filtered) of \(transcriptSegments.count) segments flagged as filtered")
         }
 
         return results
@@ -735,7 +749,10 @@ public enum SpeakerAssignment {
             guard let target = indices.map({ segments[$0].speaker })
                 .first(where: { !$0.isEmpty && $0 != "Unknown" }) else { continue }
             var collapsed = 0
-            for i in indices where segments[i].speaker.isEmpty || segments[i].speaker == "Unknown" {
+            // A `filtered` segment stays `Unknown`: it failed the gate, so attributing it to the
+            // channel's speaker would assert an identity no evidence supports (P10).
+            for i in indices where !segments[i].filtered
+                && (segments[i].speaker.isEmpty || segments[i].speaker == "Unknown") {
                 segments[i].speaker = target
                 collapsed += 1
             }

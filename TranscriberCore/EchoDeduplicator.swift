@@ -95,8 +95,12 @@ public enum EchoDeduplicator {
     // MARK: - Result
 
     public struct DeduplicationResult {
+        /// Every input segment; echoes carry `echo = true` (P11 — flagged, never deleted).
         public let segments: [LabeledSegment]
-        public let removedCount: Int
+        /// How many local segments were flagged as echo.
+        public let flaggedCount: Int
+        /// Alias of `flaggedCount`, kept for one release while callers move over.
+        public var removedCount: Int { flaggedCount }
     }
 
     // MARK: - Main deduplication
@@ -142,34 +146,30 @@ public enum EchoDeduplicator {
         let localCentroidDb  = localSpeakerDatabase.mapValues  { centroid(from: $0, dim: baseDim) }
         let remoteCentroidDb = remoteSpeakerDatabase.mapValues { centroid(from: $0, dim: baseDim) }
 
-        let remoteSegments = segments.filter { $0.source == "remote" }
+        // A segment the VAD/quality gate already flagged is neither an echo candidate nor evidence
+        // for one: it was noise by that gate's reckoning, and it used to be gone by now.
+        let remoteSegments = segments.filter { $0.source == "remote" && !$0.filtered }
         guard !remoteSegments.isEmpty else {
-            return DeduplicationResult(segments: segments, removedCount: 0)
+            return DeduplicationResult(segments: segments, flaggedCount: 0)
         }
 
-        var kept: [LabeledSegment] = []
-        var removedCount = 0
+        var result = segments
+        var flaggedCount = 0
 
-        for seg in segments {
-            guard seg.source == "local" else {
-                kept.append(seg)
-                continue
-            }
-
-            if isEcho(local: seg, remoteSegments: remoteSegments,
+        for i in result.indices where result[i].source == "local" && !result[i].filtered {
+            if isEcho(local: result[i], remoteSegments: remoteSegments,
                       localDb: localCentroidDb, remoteDb: remoteCentroidDb,
                       temporalThreshold: tThresh, textThreshold: xThresh, embeddingThreshold: eThresh) {
-                removedCount += 1
-            } else {
-                kept.append(seg)
+                result[i].echo = true
+                flaggedCount += 1
             }
         }
 
-        if removedCount > 0 {
-            Logger.transcription.debug("Echo dedup: removed \(removedCount, privacy: .public) local segments (mic bleed of remote speaker)")
+        if flaggedCount > 0 {
+            Logger.transcription.debug("Echo dedup: flagged \(flaggedCount, privacy: .public) local segments as echo (mic bleed of remote speaker)")
         }
 
-        return DeduplicationResult(segments: kept, removedCount: removedCount)
+        return DeduplicationResult(segments: result, flaggedCount: flaggedCount)
     }
 
     private static func isEcho(

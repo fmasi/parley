@@ -195,7 +195,7 @@ public final class ChunkProcessor {
                 embeddingThreshold: config.echoEmbeddingThreshold
             )
             allSegments = dedupResult.segments
-            echoRemoved = dedupResult.removedCount
+            echoRemoved = dedupResult.flaggedCount
             if echoRemoved > 0 {
                 issues.append(ChunkIssue(code: .echoFlagged, track: "local", count: echoRemoved))
             }
@@ -209,7 +209,9 @@ public final class ChunkProcessor {
                 text: seg.text,
                 speaker: seg.speaker,
                 source: seg.source,
-                qualityScore: seg.confidence
+                qualityScore: seg.confidence,
+                filtered: seg.filtered,
+                echo: seg.echo
             )
         }
 
@@ -391,6 +393,10 @@ public final class ChunkProcessor {
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase
+                let filteredCount = labeled.filter(\.filtered).count
+                if filteredCount > 0 {
+                    issues.append(ChunkIssue(code: .segmentsFiltered, track: source, count: filteredCount))
+                }
                 if result.absorbed > 0 {
                     issues.append(ChunkIssue(code: .clustersAbsorbed, track: source, count: result.absorbed))
                 }

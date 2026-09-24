@@ -147,9 +147,10 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.segments.count == 1)
-        #expect(result.segments[0].source == "remote")
-        #expect(result.removedCount == 1)
+        #expect(result.segments.count == 2, "nothing is deleted any more")
+        #expect(result.segments.filter { !$0.echo }.map(\.source) == ["remote"])
+        #expect(result.segments.first { $0.source == "local" }?.echo == true)
+        #expect(result.flaggedCount == 1)
     }
 
     @Test func removesEchoWithAccumulatedEmbeddingsWhenDimThreaded() {
@@ -167,9 +168,9 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb,
             embeddingDim: 4
         )
-        #expect(result.removedCount == 1)
-        #expect(result.segments.count == 1)
-        #expect(result.segments[0].source == "remote")
+        #expect(result.flaggedCount == 1)
+        #expect(result.segments.count == 2, "flagged, not deleted")
+        #expect(result.segments.filter { !$0.echo }.map(\.source) == ["remote"])
     }
 
     @Test func keepsLocalWhenTextDiffers() {
@@ -252,9 +253,10 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.segments.count == 3)
-        #expect(result.removedCount == 2)
-        #expect(result.segments.contains { $0.text == "My own unique thought" })
+        #expect(result.segments.count == 5, "flagged, not deleted")
+        #expect(result.segments.filter { !$0.echo }.count == 3)
+        #expect(result.flaggedCount == 2)
+        #expect(result.segments.contains { $0.text == "My own unique thought" && !$0.echo })
     }
 
     // MARK: - Windowed text comparison (misaligned segment boundaries)
@@ -274,9 +276,9 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.removedCount == 1)
-        #expect(result.segments.count == 3)
-        #expect(result.segments.allSatisfy { $0.source == "remote" })
+        #expect(result.flaggedCount == 1)
+        #expect(result.segments.count == 4, "flagged, not deleted")
+        #expect(result.segments.filter { !$0.echo }.allSatisfy { $0.source == "remote" })
     }
 
     @Test func removesEchoWhenLocalIsSubsetOfLongerRemote() {
@@ -315,9 +317,9 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.removedCount == 2)
-        #expect(result.segments.count == 1)
-        #expect(result.segments[0].source == "remote")
+        #expect(result.flaggedCount == 2)
+        #expect(result.segments.count == 3, "flagged, not deleted")
+        #expect(result.segments.filter { !$0.echo }.map(\.source) == ["remote"])
     }
 
     @Test func keepsLocalWhenContainmentIsLowDespiteSomeWordOverlap() {

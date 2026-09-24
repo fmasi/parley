@@ -176,6 +176,11 @@ public enum MeetingSummarizer {
 
     // MARK: - Private
 
+    /// Test seam for `parseTranscript(at:)`.
+    static func parseTranscriptForTesting(at path: URL) throws -> ([SummarySegment], SummaryMetadata) {
+        try parseTranscript(at: path)
+    }
+
     private static func parseTranscript(at path: URL) throws -> ([SummarySegment], SummaryMetadata) {
         let data = try Data(contentsOf: path)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -188,7 +193,9 @@ public enum MeetingSummarizer {
         let dualStream = metadata_raw?["dual_stream"] as? Bool ?? false
         let echoRemoved = metadata_raw?["echo_segments_removed"] as? Int ?? 0
 
-        let segments = rawSegments.map { seg in
+        // Flagged segments (VAD-filtered noise, mic-bleed echo) are kept in the record but are not
+        // what anybody said to the meeting: the model never sees them (P10/P11).
+        let segments = rawSegments.filter { !TranscriptAssembler.isFlagged($0) }.map { seg in
             SummarySegment(
                 start: seg["start"] as? Double ?? 0,
                 end: seg["end"] as? Double ?? 0,
@@ -206,7 +213,8 @@ public enum MeetingSummarizer {
             }
         }
 
-        let duration = segments.last?.end ?? 0
+        // From every segment, flagged or not: the meeting lasted as long as its last recorded moment.
+        let duration = rawSegments.last?["end"] as? Double ?? 0
         let sessionName = path.deletingPathExtension().lastPathComponent
 
         let metadata = SummaryMetadata(

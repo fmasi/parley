@@ -20,6 +20,9 @@ public enum TranscriptMerger {
         public let speaker: String
         public let source: String
         public let qualityScore: Float?
+        /// Carried from `ProcessedChunk.Segment` (P10/P11): kept in the record, hidden when read.
+        public let filtered: Bool
+        public let echo: Bool
 
         public init(
             elapsed: Double,
@@ -28,7 +31,9 @@ public enum TranscriptMerger {
             text: String,
             speaker: String,
             source: String,
-            qualityScore: Float?
+            qualityScore: Float?,
+            filtered: Bool = false,
+            echo: Bool = false
         ) {
             self.elapsed = elapsed
             self.elapsedEnd = elapsedEnd
@@ -37,6 +42,8 @@ public enum TranscriptMerger {
             self.speaker = speaker
             self.source = source
             self.qualityScore = qualityScore
+            self.filtered = filtered
+            self.echo = echo
         }
     }
 
@@ -125,7 +132,9 @@ public enum TranscriptMerger {
                     text: seg.text,
                     speaker: globalSpeaker,
                     source: seg.source,
-                    qualityScore: seg.qualityScore
+                    qualityScore: seg.qualityScore,
+                    filtered: seg.filtered,
+                    echo: seg.echo
                 ))
             }
         }

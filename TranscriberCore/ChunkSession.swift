@@ -74,6 +74,10 @@ public struct ProcessedChunk: Codable {
         public let speaker: String
         public let source: String
         public let qualityScore: Float?
+        /// Failed the VAD/quality gate: kept, hidden from readable output (P10).
+        public let filtered: Bool
+        /// Mic bleed of a remote speaker: kept, hidden from readable output (P11).
+        public let echo: Bool
 
         public init(
             start: Double,
@@ -81,7 +85,9 @@ public struct ProcessedChunk: Codable {
             text: String,
             speaker: String,
             source: String,
-            qualityScore: Float? = nil
+            qualityScore: Float? = nil,
+            filtered: Bool = false,
+            echo: Bool = false
         ) {
             self.start = start
             self.end = end
@@ -89,6 +95,25 @@ public struct ProcessedChunk: Codable {
             self.speaker = speaker
             self.source = source
             self.qualityScore = qualityScore
+            self.filtered = filtered
+            self.echo = echo
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case start, end, text, speaker, source, qualityScore, filtered, echo
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            start = try c.decode(Double.self, forKey: .start)
+            end = try c.decode(Double.self, forKey: .end)
+            text = try c.decode(String.self, forKey: .text)
+            speaker = try c.decode(String.self, forKey: .speaker)
+            source = try c.decode(String.self, forKey: .source)
+            qualityScore = try c.decodeIfPresent(Float.self, forKey: .qualityScore)
+            // Absent in session.json written before P10/P11 → not flagged.
+            filtered = try c.decodeIfPresent(Bool.self, forKey: .filtered) ?? false
+            echo = try c.decodeIfPresent(Bool.self, forKey: .echo) ?? false
         }
     }
 

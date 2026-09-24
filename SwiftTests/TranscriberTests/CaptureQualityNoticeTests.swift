@@ -119,4 +119,15 @@ import Foundation
         #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 1)
         #expect(CaptureQualityNotice.segmentCount(inTranscriptAt: url) == 1)
     }
+
+    /// P10/P11: flagged segments stay in the JSON but are hidden everywhere a person reads the
+    /// transcript, so they are not "speech that was transcribed".
+    @Test func segmentCountIgnoresFlaggedSegments() throws {
+        let url = try writeTranscript(["metadata": [:] as [String: Any], "segments": [
+            ["start": 0, "end": 1, "text": "noise", "speaker": "Unknown", "filtered": true],
+            ["start": 1, "end": 2, "text": "bleed", "speaker": "Local Speaker 1", "echo": true],
+        ]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.segmentCount(inTranscriptAt: url) == 0)
+    }
 }

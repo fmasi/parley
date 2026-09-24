@@ -88,11 +88,13 @@ public enum CaptureQualityNotice {
         return metadata["processing_problem_chunks"] as? Int ?? 0
     }
 
-    /// How many segments the transcript holds. An unreadable file answers 1, not 0: failing to read
-    /// the file is not evidence that no speech was transcribed, and "no speech" is an alarm.
+    /// How many readable segments the transcript holds — flagged ones (`filtered` / `echo`) are
+    /// hidden from every rendering, so they are not speech anyone can read. An unreadable file
+    /// answers 1, not 0: failing to read the file is not evidence that no speech was transcribed,
+    /// and "no speech" is an alarm.
     public static func segmentCount(inTranscriptAt url: URL) -> Int {
-        guard let segments = readRoot(url)?["segments"] as? [Any] else { return 1 }
-        return segments.count
+        guard let segments = readRoot(url)?["segments"] as? [[String: Any]] else { return 1 }
+        return segments.filter { !TranscriptAssembler.isFlagged($0) }.count
     }
 
     private static func readRoot(_ url: URL) -> [String: Any]? {

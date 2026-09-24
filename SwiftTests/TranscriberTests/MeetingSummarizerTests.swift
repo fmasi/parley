@@ -434,6 +434,18 @@ struct MeetingSummarizerTests {
         #expect(md.hasPrefix("> ⚠️ This summary may be incomplete"))
         #expect(md.contains("# Summary\ncut"))
     }
+
+    @Test func flaggedSegmentsAreExcludedFromTheSummaryInput() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("flags-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [
+            ["start": 0.0, "end": 1.0, "text": "keep", "speaker": "A"],
+            ["start": 1.0, "end": 2.0, "text": "drop", "speaker": "B", "echo": true],
+            ["start": 2.0, "end": 3.0, "text": "drop", "speaker": "Unknown", "filtered": true],
+        ]]).write(to: url)
+        let (segments, _) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(segments.map(\.text) == ["keep"])
+    }
 }
 
 private struct TruncatingProvider: SummaryProvider {

@@ -173,4 +173,20 @@ struct TranscriptWriterTests {
         let contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         #expect(contents.count == 1) // only the .json
     }
+
+    @Test func flaggedSegmentsAreHiddenInTxtAndSrt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let segments: [[String: Any]] = [
+            ["start": 1.0, "end": 2.0, "speaker": "Alice", "text": "Hello"],
+            ["start": 2.0, "end": 3.0, "speaker": "Unknown", "text": "noise", "filtered": true],
+            ["start": 3.0, "end": 4.0, "speaker": "Bob", "text": "Hello", "echo": true],
+        ]
+        let jsonPath = try createJSON(in: dir, metadata: ["output_format": "srt"], segments: segments)
+        try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        let srt = try String(contentsOf: dir.appendingPathComponent("test.srt"), encoding: .utf8)
+        #expect(srt.contains("Alice: Hello") && !srt.contains("noise") && !srt.contains("Bob"))
+        let txt = TranscriptWriter.formatTXT(segments: segments)
+        #expect(txt.contains("Alice") && !txt.contains("noise") && !txt.contains("Bob"))
+    }
 }
