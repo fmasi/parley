@@ -40,6 +40,12 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
         if presentation.openWindow { show(appState: appState) }
     }
 
+    /// One alarm's notification, no window: a new permission alarm whose repair window has not answered
+    /// within the cap (L round 5). The stable identifier lets a later presentation replace it.
+    func notify(_ alarm: ActiveAlarm) {
+        MenuView.postNotification(title: alarm.kind.headline, body: alarm.message, identifier: Self.notificationIdentifier)
+    }
+
     /// The rows the window lists: every alarm, minus the permission ones while the repair window is up.
     static func windowRows(_ alarms: [ActiveAlarm]) -> [ActiveAlarm] {
         AlarmRealarmPolicy.windowRows(alarms, repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen)

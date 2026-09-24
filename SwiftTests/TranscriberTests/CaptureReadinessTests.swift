@@ -7,6 +7,17 @@ import Foundation
 /// "Setup required" lockout that catches the user by surprise at record time.
 struct CaptureReadinessTests {
 
+    /// L round 5, item 17: an already-open repair window counts as presenting a NEW remote-permission
+    /// alarm only if it lists the permission that alarm is about (it re-lists live when a check finds
+    /// more missing) — otherwise the alarm window must present it.
+    @Test func theRepairWindowCoversARemoteAlarmOnlyIfItListsItsPermission() {
+        #expect(CaptureReadiness.remotePermission(for: .coreAudioTap) == .systemAudioRecording)
+        #expect(CaptureReadiness.remotePermission(for: .screenCaptureKit) == .screenRecording)
+        #expect(CaptureReadiness.repairWindowCovers(listed: [.microphone, .systemAudioRecording], source: .coreAudioTap))
+        #expect(!CaptureReadiness.repairWindowCovers(listed: [.microphone], source: .coreAudioTap), "open for the mic only")
+        #expect(!CaptureReadiness.repairWindowCovers(listed: [], source: .coreAudioTap))
+    }
+
     // MARK: - required(for:)
 
     @Test func screenCaptureKitNeedsMicAndScreenRecording() {

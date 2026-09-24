@@ -164,7 +164,8 @@ struct TranscriberApp: App {
             },
             presentAlarmsUI: { due, new in
                 CaptureAlarmWindowController.shared.present(due, newlyRaised: new, appState: state)
-            }
+            },
+            notifyAlarm: { alarm in CaptureAlarmWindowController.shared.notify(alarm) }
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
         Self.busyCoordinator = coordinator

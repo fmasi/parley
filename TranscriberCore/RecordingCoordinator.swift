@@ -34,6 +34,8 @@ public final class RecordingCoordinator {
     /// notify floor lets present now, oldest first; the kinds that are new since the last presentation).
     /// Called only when something is due.
     private let presentAlarmsUI: @MainActor ([ActiveAlarm], [AlarmKind]) -> Void
+    /// Post one alarm's notification only — no window (the repair window may still open).
+    private let notifyAlarm: @MainActor (ActiveAlarm) -> Void
 
     // MARK: - Alarm state (§6)
 
@@ -58,6 +60,9 @@ public final class RecordingCoordinator {
     private var idleNotifications: [AlarmKind: Int] = [:]
     /// New permission kinds handed to the repair window, awaiting whether it presented (L round 4).
     private var pendingRepairKinds: Set<AlarmKind> = []
+    /// How long a new permission alarm waits for the repair path's answer before its own notification
+    /// goes out (L round 5): a macOS prompt takes ~10 s, and an unbounded permission refresh can hang.
+    var repairOutcomeCap: Duration = .seconds(3)
     /// Internal for tests.
     var idleRealarmActive: Bool { idleRealarm != nil }
 
@@ -139,11 +144,13 @@ public final class RecordingCoordinator {
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
         onSystemAudioPermissionDenied: @escaping @MainActor () async -> Bool = { false },
         presentAlarmsUI: @escaping @MainActor ([ActiveAlarm], [AlarmKind]) -> Void = { _, _ in },
+        notifyAlarm: @escaping @MainActor (ActiveAlarm) -> Void = { _ in },
         engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))? = nil,
         recordingMicrophone: RecordingMicrophone = .shared
     ) {
         self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
         self.presentAlarmsUI = presentAlarmsUI
+        self.notifyAlarm = notifyAlarm
         self.engineFactory = engineFactory
         self.recordingMicrophone = recordingMicrophone
         self.appState = appState
@@ -775,9 +782,24 @@ public final class RecordingCoordinator {
     /// never silent for 2 minutes mid-call. It counts as notified only once something was shown.
     private func presentThroughRepairWindow(_ kinds: [AlarmKind]) {
         pendingRepairKinds.formUnion(kinds)
+        let answer = RepairAnswer()
+        // The cap: no answer within `repairOutcomeCap` (a prompt, or a hung check) → the alarm's own
+        // notification now — no window, the repair window may still open — and the normal cadence resumes.
+        Task { [weak self] in
+            guard let cap = self?.repairOutcomeCap else { return }
+            try? await Task.sleep(for: cap)
+            guard let self, !answer.arrived else { return }
+            self.pendingRepairKinds.subtract(kinds)
+            let now = Date()
+            for alarm in kinds.compactMap({ self.appState.activeAlarms[$0] }) {
+                self.appState.markNotified(alarm.kind, now: now)
+                self.notifyAlarm(alarm)
+            }
+        }
         Task { [weak self] in
             guard let self else { return }
             let presented = await self.onSystemAudioPermissionDenied()
+            answer.arrived = true
             self.pendingRepairKinds.subtract(kinds)
             let alarms = kinds.compactMap { self.appState.activeAlarms[$0] }
             guard !alarms.isEmpty else { return }
@@ -1406,4 +1428,10 @@ extension RecordingCoordinator: RecordingMicrophoneObserver {
             helperMicId = nil
         }
     }
+}
+
+/// Whether the repair path has answered, shared by the capped wait and the answer (main actor).
+@MainActor
+private final class RepairAnswer {
+    var arrived = false
 }

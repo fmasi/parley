@@ -999,6 +999,35 @@ private struct Harness {
         #expect(state.activeAlarms[.remotePermissionDenied]?.lastNotifiedAt != nil, "the repair window's presentation counts")
     }
 
+    /// L round 5, item 18: the repair path may take a macOS prompt's ~10 s, or HANG (an unbounded
+    /// permission refresh). After 3 s the alarm's own notification goes out — no window, the repair
+    /// window may still open — and the normal re-notify cadence resumes.
+    @Test func aRepairCheckThatNeverAnswersStillNotifiesWithinTheCap() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let notified = Harness.Box<[AlarmKind]>([])
+        let coordinator = RecordingCoordinator(
+            appState: state, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            onSystemAudioPermissionDenied: { try? await Task.sleep(for: .seconds(3600)); return false },   // never answers
+            presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) },
+            notifyAlarm: { notified.value.append($0.kind) },
+            recordingMicrophone: h.recordingMic)
+        coordinator.repairOutcomeCap = .milliseconds(20)
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
+        coordinator.presentAlarms()
+        #expect(notified.value.isEmpty, "the repair window gets its chance first")
+        var waited = 0
+        while notified.value.isEmpty, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(notified.value == [.remotePermissionDenied])
+        #expect(shown.value.isEmpty, "notification only: the repair window may still open")
+        let stamped = try #require(state.activeAlarms[.remotePermissionDenied]?.lastNotifiedAt)
+        coordinator.presentAlarms(now: stamped + 121)
+        #expect(shown.value.count == 1, "the normal re-notify cadence resumed")
+    }
+
     /// Item 6: at recording start only live conditions are presented again — a past event is not.
     @Test func pastEventsAreNotRepresentedAtRecordingStart() async throws {
         let h = try Harness()

@@ -78,6 +78,18 @@ public enum CaptureReadiness {
     /// The source a permission check should judge. A report from a RUNNING tap outranks the configured
     /// source: Settings can be switched to ScreenCaptureKit mid-recording (that applies to the next
     /// recording), while the tap that is actually running is the one being denied.
+    /// The permission the REMOTE track needs with this source.
+    public static func remotePermission(for source: SystemAudioSource) -> CapturePermission {
+        source == .coreAudioTap ? .systemAudioRecording : .screenRecording
+    }
+
+    /// Whether an open repair window covers a remote-permission ALARM: only if it lists the permission
+    /// that alarm is about. It re-lists live (a check that finds more missing rebuilds it), but a window
+    /// open for the microphone alone says nothing about the other side (L round 5).
+    public static func repairWindowCovers(listed: [CapturePermission], source: SystemAudioSource) -> Bool {
+        listed.contains(remotePermission(for: source))
+    }
+
     public static func sourceToVerify(configured: SystemAudioSource, tapReportedProblem: Bool) -> SystemAudioSource {
         tapReportedProblem ? .coreAudioTap : configured
     }
