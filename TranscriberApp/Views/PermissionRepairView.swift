@@ -36,6 +36,21 @@ extension CapturePermission {
     }
 }
 
+/// The "Grant" action for a recording permission. Asking is only useful while macOS can still show
+/// its prompt, so when it can't the user is taken to the Settings pane where the fix actually is,
+/// rather than left with a button that does nothing.
+@MainActor
+func grantPermission(_ permission: CapturePermission, using manager: PermissionManager) async {
+    // CGRequestScreenCaptureAccess never prompts again after a first refusal.
+    if permission == .screenRecording { permission.pane.open() }
+    await manager.request(permission)
+    // A System Audio request that ended without an answer (no prompt, still "never asked") can't be
+    // fixed by asking again. `.denied` needs no help: the row already offers "Open Settings".
+    if permission == .systemAudioRecording, manager.status(of: permission) == .notDetermined {
+        permission.pane.open()
+    }
+}
+
 /// The repair window (#220, #174): names exactly which recording permission is missing and fixes it
 /// in one click. Refreshes every 2 s while open, which is the only time anything polls, and reports
 /// back as soon as everything it lists is granted.
@@ -83,12 +98,7 @@ struct PermissionRepairView: View {
                         detail: permission.detail,
                         status: permissionManager.status(of: permission),
                         pane: permission.pane,
-                        onGrant: {
-                            // CGRequestScreenCaptureAccess never prompts again after a first refusal:
-                            // take the user where the fix actually is.
-                            if permission == .screenRecording { permission.pane.open() }
-                            Task { await permissionManager.request(permission) }
-                        }
+                        onGrant: { Task { await grantPermission(permission, using: permissionManager) } }
                     )
                 }
             }

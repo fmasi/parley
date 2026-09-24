@@ -81,7 +81,7 @@ struct SetupView: View {
                                 detail: systemAudioPermission.detail,
                                 status: permissionManager.status(of: systemAudioPermission),
                                 pane: systemAudioPermission.pane,
-                                onGrant: { Task { await permissionManager.request(systemAudioPermission) } }
+                                onGrant: { Task { await grantPermission(systemAudioPermission, using: permissionManager) } }
                             )
                         }
 

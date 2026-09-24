@@ -432,7 +432,7 @@ struct SettingsView: View {
                 detail: systemAudio.detail,
                 status: permissionManager.status(of: systemAudio),
                 pane: systemAudio.pane,
-                onGrant: { Task { await permissionManager.request(systemAudio) } }
+                onGrant: { Task { await grantPermission(systemAudio, using: permissionManager) } }
             )
         }
         Section("Optional") {

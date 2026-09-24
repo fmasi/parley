@@ -92,8 +92,7 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 10) {
             statusHeader
 
-            if appState.criticalError != nil || appState.interruptionWarning != nil
-                || appState.truncatedErrorMessage != nil {
+            if appState.hasMenuAlerts {
                 alertBanners
             }
 

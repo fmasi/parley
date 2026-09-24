@@ -87,6 +87,14 @@ public final class AppState {
         remoteAudioProblem = nil
     }
 
+    /// Whether the menu's alert area has anything to show. The sticky "other side isn't recorded" row
+    /// lives in that area, so it must count here: gating the area on the dismissible banners alone
+    /// hid the row as soon as the user dismissed one (PR #222 review).
+    public var hasMenuAlerts: Bool {
+        criticalError != nil || interruptionWarning != nil || truncatedErrorMessage != nil
+            || (isRecording && remoteAudioNotCaptured)
+    }
+
     public var isIdle: Bool {
         if case .idle = phase { return true }
         return false

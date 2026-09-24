@@ -294,4 +294,33 @@ struct AppStateTests {
         #expect(!state.remoteAudioNotCaptured)
         #expect(state.remoteAudioProblem == nil)
     }
+
+    // MARK: - #222 review: the menu must keep showing the sticky row
+
+    /// The menu renders its alert area only while `hasMenuAlerts`. The sticky row lives in that area,
+    /// so dismissing the dismissible banner must not hide it.
+    @Test func stickyRowSurvivesDismissingTheBanner() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(state.hasMenuAlerts)
+        state.interruptionWarning = nil   // user taps × on the yellow banner
+        #expect(state.hasMenuAlerts)
+    }
+
+    @Test func noAlertsWhenNothingIsWrong() {
+        #expect(!AppState().hasMenuAlerts)
+    }
+
+    @Test func aBannerAloneStillCountsAsAnAlert() {
+        let state = AppState()
+        state.interruptionWarning = "device changed"
+        #expect(state.hasMenuAlerts)
+    }
+
+    @Test func stickyStateOutsideARecordingShowsNoRow() {
+        let state = AppState()
+        state.remoteAudioNotCaptured = true   // stale flag after the recording ended
+        #expect(!state.hasMenuAlerts)
+    }
 }
