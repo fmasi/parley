@@ -174,32 +174,64 @@ struct CaptureDiagnosticsTests {
         for i in 0..<5 { d.record(event(.captureStart, .info, at: TimeInterval(i))) }
         d.clear()
         #expect(d.events.isEmpty)
-        #expect(d.droppedCount == 0)
+        // droppedCount now lives outside the ring and survives clear() (an in-session restart) —
+        // see clearKeepsTheOutOfRingCountersAndResetSessionZeroesThem below.
+        #expect(d.droppedCount == 3)
     }
 
-    // #101: per-session reset. After clear(), provenance counters must reflect ONLY post-clear events
-    // — a clean session must not inherit the prior session's tallies.
-    @Test func clearThenProvenanceReflectsOnlyNewEvents() {
+    // #101 per-session reset, restated for v2 (L4/L14): `clear()` is an IN-SESSION restart and keeps the
+    // counters that live outside the ring; `resetSession()` is the new-session reset that zeroes them.
+    @Test func clearKeepsTheOutOfRingCountersAndResetSessionZeroesThem() {
         var d = CaptureDiagnostics()
-        // "Previous session": route changes, retries, recovery, anomalies.
         d.record(event(.restartInPlace, .warning, at: 0))
         d.record(event(.restartInPlace, .warning, at: 1))
         d.record(event(.retry, .warning, at: 2))
         d.record(event(.launchRecovery, .warning, at: 3))
         d.record(event(.streamStopError, .anomaly, at: 4))
         let dirty = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
-        #expect(dirty.routeChanges == 2)
-        #expect(dirty.anomalyCount == 1)
+        #expect(dirty.routeChanges == 2 && dirty.anomalyCount == 1 && dirty.retries == 1 && dirty.recovered)
 
         d.clear()
-        // "New session": a single clean start event.
         d.record(event(.captureStart, .info, at: 10))
-        let clean = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
-        #expect(clean.routeChanges == 0)
-        #expect(clean.retries == 0)
-        #expect(clean.recovered == false)
-        #expect(clean.anomalyCount == 0)
-        #expect(clean.systemAudioUnrecovered == false)
+        let restarted = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(restarted.routeChanges == 0 && restarted.anomalyCount == 0 && restarted.systemAudioUnrecovered == false)
+        #expect(restarted.retries == 1 && restarted.recovered == true, "the restart is part of this session's story")
+
+        d.resetSession()
+        d.record(event(.captureStart, .info, at: 20))
+        let fresh = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(fresh.retries == 0 && fresh.recovered == false && fresh.eventsDropped == 0)
+    }
+
+    @Test func countersSurviveEvictionAndClear() {
+        var d = CaptureDiagnostics(maxEvents: 2)
+        d.record(event(.retry, .warning, at: 0))
+        d.record(event(.retry, .warning, at: 1))
+        d.record(event(.retry, .warning, at: 2))
+        #expect(d.events.count == 2 && d.droppedCount == 1)
+        #expect(d.retryCount == 3, "the evicted retry still counts")
+        d.clear()
+        #expect(d.retryCount == 3 && d.droppedCount == 1)
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).eventsDropped == 1)
+    }
+
+    /// Scan B P3.6(2): `merge()` re-records the ring's own events; that must not count them twice.
+    @Test func mergeDoesNotDoubleCountTheCounters() {
+        var d = CaptureDiagnostics()
+        d.record(event(.retry, .warning, at: 0))
+        d.merge([event(.retry, .warning, at: 1, origin: .helper)])
+        #expect(d.events.count == 2 && d.retryCount == 2)
+        d.merge([])
+        #expect(d.retryCount == 2)
+    }
+
+    @Test func eventsDroppedRoundTripsInProvenance() throws {
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, eventsDropped: 7)
+        let back = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(back.eventsDropped == 7 && p.asMetadataDictionary()["events_dropped"] as? Int == 7)
+        let legacy = Data(#"{"engine":"e","route_changes":0,"retries":0,"recovered":false,"anomaly_count":0}"#.utf8)
+        #expect(try JSONDecoder().decode(CaptureProvenance.self, from: legacy).eventsDropped == 0)
     }
 
     // #86: a system-stream-unrecovered event must surface in provenance + metadata.

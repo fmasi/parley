@@ -243,6 +243,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// the coverage plus that side's content anomalies. `nil` exactly when the matching coverage is.
     public let localStatus: String?
     public let remoteStatus: String?
+    /// How many ring events were evicted before this stamp was built (#101/L14) — the ring's own
+    /// admission that it does not hold the session's whole story. Always emitted (default 0).
+    public let eventsDropped: Int
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -261,6 +264,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case remoteCoverage = "remote_coverage"
         case localStatus = "local_status"
         case remoteStatus = "remote_status"
+        case eventsDropped = "events_dropped"
     }
 
     public init(
@@ -279,7 +283,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         localCoverage: TrackAccounting? = nil,
         remoteCoverage: TrackAccounting? = nil,
         localStatus: String? = nil,
-        remoteStatus: String? = nil
+        remoteStatus: String? = nil,
+        eventsDropped: Int = 0
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -297,6 +302,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.remoteCoverage = remoteCoverage
         self.localStatus = localStatus
         self.remoteStatus = remoteStatus
+        self.eventsDropped = eventsDropped
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -326,6 +332,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         remoteCoverage = try c.decodeIfPresent(TrackAccounting.self, forKey: .remoteCoverage)
         localStatus = try c.decodeIfPresent(String.self, forKey: .localStatus)
         remoteStatus = try c.decodeIfPresent(String.self, forKey: .remoteStatus)
+        eventsDropped = try c.decodeIfPresent(Int.self, forKey: .eventsDropped) ?? 0
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -338,6 +345,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "anomaly_count": anomalyCount,
             "quality_anomaly_count": qualityAnomalyCount,
             "system_audio_unrecovered": systemAudioUnrecovered,
+            "events_dropped": eventsDropped,
         ]
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
@@ -390,12 +398,29 @@ public struct CaptureDiagnostics: Sendable {
         (try? makeEncoder().encode(event)) ?? Data()
     }
 
+    /// Counters that live OUTSIDE the evicting ring (#101, L4/L14): unlike `retryCount`/`didRecover`
+    /// derived from `events`, these must survive both eviction (an evicted retry still happened) and
+    /// `clear()` (an in-session restart does not erase the session's own story) — only
+    /// `resetSession()`, the new-session reset, zeroes them.
+    public private(set) var retryCount = 0
+    public private(set) var launchRecoveries = 0
+
     public mutating func record(_ event: CaptureEvent) {
+        store(event)
+        count(event)
+    }
+
+    private mutating func store(_ event: CaptureEvent) {
         let cost = Self.encode(event).count + 1  // + newline
         events.append(event)
         byteCosts.append(cost)
         totalBytes += cost
         evict()
+    }
+
+    private mutating func count(_ e: CaptureEvent) {
+        if e.kind == .retry { retryCount += 1 }
+        if e.kind == .launchRecovery { launchRecoveries += 1 }
     }
 
     private mutating func evict() {
@@ -406,19 +431,31 @@ public struct CaptureDiagnostics: Sendable {
         }
     }
 
-    /// Empty the ring (after a drain to the app side).
+    /// Empty the ring (an IN-SESSION restart, e.g. after a drain to the app side). Keeps
+    /// `droppedCount`/`retryCount`/`launchRecoveries` — they are this session's story, not the
+    /// ring's contents.
     public mutating func clear() {
         events.removeAll()
         byteCosts.removeAll()
         totalBytes = 0
+    }
+
+    /// Reset for a NEW session (a new session id): `clear()` plus zeroing the out-of-ring counters.
+    public mutating func resetSession() {
+        clear()
         droppedCount = 0
+        retryCount = 0
+        launchRecoveries = 0
     }
 
     /// Merge events drained from another ring (e.g. the helper), keeping the result time-sorted.
+    /// `events` are the ring's own — already counted when first recorded — so only `other` is
+    /// counted here, or a re-merge of the same ring would double-count every retry (scan B P3.6(2)).
     public mutating func merge(_ other: [CaptureEvent]) {
         let combined = (events + other).sorted { $0.timestamp < $1.timestamp }
         clear()
-        for event in combined { record(event) }
+        for event in combined { store(event) }
+        for event in other { count(event) }
     }
 
     public var isAnomalous: Bool { events.contains { $0.severity == .anomaly } }
@@ -426,8 +463,7 @@ public struct CaptureDiagnostics: Sendable {
     /// 48kHz/mono system tap never emits `.formatChanged`, so counting that would always read 0 for
     /// the AirPods HFP↔A2DP scenario this exists to surface — council F5.)
     public var routeChangeCount: Int { events.lazy.filter { $0.kind == .restartInPlace }.count }
-    public var retryCount: Int { events.lazy.filter { $0.kind == .retry }.count }
-    public var didRecover: Bool { events.contains { $0.kind == .launchRecovery } }
+    public var didRecover: Bool { launchRecoveries > 0 }
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
     /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
     /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
@@ -515,7 +551,8 @@ public struct CaptureDiagnostics: Sendable {
             localCoverage: local,
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
-            remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue }
+            remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue },
+            eventsDropped: droppedCount
         )
     }
 
