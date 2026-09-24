@@ -694,11 +694,16 @@ public final class LockedDiagnostics: @unchecked Sendable {
 
     /// Empty the ring's EVENTS (an in-session restart, same as `CaptureDiagnostics.clear()` — see
     /// its doc) so a skipped finalize (crash) can't carry the previous session's events into the
-    /// next one. The helper never reads `makeProvenance()`/`retryCount`/`droppedCount` from its own
-    /// ring — only the app does, after draining — so there is no `resetSession()` wrapper here: the
-    /// helper's out-of-ring counters are recorded but never consumed on this side.
+    /// next one.
     public func clear() {
         lock.withLock { $0.clear() }
+    }
+
+    /// A NEW capture session in the helper (council B-M14a): `clear()` plus every out-of-ring counter,
+    /// tally and dedup key. The helper never consumes those (only the app does, after draining), but
+    /// the dedup keys otherwise grow for the helper's whole lifetime.
+    public func resetSession() {
+        lock.withLock { $0.resetSession() }
     }
 
     /// Snapshot the ring for transport and clear it, atomically.

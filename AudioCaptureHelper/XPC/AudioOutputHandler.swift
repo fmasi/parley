@@ -159,7 +159,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ))
     }
 
+    /// Set by `finalizeAll`: this handler's session is sealed. Every append returns at once from here,
+    /// so a source that is still being stopped (up to the stop bound) writes nothing and raises no
+    /// banner or anomaly after the seal (round 2 item 8). Audio-queue confined.
+    private var sealed = false
+
     func finalizeAll() {
+        sealed = true
         systemWriter.finalize()
         micWriter.finalize()
         // Session-wide backstop (#196): compare each track's TOTAL frame count against how long it
@@ -267,6 +273,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard !sealed else { return }
         // Liveness stamp (#86) moved BELOW the sticky format gate — see the stamp site after it.
         //
         // It used to be stamped here, on every arrival, before any format-drop early return. That
@@ -388,6 +395,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
     /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
     func appendSystemSamples(_ samples: [Int16], pts: CMTime) {
+        guard !sealed else { return }
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
@@ -429,6 +437,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// called on the capture service's audio queue — the same serial queue as system-audio callbacks,
     /// writer swaps, and finalize — so all writer access stays single-threaded.
     func appendMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard !sealed else { return }
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }

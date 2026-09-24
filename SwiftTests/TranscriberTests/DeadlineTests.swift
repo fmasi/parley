@@ -20,4 +20,23 @@ import Testing
             try await withDeadline(seconds: 1, label: "boom") { throw Boom() }
         }
     }
+
+    /// H2 round 2 (council B-M13): a body that wins leaves no sleeper behind. Before, the sleeper ran
+    /// out its whole deadline (20 s after a stop) — idle wakeups with nothing recording.
+    @Test func aFastBodyCancelsTheSleeper() async throws {
+        let sleeperCancelled = AsyncStream<Bool>.makeStream()
+        let v = try await withDeadline(seconds: 30, label: "fast", sleeper: { seconds in
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+                sleeperCancelled.continuation.yield(false)
+            } catch {
+                sleeperCancelled.continuation.yield(true)
+            }
+            sleeperCancelled.continuation.finish()
+        }) { 7 }
+        #expect(v == 7)
+        var cancelled: Bool?
+        for await c in sleeperCancelled.stream { cancelled = c }
+        #expect(cancelled == true, "the sleeper was cancelled, not left to run 30 s")
+    }
 }
