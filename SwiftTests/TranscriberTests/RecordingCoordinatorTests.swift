@@ -1056,6 +1056,7 @@ private struct Harness {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.runner.failSetupForTesting = true   // R0 seam: setupChunkedPipeline throws
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
         let markedAtStop = Harness.Box<String??>(nil)
         let recordingMic = h.recordingMic
         h.client.onStop = { markedAtStop.value = recordingMic.current }
@@ -2393,6 +2394,7 @@ private struct Harness {
         let h = try Harness()
         _ = try writeSentinel(h, alive: 5, stopping: true)
         h.client.isCapturingResult = true
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("x.wav"), micAudio: h.tmp.appendingPathComponent("x_mic.wav"))
         let phaseAtStop = Harness.Box<AppState.Phase?>(nil)
         let state = h.appState
         h.client.onStop = { phaseAtStop.value = state.phase }
@@ -2569,6 +2571,7 @@ private struct Harness {
         let h = try Harness()
         _ = try writeSentinel(h, alive: 10)
         h.runner.failSetupForTesting = true
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("x.wav"), micAudio: h.tmp.appendingPathComponent("x_mic.wav"))
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.startCalls.count == 1 && h.client.stopCalls == 1)
         #expect(h.appState.isIdle && h.appState.activeAlarms[.recordingStopped] != nil)
@@ -2595,18 +2598,16 @@ private struct Harness {
         let h = try Harness()
         let locked = try writeUnreachableSentinel(h)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
-        h.coordinator.folderRetryInterval = .milliseconds(20)
         await h.coordinator.recoverAtLaunch()
         #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil)
-        #expect(RecordingSentinel.read(directory: h.tmp) != nil, "kept: the data may be on the missing drive")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "kept: the data may be on the missing drive")
         #expect(h.client.captureEndedCalls == 1 && h.appState.isIdle, "no capture: detection disarmed")
 
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)   // the drive is back
-        var waited = 0
-        while h.appState.activeAlarms[.recordingStopped] == nil, waited < 400 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        await h.coordinator.retryPendingSessions()   // the volume-mounted event
         #expect(h.appState.activeAlarms[.recordingFolderUnavailable] == nil, "cleared: never a stuck false alarm")
         #expect(h.appState.activeAlarms[.recordingStopped] != nil)
-        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty)
     }
 
     /// The retry never acts while a recording runs or starts: the sentinel on disk would be ITS own.
@@ -2614,13 +2615,12 @@ private struct Harness {
         let h = try Harness()
         let locked = try writeUnreachableSentinel(h)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
-        h.coordinator.folderRetryInterval = .milliseconds(20)
         await h.coordinator.recoverAtLaunch()
         h.appState.phase = .recording(since: Date())   // a recording started meanwhile
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
-        try await Task.sleep(for: .milliseconds(150))
+        await h.coordinator.retryPendingSessions()   // a volume mounted mid-recording
         #expect(h.client.isCapturingCalls == 1, "not even the ping")
-        #expect(h.appState.activeAlarms[.recordingStopped] == nil && RecordingSentinel.read(directory: h.tmp) != nil)
+        #expect(h.appState.activeAlarms[.recordingStopped] == nil && RecordingSentinel.readPending(directory: h.tmp).count == 1)
 
         h.appState.phase = .idle
         var waited = 0
@@ -2855,6 +2855,7 @@ private struct Harness {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(200)
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
         let stalled = Harness.Box(true)
         h.client.onStartAsync = { if stalled.value { try? await Task.sleep(for: .seconds(2)) } }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
@@ -3072,5 +3073,200 @@ private struct Harness {
         await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
         #expect(h.notified.value.last?.title == "Transcription Complete")
         #expect(h.notified.value.last?.body == "clean.json")
+    }
+}
+
+// MARK: - L follow-ups: pending sessions, folder events, ghost mounts, a helper that will not stop
+
+@MainActor
+@Suite struct RecordingCoordinatorPendingSessionTests {
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+
+    /// A sentinel in the slot whose folder is unreachable (its parent is not writable).
+    private func writeUnreachableSentinel(_ h: Harness, name: String = "sess", folder: String = "locked") throws -> (sentinel: RecordingSentinel, locked: URL) {
+        let locked = h.tmp.appendingPathComponent(folder)
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        let dir = locked.appendingPathComponent("day")
+        let sentinel = RecordingSentinel(
+            startedAt: Date(), sessionName: "T",
+            systemAudioPath: dir.appendingPathComponent("\(name)-0.wav").path,
+            micAudioPath: dir.appendingPathComponent("\(name)-0_mic.wav").path, segment: 1, chunkIndex: 0)
+        try RecordingSentinel.write(sentinel, directory: h.tmp)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        return (sentinel, locked)
+    }
+
+    private func unlock(_ folder: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        var waited = 0
+        while !condition(), waited < 400 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+    }
+
+    /// 24: waiting sessions are a LIST beside the sentinel. A later recording's sentinel never takes their
+    /// place, and each one is salvaged when its folder returns.
+    @Test func waitingSessionsAreAListALaterRecordingNeverOverwrites() async throws {
+        let h = try Harness()
+        let (first, lockedA) = try writeUnreachableSentinel(h, name: "a", folder: "lockedA")
+        defer { unlock(lockedA) }
+        await h.coordinator.recoverAtLaunch()
+        #expect(pending(h).map(\.sessionKey) == [first.sessionKey])
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil, "the slot is free for the next recording")
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil)
+
+        // A later recording crashed too, its folder unreachable as well: the next launch finds both.
+        let (second, lockedB) = try writeUnreachableSentinel(h, name: "b", folder: "lockedB")
+        defer { unlock(lockedB) }
+        await h.coordinator.recoverAtLaunch()
+        #expect(Set(pending(h).map(\.sessionKey)) == [first.sessionKey, second.sessionKey])
+
+        unlock(lockedA)
+        await h.coordinator.retryPendingSessions()   // a volume mounted
+        #expect(pending(h).map(\.sessionKey) == [second.sessionKey], "salvaged as soon as ITS folder is back")
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil, "one is still waiting")
+        unlock(lockedB)
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty && h.appState.activeAlarms[.recordingFolderUnavailable] == nil)
+        #expect(h.appState.activeAlarms[.recordingStopped] != nil)
+    }
+
+    /// 35: no timer. Nothing happens until an event — a volume mount, a wake, a launch, a recording's end.
+    @Test func theFolderRetryIsEventDrivenNeverATimer() async throws {
+        let h = try Harness()
+        let (_, locked) = try writeUnreachableSentinel(h)
+        defer { unlock(locked) }
+        await h.coordinator.recoverAtLaunch()
+        unlock(locked)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(pending(h).count == 1 && h.client.isCapturingCalls == 1, "no poll: nothing ran by itself")
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty && h.appState.activeAlarms[.recordingStopped] != nil)
+    }
+
+    /// 35/38: an event during a recording (the slot is that recording's) waits, and runs when it ends.
+    @Test func aRetryAskedForDuringARecordingRunsWhenItEnds() async throws {
+        let h = try Harness()
+        let (_, locked) = try writeUnreachableSentinel(h)
+        defer { unlock(locked) }
+        await h.coordinator.recoverAtLaunch()
+        unlock(locked)
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).count == 1 && h.client.isCapturingCalls == 1, "never during a recording, not even the ping")
+        h.appState.phase = .idle
+        try await waitUntil { pending(h).isEmpty }
+        #expect(pending(h).isEmpty)
+    }
+
+    /// 38: a Start pressed during the launch ping owns the app: the session is kept for later, never
+    /// resumed on top of that start.
+    @Test func aStartPressedDuringTheLaunchPingDefersTheSession() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-10)
+        s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        let coordinator = h.coordinator
+        h.client.onIsCapturing = { coordinator.announceStart() }   // the user starts a recording meanwhile
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.startCalls.isEmpty, "no resume races the user's start")
+        #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
+        #expect(h.coordinator.isStartInFlight, "the user's start is left alone")
+    }
+
+    /// 40: a `stopping` sentinel whose helper will not stop is not salvaged while its file may still be
+    /// written. It is kept, the user told, and the next event finishes it once the helper lets go.
+    @Test func aStoppingSessionWhoseHelperWillNotStopIsKeptNeverSalvagedLive() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(150)
+        let hang = Harness.Box(true)
+        h.client.onStop = { if hang.value { try? await Task.sleep(for: .seconds(1)) } }
+        await h.coordinator.recoverAtLaunch()
+        #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
+        #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "a file still being written is never salvaged")
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains("couldn’t stop the previous recording cleanly") == true)
+        #expect(h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+
+        hang.value = false
+        h.client.isCapturingResult = false   // the helper let go
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty && !h.client.finalizeCalls.isEmpty, "finished once the helper let go")
+    }
+
+    /// 27: a failed start's bounded helper stop that does not answer is never swallowed. The helper may
+    /// still hold the mic: the sentinel and the mic marker stay, and it is logged and recorded.
+    @Test func aFailedStartWhoseHelperWillNotStopKeepsTheSentinelAndTheMic() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.runner.failSetupForTesting = true
+        h.coordinator.helperStopDeadline = .milliseconds(150)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil, "the next launch sees the capturing helper and handles it")
+        #expect(h.recordingMic.current == .some("mic-1"), "the helper may still hold the mic")
+        #expect(h.client.recordedEvents.contains { $0.kind == .xpcTimeout && $0.detail["call"] == "stop after failed start" })
+        #expect(h.appState.isIdle && !h.coordinator.isStartInFlight && h.notified.value.last?.title == "Recording Failed")
+    }
+
+    /// 27: a stop that fails with anything but "not capturing" is recorded too, and keeps the sentinel.
+    @Test func aFailedStartWhoseHelperStopErrorsIsRecordedAndKept() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.runner.failSetupForTesting = true
+        h.client.stopError = FakeCaptureError()
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.recordedEvents.contains { $0.kind == .streamStopError && $0.detail["call"] == "stop after failed start" })
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+    }
+
+    /// 25: a legacy (pre-0.6, single-file) recording is never called "no recorded audio": it is kept, and
+    /// the message names its folder, not the meeting.
+    @Test func aLegacySingleFileRecordingIsNeverCalledNoRecordedAudio() async throws {
+        let h = try Harness()
+        let outDir = h.tmp.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(), sessionName: "Board meeting",
+            systemAudioPath: outDir.appendingPathComponent("board.wav").path,
+            micAudioPath: outDir.appendingPathComponent("board_mic.wav").path, segment: 1, chunkIndex: 0)
+        try RecordingSentinel.write(sentinel, directory: h.tmp)
+        try Data(count: 4096).write(to: URL(fileURLWithPath: sentinel.systemAudioPath))
+        await h.coordinator.recoverAtLaunch()
+        let message = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(!message.contains("no recorded audio"), "\(message)")
+        #expect(message.contains("older-format recording") && message.contains(abbreviatedDisplayPath(outDir.path)))
+        #expect(!message.contains("board"), "the folder, not the meeting")
+        #expect(FileManager.default.fileExists(atPath: sentinel.systemAudioPath), "kept")
+    }
+}
+
+/// 39: a leftover folder under `/Volumes/<name>` after an unplug is a ghost, not the drive.
+@Suite struct FolderReachabilityTests {
+    private let day = URL(fileURLWithPath: "/Volumes/Ext/Recordings/2026-09-24")
+
+    @Test func aGhostMountPointIsUnreachable() {
+        let ghost = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        #expect(!RecordingCoordinator.folderReachable(day, probe: ghost))
+    }
+
+    @Test func aMountedVolumeIsReachable() {
+        let mounted = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { $0.path == "/Volumes/Ext" })
+        #expect(RecordingCoordinator.folderReachable(day, probe: mounted))
+    }
+
+    @Test func anUnmountedVolumeIsUnreachable() {
+        let unmounted = RecordingCoordinator.FolderProbe(exists: { ["/", "/Volumes"].contains($0.path) }, isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        #expect(!RecordingCoordinator.folderReachable(day, probe: unmounted))
+    }
+
+    @Test func aFolderNotOnAnExternalVolumeHasNoMountCheck() {
+        let noVolumes = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        #expect(RecordingCoordinator.folderReachable(URL(fileURLWithPath: "/Users/x/Documents/Recordings/day"), probe: noVolumes))
     }
 }

@@ -131,6 +131,40 @@ public struct RecordingSentinel: Codable, Equatable {
         }
     }
 
+    // MARK: - Sessions awaiting salvage (L follow-ups 24, 40)
+
+    private static let pendingFileName = "pending-sessions.json"
+
+    /// The recording session this sentinel names: its folder and its chunk session id.
+    public var sessionKey: String {
+        URL(fileURLWithPath: systemAudioPath).deletingLastPathComponent().appendingPathComponent(stripSegmentSuffix(systemAudioPath)).path
+    }
+
+    /// Sessions a relaunch could not finish yet — their folder unreachable (an unplugged drive), or the
+    /// capture helper not letting go of them — kept as a LIST beside the sentinel, so a later recording's
+    /// sentinel can never take their place. Missing or unreadable → empty.
+    public static func readPending(directory: URL? = nil) -> [RecordingSentinel] {
+        let url = (directory ?? AppPaths.dataDirectory).appendingPathComponent(pendingFileName)
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        guard let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) else {
+            Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable — ignoring")
+            return []
+        }
+        return sessions
+    }
+
+    /// Atomically replace the list; an empty list removes the file.
+    public static func writePending(_ sessions: [RecordingSentinel], directory: URL? = nil) throws {
+        let dir = directory ?? AppPaths.dataDirectory
+        let url = dir.appendingPathComponent(pendingFileName)
+        guard !sessions.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try makeEncoder().encode(sessions).write(to: url, options: .atomic)
+    }
+
     // MARK: - Instance helpers
 
     /// Returns a copy with segment incremented by 1 and updated audio paths. Everything else carries

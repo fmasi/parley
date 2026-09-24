@@ -87,6 +87,12 @@ public enum RecoveryMessages {
         return " (\(error))"
     }
 
+    /// A pre-0.6 single-file recording was found (L follow-up 25): kept, never "no recorded audio". Names
+    /// the folder, not the meeting.
+    public static func relaunchStoppedKeepingOlderFormat(at: Date, folder: String) -> String {
+        "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. An older-format recording was found and kept in \(folder)."
+    }
+
     public static func relaunchStopped(at: Date, outcome: SalvageOutcome) -> String {
         "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. " + outcomeSentence(outcome)
     }
