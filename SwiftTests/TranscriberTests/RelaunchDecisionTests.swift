@@ -21,8 +21,11 @@ import Testing
     @Test func freshSentinelAndDeadHelperResumesTheSameSession() {
         #expect(decide(alive: 30) == .resumeSameSession(gapStart: now.addingTimeInterval(-30)))
     }
-    @Test func theWindowEdgeStillResumes() {
-        #expect(decide(alive: RelaunchDecision.resumeWindow) == .resumeSameSession(gapStart: now.addingTimeInterval(-RelaunchDecision.resumeWindow)))
+    /// Fix round 1, item 8: spec §8.3 says "< 180 s" — the boundary itself does NOT resume.
+    @Test func theWindowEdgeIsExclusive() {
+        #expect(decide(alive: RelaunchDecision.resumeWindow) == .salvageAndStop(reason: .tooOld(seconds: RelaunchDecision.resumeWindow)))
+        let justInside = RelaunchDecision.resumeWindow - 0.1
+        #expect(decide(alive: justInside) == .resumeSameSession(gapStart: now.addingTimeInterval(-justInside)))
     }
     @Test func oldSentinelSalvagesAndStops() {
         #expect(decide(alive: 600) == .salvageAndStop(reason: .tooOld(seconds: 600)))
@@ -30,10 +33,20 @@ import Testing
     @Test func aSentinelWithoutLivenessSalvages() {
         #expect(decide(alive: nil) == .salvageAndStop(reason: .noLiveness))
     }
+    /// Fix round 1, item 9: a wall-clock jump backwards after `lastAliveAt` was written must not
+    /// be read as "very fresh" — a negative age is exactly as untrustworthy as no liveness at all.
+    @Test func negativeAgeFromClockSkewSalvagesAsNoLiveness() {
+        #expect(decide(alive: -50) == .salvageAndStop(reason: .noLiveness))
+    }
     /// Spec §8.3/§8.8 (scan A163/C16): a crash during post-Stop finalize must not resume a recording
     /// the user stopped; the sentinel is marked `stopping` before finalize and that wins over freshness.
     @Test func aSentinelMarkedStoppingIsSalvagedNeverResumed() {
         #expect(decide(alive: 5, stopping: true) == .salvageAndStop(reason: .wasStopping))
+    }
+    /// Fix round 1, item 7: `stopping` must win over `helperCapturing` too — a stop-in-flight race
+    /// where the helper hasn't reported dead yet must never resume the recording the user stopped.
+    @Test func stoppingWinsEvenWhenTheHelperStillReportsCapturing() {
+        #expect(decide(alive: 5, stopping: true, helper: true) == .salvageAndStop(reason: .wasStopping))
     }
     @Test func aDifferentBootSessionIsStaleEvenIfRecent() {
         #expect(decide(alive: 30, boot: "B0") == .salvageStale)
