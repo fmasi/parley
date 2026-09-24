@@ -2702,6 +2702,41 @@ private struct Harness {
         #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty)
     }
 
+    /// L review 75: the relaunch reads the session's folder off the main actor, bounded. One that hangs is
+    /// treated as unreachable — the session waits, never salvaged as "no recorded audio".
+    @Test func aHungFolderAtRelaunchWaitsNeverSalvaged() async throws {
+        let h = try Harness()
+        let s = try writeSentinel(h, alive: 600)
+        h.coordinator.folderReadDeadline = .milliseconds(100)
+        let onMain = Harness.Box<Bool?>(nil)
+        h.coordinator.folderProbe = .init(exists: { _ in onMain.value = Thread.isMainThread; Thread.sleep(forTimeInterval: 1); return true },
+                                          isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        let began = ContinuousClock.now
+        await h.coordinator.recoverAtLaunch()
+        #expect(ContinuousClock.now - began < .seconds(1))
+        #expect(onMain.value == false)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [s.sessionKey])
+        #expect(h.presented.value.isEmpty && h.appState.activeAlarms[.recordingStopped] == nil)
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil)
+    }
+
+    /// L review 75: … and the mount/wake retry reads the pending folders the same way.
+    @Test func aHungFolderAtRetryIsSkipped() async throws {
+        let h = try Harness()
+        let locked = try writeUnreachableSentinel(h)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
+        await h.coordinator.recoverAtLaunch()
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
+        h.coordinator.folderReadDeadline = .milliseconds(100)
+        h.coordinator.folderProbe = .init(exists: { _ in Thread.sleep(forTimeInterval: 1); return true },
+                                          isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        let began = ContinuousClock.now
+        await h.coordinator.retryPendingSessions()
+        #expect(ContinuousClock.now - began < .seconds(1))
+        #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1 && h.presented.value.isEmpty)
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil)
+    }
+
     /// The retry never acts while a recording runs or starts: the sentinel on disk would be ITS own.
     @Test func theFolderRetryNeverRunsDuringARecording() async throws {
         let h = try Harness()
@@ -2799,6 +2834,48 @@ private struct Harness {
         #expect(h.notified.value.first?.title == "Recording not started")
         #expect(h.notified.value.first?.body.contains("isn’t reachable") == true)
         #expect(h.appState.errorMessage == h.notified.value.first?.body)
+    }
+
+    /// L review 74: a folder read that hangs (a dead network share) is the FOLDER's fault, said so within its
+    /// own short bound — never "the audio system didn't respond".
+    @Test func aHungFolderReadRefusesTheStartInFolderWords() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.coordinator.folderReadDeadline = .milliseconds(100)
+        h.coordinator.folderProbe = .init(exists: { _ in Thread.sleep(forTimeInterval: 1); return true },
+                                          isWritable: { _ in true }, isVolumeRoot: { _ in false })
+        let began = ContinuousClock.now
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(h.client.startCalls.isEmpty && !h.coordinator.isStartInFlight)
+        let body = try #require(h.notified.value.last?.body)
+        #expect(h.notified.value.last?.title == "Recording not started")
+        #expect(body.hasPrefix("Parley couldn’t reach the recording folder — is its drive or network share available?"), "\(body)")
+        #expect(!body.contains("audio system"))
+    }
+
+    /// L review 79: a recording folder that is there but read-only is a permissions problem, said so.
+    @Test func aReadOnlyRecordingFolderIsSaidToBeAPermissionsProblem() async throws {
+        let h = try Harness()
+        let folder = h.tmp.appendingPathComponent("rec")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+        h.config.update { $0.recordingDirectory = folder.path }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.isEmpty)
+        #expect(h.appState.errorMessage?.hasPrefix("Parley can’t write to the recording folder — check its permissions") == true, "\(h.appState.errorMessage ?? "nil")")
+    }
+
+    /// L review 71: a recording folder reached through a link to an unplugged drive refuses the start.
+    @Test func aStartThroughADanglingLinkIsRefused() async throws {
+        let h = try Harness()
+        let link = h.tmp.appendingPathComponent("Recordings")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/Volumes/Absent-\(UUID().uuidString)/Recordings")
+        h.config.update { $0.recordingDirectory = link.path }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.isEmpty)
+        #expect(h.appState.errorMessage?.contains("isn’t reachable") == true)
     }
 
     /// 33: the start's disk read runs off the main actor (a hung network volume must not freeze the UI).
@@ -3805,6 +3882,43 @@ private struct Harness {
     @Test func aFolderNotOnAnExternalVolumeHasNoMountCheck() {
         let noVolumes = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { _ in false })
         #expect(RecordingCoordinator.folderReachable(URL(fileURLWithPath: "/Users/x/Documents/Recordings/day"), probe: noVolumes))
+    }
+
+    /// L review 71: `resolvingSymlinksInPath()` leaves a DANGLING link alone — `~/Recordings → /Volumes/Ext/…`
+    /// with the drive unplugged read as a writable home folder. Every link is substituted, dangling or not,
+    /// before the `/Volumes` check.
+    @Test func aDanglingLinkToAnAbsentVolumeIsUnreachable() {
+        let probe = RecordingCoordinator.FolderProbe(
+            exists: { ["/", "/Users", "/Users/x", "/Volumes"].contains($0.path) }, isWritable: { _ in true }, isVolumeRoot: { _ in false },
+            symlinkDestination: { $0.path == "/Users/x/Recordings" ? "/Volumes/Ext/Recordings" : nil })
+        #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/Users/x/Recordings/day"), probe: probe) == .unreachable)
+    }
+
+    /// … on the real file system too: a link to a volume that is not mounted.
+    @Test func aRealDanglingLinkToAnAbsentVolumeIsUnreachable() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("dangling-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let link = dir.appendingPathComponent("Recordings")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/Volumes/Absent-\(UUID().uuidString)/Recordings")
+        #expect(!RecordingCoordinator.folderReachable(link.appendingPathComponent("2026-09-25")))
+    }
+
+    /// A relative link resolves against its own folder.
+    @Test func aRelativeLinkResolvesAgainstItsFolder() {
+        let probe = RecordingCoordinator.FolderProbe(
+            exists: { _ in true }, isWritable: { _ in true }, isVolumeRoot: { $0.path == "/Volumes/Ext" },
+            symlinkDestination: { $0.path == "/Users/x/Recordings" ? "../../Volumes/Ext/Rec" : nil })
+        #expect(RecordingCoordinator.resolvedFolder(URL(fileURLWithPath: "/Users/x/Recordings/day"), probe: probe).path == "/Volumes/Ext/Rec/day")
+    }
+
+    /// L review 79: a folder that is there but cannot be written is its own case — a permissions problem, not
+    /// a missing drive.
+    @Test func aPresentFolderThatCannotBeWrittenIsNotWritableNotUnreachable() {
+        let readOnly = RecordingCoordinator.FolderProbe(exists: { _ in true }, isWritable: { _ in false }, isVolumeRoot: { _ in false })
+        #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/Users/x/Recordings/day"), probe: readOnly) == .notWritable)
+        let missing = RecordingCoordinator.FolderProbe(exists: { $0.path == "/" }, isWritable: { _ in false }, isVolumeRoot: { _ in false })
+        #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/Users/x/Recordings/day"), probe: missing) == .unreachable)
     }
 }
 

@@ -369,26 +369,27 @@ public final class RecordingCoordinator {
         // starts, not only via the live exact-zero detector once the meeting is already underway.
         // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
         // The lookups are synchronous IOKit / CoreAudio HAL calls: detached, so a stall never blocks the
-        // main actor, and bounded, so a stall ends the start honestly instead of holding it forever. The
-        // recording folder's reachability and free space are read there too: a hung network volume must
-        // not freeze the UI either (L follow-up 33).
-        let preflight = self.preflight, freeBytesProvider = self.freeBytesProvider
+        // main actor, and bounded, so a stall ends the start honestly instead of holding it forever.
+        // The recording folder is read in its OWN detached task with its own short bound, concurrently (L
+        // review 74): a hung network share must not freeze the UI (L follow-up 33), and must be named as the
+        // folder's problem, never the audio system's.
+        let preflight = self.preflight, freeBytesProvider = self.freeBytesProvider, probe = folderProbe
         let config = configManager.config
         let recordingDirectory = URL(fileURLWithPath: config.recordingDirectory)
-        let lidClosed: Bool, isBuiltInMic: Bool, folderReachable: Bool, freeBytes: Int?
+        let folderBound = min(folderReadDeadline, max(.milliseconds(1), startBy - SuspendingClock.now))
+        async let folderRead = readOffMain("start: recording folder", bound: folderBound) {
+            let status = Self.folderStatus(recordingDirectory, probe: probe)
+            return (status, status == .reachable ? freeBytesProvider(Self.nearestExistingDirectory(recordingDirectory, probe: probe)) : nil)
+        }
+        let devices: (lidClosed: Bool, builtInMic: Bool)?
         do {
-            (lidClosed, isBuiltInMic, folderReachable, freeBytes) = try await withDeadline(seconds: Self.seconds(until: startBy), label: "start: pre-flight") {
-                await Task.detached {
-                    let (lid, builtIn) = preflight(microphoneDeviceId)
-                    let reachable = Self.folderReachable(recordingDirectory)
-                    return (lid, builtIn, reachable, reachable ? freeBytesProvider(Self.nearestExistingDirectory(recordingDirectory)) : nil)
-                }.value
+            devices = try await withDeadline(seconds: Self.seconds(until: startBy), label: "start: pre-flight") {
+                await Task.detached { preflight(microphoneDeviceId) }.value
             }
         } catch {
-            Logger.state.error("Recording not started: the pre-flight audio-device lookup did not answer")
-            reportUnresponsiveStart()
-            return
+            devices = nil
         }
+        let folder = await folderRead
         // Re-entrancy guard: the await above is a genuine suspension point (unlike the two
         // synchronous IOKit/CoreAudio calls it replaced), so a second startRecording call fired
         // during it — e.g. a double-tap of the record control before the UI disables it — must not
@@ -398,11 +399,29 @@ public final class RecordingCoordinator {
         // recording it isn't the one driving.
         guard appState.isIdle else { return }
         // Before the sentinel and the helper, and before any banner: nothing of this recording exists yet.
-        // A recording folder on a drive that is not there is named as the cause, before any disk read (L
-        // follow-up 32) — the user copy names the folder, never a meeting.
-        guard folderReachable else {
+        // The recording folder is named as the cause first, before any disk verdict (L follow-up 32) — the
+        // user copy names the folder, never a meeting.
+        let folderName = abbreviatedDisplayPath(config.recordingDirectory)
+        guard let (folderStatus, freeBytes) = folder else {
+            Logger.state.error("Recording not started: the recording folder did not answer")
+            refuseStart("Parley couldn’t reach the recording folder — is its drive or network share available? (\(folderName))")
+            return
+        }
+        switch folderStatus {
+        case .reachable:
+            break
+        case .unreachable:
             Logger.state.error("Recording not started: the recording folder is unreachable")
-            refuseStart("The recording folder isn’t reachable — is its drive connected? (\(abbreviatedDisplayPath(config.recordingDirectory)))")
+            refuseStart("The recording folder isn’t reachable — is its drive connected? (\(folderName))")
+            return
+        case .notWritable:
+            Logger.state.error("Recording not started: the recording folder is not writable")
+            refuseStart("Parley can’t write to the recording folder — check its permissions (\(folderName)).")
+            return
+        }
+        guard let (lidClosed, isBuiltInMic) = devices else {
+            Logger.state.error("Recording not started: the pre-flight audio-device lookup did not answer")
+            reportUnresponsiveStart()
             return
         }
         // §8.7: never start what the disk cannot hold — two chunks plus headroom. Read on the folder's
@@ -1439,7 +1458,10 @@ public final class RecordingCoordinator {
     private func recover(_ sentinel: RecordingSentinel) async -> RelaunchOutcome {
         Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let folderReachable = Self.folderReachable(outputDir)
+        // Off the main actor, bounded (L review 75): a folder that does not answer is unreachable here — the
+        // session waits, never salvaged as "no recorded audio".
+        let probe = folderProbe
+        let folderStatus = await readOffMain("relaunch: recording folder") { Self.folderStatus(outputDir, probe: probe) } ?? .unreachable
 
         // The callbacks are wired and crash detection armed BEFORE the ping (no start() in this process,
         // C1): a crash reported during it is heard (L round 5). Every path below that ends without a
@@ -1464,7 +1486,7 @@ public final class RecordingCoordinator {
         let decision = RelaunchDecision.decide(
             lastAliveAt: sentinel.lastAliveAt, bootSessionUUID: sentinel.bootSessionUUID, wasStopping: sentinel.stopping,
             now: Date(), helperCapturing: helperCapturing, currentBootSessionUUID: BootSession.currentUUID(),
-            folderReachable: folderReachable)
+            folderReachable: folderStatus == .reachable)
         Logger.state.info("Relaunch decision: \(String(describing: decision), privacy: .public)")
 
         switch decision {
@@ -1501,7 +1523,7 @@ public final class RecordingCoordinator {
             // Never deleted: the recording data may be on the missing drive (§8.9). No capture: disarmed.
             captureClient.captureEnded()
             keepPending(sentinel)
-            updateFolderAlarm()
+            await updateFolderAlarm()
         }
         return .handled
     }
@@ -1583,15 +1605,24 @@ public final class RecordingCoordinator {
         presentAlarms()
     }
 
-    /// `recordingFolderUnavailable` while any pending session's folder is unreachable, cleared otherwise.
-    private func updateFolderAlarm() {
-        let waiting = RecordingSentinel.readPending(directory: sentinelDirectory).contains {
-            !Self.folderReachable(URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
-        }
-        if waiting {
-            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t reachable — Parley will keep the recording data and retry.")
-        } else {
+    /// `recordingFolderUnavailable` while any pending session's folder cannot be written, cleared otherwise.
+    /// The folders are read off the main actor, bounded (L review 75); one that does not answer counts as
+    /// unreachable.
+    private func updateFolderAlarm() async {
+        let pending = RecordingSentinel.readPending(directory: sentinelDirectory)
+        applyFolderAlarm(pending: pending, statuses: pending.isEmpty ? [:] : await pendingFolderStatuses(pending))
+    }
+
+    private func applyFolderAlarm(pending: [RecordingSentinel], statuses: [String: FolderStatus]?) {
+        let waiting = pending.map { statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] ?? .unreachable }
+            .filter { $0 != .reachable }
+        if waiting.isEmpty {
             appState.clearAppAlarm(.recordingFolderUnavailable)
+        } else if waiting.allSatisfy({ $0 == .notWritable }) {
+            // There, but read-only: a permissions problem, not a missing drive (L review 79).
+            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "Parley can’t write to the recording folder — check its permissions. The recording data is kept, and Parley will retry.")
+        } else {
+            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t reachable — Parley will keep the recording data and retry.")
         }
     }
 
@@ -1612,7 +1643,9 @@ public final class RecordingCoordinator {
         pendingRetryRunning = true
         defer { pendingRetryRunning = false }
         retryPendingWhenIdle = false
-        let ready = pending.filter { Self.folderReachable(URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent()) }
+        // Off the main actor, bounded (L review 75): folders that do not answer are not ready.
+        let statuses = await pendingFolderStatuses(pending)
+        let ready = pending.filter { statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable }
         if !ready.isEmpty {
             // While idle, a capturing helper is a previous recording's that did not stop: stop it first.
             // `.unknown` (no answer in time) may still be capturing too (L9 review 49).
@@ -1623,7 +1656,7 @@ public final class RecordingCoordinator {
                 return
             }
             if helperState != .notCapturing, !(await boundedHelperStop("stop a pending session")) {
-                updateFolderAlarm()
+                applyFolderAlarm(pending: RecordingSentinel.readPending(directory: sentinelDirectory), statuses: statuses)
                 return   // still not letting go: the next event tries again
             }
             for sentinel in ready {
@@ -1635,47 +1668,122 @@ public final class RecordingCoordinator {
                                       pending: true)
             }
         }
-        updateFolderAlarm()
+        applyFolderAlarm(pending: RecordingSentinel.readPending(directory: sentinelDirectory), statuses: statuses)
     }
 
-    /// What `folderReachable` asks the file system. Injectable, so a ghost mount point is testable.
+    /// What `folderStatus` asks the file system. Injectable, so a ghost mount point, a dangling link and a
+    /// hung share are testable.
     struct FolderProbe: Sendable {
         var exists: @Sendable (URL) -> Bool
         var isWritable: @Sendable (URL) -> Bool
         var isVolumeRoot: @Sendable (URL) -> Bool
+        /// The destination of the symbolic link at this path (without following it), nil when it is not one.
+        var symlinkDestination: @Sendable (URL) -> String? = { _ in nil }
 
         static let live = FolderProbe(
             exists: { FileManager.default.fileExists(atPath: $0.path) },
             isWritable: { FileManager.default.isWritableFile(atPath: $0.path) },
-            isVolumeRoot: { (try? $0.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true }
+            isVolumeRoot: { (try? $0.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true },
+            symlinkDestination: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0.path) }
         )
     }
 
-    /// Whether the session's folder can be written: the folder itself or, when it was never created (a
-    /// crash before the helper made the day folder), its nearest existing ancestor. Symlinks resolved. A
-    /// folder under `/Volumes/<name>` is reachable only while that volume is MOUNTED: after an unplug,
-    /// `/Volumes` is not writable, and a leftover folder at `/Volumes/<name>` is a ghost on the boot
-    /// volume, not the drive (L follow-up 39) — never "no recorded audio" there.
-    nonisolated static func folderReachable(_ dir: URL, probe: FolderProbe = .live) -> Bool {
-        let resolved = dir.resolvingSymlinksInPath().standardizedFileURL
+    /// Whether a recording folder can be written (L review 79: "not there" and "there but read-only" are
+    /// different problems, and said differently).
+    enum FolderStatus: Equatable, Sendable {
+        case reachable
+        /// Not there: an unmounted volume, a ghost mount point, a dangling link, an unwritable ancestor of a
+        /// folder not created yet.
+        case unreachable
+        /// There, but it cannot be written: its permissions.
+        case notWritable
+    }
+
+    /// The session's folder status: the folder itself or, when it was never created (a crash before the
+    /// helper made the day folder), its nearest existing ancestor must be writable. Every symbolic link in
+    /// the path is substituted first — a DANGLING one too (L review 71): `resolvingSymlinksInPath()` leaves
+    /// it alone, and `~/Recordings → /Volumes/Ext/…` with the drive unplugged read as the writable home
+    /// folder. A folder under `/Volumes/<name>` is reachable only while that volume is MOUNTED: after an
+    /// unplug a leftover folder there is a ghost on the boot volume, not the drive (L follow-up 39).
+    nonisolated static func folderStatus(_ dir: URL, probe: FolderProbe = .live) -> FolderStatus {
+        let resolved = resolvedFolder(dir, probe: probe)
         let parts = resolved.pathComponents
         if parts.count >= 3, parts[0] == "/", parts[1] == "Volumes" {
             let mount = URL(fileURLWithPath: "/Volumes").appendingPathComponent(parts[2])
-            guard probe.exists(mount), probe.isVolumeRoot(mount) else { return false }
+            guard probe.exists(mount), probe.isVolumeRoot(mount) else { return .unreachable }
         }
-        return probe.isWritable(nearestExistingDirectory(resolved, exists: probe.exists))
+        if probe.exists(resolved) { return probe.isWritable(resolved) ? .reachable : .notWritable }
+        return probe.isWritable(nearestExistingDirectory(resolved, probe: probe)) ? .reachable : .unreachable
     }
 
-    /// `dir`, or its nearest ancestor that exists (at worst `/`), symlinks resolved.
-    nonisolated static func nearestExistingDirectory(_ dir: URL,
-                                                     exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL {
-        var candidate = dir.resolvingSymlinksInPath().standardizedFileURL
-        while !exists(candidate) {
+    nonisolated static func folderReachable(_ dir: URL, probe: FolderProbe = .live) -> Bool {
+        folderStatus(dir, probe: probe) == .reachable
+    }
+
+    /// `dir` with every symbolic link in its path substituted, a dangling one included, component by
+    /// component (a relative link against its own folder); `/private` normalized as `resolvingSymlinksInPath`
+    /// does. A loop stops after 40 links.
+    nonisolated static func resolvedFolder(_ dir: URL, probe: FolderProbe = .live) -> URL {
+        // Lexical only: `standardizedFileURL` strips `/private`, which would turn `/var → private/var` into a loop.
+        func components(_ path: String) -> [String] { path.split(separator: "/").map(String.init) }
+        var remaining = components(dir.path)
+        var resolved: [String] = []
+        var links = 0
+        while !remaining.isEmpty {
+            let part = remaining.removeFirst()
+            if part == "." { continue }
+            if part == ".." { _ = resolved.popLast(); continue }
+            let next = URL(fileURLWithPath: "/" + (resolved + [part]).joined(separator: "/"))
+            guard links < 40, let destination = probe.symlinkDestination(next) else {
+                resolved.append(part)
+                continue
+            }
+            links += 1
+            // An absolute link restarts from the root; a relative one resolves against its own folder.
+            if destination.hasPrefix("/") { resolved = [] }
+            remaining = components(destination) + remaining
+        }
+        return URL(fileURLWithPath: "/" + resolved.joined(separator: "/")).resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    /// `dir`, or its nearest ancestor that exists (at worst `/`), every link substituted.
+    nonisolated static func nearestExistingDirectory(_ dir: URL, probe: FolderProbe = .live) -> URL {
+        var candidate = resolvedFolder(dir, probe: probe)
+        while !probe.exists(candidate) {
             let parent = candidate.deletingLastPathComponent()
             guard parent.path != candidate.path else { break }
             candidate = parent
         }
-        return candidate
+        return candidate.resolvingSymlinksInPath().standardizedFileURL   // `/private` normalized, now that it exists
+    }
+
+    /// The bound on a folder or disk read off the main actor (L review 74, 75): a hung network share or a
+    /// dying drive is named as the folder — never the audio system — and never stalls the UI. Tests shorten it.
+    var folderReadDeadline: Duration = .seconds(5)
+    /// What the folder reads ask the file system. Tests inject a slow or fake one.
+    var folderProbe: FolderProbe = .live
+
+    /// A folder or disk read off the main actor, bounded (on awake time): nil when it did not answer.
+    private func readOffMain<T>(_ label: String, bound: Duration? = nil, _ read: @escaping @Sendable () -> T) async -> T? {
+        let seconds = Self.seconds(bound ?? folderReadDeadline)
+        do {
+            return try await withDeadline(seconds: seconds, label: label) {
+                await Task.detached(priority: .userInitiated) { OffMain(read()) }.value
+            }.value
+        } catch {
+            Logger.state.error("A folder read did not answer within \(seconds, privacy: .public) s (\(label, privacy: .public))")
+            return nil
+        }
+    }
+
+    /// The status of each pending session's folder, read off the main actor under one bound; nil when the
+    /// read did not answer (then none is known reachable).
+    private func pendingFolderStatuses(_ sessions: [RecordingSentinel]) async -> [String: FolderStatus]? {
+        let probe = folderProbe
+        let folders = sessions.map { URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent() }
+        return await readOffMain("pending folders") {
+            Dictionary(folders.map { ($0.path, Self.folderStatus($0, probe: probe)) }, uniquingKeysWith: { a, _ in a })
+        }
     }
 
     /// Resume the crashed recording as the SAME session (§8.3): a new capture at a free chunk index, the
@@ -2144,14 +2252,14 @@ public final class RecordingCoordinator {
         guard appState.isRecording else { return }
         appState.clearAppAlarm(.rotationFailed)
         guard let dir = transcriptionRunner.chunkRotator?.sessionLocation.outputDir else { return }
-        let provider = freeBytesProvider, bound = Self.seconds(rotationDiskReadDeadline)
+        let provider = freeBytesProvider, bound = Self.seconds(rotationDiskReadDeadline), probe = folderProbe
         rotationDiskCheckGeneration += 1
         let generation = rotationDiskCheckGeneration
         rotationDiskCheck = Task { [weak self] in
             let free: Int?
             do {
                 free = try await withDeadline(seconds: bound, label: "rotation disk read") {
-                    await Task.detached { provider(Self.nearestExistingDirectory(dir)) }.value
+                    await Task.detached { provider(Self.nearestExistingDirectory(dir, probe: probe)) }.value
                 }
             } catch {
                 Logger.state.error("The free-space read at a rotation did not answer within \(bound, privacy: .public) s — this rotation's disk check is skipped")
@@ -2522,4 +2630,11 @@ extension RecordingCoordinator: RecordingMicrophoneObserver {
 @MainActor
 private final class RepairAnswer {
     var arrived = false
+}
+
+/// A value read off the main actor and handed back whole (L review 75). The reads return value types —
+/// `SessionState`, orphan lists, statuses — built on the background thread and never touched there again.
+private struct OffMain<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
 }
