@@ -1,8 +1,9 @@
 import Foundation
 
-/// Rehydrate a chunked recording session after a crash: read `session.json` (or start from an
-/// empty state), re-ingest any orphan chunk WAVs still on disk that never made it into
-/// `session.json`, then finalize — producing the same offset-aware, cross-chunk-reconciled
+/// Rehydrate a chunked recording session after a crash: read `session.json` — or the session's
+/// moved-aside `session-<id>.json` (C-I3) — or start from an empty state, re-ingest any orphan chunk
+/// (a WAV, or an archive whose WAVs are gone) still on disk that never made it into `session.json`,
+/// then finalize — producing the same offset-aware, cross-chunk-reconciled
 /// transcript a clean stop would have produced.
 @MainActor
 public enum ChunkedSessionRecovery {
@@ -22,10 +23,7 @@ public enum ChunkedSessionRecovery {
             // earliest orphan WAV's filesystem creation date rather than defaulting to `Date()`
             // (recovery time), which would stamp the transcript with a start time that's
             // potentially much later than when the meeting actually began.
-            let earliestOrphanCreation = orphans.compactMap {
-                try? outputDirectory.appendingPathComponent($0.baseName + ".wav")
-                    .resourceValues(forKeys: [.creationDateKey]).creationDate
-            }.min()
+            let earliestOrphanCreation = orphans.compactMap { estimatedStart(of: $0, in: outputDirectory) }.min()
             return SessionState(sessionId: sessionId, meetingStart: earliestOrphanCreation ?? Date(),
                                 engine: config.engine.rawValue,
                                 chunkDurationMinutes: config.validatedChunkDuration, chunks: [])
@@ -35,7 +33,7 @@ public enum ChunkedSessionRecovery {
                                        sessionState: baseState, transcriber: transcriber, diarizer: diarizer)
         for orphan in orphans {
             let sysURL = outputDirectory.appendingPathComponent(orphan.baseName + ".wav")
-            let start = (try? sysURL.resourceValues(forKeys: [.creationDateKey]).creationDate)
+            let start = estimatedStart(of: orphan, in: outputDirectory)
                 ?? baseState.meetingStart.addingTimeInterval(Double(orphan.index) * Double(baseState.chunkDurationMinutes) * 60)
             let micURL = outputDirectory.appendingPathComponent(orphan.baseName + "_mic.wav")
             // Always pass the real mic path, even when it doesn't exist. `ChunkProcessor` decides
@@ -62,10 +60,21 @@ public enum ChunkedSessionRecovery {
             // that writes session.json (e.g. a partial flush) without appending, this delete
             // would silently erase data that was just persisted — check this guard first if
             // ChunkProcessor's write/append coupling ever changes.
-            SessionState.delete(directory: outputDirectory)
+            SessionState.delete(directory: outputDirectory, sessionId: sessionId)
             return nil
         }
         if let provenance { state.provenance = provenance }
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
+    }
+
+    /// When an orphan chunk began: its WAV's creation date (the helper created it at the rotation).
+    /// An orphan left only as its archive (C-I4) was written after the chunk ended, so its start is
+    /// the archive's creation date minus its length — an estimate, a few seconds late.
+    static func estimatedStart(of orphan: CrashRecoveryPlanner.OrphanChunk, in directory: URL) -> Date? {
+        let wav = directory.appendingPathComponent(orphan.baseName + ".wav")
+        if let created = try? wav.resourceValues(forKeys: [.creationDateKey]).creationDate { return created }
+        let archive = directory.appendingPathComponent(orphan.baseName + ".m4a")
+        guard let created = try? archive.resourceValues(forKeys: [.creationDateKey]).creationDate else { return nil }
+        return created.addingTimeInterval(-TranscriptAssembler.duration(of: archive))
     }
 }

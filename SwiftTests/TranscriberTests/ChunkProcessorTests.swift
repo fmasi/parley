@@ -307,4 +307,135 @@ struct ChunkProcessorTests {
                 == [SessionIssue(chunk: 5, issue: ChunkIssue(code: .duplicateSourceOtherIndex, track: nil, count: 1))])
         #expect(!ChunkIssue.Code.duplicateSourceOtherIndex.affectsContent)
     }
+
+    // MARK: - R2 council
+
+    private func processor(dir: URL, preserve: Bool = false, engine: any TranscriptionEngine = FakeEngine(),
+                           state: SessionState? = nil) -> ChunkProcessor {
+        var config = Config.default
+        config.preserveSourceWAV = preserve
+        return ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: state ?? SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio", chunkDurationMinutes: 10),
+            transcriber: engine, diarizer: FakeDiarizer())
+    }
+
+    /// C-I4: the WAVs used to be deleted before the chunk reached session.json, so a crash in that
+    /// window dropped the chunk. At the moment session.json first holds the chunk (with its .m4a),
+    /// its WAVs must still be on disk; only after that are they deleted.
+    @Test func theChunkIsPersistedBeforeItsWavsAreDeleted() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let processor = processor(dir: dir)
+        final class Probe { var atWrite: [(persisted: [String], wavs: Bool)] = [] }
+        let probe = Probe()
+        processor.onSessionWriteSucceeded = {
+            let persisted = SessionState.read(directory: dir)?.chunks.map(\.audioPath) ?? []
+            probe.atWrite.append((persisted, FileManager.default.fileExists(atPath: sys.path) && FileManager.default.fileExists(atPath: mic.path)))
+        }
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(probe.atWrite.count == 1)
+        #expect(probe.atWrite.first?.persisted == ["meeting-0.m4a"])
+        #expect(probe.atWrite.first?.wavs == true, "both WAVs still on disk when the chunk was first persisted")
+        #expect(!FileManager.default.fileExists(atPath: sys.path) && !FileManager.default.fileExists(atPath: mic.path),
+                "then deleted: preserve_source_wav is off")
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-0.m4a").path))
+    }
+
+    /// C-I4: a chunk that could not be persisted keeps its WAVs — they are the only copy recovery can find.
+    @Test func aChunkThatCouldNotBePersistedKeepsItsWavs() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let processor = processor(dir: dir)
+        await processor.failSessionWritesForTesting()
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(FileManager.default.fileExists(atPath: sys.path) && FileManager.default.fileExists(atPath: mic.path))
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-0.m4a").path), "the archive itself succeeded")
+        #expect(await processor.getSessionState().issues.contains(SessionIssue(chunk: 0, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))))
+    }
+
+    /// Stream L clears the sticky `sessionWriteFailed` alarm on the next good write: the success hook
+    /// fires after every successful session.json write (chunk and gap), never after a failed one.
+    @Test func onSessionWriteSucceededFiresAfterEverySuccessfulWrite() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = processor(dir: dir)
+        final class Sink { var successes = 0; var failures: [Int?] = [] }
+        let sink = Sink()
+        processor.onSessionWriteSucceeded = { sink.successes += 1 }
+        processor.onSessionWriteFailure = { sink.failures.append($0) }
+        await processor.processLastChunk(chunk0(in: dir))
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
+        #expect(sink.successes == 2 && sink.failures.isEmpty)
+        await processor.failSessionWritesForTesting()
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 5), end: Date(timeIntervalSince1970: 6), reason: "sleep"))
+        #expect(sink.successes == 2 && sink.failures == [nil], "a failed write is not a success")
+    }
+
+    /// B-I3: `awaitAllProcessed` snapshotted its task list once, so a chunk scheduled while it waited
+    /// (a late rotation reply) was processed but left out of the final merge.
+    @Test func awaitAllProcessedCoversAChunkScheduledWhileWaiting() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-1.wav"), seconds: 1)
+        struct SlowEngine: TranscriptionEngine {
+            let name = "Slow"
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+                try await Task.sleep(for: .milliseconds(400))
+                return [TranscriptSegment(start: 0, end: 1, text: "hi", language: "en")]
+            }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+        let processor = processor(dir: dir, engine: SlowEngine())
+        processor.processChunk(chunk0(in: dir))
+        let waiter = Task { @MainActor in
+            await processor.awaitAllProcessed()
+            return await processor.getSessionState().chunks.map(\.index)
+        }
+        try await Task.sleep(for: .milliseconds(150))   // the waiter is now awaiting chunk 0
+        processor.processChunk(ChunkRotator.FinalizedChunk(index: 1, systemPath: dir.appendingPathComponent("meeting-1.wav").path,
+                                                           micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
+                                                           startTime: Date(timeIntervalSince1970: 600)))
+        #expect(await waiter.value.sorted() == [0, 1])
+    }
+
+    /// C-I3: this processor's first write lands on a day folder whose session.json belongs to another,
+    /// unfinalized recording. That file is moved aside (not overwritten) and the move is recorded.
+    @Test func aDisplacedSessionIsMovedAsideAndRecorded() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "morning", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0, 1])
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = processor(dir: dir)
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 2, "the other session survives, aside")
+        let mine = try #require(SessionState.read(directory: dir, sessionId: "meeting"))
+        #expect(mine.issues == [SessionIssue(chunk: nil, issue: ChunkIssue(code: .sessionFileDisplaced, track: nil, count: nil))],
+                "the displacement is persisted with this session")
+        #expect(!ChunkIssue.Code.sessionFileDisplaced.affectsContent, "nothing of this recording is missing")
+    }
+
+    /// C-I4 (orphan side): a chunk whose WAVs are gone but whose .m4a exists — the crash window of a
+    /// build that deleted the WAVs first — is transcribed from its archive, which is kept as-is.
+    @Test func anArchiveOnlyChunkIsTranscribedFromItsM4a() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        let archive = try await AudioArchiver.archiveSystemOnly(systemAudio: sys, outputDirectory: dir, bitrateKbps: 64).archivePath
+        #expect(!FileManager.default.fileExists(atPath: sys.path))
+        let before = try Data(contentsOf: archive)
+        let processor = processor(dir: dir)
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.audioPath == "meeting-0.m4a")
+        #expect(chunk.segments.map(\.text) == ["hello"], "the words come back from the archive")
+        #expect(chunk.issues.contains(ChunkIssue(code: .transcribedFromArchive, track: nil, count: nil)))
+        #expect(!chunk.issues.contains { $0.affectsContent }, "nothing was lost: \(chunk.issues)")
+        #expect(try Data(contentsOf: archive) == before, "the only copy is never re-encoded")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["meeting-0.m4a", "session.json"],
+                "no scratch audio is left behind")
+    }
 }

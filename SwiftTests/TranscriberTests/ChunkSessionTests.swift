@@ -128,7 +128,7 @@ struct ChunkSessionTests {
         #expect(SessionState.read(directory: dir) != nil)
 
         // Delete and verify gone
-        SessionState.delete(directory: dir)
+        SessionState.delete(directory: dir, sessionId: session.sessionId)
         #expect(SessionState.read(directory: dir) == nil)
     }
 
@@ -219,5 +219,93 @@ struct ChunkSessionTests {
         let data = Data(#"{"sessionId":"s","meetingStart":"2026-09-24T16:00:00Z","engine":"fluid_audio","chunkDurationMinutes":5,"chunks":[{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","speakerDatabase":{},"segments":[{"start":0,"end":1,"text":"hi","speaker":"S","source":"remote","qualityScore":0.9}]}]}"#.utf8)
         let seg = try #require(try decoder.decode(SessionState.self, from: data).chunks.first?.segments.first)
         #expect(seg.text == "hi" && !seg.filtered && !seg.echo && !seg.duplicate)
+    }
+
+    // MARK: - R2 council (C-I3, B-M11): one session.json per day folder
+
+    private func session(_ id: String, chunks: [Int]) -> SessionState {
+        SessionState(sessionId: id, meetingStart: Date(timeIntervalSince1970: 1_700_000_000), engine: "fluidAudio",
+                     chunkDurationMinutes: 5, chunks: chunks.map { makeChunk(index: $0) })
+    }
+
+    /// C-I3: the next recording that day used to overwrite an unfinalized session's recognised text.
+    /// Its file is moved aside, never overwritten, and the write says so.
+    @Test("writingAnotherSessionMovesTheExistingFileAside")
+    func writingAnotherSessionMovesTheExistingFileAside() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try SessionState.write(session("morning", chunks: [0, 1, 2]), directory: dir) == nil)
+        let displaced = try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
+        #expect(displaced?.sessionId == "morning")
+        #expect(displaced?.movedTo.lastPathComponent == "session-morning.json")
+        #expect(SessionState.read(directory: dir)?.sessionId == "afternoon")
+        #expect(try SessionState.write(session("afternoon", chunks: [0, 1]), directory: dir) == nil, "its own file is simply replaced")
+        let aside = try JSONDecoder.iso8601.decode(SessionState.self, from: Data(contentsOf: dir.appendingPathComponent("session-morning.json")))
+        #expect(aside.sessionId == "morning" && aside.chunks.map(\.index) == [0, 1, 2], "every chunk of the displaced session survives")
+    }
+
+    /// The aside session is still found by id — by recovery, resume and the orphan planner alike.
+    @Test("readBySessionIdFindsAMovedAsideSession")
+    func readBySessionIdFindsAMovedAsideSession() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(session("morning", chunks: [0, 1, 2]), directory: dir)
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
+        #expect(SessionState.read(directory: dir, sessionId: "morning")?.chunks.count == 3)
+        #expect(SessionState.read(directory: dir, sessionId: "afternoon")?.chunks.count == 1)
+        #expect(SessionState.read(directory: dir, sessionId: "evening") == nil)
+        #expect(CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "morning"))
+        #expect(CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: dir, sessionId: "morning") == 3)
+    }
+
+    /// A file whose session id cannot be read is not known to be someone else's: moved aside too.
+    @Test("anUnreadableSessionFileIsMovedAsideNotOverwritten")
+    func anUnreadableSessionFileIsMovedAsideNotOverwritten() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let garbage = Data("{not json".utf8)
+        try garbage.write(to: dir.appendingPathComponent("session.json"))
+        let displaced = try #require(try SessionState.write(session("afternoon", chunks: [0]), directory: dir))
+        #expect(displaced.sessionId == nil)
+        #expect(try Data(contentsOf: displaced.movedTo) == garbage)
+        #expect(SessionState.read(directory: dir)?.sessionId == "afternoon")
+    }
+
+    /// Deletes (finalize, recovery) remove only the session they belong to — and its aside copy.
+    @Test("deleteRemovesOnlyTheMatchingSession")
+    func deleteRemovesOnlyTheMatchingSession() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(session("morning", chunks: [0]), directory: dir)
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)   // morning → session-morning.json
+        SessionState.delete(directory: dir, sessionId: "evening")
+        SessionState.delete(directory: dir, sessionId: "morning")
+        #expect(SessionState.read(directory: dir)?.sessionId == "afternoon", "another session's session.json is never deleted")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("session-morning.json").path))
+        SessionState.delete(directory: dir, sessionId: "afternoon")
+        #expect(SessionState.read(directory: dir) == nil)
+    }
+
+    /// B-M11: concurrent writers shared one `session.json.tmp`; the loser's rename threw a false
+    /// `sessionWriteFailed`. A unique tmp per write, still renamed atomically, and none left behind.
+    @Test("concurrentWritesNeverFailAndLeaveNoTmp")
+    func concurrentWritesNeverFailAndLeaveNoTmp() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let state = session("afternoon", chunks: [0, 1])
+        let failures = await withTaskGroup(of: Int.self) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    do { try SessionState.write(state, directory: dir); return 0 } catch { return 1 }
+                }
+            }
+            return await group.reduce(0, +)
+        }
+        #expect(failures == 0)
+        #expect(SessionState.read(directory: dir, sessionId: "afternoon")?.chunks.count == 2)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0 != "session.json" }
+        #expect(leftovers.isEmpty, "no tmp file (or aside copy of itself) is left: \(leftovers)")
+    }
+}
+
+extension JSONDecoder {
+    /// session.json's own date strategy, for tests that read an aside file directly.
+    static var iso8601: JSONDecoder {
+        let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d
     }
 }

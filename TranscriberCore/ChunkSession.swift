@@ -43,11 +43,19 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// collided chunk, re-ingested by a relaunch orphan scan) and was skipped. Recorded on the
         /// session against the known index; `count` carries the incoming index. Nothing was lost.
         public static let duplicateSourceOtherIndex = Code(rawValue: "duplicate_source_other_index")
-        /// A resumed session was seeded with a session.json of another session id (a problem).
+        /// A resume was offered a session.json of another session id: refused, the session started
+        /// fresh (a problem — whatever this recording held before the resume is not in this record).
         public static let seedMismatch = Code(rawValue: "seed_mismatch")
         /// A resumed session's seed was transcribed with another engine (informational: the
         /// engine setting changed between crash and resume).
         public static let seedEngineChanged = Code(rawValue: "seed_engine_changed")
+        /// This session's first write found the day folder's session.json holding ANOTHER session
+        /// and moved that file aside (`session-<id>.json`) instead of overwriting it (informational:
+        /// nothing of this recording is missing; the other one is preserved).
+        public static let sessionFileDisplaced = Code(rawValue: "session_file_displaced")
+        /// The chunk's WAVs were gone and its words were recognised from its `.m4a` archive (a crash
+        /// between archiving and the session.json write). Informational: the archive is the audio.
+        public static let transcribedFromArchive = Code(rawValue: "transcribed_from_archive")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
@@ -289,6 +297,13 @@ public struct CaptureGap: Codable, Equatable, Sendable {
 
 // MARK: - SessionState
 
+/// A session.json that belonged to another recording, moved aside rather than overwritten.
+public struct DisplacedSession: Equatable, Sendable {
+    /// The displaced file's session id; nil when it could not be read.
+    public let sessionId: String?
+    public let movedTo: URL
+}
+
 /// Persistent session state written to `session.json` alongside transcript files.
 /// Tracks all processed chunks and their speaker databases for incremental processing.
 public struct SessionState: Codable {
@@ -347,11 +362,25 @@ public struct SessionState: Codable {
 
     // MARK: - File location
 
+    /// One per day folder (the folder is the session's output directory). Its id is checked on every
+    /// write and delete; a file of another session is moved aside to `session-<id>.json`, never
+    /// overwritten (C-I3).
     private static let fileName = "session.json"
 
     private static func fileURL(directory: URL) -> URL {
         directory.appendingPathComponent(fileName)
     }
+
+    /// Where a displaced session's file goes: `session-<id>.json`, or a unique name when its id can't
+    /// be read (it is not known to be anybody's, so it is not known to be expendable).
+    private static func asideURL(directory: URL, sessionId: String?) -> URL {
+        directory.appendingPathComponent("session-\(sessionId ?? "unreadable-\(UUID().uuidString)").json")
+    }
+
+    /// Serializes every session.json write and delete in this process. Two writers renaming over the
+    /// same file concurrently hung the process in the kernel (`renameatx_np`) in a test; a salvage and
+    /// a live recording can share a day folder.
+    private static let ioLock = NSLock()
 
     // MARK: - JSON encoder/decoder
 
@@ -368,28 +397,74 @@ public struct SessionState: Codable {
         return decoder
     }
 
+    /// Just the id, so a session written by a newer build (whose full shape this one may not
+    /// decode) is still recognised as its own session or another's.
+    private struct StoredId: Decodable { let sessionId: String }
+
+    /// The session id stored in the file at `url`, `.some(nil)` when the file exists but its id
+    /// can't be read, nil when there is no file.
+    private static func storedSessionId(at url: URL) -> String?? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let data = try? Data(contentsOf: url),
+              let stored = try? JSONDecoder().decode(StoredId.self, from: data)
+        else { return .some(nil) }
+        return .some(stored.sessionId)
+    }
+
     // MARK: - Static I/O
 
-    /// Atomically write session state to disk (write to temp file, then rename).
-    public static func write(_ state: SessionState, directory: URL) throws {
-        let dest = fileURL(directory: directory)
-        let dir = dest.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
+    /// Atomically write session state to disk: a uniquely named temp file in the same folder, renamed
+    /// over `session.json` (B-M11: a shared temp name let concurrent writers fail or hang each other).
+    ///
+    /// When `session.json` holds ANOTHER session (or one whose id can't be read), that file is moved
+    /// aside to `session-<id>.json` first and returned, so the caller can record it: the next
+    /// recording in a day folder used to overwrite an unfinalized session's recognised text (C-I3).
+    /// If it can't be moved aside, nothing is written and this throws.
+    @discardableResult
+    public static func write(_ state: SessionState, directory: URL) throws -> DisplacedSession? {
         let data = try makeEncoder().encode(state)
+        ioLock.lock(); defer { ioLock.unlock() }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dest = fileURL(directory: directory)
 
-        // Write to a temp file in the same directory, then rename for atomicity.
-        let tmp = dir.appendingPathComponent("\(fileName).tmp")
-        try data.write(to: tmp, options: .atomic)
-        // Rename (atomic on same volume)
-        _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+        var displaced: DisplacedSession?
+        if let theirs = storedSessionId(at: dest), theirs != state.sessionId {
+            let aside = asideURL(directory: directory, sessionId: theirs)
+            // An older aside copy of the same session is superseded: every write goes to
+            // session.json, so the file being moved is that session's newest state.
+            try rename(dest, to: aside)
+            Logger.state.error(
+                "session.json belonged to \(theirs ?? "a session whose id can't be read", privacy: .sensitive), not \(state.sessionId, privacy: .sensitive) — moved it aside to \(aside.lastPathComponent, privacy: .sensitive) instead of overwriting it"
+            )
+            displaced = DisplacedSession(sessionId: theirs, movedTo: aside)
+        }
+
+        let tmp = directory.appendingPathComponent("\(fileName).\(UUID().uuidString).tmp")
+        do {
+            try data.write(to: tmp)
+            try rename(tmp, to: dest)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            throw error
+        }
 
         Logger.state.debug("SessionState written — id: \(state.sessionId, privacy: .sensitive), chunks: \(state.chunks.count)")
+        return displaced
+    }
+
+    /// POSIX `rename(2)`: atomic on one volume, replaces `to` if it exists.
+    private static func rename(_ from: URL, to: URL) throws {
+        guard Darwin.rename(from.path, to.path) == 0 else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)])
+        }
     }
 
     /// Read session state from disk. Returns nil if file is missing or corrupt.
     public static func read(directory: URL) -> SessionState? {
-        let url = fileURL(directory: directory)
+        read(url: fileURL(directory: directory))
+    }
+
+    private static func read(url: URL) -> SessionState? {
         guard let data = try? Data(contentsOf: url) else {
             return nil
         }
@@ -401,29 +476,42 @@ public struct SessionState: Codable {
         return state
     }
 
-    /// Read session state only if it belongs to `sessionId` (P12). A session.json left in the same
-    /// folder by a different recording must never be merged into this one: nil on a mismatch.
+    /// Read session state only if it belongs to `sessionId` (P12): `session.json` when it is this
+    /// session's, else this session's moved-aside `session-<id>.json` (C-I3). A file of a different
+    /// recording is never merged into this one: nil when neither matches.
     public static func read(directory: URL, sessionId: String) -> SessionState? {
-        guard let state = read(directory: directory) else { return nil }
-        guard state.sessionId == sessionId else {
-            Logger.state.warning(
-                "SessionState belongs to \(state.sessionId, privacy: .sensitive), not \(sessionId, privacy: .sensitive) — ignoring it"
-            )
-            return nil
+        let current = read(directory: directory)
+        if let current, current.sessionId == sessionId { return current }
+        if let aside = read(url: asideURL(directory: directory, sessionId: sessionId)), aside.sessionId == sessionId {
+            Logger.state.info("SessionState \(sessionId, privacy: .sensitive) found moved aside — using it")
+            return aside
         }
-        return state
+        if let current {
+            Logger.state.warning(
+                "SessionState belongs to \(current.sessionId, privacy: .sensitive), not \(sessionId, privacy: .sensitive) — ignoring it"
+            )
+        }
+        return nil
     }
 
-    /// Delete session state from disk. No-op if file does not exist.
-    public static func delete(directory: URL) {
-        let url = fileURL(directory: directory)
-        do {
-            try FileManager.default.removeItem(at: url)
-            Logger.state.debug("SessionState deleted")
-        } catch CocoaError.fileNoSuchFile {
-            // Expected when session was never written — not an error.
-        } catch {
-            Logger.state.warning("SessionState delete failed: \(error.localizedDescription, privacy: .public)")
+    /// Delete `sessionId`'s session state: `session.json` only when it is this session's (another
+    /// recording may own it now), and its moved-aside copy. No-op when neither exists.
+    public static func delete(directory: URL, sessionId: String) {
+        ioLock.lock(); defer { ioLock.unlock() }
+        for url in [fileURL(directory: directory), asideURL(directory: directory, sessionId: sessionId)] {
+            guard let stored = storedSessionId(at: url) else { continue }
+            guard stored == sessionId else {
+                if url.lastPathComponent == fileName {
+                    Logger.state.info("session.json belongs to another session — not deleting it")
+                }
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(at: url)
+                Logger.state.debug("SessionState deleted: \(url.lastPathComponent, privacy: .sensitive)")
+            } catch {
+                Logger.state.warning("SessionState delete failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            }
         }
     }
 }

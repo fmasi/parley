@@ -5,23 +5,32 @@ public enum CrashRecoveryPlanner {
         public let index: Int; public let baseName: String
         public init(index: Int, baseName: String) { self.index = index; self.baseName = baseName }
     }
-    /// Scan `outputDirectory` for `<sessionId>-N.wav` chunk files (excluding the `_mic.wav`
-    /// companion), returning each discovered index alongside its base name (no extension).
-    /// Shared by `orphanChunks` and `nextFreeChunkIndex` so both use identical name parsing.
-    private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String)] {
+    /// Scan `outputDirectory` for `<sessionId>-N.wav` and `<sessionId>-N.m4a` chunk files (excluding
+    /// the `_mic.wav` companion), returning each discovered index once, alongside its base name (no
+    /// extension) and whether a WAV exists for it. Shared by `orphanChunks` and `nextFreeChunkIndex`
+    /// so both use identical name parsing.
+    private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
         let prefix = "\(sessionId)-"
-        var found: [(index: Int, baseName: String)] = []
-        for name in names where name.hasSuffix(".wav") && !name.hasSuffix("_mic.wav") && name.hasPrefix(prefix) {
+        var found: [Int: (baseName: String, hasWav: Bool)] = [:]
+        for name in names where name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") {
+            let isWav = name.hasSuffix(".wav")
+            guard isWav || name.hasSuffix(".m4a") else { continue }
             let stem = String(name.dropLast(4))
             guard let idx = Int(stem.dropFirst(prefix.count)) else { continue }
-            found.append((index: idx, baseName: stem))
+            found[idx] = (stem, isWav || (found[idx]?.hasWav ?? false))
         }
-        return found
+        return found.map { (index: $0.key, baseName: $0.value.baseName, hasWav: $0.value.hasWav) }
     }
+
+    /// Chunks on disk that `session.json` does not hold. An archive with no WAV counts (C-I4: a crash
+    /// between archiving a chunk and writing session.json left only its `.m4a`; `ChunkProcessor`
+    /// transcribes it from the archive) — unless the session was already finalized: once its
+    /// transcript `<sessionId>.json` exists, its chunk archives are its audio, not orphans.
     public static func orphanChunks(outputDirectory: URL, sessionId: String, completedIndices: Set<Int>) -> [OrphanChunk] {
-        onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
-            .filter { !completedIndices.contains($0.index) }
+        let finalized = FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("\(sessionId).json").path)
+        return onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
+            .filter { !completedIndices.contains($0.index) && ($0.hasWav || !finalized) }
             .map { OrphanChunk(index: $0.index, baseName: $0.baseName) }
             .sorted { $0.index < $1.index }
     }
@@ -34,10 +43,12 @@ public enum CrashRecoveryPlanner {
 
     /// The next chunk index guaranteed not to collide with any chunk index already known to this
     /// session — either recorded as completed in `session.json` or present as a `<sessionId>-N.wav`
-    /// file on disk. Restart-capture sites (crash-relaunch, no-live-rotator XPC crash) must name
-    /// their new WAV with this index, never with the legacy segment counter: the segment counter
-    /// and the chunk-index namespace can collide, and colliding either drops the restart file as
-    /// "already completed" or truncates an in-progress chunk's WAV on create (#135).
+    /// or `.m4a` file on disk (C-M16: an index whose only artefact was its archive was reusable, and
+    /// the archiver then removed that archive as stale output). Restart-capture sites (crash-relaunch,
+    /// no-live-rotator XPC crash) must name their new WAV with this index, never with the legacy
+    /// segment counter: the segment counter and the chunk-index namespace can collide, and colliding
+    /// either drops the restart file as "already completed" or truncates an in-progress chunk's WAV
+    /// on create (#135).
     public static func nextFreeChunkIndex(outputDirectory: URL, sessionId: String) -> Int {
         let completed = SessionState.read(directory: outputDirectory, sessionId: sessionId)?.chunks.map(\.index) ?? []
         let onDisk = onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId).map(\.index)

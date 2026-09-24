@@ -38,39 +38,63 @@ public final class ChunkProcessor {
     /// `sessionWriteFailed` (L10). The failure is also recorded in `SessionState.issues`, so the
     /// next successful write persists it.
     public var onSessionWriteFailure: ((_ chunkIndex: Int?) -> Void)?
+    /// Called on the main actor after every successful session.json write (chunk or gap), the mirror
+    /// of `onSessionWriteFailure`: the coordinator clears its sticky `sessionWriteFailed` alarm.
+    public var onSessionWriteSucceeded: (() -> Void)?
 
-    /// Actor-isolated mutable session state — replaces NSLock.
+    /// Actor-isolated mutable session state — replaces NSLock. It also owns every session.json
+    /// write, so writes are serialized: a snapshot taken before another chunk's append can never be
+    /// renamed over the newer one (B-M11).
     private actor StateStore {
         var sessionState: SessionState
+        let directory: URL
+        private var failWritesForTesting = false
 
-        init(sessionState: SessionState) {
+        init(sessionState: SessionState, directory: URL) {
             self.sessionState = sessionState
+            self.directory = directory
         }
 
-        func appendChunk(_ chunk: ProcessedChunk) -> SessionState {
+        func appendChunk(_ chunk: ProcessedChunk) {
             sessionState.chunks.append(chunk)
-            return sessionState
         }
 
         func noteIssue(_ issue: SessionIssue) {
             sessionState.issues.append(issue)
         }
 
-        func noteSessionWriteFailure(chunkIndex: Int?) -> SessionState {
+        func noteSessionWriteFailure(chunkIndex: Int?) {
             sessionState.issues.append(SessionIssue(
                 chunk: chunkIndex, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil)
             ))
-            return sessionState
         }
 
-        func appendGap(_ gap: CaptureGap) -> SessionState {
+        func appendGap(_ gap: CaptureGap) {
             sessionState.gaps.append(gap)
-            return sessionState
         }
 
         func getSessionState() -> SessionState {
             sessionState
         }
+
+        /// Write the current state. When the folder's session.json belonged to another recording,
+        /// it was moved aside (never overwritten); that is recorded here and written with the state.
+        func persist() throws {
+            if failWritesForTesting { throw CocoaError(.fileWriteUnknown) }
+            if try SessionState.write(sessionState, directory: directory) != nil {
+                sessionState.issues.append(SessionIssue(
+                    chunk: nil, issue: ChunkIssue(code: .sessionFileDisplaced, track: nil, count: nil)
+                ))
+                try SessionState.write(sessionState, directory: directory)
+            }
+        }
+
+        func setFailWritesForTesting() { failWritesForTesting = true }
+    }
+
+    /// Test seam: every later session.json write fails.
+    func failSessionWritesForTesting() async {
+        await stateStore.setFailWritesForTesting()
     }
 
     public init(
@@ -82,7 +106,7 @@ public final class ChunkProcessor {
     ) {
         self.config = config
         self.outputDirectory = outputDirectory
-        self.stateStore = StateStore(sessionState: sessionState)
+        self.stateStore = StateStore(sessionState: sessionState, directory: outputDirectory)
         self.sourceByIndex = Dictionary(
             sessionState.chunks.map { ($0.index, Self.sourceBaseName(ofFile: $0.audioPath)) },
             uniquingKeysWith: { first, _ in first }
@@ -113,10 +137,16 @@ public final class ChunkProcessor {
         await task?.value
     }
 
-    /// Wait for all chunk processing to complete before merging.
+    /// Wait for all chunk processing to complete before merging — including any chunk scheduled
+    /// while waiting (a rotation reply that lands late): the task set is re-read until it stops
+    /// growing (B-I3). Tasks are never removed, so the count tells whether any were added.
     public func awaitAllProcessed() async {
-        for task in Array(tasksByIndex.values) + bookkeepingTasks {
-            await task.value
+        var awaited = 0
+        while tasksByIndex.count + bookkeepingTasks.count > awaited {
+            awaited = tasksByIndex.count + bookkeepingTasks.count
+            for task in Array(tasksByIndex.values) + bookkeepingTasks {
+                await task.value
+            }
         }
     }
 
@@ -187,14 +217,24 @@ public final class ChunkProcessor {
     /// A period during which nothing was recorded (relaunch, sleep). Persisted with the session so a
     /// later relaunch and the final transcript both see it (§7.2 metadata.capture.gaps).
     public nonisolated func appendGap(_ gap: CaptureGap) async {
-        let snapshot = await stateStore.appendGap(gap)
+        await stateStore.appendGap(gap)
+        // Same path as a chunk's write: a failure is recorded and reported (nil = session-level).
+        _ = await persist(chunkIndex: nil, context: "after a capture gap")
+    }
+
+    /// Write session.json and tell the coordinator either way: `onSessionWriteSucceeded`, or
+    /// `onSessionWriteFailure` with the failure recorded in the session's issues so the next
+    /// successful write persists it — a session that cannot be saved is not recoverable.
+    private nonisolated func persist(chunkIndex: Int?, context: String) async -> Bool {
         do {
-            try SessionState.write(snapshot, directory: outputDirectory)
+            try await stateStore.persist()
+            await MainActor.run { self.onSessionWriteSucceeded?() }
+            return true
         } catch {
-            Logger.state.error("Failed to write session.json after a capture gap: \(error, privacy: .public)")
-            // Same path as a chunk's failed write: recorded, and reported (nil = session-level).
-            _ = await stateStore.noteSessionWriteFailure(chunkIndex: nil)
-            await MainActor.run { self.onSessionWriteFailure?(nil) }
+            Logger.state.error("Failed to write session.json \(context, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            await stateStore.noteSessionWriteFailure(chunkIndex: chunkIndex)
+            await MainActor.run { self.onSessionWriteFailure?(chunkIndex) }
+            return false
         }
     }
 
@@ -206,20 +246,38 @@ public final class ChunkProcessor {
             "Chunk \(chunk.index, privacy: .public) processing started (qos: \(self.config.chunkProcessingQos, privacy: .public))"
         )
 
+        // 0. A chunk whose WAVs are gone but whose .m4a exists — archived, then the process died
+        //    before session.json got it (C-I4, in a build that deleted the WAVs first). The archive is
+        //    the only copy: its words are recognised from scratch WAVs split out of it, and it stays
+        //    the chunk's audio as-is (never re-encoded over itself).
+        var systemURL = URL(fileURLWithPath: chunk.systemPath)
+        var micURL = URL(fileURLWithPath: chunk.micPath)
+        var existingArchive: URL?
+        var scratch: URL?
+        var archiveIssues: [ChunkIssue] = []
+        if let archive = Self.archiveOnlyChunk(chunk) {
+            existingArchive = archive
+            if let split = await splitArchive(archive, chunkIndex: chunk.index) {
+                archiveIssues.append(ChunkIssue(code: .transcribedFromArchive, track: nil, count: nil))
+                scratch = split.directory
+                systemURL = split.system
+                micURL = split.mic ?? split.directory.appendingPathComponent("absent_mic.wav")
+            }
+        }
+        defer { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
+
         // 1. Transcribe + diarize system audio
-        let systemURL = URL(fileURLWithPath: chunk.systemPath)
         let systemResult = await transcribeStream(
             audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
         )
 
         // 2. Transcribe mic audio (skip if file missing or empty)
-        let micURL = URL(fileURLWithPath: chunk.micPath)
         // Dual-stream is a property of the CAPTURE, not of whether the user spoke. Deriving it from
         // `!micResult.segments.isEmpty` meant a chunk the user sat through in silence skipped source
         // prefixing while its siblings kept it — so the reconciler's `Remote Speaker N` keys matched
         // nothing there, its mapping fell back to the identity, and its chunk-local numbering was
         // laundered into the global namespace, swapping speakers for the rest of the meeting.
-        let hasDualStream = FileManager.default.fileExists(atPath: chunk.micPath)
+        let hasDualStream = FileManager.default.fileExists(atPath: micURL.path)
         let micResult: StreamResult
         if hasDualStream {
             micResult = await transcribeStream(
@@ -228,7 +286,7 @@ public final class ChunkProcessor {
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
-        var issues = extraIssues + systemResult.issues + micResult.issues
+        var issues = extraIssues + archiveIssues + systemResult.issues + micResult.issues
 
         // 3. Merge segments
         var allSegments = systemResult.segments + micResult.segments
@@ -290,46 +348,54 @@ public final class ChunkProcessor {
         // hasDualStream, which is segment-based) so a mic file that produced no segments is still
         // consumed instead of orphaned. The ONLY time a WAV survives is a genuine archive failure:
         // deleting a WAV that has no .m4a replacement would be real data loss.
+        //
+        // The archiver never deletes here: the WAVs go only once session.json holds this chunk with
+        // its .m4a (step 8, C-I4). Deleted first, a crash before the write lost the chunk.
         var audioPath = systemURL.lastPathComponent
-        let micFileExists = FileManager.default.fileExists(atPath: chunk.micPath)
+        let micFileExists = FileManager.default.fileExists(atPath: micURL.path)
         // An ASR-failed chunk keeps its WAV(s) next to the .m4a so it can be re-transcribed (P3):
         // the AAC is lossy, and the words it failed to yield exist nowhere else.
         let preserveSourceWAV = (config.preserveSourceWAV ?? false) || issues.contains { $0.code == .asrFailed }
         var archivePath: URL?
-        do {
-            let archiveResult: AudioArchiveResult
-            if micFileExists {
-                archiveResult = try await AudioArchiver.archive(
-                    systemAudio: systemURL,
-                    micAudio: micURL,
-                    outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps,
-                    preserveSourceWAV: preserveSourceWAV
+        if let existingArchive {
+            audioPath = existingArchive.lastPathComponent
+            archivePath = existingArchive
+        } else {
+            do {
+                let archiveResult: AudioArchiveResult
+                if micFileExists {
+                    archiveResult = try await AudioArchiver.archive(
+                        systemAudio: systemURL,
+                        micAudio: micURL,
+                        outputDirectory: outputDirectory,
+                        bitrateKbps: config.archiveBitrateKbps,
+                        preserveSourceWAV: true
+                    )
+                } else {
+                    archiveResult = try await AudioArchiver.archiveSystemOnly(
+                        systemAudio: systemURL,
+                        outputDirectory: outputDirectory,
+                        bitrateKbps: config.archiveBitrateKbps,
+                        preserveSourceWAV: true
+                    )
+                }
+                audioPath = archiveResult.archivePath.lastPathComponent
+                archivePath = archiveResult.archivePath
+                Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .sensitive)")
+            } catch {
+                // Archive failed — keep the WAV(s) as a last-resort fallback. Record whichever one
+                // actually holds audio: on a speakerphone recording the system WAV is an empty header
+                // and the mic WAV holds every word, and pointing the transcript at the empty one left
+                // the real audio referenced nowhere (#183).
+                audioPath = AudioArchiver.fallbackAudioName(
+                    systemName: systemURL.lastPathComponent,
+                    systemHasFrames: Self.hasAudioFrames(systemURL),
+                    micName: micFileExists ? micURL.lastPathComponent : nil,
+                    micHasFrames: micFileExists && Self.hasAudioFrames(micURL)
                 )
-            } else {
-                archiveResult = try await AudioArchiver.archiveSystemOnly(
-                    systemAudio: systemURL,
-                    outputDirectory: outputDirectory,
-                    bitrateKbps: config.archiveBitrateKbps,
-                    preserveSourceWAV: preserveSourceWAV
-                )
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed (\(type(of: error), privacy: .public)), keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .private)")
+                issues.append(ChunkIssue(code: .archiveFailed, track: nil, count: nil))
             }
-            audioPath = archiveResult.archivePath.lastPathComponent
-            archivePath = archiveResult.archivePath
-            Logger.files.info("Chunk \(chunk.index, privacy: .public) archived: \(archiveResult.archivePath.lastPathComponent, privacy: .sensitive)")
-        } catch {
-            // Archive failed — keep the WAV(s) as a last-resort fallback. Record whichever one
-            // actually holds audio: on a speakerphone recording the system WAV is an empty header
-            // and the mic WAV holds every word, and pointing the transcript at the empty one left
-            // the real audio referenced nowhere (#183).
-            audioPath = AudioArchiver.fallbackAudioName(
-                systemName: systemURL.lastPathComponent,
-                systemHasFrames: Self.hasAudioFrames(systemURL),
-                micName: micFileExists ? micURL.lastPathComponent : nil,
-                micHasFrames: micFileExists && Self.hasAudioFrames(micURL)
-            )
-            Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .public)")
-            issues.append(ChunkIssue(code: .archiveFailed, track: nil, count: nil))
         }
 
         // Enforce the storage quota (P13). Outside the archive `catch`: a quota failure used to land
@@ -344,7 +410,7 @@ public final class ChunkProcessor {
                     protectedFile: archivePath
                 )
             } catch {
-                Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .public)")
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
             }
         }
 
@@ -361,17 +427,20 @@ public final class ChunkProcessor {
             issues: issues
         )
 
-        // 8. Actor-isolated append + persist
-        let snapshot = await stateStore.appendChunk(processed)
-
-        do {
-            try SessionState.write(snapshot, directory: outputDirectory)
-        } catch {
-            Logger.state.error("Failed to write session.json for chunk \(chunk.index, privacy: .public): \(error, privacy: .public)")
-            // Recorded in memory so the next successful write persists it, and reported so the
-            // coordinator can tell the user now — a session that cannot be saved is not recoverable.
-            _ = await stateStore.noteSessionWriteFailure(chunkIndex: chunk.index)
-            await MainActor.run { self.onSessionWriteFailure?(chunk.index) }
+        // 8. Actor-isolated append + persist; only then may the source WAVs go (C-I4). A chunk that
+        //    could not be persisted keeps them: they are what a relaunch's orphan scan finds.
+        await stateStore.appendChunk(processed)
+        let persisted = await persist(chunkIndex: chunk.index, context: "for chunk \(chunk.index)")
+        if existingArchive == nil, archivePath != nil {
+            if !persisted {
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) is not in session.json — keeping its WAV(s) so a relaunch can still recover it")
+            } else if preserveSourceWAV {
+                Logger.files.info("Chunk \(chunk.index, privacy: .public): keeping source WAV(s) next to the archive")
+            } else {
+                // Every success path of the archiver consumed both files (an empty header included).
+                try? FileManager.default.removeItem(at: systemURL)
+                if micFileExists { try? FileManager.default.removeItem(at: micURL) }
+            }
         }
 
         let elapsed = ContinuousClock.now - startTime
@@ -385,6 +454,52 @@ public final class ChunkProcessor {
         let segments: [LabeledSegment]
         let speakerDatabase: [String: [Float]]
         var issues: [ChunkIssue] = []
+    }
+
+    /// The chunk's `.m4a` when it is the only artefact left: neither WAV exists, the archive does.
+    /// A caller that names the archive itself as the system path gets it back too — archiving it
+    /// again would remove the source as "stale output" before encoding it.
+    nonisolated static func archiveOnlyChunk(_ chunk: ChunkRotator.FinalizedChunk) -> URL? {
+        let system = URL(fileURLWithPath: chunk.systemPath)
+        let fm = FileManager.default
+        if system.pathExtension == "m4a" { return fm.fileExists(atPath: system.path) ? system : nil }
+        guard !fm.fileExists(atPath: system.path), !fm.fileExists(atPath: chunk.micPath) else { return nil }
+        let archive = system.deletingPathExtension().appendingPathExtension("m4a")
+        return fm.fileExists(atPath: archive.path) ? archive : nil
+    }
+
+    /// Split an archived chunk (L = mic, R = system) into scratch WAVs outside the output folder.
+    /// The mic side is kept only when this chunk was dual-stream: like the session's other chunks
+    /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
+    /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
+    /// system stream missing, never dropped.
+    private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int) async -> (directory: URL, system: URL, mic: URL?)? {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let split = try await AudioSourceResolver.splitChannels(stereoAac: archive, outputDirectory: directory)
+            let siblings = await stateStore.getSessionState().chunks
+            let dual = siblings.isEmpty ? Self.hasSignal(split.local) : siblings.contains(where: \.isDualStream)
+            if !dual { try? FileManager.default.removeItem(at: split.local) }
+            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public) has no WAVs, only its archive — transcribing it from \(archive.lastPathComponent, privacy: .sensitive)")
+            return (directory, split.remote, dual ? split.local : nil)
+        } catch {
+            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): its archive could not be read (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+    }
+
+    /// Whether a WAV holds any non-zero sample (stops at the first one).
+    private nonisolated static func hasSignal(_ url: URL) -> Bool {
+        guard let file = try? AVAudioFile(forReading: url, commonFormat: .pcmFormatInt16, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 48_000)
+        else { return false }
+        while (try? file.read(into: buffer)) != nil, buffer.frameLength > 0 {
+            guard let samples = buffer.int16ChannelData?[0] else { return false }
+            if UnsafeBufferPointer(start: samples, count: Int(buffer.frameLength)).contains(where: { $0 != 0 }) { return true }
+        }
+        return false
     }
 
     /// Whether a WAV holds any audio at all. A capture that opened a file and never wrote a frame

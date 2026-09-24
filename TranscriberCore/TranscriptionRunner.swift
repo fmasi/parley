@@ -523,7 +523,7 @@ public final class TranscriptionRunner {
         }
 
         // 10. Clean up session.json
-        SessionState.delete(directory: outputDirectory)
+        SessionState.delete(directory: outputDirectory, sessionId: sessionState.sessionId)
 
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
@@ -620,23 +620,27 @@ public final class TranscriptionRunner {
         if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
 
-        var sessionState = seededState ?? SessionState(
+        let fresh = SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
             engine: config.engine.rawValue,
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )
-        // A seed from another session is accepted — refusing would lose the chunks it holds — but
-        // never silently: it is logged and recorded as a problem. An engine change between crash and
-        // resume (a Settings change) is recorded as information only.
+        var sessionState = seededState ?? fresh
+        // A seed from ANOTHER session is refused (C-I5): accepted, it kept the other id, so this
+        // recording finalized as the other's `<id>.json`, merged into the other's `<id>.m4a` and
+        // took the other meeting's chunks into its record. This session starts fresh under its own
+        // id; the refusal is recorded as a problem. The seed's own file is untouched and stays
+        // recoverable under its id. An engine change between crash and resume (a Settings change)
+        // is recorded as information only, and still seeds.
         if let seededState, seededState.sessionId != sessionBaseName {
             Logger.state.error(
-                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — resuming anyway"
+                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — not seeding; starting this session fresh"
             )
+            sessionState = fresh
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil)))
-        }
-        if let seededState, seededState.engine != config.engine.rawValue {
+        } else if let seededState, seededState.engine != config.engine.rawValue {
             Logger.state.info(
                 "Seeded session was transcribed with \(seededState.engine, privacy: .public); resuming with \(config.engine.rawValue, privacy: .public)"
             )

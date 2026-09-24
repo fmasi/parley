@@ -151,7 +151,7 @@ public enum AudioArchiver {
 
         // 5. Delete source WAVs (unless explicitly preserved for diagnostics).
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAVs (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAVs kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: systemAudio)
             try? FileManager.default.removeItem(at: micAudio)
@@ -217,7 +217,7 @@ public enum AudioArchiver {
         }
 
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAV kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: systemAudio)
         }
@@ -290,7 +290,7 @@ public enum AudioArchiver {
         }
 
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAV kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: micAudio)
         }

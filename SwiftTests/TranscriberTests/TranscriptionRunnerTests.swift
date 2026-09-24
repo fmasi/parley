@@ -159,15 +159,37 @@ import Testing
         #expect((clean["processing_issues"] as? [Any])?.isEmpty == true)
     }
 
-    /// Review round 1 item 10: a seed from another session or engine is accepted but never silently.
-    @Test func aMismatchedSeedIsRecorded() async throws {
+    /// R2 council (C-I5, reverses review round 1 item 10): a seed from ANOTHER session is refused. It
+    /// used to be accepted with its own id, so this recording finalized as `<other>.json` and merged
+    /// the other meeting's chunks into its record. The pipeline starts fresh under the current id,
+    /// the mismatch is recorded, and the other session's chunks stay out.
+    @Test func aMismatchedSeedIsRefusedAndRecorded() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let seeded = SessionState(sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10)
+        let foreign = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "other-0.m4a", segments: [], speakerDatabase: [:])
+        let seeded = SessionState(sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio",
+                                  chunkDurationMinutes: 10, chunks: [foreign])
         let runner = TranscriptionRunner()
         try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded, firstChunkIndex: 0)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
-        #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))
+        #expect(state.sessionId == "m", "the current session's id, never the seed's")
+        #expect(state.chunks.isEmpty, "the other session's chunks are not this recording's")
+        #expect(state.meetingStart != seeded.meetingStart)
+        #expect(state.issues == [SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))])
+        #expect(runner.chunkRotator?.currentChunkInfo.index == 0)
         runner.teardownChunkedPipeline()
+    }
+
+    /// C-I3: finalize deletes only ITS session.json — never a later recording's that now holds the file.
+    @Test func finalizeDeletesOnlyItsOwnSessionFile() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(SessionState(sessionId: "later", meetingStart: Date(timeIntervalSince1970: 60), engine: "fluid_audio",
+                                            chunkDurationMinutes: 10), directory: dir)
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                                   segments: [.init(start: 0, end: 5, text: "hi", speaker: "Speaker 1", source: "remote")],
+                                   speakerDatabase: ["Speaker 1": [1, 0, 0]])
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
+        _ = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+        #expect(SessionState.read(directory: dir, sessionId: "later") != nil)
     }
 
     /// R0/R2 round ruling (R345 item 9): an engine change between crash and resume is informational;

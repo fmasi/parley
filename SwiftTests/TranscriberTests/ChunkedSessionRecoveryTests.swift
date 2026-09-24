@@ -242,7 +242,46 @@ struct ChunkedSessionRecoveryTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        SessionState.delete(directory: dir)  // must not throw or crash with nothing on disk
+        SessionState.delete(directory: dir, sessionId: "m")  // must not throw or crash with nothing on disk
         #expect(SessionState.read(directory: dir) == nil)
+    }
+
+    /// C-I4: chunk 1 was archived and its WAVs deleted, then the app died before session.json got it.
+    /// Recovery transcribes it from the archive; its words and its audio are in the transcript.
+    @Test func recoversAnArchiveOnlyOrphan() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0])
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-0.wav"), seconds: 1)
+        _ = try await AudioArchiver.archiveSystemOnly(systemAudio: dir.appendingPathComponent("m-0.wav"), outputDirectory: dir, bitrateKbps: 64)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-1.wav"), seconds: 1)
+        _ = try await AudioArchiver.archiveSystemOnly(systemAudio: dir.appendingPathComponent("m-1.wav"), outputDirectory: dir, bitrateKbps: 64)
+
+        var config = Config.default
+        config.mergeChunkedAudio = false
+        let result = try #require(try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: config,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
+        ))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        #expect((json["segments"] as? [[String: Any]])?.compactMap { $0["text"] as? String } == ["chunk 0", "hello"])
+        #expect((json["metadata"] as? [String: Any])?["audio_files"] as? [String] == ["m-0.m4a", "m-1.m4a"])
+    }
+
+    /// C-I3: the session was moved aside by a later recording in the same folder. Recovery by id still
+    /// finds and finalizes it, deletes only its own files, and leaves the other recording's alone.
+    @Test func recoversAMovedAsideSessionAndLeavesTheOtherAlone() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0, 1])
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "later", meetingStart: Date(timeIntervalSince1970: 7200), chunkIndices: [0])
+        let result = try #require(try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "m", config: .default,
+            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()
+        ))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        #expect((json["segments"] as? [[String: Any]])?.count == 2)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("session-m.json").path))
+        #expect(SessionState.read(directory: dir, sessionId: "later")?.chunks.count == 1, "the later recording's session is untouched")
     }
 }
