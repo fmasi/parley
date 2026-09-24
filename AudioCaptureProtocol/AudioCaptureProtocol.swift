@@ -52,6 +52,21 @@ import Foundation
     func drainDiagnostics(
         reply: @escaping (Data?) -> Void
     )
+
+    /// The System Audio Recording (`kTCCServiceAudioCapture`) permission as the HELPER sees it (#220).
+    /// Asked here rather than in the app because TCC caches the answer per process: the long-running
+    /// app keeps its launch-time answer, while the helper (which touches the tap) sees changes.
+    /// Reply: "authorized" | "denied" | "notDetermined" | "unavailable" (SPI missing — unverifiable).
+    func systemAudioPermissionStatus(
+        reply: @escaping (String) -> Void
+    )
+
+    /// Rebuild the Core Audio tap in place after the System Audio Recording permission was granted
+    /// mid-recording, so remote audio resumes in the SAME recording (#220). No-op on ScreenCaptureKit.
+    /// Reply: (success: Bool, errorMessage: String?)
+    func restartSystemAudio(
+        reply: @escaping (Bool, String?) -> Void
+    )
 }
 
 /// Reverse XPC channel: the helper calls back into the app to report that it self-healed a benign

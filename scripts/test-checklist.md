@@ -1,88 +1,51 @@
-# Test Checklist
+# Test Checklist — permission readiness (#220, #174)
 
-Build/install this tree first: `python3 scripts/dev.py`
-(Resets TCC — re-grant Screen Recording + Microphone on first launch.)
+Build and install this tree: `python3 scripts/dev.py`. The stable signing identity keeps existing
+grants; this checklist resets only the permission under test.
+Set Settings → Audio → Capture Method → **Core Audio Tap** unless a step says otherwise.
+To play "remote" audio, use any video/music, or `afplay` a file.
 
-## Crash-recovery rehydration (#135 — this branch)
-Crashing a long recording used to silently discard the whole session. Recovery now reads
-`session.json`, re-ingests the un-archived orphan chunk(s), and finalizes. Use a short chunk
-duration (Settings → set chunk minutes low, e.g. 1) so a few-minute recording rotates several chunks.
-- [ ] **Single-fault relaunch recovery (the core fix).** Record past ≥2 chunk rotations, then **force-quit Parley** (⌥⌘Esc → Force Quit) so the audio helper dies too. Relaunch. Expect: a **complete transcript** covering *all* chunks including the in-progress one — NOT "No usable audio files", not just the last few minutes. Rename dialog + auto-summary prompt appear (Deliverable C). `session.json` is gone afterward.
-- [ ] **Timestamps monotonic (H2).** In the recovered transcript, timestamps increase across chunk boundaries — no two chunks' minute-2 lines interleaved; SRT (if enabled) is monotonic.
-- [ ] **Speakers not split/merged wrongly (H3).** With ≥2 speakers across different chunks, the same person keeps one label across chunks and two different people aren't collapsed into one.
-- [ ] **Double-fault (app crash → reattach → helper crash).** Record ≥2 chunks; force-quit the app but immediately relaunch WHILE the helper is still capturing (Flow A re-attach — you'll see "Recording…" resume); then kill the helper (`pkill -9 audio-capture-helper-xpc`) to force a restart; keep talking; Stop. Expect: the transcript includes the post-restart audio too (no silently dropped segment). *Note (reviewer edge): the fix keys off the system WAV; a mic-only orphan is a contrived case not covered.*
-- [ ] **Normal (no-crash) recording still fine.** A clean record→stop produces the same transcript quality as before (regression check on the relocated pipeline).
+The acceptance bar for this class of bug (lesson from #217): the alarm must **fire**, it must
+**stay** while the problem continues, and it must be **actionable**. A single past-tense
+banner doesn't count. **Rule for every mid-call step: after Stop, the right channel of the `.m4a` either
+has the remote audio, or the recording raised a persisting alarm. Never neither.**
+Check the right channel with `ffmpeg -i <file>.m4a -af "pan=mono|c0=c1,volumedetect" -f null -`
+(mean around −91 dB means digital zero), and read `capture_provenance.system_exact_zero_seconds` in the transcript JSON.
+
+## The root cause: Parley can now be prompted
+- [ ] **Prompt appears.** `tccutil reset AudioCapture eu.fmasi.parley`, relaunch Parley. Expect the system prompt **"Parley.app" would like to record your system audio** at launch. Allow. No repair window follows.
+- [ ] **System Settings lists it.** Parley appears under Privacy & Security → Screen & System Audio Recording → **System Audio Recording Only**, switched on.
+
+## The council's critical case: Allow quickly at Record
+- [ ] **Fast Allow, built-in speakers.** With output on the **built-in speakers** (not AirPods, whose route switch triggers a rebuild that would hide the bug), `tccutil reset AudioCapture eu.fmasi.parley`, play audio, press Record, and click **Allow within ~5 s**. After Stop the right channel **has audio** from a few seconds in, and `system_exact_zero_seconds` is small, not the whole recording.
+
+- [ ] **No false "restored".** In the fast-Allow run above, no "being recorded again" banner appears (nothing was ever reported).
+
+## Repair window, before recording
+- [ ] **Denied at launch → repair, not lockout.** Switch Parley **off** under "System Audio Recording Only", relaunch. The menu is usable (no "Setup required"), and a floating **Permission Needed** window lists System Audio Recording with **Open Settings**. Open Settings lands on the right pane; switch Parley on → the window **closes by itself** within ~2 s.
+- [ ] **Record start with the permission off.** Switch it off, press Record. The recording **starts** (timer running, mic captured), then the repair window opens saying **"Parley isn’t recording everything"** (not "your next recording"), with a notification. The menu shows the sticky red row **"The other side isn’t being recorded"**.
+- [ ] **The alarm persists.** Click **Later**. The sticky menu row stays and **can't be dismissed**. Cause an unrelated banner (e.g. switch the mic): the sticky row is still there. After ~3 min the window reopens by itself.
+- [ ] **Fix after Later, via System Settings.** With the window dismissed, switch Parley on in System Settings. Within ~5 s the helper rebuilds the tap by itself; once remote audio plays the sticky row clears and the banner says it's being recorded again. After Stop the right channel has audio after the fix.
+- [ ] **It comes back next time.** Stop, then start another recording with the permission still off → the window opens again.
+
+## Mid-call (the #220 scenario)
+- [ ] **Revocation while audio plays.** Record with remote audio playing; after ~20 s switch Parley off under "System Audio Recording Only". Then **either** the right channel keeps its audio after Stop (macOS keeps feeding a running tap), **or** the repair window + sticky row appear within ~15 s. Check the archive to tell which. Also try revoking **then switching the output device** (forces a rebuild): the alarm must appear.
+- [ ] **No focus stealing.** When the window pops mid-call, typing in the meeting app's chat keeps working.
+- [ ] **Fix resumes in the same recording.** Switch it back on → the window closes by itself and the banner says remote audio is being recorded again. After Stop, the `.m4a` right channel has audio **before** the revoke and **after** the fix, in one file. `.diag.jsonl` has `systemAudioPermissionDenied` then `systemAudioPermissionRestored`, and provenance has `system_audio_unrecovered: false` and `quality_anomaly_count ≥ 1`.
+- [ ] **Unfixed is recorded honestly.** Repeat but don't fix (click **Later**). The banner stays until Stop, and provenance has `system_audio_unrecovered: true`.
+
+## No false alarms
+- [ ] **Genuine silence.** Permission on, record 60 s with nothing playing and then a muted call → **no** repair window.
+- [ ] **ScreenCaptureKit unaffected.** Switch Capture Method to Screen Recording and Save: Setup/Settings show the **Screen Recording** row, and recording works with no System Audio prompt.
+- [ ] **Switching to the tap asks right away.** `tccutil reset AudioCapture eu.fmasi.parley`, then switch Capture Method to Core Audio Tap and **Save** → the system prompt appears immediately, not at the next meeting.
+
+## A stalled helper must not wedge the permission checks
+- [ ] **Frozen helper.** Start a recording (so the capture helper is running), then `pkill -STOP -f audio-capture-helper-xpc`. In Settings switch Capture Method and **Save**: the app and menu must stay responsive, and within ~5 s the permission check gives up (each helper call has a 3 s deadline and fails open) instead of hanging. Then `pkill -CONT -f audio-capture-helper-xpc` and confirm the recording carries on. (The same deadline protects the launch check; that path is not race-free to test by hand.)
+
+## Tap recording sanity (this PR)
+- [ ] **Normal tap recording.** Permission on, a real call or a video for 2 minutes: transcript has remote segments, and no repair window or new banners appear.
 
 ---
-
-## Summary-failure visibility (#134 — shipped, kept for reference)
-A failed auto-summary used to fail silently, and a misconfigured endpoint reported
-the misleading "Summary response contained no content". Both are fixed here.
-- [ ] **Broken config surfaces the real error.** In Settings → Summary, enable summaries with a wrong API key (or a model the server doesn't have). Record a short session and finish the rename. A **"Summary Failed"** notification appears whose body is the server's *actual* message (e.g. the auth/model error), **not** "Summary response contained no content".
-- [ ] **Working config is silent + writes the file.** Fix the config to a healthy endpoint/model, record again: no failure notification, and a `…-summary.md` lands next to the transcript.
-- [ ] **LM Studio native path.** With provider = LM Studio and the target model unloaded/oversized, a failure notification shows the real reason rather than a generic empty-content message.
-
----
-
-# Test Checklist — v0.8.x UI Revamp (all 8 screens)
-_(Stale: belongs to the UI-revamp track, not this branch. Left intact — maintainer to prune.)_
-
-Everything here is a visual/UX pass — the pipeline is untouched. Compare
-against docs/design/design-system-0.8.x.md ("Quiet Confidence") when in doubt.
-
-## Menu bar panel (MenuView — from Pass 1, re-check after rebase)
-- [ ] Panel opens as a 320pt window-style panel, not a text menu.
-- [ ] Idle: green dot, prominent red Start Recording button, hover-highlight on action rows.
-- [ ] Recording: pulsing red dot, live mm:ss timer ticking, Stop button.
-- [ ] Close and reopen the panel *while recording*: the dot fades in and picks up its pulse (no un-animated jump), and the timer shows the true elapsed time, not a restart from 00:00.
-- [ ] Stop recording with the panel open: the dot fades back to solid rather than snapping.
-- [ ] Transcribing: spinner in header, record button disabled.
-- [ ] Warnings/criticals appear as dismissible banners, not disabled menu items.
-
-## Setup window (SetupView — from Pass 1, re-check after rebase)
-- [ ] Opens with app icon + "Welcome to Parley" + privacy line, grouped cards with icon tiles.
-- [ ] Continue stays disabled with an explanatory footnote until required permissions + model are ready.
-- [ ] Folder Choose… works; denied folder shows orange guidance, not red.
-- [ ] Window opens centered, full content visible (hero through Continue), no clipping.
-- [ ] Drag the window shorter than its opening size: content scrolls, Continue stays reachable at the bottom the whole time.
-- [ ] Drag the window taller: no dead space appears below the footer.
-- [ ] **Folder access denied.** With all permissions granted and the model ready, pick a folder you don't have access to (or revoke access after choosing) and click Continue. Expect: Continue fires (is not disabled), the denial message appears in the footer, and the Recordings card scrolls into view. Grant access in Settings and click Continue again — expect setup completes normally.
-- [ ] With an uncached model already selected, opening Setup scrolls the Transcription card into view automatically (Download button visible without manual scrolling).
-- [ ] **First-launch order.** On a fresh Setup (no permissions granted yet, model not cached), grant Microphone + Screen Recording. As soon as permissions complete, the Transcription card auto-scrolls into view (Download button visible) — not just when the model state itself changes.
-
-## Settings window (NEW — tabbed)
-- [ ] Five tabs render with toolbar-style icons: General / Audio / Transcription / Summary / Permissions.
-- [ ] Window resizes sensibly when switching tabs; no clipped content.
-- [ ] General: Recording Folder shows a ~-abbreviated path + Choose… panel (no raw TextField).
-- [ ] Save bar at the bottom of every tab; ⌘S saves; "Saved" appears ~2s; edits persist to config.json only after Save.
-- [ ] Transcription: engine switch to Parakeet when model uncached → "Model will download … when you save"; Save triggers download with progress; failure shows orange (not red).
-- [ ] Permissions tab: granted = green check; not-determined = Grant; denied = Open Settings (deep-links Privacy pane).
-- [ ] Summary: LM Studio provider reveals the Context section; empty fields show "Model default" prompts.
-- [ ] Summary: toggling "Summarize After Transcription" grows/shrinks the window (260 → 460/620pt). Confirm it reads as content revealing itself, not as a glitch.
-- [ ] Check for Updates…: the panel closes before Sparkle's dialog appears (it must not linger behind it).
-
-## Rename Speakers dialog (NEW — cards)
-- [ ] One card per speaker: label top-left, sample counter + play/next top-right, name field, quoted sample text.
-- [ ] Sample text is readable (secondary, not faint quaternary).
-- [ ] Play/next buttons are comfortably clickable; playback still channel-correct (local=L, remote=R).
-
-## Session name dialog
-- [ ] With a calendar meeting in range: field pre-filled + "Suggested from your calendar" caption; typing your own name swaps the caption to the timestamp hint.
-- [ ] Start Recording is the visually primary (filled) button.
-
-## Mic switch dialog (during recording)
-- [ ] Switch shows a spinner + "Switching…" while in flight.
-- [ ] A failed switch shows an orange warning label, not red.
-
-## Critical alert
-- [ ] Sits on the same glass/material as the other dialogs; Dismiss is a prominent filled button; red triangle unchanged.
-
-## Cross-cutting
-- [ ] Every "opens further UI" label uses a true ellipsis (…): Settings…, Rename Speakers…, Choose…, Check for Updates…, Switching…
-- [ ] Red appears ONLY for: record/stop affordances, recording timer/dot, critical alerts, destructive rows (Quit is not red), meter clipping.
-- [ ] Dark mode: run the full pass once in dark mode — cards, glass, and meter must all adapt.
-- [ ] Large Text: with System Settings › Accessibility › Display › Larger Text raised, open each Settings tab. Rows grow; the grouped Form should scroll within its fixed tab height, never clip. (Same construction as the pre-revamp 600pt scrolling Form.)
-- [ ] VoiceOver: menu panel rows announce their title only, not the SF Symbol name; the status dot is not announced as an unlabelled element.
 
 ## Regression (always — do not trim; these are standing gates, not per-feature tests)
 - [ ] Start recording → stop → transcription completes

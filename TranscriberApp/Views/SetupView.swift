@@ -24,6 +24,10 @@ struct SetupView: View {
             || downloadState == .done
     }
 
+    private var systemAudioPermission: CapturePermission {
+        permissionManager.systemAudioSource == .coreAudioTap ? .systemAudioRecording : .screenRecording
+    }
+
     private var canContinue: Bool {
         // Deliberately NOT gated on folderCheckDenied: the only way to clear a
         // denial is to grant folder access in System Settings and press
@@ -69,13 +73,15 @@ struct SetupView: View {
                                 onGrant: { Task { await permissionManager.requestMicrophone() } }
                             )
                             Divider()
+                            // Follows the capture method: the tap needs System Audio Recording, not
+                            // Screen Recording (#220).
                             PermissionRow(
-                                tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
-                                name: "Screen Recording",
-                                detail: "Capture system audio from meeting apps",
-                                status: permissionManager.screenRecording,
-                                pane: .screenRecording,
-                                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                                tile: systemAudioPermission.tile,
+                                name: systemAudioPermission.displayName,
+                                detail: systemAudioPermission.detail,
+                                status: permissionManager.status(of: systemAudioPermission),
+                                pane: systemAudioPermission.pane,
+                                onGrant: { Task { await grantPermission(systemAudioPermission, using: permissionManager) } }
                             )
                         }
 
@@ -455,7 +461,7 @@ private struct FolderPickerRow: View {
     }
 }
 
-private struct PermissionRow: View {
+struct PermissionRow: View {
     let tile: IconTile
     let name: String
     let detail: String

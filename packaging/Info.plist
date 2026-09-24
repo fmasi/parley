@@ -39,6 +39,13 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Parley needs microphone access to record your voice.</string>
 
+    <!-- REQUIRED HERE, in the app (#220). The Core Audio tap is created by the XPC helper, but TCC
+         attributes System Audio Recording to the HOST APP: the prompt names Parley.app and shows
+         THIS string. Without it macOS never prompts, the permission stays undetermined forever, and
+         the tap silently records digital zeros. Verified by device spike 2026-09-23. -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Parley needs System Audio Recording permission to capture meeting and call audio (including Continuity calls).</string>
+
     <key>NSCalendarsUsageDescription</key>
     <string>Parley uses your calendar to suggest a name for the recording based on your current meeting.</string>
 

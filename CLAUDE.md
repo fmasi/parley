@@ -23,7 +23,9 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
-- `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter)
+- `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter); System Audio Recording is asked of the helper over XPC
+- `TranscriberApp/Services/PermissionRepairWindowController.swift` -- checks recording permissions at launch, record start, capture-method change and on helper evidence; opens the floating repair window and rebuilds the tap once fixed (#220)
+- `TranscriberApp/Views/PermissionRepairView.swift` -- repair window: lists only what's missing with a one-click fix, polls every 2 s only while open, closes itself when resolved
 - `TranscriberApp/Services/UpdaterController.swift` -- hosts `CheckForUpdatesViewModel` + `CheckForUpdatesView`, driving the "Check for Updates..." menu item via `SPUUpdater.canCheckForUpdates` KVO
 - `TranscriberApp/Views/MenuView.swift` -- window-style menu bar panel (status header, live timer, record button, action rows); presentation only — recording lifecycle + crash recovery delegate to Core's `RecordingCoordinator`
 - `TranscriberApp/Views/DesignSystem.swift` -- shared "Quiet Confidence" components (MenuActionRow, IconTile, StatusDot, AlertBanner, folder-picker helpers); see docs/design/design-system-0.8.x.md
@@ -94,7 +96,10 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/AudioDeviceCatalog.swift` -- cached input-device list for views, scanned in the background and coalesced; `refreshed(timeout:)` for a bounded fresh scan (#192) — never call `AudioDeviceEnumerator.availableDevices()` on main
 - `TranscriberCore/ResumeOnce.swift` -- resumes a continuation exactly once when work races a deadline
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
-- `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol
+- `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol — source-aware: the tap needs System Audio Recording, ScreenCaptureKit needs Screen Recording (#220)
+- `TranscriberCore/CaptureReadiness.swift` -- pure readiness decisions: required permissions per system-audio source, launch routing (after onboarding a missing permission goes to REPAIR, never the Setup lockout), fix action per status (#174, #220)
+- `TranscriberCore/TapPermissionGuard.swift` -- pure state machine keeping the tap honest about its permission: rebuild after a grant, re-check/re-report only while a problem exists, "restored" only on real audio, no rebuild loops; counts exact-zero frames for provenance (#220)
+- `TranscriberCore/SystemAudioRecordingPermission.swift` -- private TCC SPI wrapper (`dlsym`) for `kTCCServiceAudioCapture`; preflight is cached per process, so live checks go through the helper (gotcha #70, docs/app-store-blockers.md)
 - `TranscriberCore/PathDisplay.swift` -- prefix-anchored `~` abbreviation of filesystem paths for display (shared by Setup + Settings)
 - `TranscriberCore/RecordingTimer.swift` -- pure elapsed-time formatting (mm:ss / h:mm:ss) for the menu bar live timer
 - `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
@@ -133,7 +138,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 1060 tests across 125 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
+# 1220 tests across 138 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -177,12 +182,13 @@ fault outright.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 69 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 70 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
+- [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 69 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 70 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

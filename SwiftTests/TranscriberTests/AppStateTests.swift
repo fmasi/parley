@@ -235,4 +235,92 @@ struct AppStateTests {
         let state = AppState()
         #expect(state.criticalError == nil)
     }
+
+    // MARK: - #220: remote audio not captured is sticky
+
+    @Test func permissionDenialSetsStickyStateAndAsksForRepair() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        #expect(state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied"))
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    /// The single-slot banner can be dismissed or overwritten by any later anomaly; the sticky state can't.
+    @Test func unrelatedAnomalyDoesNotClearStickyState() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.livenessGap.rawValue, message: "mic gap"))
+        state.interruptionWarning = nil   // user dismissed the banner
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    @Test func restoredAudioClearsStickyState() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionRestored.rawValue, message: "back"))
+        #expect(!state.remoteAudioNotCaptured)
+        // The user is told it's fixed, not just silently returned to normal.
+        #expect(state.interruptionWarning == "back")
+    }
+
+    @Test func stickyStateEndsWithTheRecording() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        state.phase = .transcribing(progress: "")
+        #expect(!state.remoteAudioNotCaptured)
+    }
+
+    /// A failed tap rebuild loses the other side just as surely as a denial.
+    @Test func systemAudioLostIsStickyWithItsMessage() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteSystemAudioLost(message: "lost")
+        state.interruptionWarning = nil
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.remoteAudioProblem == "lost")
+    }
+
+    /// A crash-restarted helper can't "restore" the old helper's alarm, so the restart clears it.
+    @Test func clearingRemovesStickyStateAndMessage() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        state.clearRemoteAudioProblem()
+        #expect(!state.remoteAudioNotCaptured)
+        #expect(state.remoteAudioProblem == nil)
+    }
+
+    // MARK: - #222 review: the menu must keep showing the sticky row
+
+    /// The menu renders its alert area only while `hasMenuAlerts`. The sticky row lives in that area,
+    /// so dismissing the dismissible banner must not hide it.
+    @Test func stickyRowSurvivesDismissingTheBanner() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(state.hasMenuAlerts)
+        state.interruptionWarning = nil   // user taps × on the yellow banner
+        #expect(state.hasMenuAlerts)
+    }
+
+    @Test func noAlertsWhenNothingIsWrong() {
+        #expect(!AppState().hasMenuAlerts)
+    }
+
+    @Test func aBannerAloneStillCountsAsAnAlert() {
+        let state = AppState()
+        state.interruptionWarning = "device changed"
+        #expect(state.hasMenuAlerts)
+    }
+
+    @Test func stickyStateOutsideARecordingShowsNoRow() {
+        let state = AppState()
+        state.remoteAudioNotCaptured = true   // stale flag after the recording ended
+        #expect(!state.hasMenuAlerts)
+    }
 }
