@@ -6,6 +6,35 @@ public enum CaptureTrack: String, Codable, CaseIterable, Sendable {
     case mic, system
 }
 
+/// Names one helper alarm-registry instance, ORDERED: `"<process start ms>-<registry resets>"`, e.g.
+/// `"1790000000123-4"`. A later process is newer whatever its counter; within one process every
+/// registry reset is newer. The app adopts an id only when it is strictly newer than the current one,
+/// so a late message from a replaced helper can never displace its replacement.
+public struct HelperSessionId: Comparable, Hashable, Sendable, CustomStringConvertible {
+    public let processStartMillis: UInt64
+    public let registryResets: UInt64
+
+    public init(processStartMillis: UInt64, registryResets: UInt64) {
+        self.processStartMillis = processStartMillis
+        self.registryResets = registryResets
+    }
+
+    /// Strict: exactly two runs of ASCII digits joined by one `-`.
+    public init?(_ string: String) {
+        let parts = string.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { ("0"..."9").contains($0) } }),
+              let start = UInt64(parts[0]), let resets = UInt64(parts[1]) else { return nil }
+        self.init(processStartMillis: start, registryResets: resets)
+    }
+
+    public var description: String { "\(processStartMillis)-\(registryResets)" }
+
+    public static func < (lhs: HelperSessionId, rhs: HelperSessionId) -> Bool {
+        (lhs.processStartMillis, lhs.registryResets) < (rhs.processStartMillis, rhs.registryResets)
+    }
+}
+
 /// What a NEW helper must observe before a STALE alarm (inherited from the helper it replaced) is
 /// proven gone (§6.2). Each kind is disproved only by evidence about the thing it claims.
 public enum AlarmEvidence: Sendable {
@@ -62,7 +91,8 @@ public struct ActiveAlarm: Codable, Equatable, Sendable {
     /// Since when the condition has been true. A replacing helper re-raising it keeps this.
     public let raisedAt: Date
     /// When this KIND last notified — carried across episodes and clears, so a flapping condition
-    /// cannot notify faster than `AlarmRealarmPolicy.notifyInterval`. App-side state: a value in a
+    /// cannot notify faster than `AlarmRealarmPolicy.notifyInterval`. Acknowledgeable kinds are
+    /// exempt: each is a one-off past event and notifies at once. App-side state: a value in a
     /// helper snapshot is ignored.
     public var lastNotifiedAt: Date?
     public let message: String
@@ -83,9 +113,11 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
     /// Helper-owned alarms inherited from a helper that has since been replaced (crash restart).
     /// Kept and shown until the new helper's evidence proves the condition gone (§6.2).
     public private(set) var staleKinds: Set<AlarmKind> = []
-    public private(set) var helperSessionId: String?
-    /// Helpers already replaced. A message still in flight from one of them says nothing about now.
-    private var retiredHelperSessionIds: Set<String> = []
+    /// The newest helper registry heard from. Anything older is a late message and is ignored.
+    public private(set) var helperSessionId: HelperSessionId?
+    /// Sequence of the last snapshot applied from the current helper; a same-helper snapshot that is
+    /// not newer (a pull reply overtaken by a push) is ignored. Reset when a newer helper is adopted.
+    private var lastAppliedSequence: UInt64?
 
     public init() {}
 
@@ -95,7 +127,8 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
         guard alarms[kind] == nil else { return false }
         let episode = (episodes[kind] ?? 0) + 1
         episodes[kind] = episode
-        alarms[kind] = ActiveAlarm(kind: kind, raisedAt: now, lastNotifiedAt: lastNotified[kind], message: message, episode: episode)
+        alarms[kind] = ActiveAlarm(kind: kind, raisedAt: now, lastNotifiedAt: kind.isAcknowledgeable ? nil : lastNotified[kind],
+                                   message: message, episode: episode)
         return true
     }
 
@@ -111,13 +144,15 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
         lastNotified[kind] = now
     }
 
-    /// App side. The snapshot's helper becomes the current one (a NEW helper turns the previous
-    /// helper's alarms stale, §6.2; a replaced helper's late snapshot is ignored). The current
-    /// helper's snapshot is then the truth for every helper-owned kind that is not stale. An alarm
-    /// continuing in the same episode, or re-raised by the replacing helper, keeps its `raisedAt`.
-    /// App-owned kinds inside a snapshot are ignored.
+    /// App side. A snapshot from a NEWER helper makes it the current one and turns the previous
+    /// helper's alarms stale (§6.2); one from an older helper, or an older/duplicate `sequence` from
+    /// the current helper, is ignored. The current helper's snapshot is then the truth for every
+    /// helper-owned kind that is not stale. An alarm continuing in the same episode, or re-raised by
+    /// the replacing helper, keeps its `raisedAt`. App-owned kinds inside a snapshot are ignored.
     public mutating func apply(_ snapshot: CaptureStatusSnapshot) {
         guard adoptHelper(snapshot.helperSessionId) else { return }
+        if let last = lastAppliedSequence, snapshot.sequence <= last { return }
+        lastAppliedSequence = snapshot.sequence
         for kind in AlarmKind.allCases where kind.isHelperOwned && !staleKinds.contains(kind) {
             if !snapshot.alarms.contains(where: { $0.kind == kind }) { alarms.removeValue(forKey: kind) }
         }
@@ -164,16 +199,23 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
         alarms.values.sorted { ($0.raisedAt, $0.kind.rawValue) < ($1.raisedAt, $1.kind.rawValue) }
     }
 
-    /// Moves to helper `id`. A NEW helper turns every helper-owned alarm of the previous one stale.
-    /// Returns false for a helper that has already been replaced: its message is ignored.
-    private mutating func adoptHelper(_ id: String) -> Bool {
-        if id == helperSessionId { return true }
-        if retiredHelperSessionIds.contains(id) { return false }
-        if let previous = helperSessionId {
-            retiredHelperSessionIds.insert(previous)
-            for kind in alarms.keys where kind.isHelperOwned { staleKinds.insert(kind) }
+    /// Hears a message from helper `raw`. The current helper: true. A strictly NEWER one becomes
+    /// current and turns every helper-owned alarm of the previous one stale: true. An older helper
+    /// (a late message) or an unparsable id: false, the message is ignored.
+    private mutating func adoptHelper(_ raw: String) -> Bool {
+        guard let id = HelperSessionId(raw) else {
+            Logger.audio.warning("Capture status from an unparsable helper id — ignored")
+            return false
         }
+        guard let current = helperSessionId else {
+            helperSessionId = id
+            return true
+        }
+        if id == current { return true }
+        guard id > current else { return false }
+        for kind in alarms.keys where kind.isHelperOwned { staleKinds.insert(kind) }
         helperSessionId = id
+        lastAppliedSequence = nil
         return true
     }
 
@@ -204,7 +246,11 @@ public struct TrackHealthSnapshot: Codable, Equatable, Sendable {
 /// What the app PULLS from the helper on connect, every 5 s while recording, and after any
 /// restart — and what the helper PUSHES on every change. JSON over XPC.
 public struct CaptureStatusSnapshot: Codable, Equatable, Sendable {
+    /// A `HelperSessionId` string.
     public let helperSessionId: String
+    /// Increments on every snapshot the helper builds (pull reply or push), so the app can drop one
+    /// that arrives after a newer one from the same helper.
+    public let sequence: UInt64
     public let isCapturing: Bool
     public let alarms: [ActiveAlarm]
     public let tracks: [TrackHealthSnapshot]
@@ -212,12 +258,13 @@ public struct CaptureStatusSnapshot: Codable, Equatable, Sendable {
     /// Never encoded.
     public private(set) var unknownAlarmKinds: [String] = []
 
-    public init(helperSessionId: String, isCapturing: Bool, alarms: [ActiveAlarm], tracks: [TrackHealthSnapshot]) {
-        self.helperSessionId = helperSessionId; self.isCapturing = isCapturing; self.alarms = alarms; self.tracks = tracks
+    public init(helperSessionId: String, sequence: UInt64, isCapturing: Bool, alarms: [ActiveAlarm], tracks: [TrackHealthSnapshot]) {
+        self.helperSessionId = helperSessionId; self.sequence = sequence
+        self.isCapturing = isCapturing; self.alarms = alarms; self.tracks = tracks
     }
 
     // `unknownAlarmKinds` is deliberately absent: it describes the decoding build, not the wire.
-    private enum CodingKeys: String, CodingKey { case helperSessionId, isCapturing, alarms, tracks }
+    private enum CodingKeys: String, CodingKey { case helperSessionId, sequence, isCapturing, alarms, tracks }
 
     /// Tolerant of exactly one thing: an alarm whose KIND this build does not know is skipped and
     /// recorded in `unknownAlarmKinds`. Any other defect fails the whole snapshot — a silently
@@ -225,6 +272,7 @@ public struct CaptureStatusSnapshot: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         helperSessionId = try c.decode(String.self, forKey: .helperSessionId)
+        sequence = try c.decode(UInt64.self, forKey: .sequence)
         isCapturing = try c.decode(Bool.self, forKey: .isCapturing)
         tracks = try c.decodeIfPresent([TrackHealthSnapshot].self, forKey: .tracks) ?? []
         var known: [ActiveAlarm] = []

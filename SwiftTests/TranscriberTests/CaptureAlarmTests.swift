@@ -6,9 +6,15 @@ import Testing
 /// periodically. Incident A's watchdog fired once and stayed silent for 51 minutes.
 @Suite struct CaptureAlarmTests {
     let t0 = Date(timeIntervalSince1970: 1_000)
+    /// Helper registry ids, oldest first: "<process start ms>-<registry resets>" (F2 fix round 2).
+    let h1 = "1000-0", h2 = "1000-1", h3 = "2000-0"
 
-    private func snapshot(_ id: String, _ alarms: [ActiveAlarm]) -> CaptureStatusSnapshot {
-        CaptureStatusSnapshot(helperSessionId: id, isCapturing: true, alarms: alarms, tracks: [])
+    /// Each snapshot a helper builds carries the next sequence number.
+    private final class SequenceCounter { var value: UInt64 = 0; func next() -> UInt64 { value += 1; return value } }
+    private let sequence = SequenceCounter()
+
+    private func snapshot(_ id: String, _ alarms: [ActiveAlarm], sequence seq: UInt64? = nil) -> CaptureStatusSnapshot {
+        CaptureStatusSnapshot(helperSessionId: id, sequence: seq ?? sequence.next(), isCapturing: true, alarms: alarms, tracks: [])
     }
     private func alarm(_ kind: AlarmKind, at: Date, episode: Int = 1) -> ActiveAlarm {
         ActiveAlarm(kind: kind, raisedAt: at, lastNotifiedAt: nil, message: kind.rawValue, episode: episode)
@@ -41,8 +47,8 @@ import Testing
     @Test func sameHelperSnapshotReplacesHelperOwnedAlarmsOnly() {
         var r = CaptureAlarmRegistry()
         r.raise(.crashProtectionOff, message: "c", now: t0)
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0)]))
-        r.apply(snapshot("h1", [alarm(.micDigitalSilence, at: t0 + 5)]))
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)]))
+        r.apply(snapshot(h1, [alarm(.micDigitalSilence, at: t0 + 5)]))
         #expect(Set(r.alarms.keys) == [.crashProtectionOff, .micDigitalSilence])
         #expect(r.staleKinds.isEmpty)
     }
@@ -52,10 +58,10 @@ import Testing
     @Test func anAppOwnedKindInsideASnapshotIsIgnored() {
         var r = CaptureAlarmRegistry()
         r.raise(.diskLow, message: "app", now: t0)
-        r.apply(snapshot("h1", [alarm(.crashProtectionOff, at: t0), alarm(.diskLow, at: t0 + 9)]))
+        r.apply(snapshot(h1, [alarm(.crashProtectionOff, at: t0), alarm(.diskLow, at: t0 + 9)]))
         #expect(Set(r.alarms.keys) == [.diskLow])
         #expect(r.alarms[.diskLow]?.message == "app")
-        r.apply(snapshot("h1", []))
+        r.apply(snapshot(h1, []))
         #expect(Set(r.alarms.keys) == [.diskLow], "the helper's snapshot never clears an app-owned alarm")
     }
 
@@ -63,9 +69,9 @@ import Testing
     @Test func pollingDoesNotResetTheNotifyClock() {
         var r = CaptureAlarmRegistry()
         let fromHelper = alarm(.remoteNotDelivering, at: t0)
-        r.apply(snapshot("h1", [fromHelper]))
+        r.apply(snapshot(h1, [fromHelper]))
         r.markNotified(.remoteNotDelivering, now: t0 + 1)
-        r.apply(snapshot("h1", [fromHelper]))   // the next poll, same episode
+        r.apply(snapshot(h1, [fromHelper]))   // the next poll, same episode
         #expect(r.alarms[.remoteNotDelivering]?.lastNotifiedAt == t0 + 1)
         #expect(AlarmRealarmPolicy.shouldRenotify(r.alarms[.remoteNotDelivering]!, now: t0 + 6) == false)
     }
@@ -75,11 +81,11 @@ import Testing
     /// for the per-kind floor.
     @Test func aNewEpisodeOfTheSameKindNotifiesAgainOnlyAfterTheFloor() throws {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0, episode: 1)]))
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0, episode: 1)]))
         r.markNotified(.remoteNotDelivering, now: t0 + 1)
-        r.apply(snapshot("h1", []))   // the condition cleared…
+        r.apply(snapshot(h1, []))   // the condition cleared…
         #expect(r.alarms[.remoteNotDelivering] == nil)
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0 + 30, episode: 2)]))   // …and came back
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0 + 30, episode: 2)]))   // …and came back
         let a = try #require(r.alarms[.remoteNotDelivering])
         #expect(a.raisedAt == t0 + 30, "the row reflects the new episode at once")
         #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0 + 30) == false, "within the floor: no sound")
@@ -100,7 +106,7 @@ import Testing
 
     @Test func aKindThatNeverNotifiedNotifiesAtOnce() throws {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.micNotDelivering, at: t0)]))
+        r.apply(snapshot(h1, [alarm(.micNotDelivering, at: t0)]))
         let a = try #require(r.alarms[.micNotDelivering])
         #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0))
     }
@@ -110,18 +116,18 @@ import Testing
     /// alarm (permission denied, digital silence) is disproved by real audio, not by first frames.
     @Test func aNewHelperKeepsTheOldAlarmsAsStaleUntilItsEvidence() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remotePermissionDenied, at: t0), alarm(.micNotDelivering, at: t0)]))
-        r.apply(snapshot("h2", []))   // crash restart: the new helper's registry is empty
+        r.apply(snapshot(h1, [alarm(.remotePermissionDenied, at: t0), alarm(.micNotDelivering, at: t0)]))
+        r.apply(snapshot(h2, []))   // crash restart: the new helper's registry is empty
         #expect(Set(r.alarms.keys) == [.remotePermissionDenied, .micNotDelivering])
         #expect(r.staleKinds == [.remotePermissionDenied, .micNotDelivering])
-        r.apply(snapshot("h2", []))   // the next poll must not wipe them either
+        r.apply(snapshot(h2, []))   // the next poll must not wipe them either
         #expect(Set(r.alarms.keys) == [.remotePermissionDenied, .micNotDelivering])
-        r.noteFirstFrames(track: .system, helperSessionId: "h2")
+        r.noteFirstFrames(track: .system, helperSessionId: h2)
         #expect(Set(r.alarms.keys) == [.remotePermissionDenied, .micNotDelivering],
                 "frames prove delivery, not permission: a denied tap delivers frames of zeros")
-        r.noteRealAudio(track: .system, helperSessionId: "h2")
+        r.noteRealAudio(track: .system, helperSessionId: h2)
         #expect(Set(r.alarms.keys) == [.micNotDelivering], "mic frames have not arrived yet")
-        r.noteFirstFrames(track: .mic, helperSessionId: "h2")
+        r.noteFirstFrames(track: .mic, helperSessionId: h2)
         #expect(r.isEmpty)
     }
 
@@ -130,11 +136,11 @@ import Testing
         for kind in [AlarmKind.micNotDelivering, .remoteNotDelivering, .remoteRecoveryFailed] {
             let track = try #require(kind.track)
             var r = staleRegistry(kind)
-            r.noteRealAudio(track: track, helperSessionId: "h2")
-            r.noteWriteSucceeded(helperSessionId: "h2")
-            r.noteFirstFrames(track: other(track), helperSessionId: "h2")
+            r.noteRealAudio(track: track, helperSessionId: h2)
+            r.noteWriteSucceeded(helperSessionId: h2)
+            r.noteFirstFrames(track: other(track), helperSessionId: h2)
             #expect(r.alarms[kind] != nil, "\(kind.rawValue): only first frames on its own track disprove it")
-            r.noteFirstFrames(track: track, helperSessionId: "h2")
+            r.noteFirstFrames(track: track, helperSessionId: h2)
             #expect(r.alarms[kind] == nil, "\(kind.rawValue)")
         }
     }
@@ -143,11 +149,11 @@ import Testing
         for kind in [AlarmKind.micDigitalSilence, .remotePermissionDenied, .remoteCantConfirm] {
             let track = try #require(kind.track)
             var r = staleRegistry(kind)
-            r.noteFirstFrames(track: track, helperSessionId: "h2")
-            r.noteWriteSucceeded(helperSessionId: "h2")
-            r.noteRealAudio(track: other(track), helperSessionId: "h2")
+            r.noteFirstFrames(track: track, helperSessionId: h2)
+            r.noteWriteSucceeded(helperSessionId: h2)
+            r.noteRealAudio(track: other(track), helperSessionId: h2)
             #expect(r.alarms[kind] != nil, "\(kind.rawValue): only real audio on its own track disproves it")
-            r.noteRealAudio(track: track, helperSessionId: "h2")
+            r.noteRealAudio(track: track, helperSessionId: h2)
             #expect(r.alarms[kind] == nil, "\(kind.rawValue)")
         }
     }
@@ -156,11 +162,11 @@ import Testing
     @Test func aStaleDiskWriteFailureClearsOnlyOnASuccessfulWrite() {
         var r = staleRegistry(.diskWriteFailure)
         for track in [CaptureTrack.mic, .system] {
-            r.noteFirstFrames(track: track, helperSessionId: "h2")
-            r.noteRealAudio(track: track, helperSessionId: "h2")
+            r.noteFirstFrames(track: track, helperSessionId: h2)
+            r.noteRealAudio(track: track, helperSessionId: h2)
         }
         #expect(r.alarms[.diskWriteFailure] != nil)
-        r.noteWriteSucceeded(helperSessionId: "h2")
+        r.noteWriteSucceeded(helperSessionId: h2)
         #expect(r.alarms[.diskWriteFailure] == nil)
     }
 
@@ -168,9 +174,9 @@ import Testing
     /// by its own snapshots.
     @Test func evidenceLeavesTheCurrentHelpersAlarmsAlone() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
-        r.noteFirstFrames(track: .system, helperSessionId: "h1")
-        r.noteRealAudio(track: .mic, helperSessionId: "h1")
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
+        r.noteFirstFrames(track: .system, helperSessionId: h1)
+        r.noteRealAudio(track: .mic, helperSessionId: h1)
         #expect(Set(r.alarms.keys) == [.remoteNotDelivering, .micDigitalSilence])
     }
 
@@ -178,48 +184,48 @@ import Testing
     /// The evidence carries the helper id, so the stale transition happens there and is not lost.
     @Test func firstFramesFromANewHelperBeforeItsFirstSnapshotStillClearTheStaleAlarms() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
-        r.noteFirstFrames(track: .system, helperSessionId: "h2")   // before any h2 snapshot
-        #expect(r.helperSessionId == "h2")
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
+        r.noteFirstFrames(track: .system, helperSessionId: h2)   // before any h2 snapshot
+        #expect(r.helperSessionId == HelperSessionId(h2))
         #expect(r.alarms[.remoteNotDelivering] == nil)
         #expect(r.staleKinds == [.micDigitalSilence])
-        r.apply(snapshot("h2", []))
+        r.apply(snapshot(h2, []))
         #expect(Set(r.alarms.keys) == [.micDigitalSilence], "h2's empty first snapshot must not wipe the stale content alarm")
     }
 
     /// A message still in flight from a helper that has since been replaced says nothing about now.
     @Test func lateMessagesFromAReplacedHelperAreIgnored() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0)]))
-        r.apply(snapshot("h2", [alarm(.micNotDelivering, at: t0 + 5)]))
-        r.noteFirstFrames(track: .system, helperSessionId: "h1")
-        r.apply(snapshot("h1", []))
-        #expect(r.helperSessionId == "h2")
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)]))
+        r.apply(snapshot(h2, [alarm(.micNotDelivering, at: t0 + 5)]))
+        r.noteFirstFrames(track: .system, helperSessionId: h1)
+        r.apply(snapshot(h1, []))
+        #expect(r.helperSessionId == HelperSessionId(h2))
         #expect(Set(r.alarms.keys) == [.remoteNotDelivering, .micNotDelivering])
         #expect(r.staleKinds == [.remoteNotDelivering])
     }
 
     @Test func twoHelperRestartsInARowKeepTheAlarmsStale() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
-        r.apply(snapshot("h2", []))
-        r.apply(snapshot("h3", []))
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0), alarm(.micDigitalSilence, at: t0)]))
+        r.apply(snapshot(h2, []))
+        r.apply(snapshot(h3, []))
         #expect(Set(r.alarms.keys) == [.remoteNotDelivering, .micDigitalSilence])
         #expect(r.staleKinds == [.remoteNotDelivering, .micDigitalSilence])
-        r.noteFirstFrames(track: .system, helperSessionId: "h3")
+        r.noteFirstFrames(track: .system, helperSessionId: h3)
         #expect(Set(r.alarms.keys) == [.micDigitalSilence])
-        r.noteRealAudio(track: .mic, helperSessionId: "h3")
+        r.noteRealAudio(track: .mic, helperSessionId: h3)
         #expect(r.isEmpty)
     }
 
     /// F2 fix round 1: a replacing helper re-raising the same condition keeps "since when".
     @Test func aNewHelperReRaisingAKindMakesItCurrentAgainAndKeepsItsStart() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remotePermissionDenied, at: t0)]))
-        r.apply(snapshot("h2", [alarm(.remotePermissionDenied, at: t0 + 20)]))
+        r.apply(snapshot(h1, [alarm(.remotePermissionDenied, at: t0)]))
+        r.apply(snapshot(h2, [alarm(.remotePermissionDenied, at: t0 + 20)]))
         #expect(r.staleKinds.isEmpty)
         #expect(r.alarms[.remotePermissionDenied]?.raisedAt == t0, "the condition has been true since t0")
-        r.apply(snapshot("h2", [alarm(.remotePermissionDenied, at: t0 + 20)]))   // the next poll
+        r.apply(snapshot(h2, [alarm(.remotePermissionDenied, at: t0 + 20)]))   // the next poll
         #expect(r.alarms[.remotePermissionDenied]?.raisedAt == t0)
     }
 
@@ -228,7 +234,7 @@ import Testing
         r.raise(.crashProtectionOff, message: "c", now: t0)
         r.raise(.recordingStopped, message: "s", now: t0)
         r.raise(.diskLow, message: "d", now: t0)
-        r.apply(snapshot("h1", [alarm(.micDigitalSilence, at: t0)]))
+        r.apply(snapshot(h1, [alarm(.micDigitalSilence, at: t0)]))
         r.recordingEnded()
         #expect(Set(r.alarms.keys) == [.crashProtectionOff, .recordingStopped])
     }
@@ -247,7 +253,7 @@ import Testing
         var r = CaptureAlarmRegistry()
         r.raise(.remoteNotDelivering, message: "r", now: t0 + 0.25)
         r.markNotified(.remoteNotDelivering, now: t0 + 0.5)
-        let s = CaptureStatusSnapshot(helperSessionId: "h1", isCapturing: true, alarms: r.sorted,
+        let s = CaptureStatusSnapshot(helperSessionId: h1, sequence: 7, isCapturing: true, alarms: r.sorted,
                                       tracks: [TrackHealthSnapshot(track: .system, expected: true, heartbeatAgeSeconds: 7.5, generation: 2)])
         let decoded = try #require(CaptureStatusSnapshot.decode(s.encoded()))
         #expect(decoded == s)
@@ -261,7 +267,7 @@ import Testing
             TrackHealthSnapshot(track: .mic, expected: true, heartbeatAgeSeconds: .nan, generation: 1),
         ]
         #expect(tracks.allSatisfy { $0.heartbeatAgeSeconds == nil })
-        let s = CaptureStatusSnapshot(helperSessionId: "h", isCapturing: true, alarms: [], tracks: tracks)
+        let s = CaptureStatusSnapshot(helperSessionId: h1, sequence: 1, isCapturing: true, alarms: [], tracks: tracks)
         let data = s.encoded()
         #expect(!data.isEmpty)
         #expect(CaptureStatusSnapshot.decode(data) == s)
@@ -271,7 +277,7 @@ import Testing
     /// recorded, and the known ones survive.
     @Test func snapshotWithUnknownKindKeepsTheOthers() throws {
         let json = """
-        {"helperSessionId":"h","isCapturing":true,"tracks":[],
+        {"helperSessionId":"1000-0","sequence":1,"isCapturing":true,"tracks":[],
          "alarms":[{"kind":"somethingNew","raisedAt":"2026-09-24T16:00:00Z","message":"x","episode":1},
                    {"kind":"micDigitalSilence","raisedAt":"2026-09-24T16:00:00Z","message":"y","episode":1}]}
         """
@@ -284,11 +290,11 @@ import Testing
     /// read as an all-clear on the next same-helper `apply`, silently clearing a live alarm.
     @Test func aMalformedKnownAlarmFailsTheWholeSnapshot() {
         let missingEpisode = """
-        {"helperSessionId":"h","isCapturing":true,"tracks":[],
+        {"helperSessionId":"1000-0","sequence":1,"isCapturing":true,"tracks":[],
          "alarms":[{"kind":"remoteNotDelivering","raisedAt":"2026-09-24T16:00:00Z","message":"x"}]}
         """
         let missingKind = """
-        {"helperSessionId":"h","isCapturing":true,"tracks":[],
+        {"helperSessionId":"1000-0","sequence":1,"isCapturing":true,"tracks":[],
          "alarms":[{"raisedAt":"2026-09-24T16:00:00Z","message":"x","episode":1}]}
         """
         #expect(CaptureStatusSnapshot.decode(Data(missingEpisode.utf8)) == nil)
@@ -297,8 +303,8 @@ import Testing
 
     @Test func aFailedDecodeLeavesTheLiveAlarmsInPlace() {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(.remoteNotDelivering, at: t0)]))
-        let broken = #"{"helperSessionId":"h1","isCapturing":true,"tracks":[],"alarms":[{"kind":"remoteNotDelivering","message":"x","episode":1}]}"#
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)]))
+        let broken = #"{"helperSessionId":"1000-0","sequence":99,"isCapturing":true,"tracks":[],"alarms":[{"kind":"remoteNotDelivering","message":"x","episode":1}]}"#
         if let s = CaptureStatusSnapshot.decode(Data(broken.utf8)) { r.apply(s) }
         #expect(r.alarms[.remoteNotDelivering] != nil)
     }
@@ -329,13 +335,91 @@ import Testing
         #expect(AlarmKind.diskLow.outlivesRecording == false)
     }
 
+    // MARK: - F2 fix round 2: ordered helper ids, snapshot sequence, one-off events
+
+    @Test func helperSessionIdsAreOrderedAndStrictlyParsed() throws {
+        let id = try #require(HelperSessionId("1790000000123-4"))
+        #expect(id == HelperSessionId(processStartMillis: 1_790_000_000_123, registryResets: 4))
+        #expect(id.description == "1790000000123-4")
+        #expect(HelperSessionId("1000-1")! < HelperSessionId("1000-2")!, "a registry reset is newer")
+        #expect(HelperSessionId("1000-9")! < HelperSessionId("2000-0")!, "a later process is newer, whatever its counter")
+        #expect(HelperSessionId("1000-1") == HelperSessionId("1000-1"))
+        for bad in ["h1", "", "1000", "1000-", "-1", "1000-1-2", "a-1", "1000-x", "1000--1"] {
+            #expect(HelperSessionId(bad) == nil, "\(bad) must not parse")
+        }
+    }
+
+    /// The re-review's sequence: h1 current, h3 adopted, then a LATE h2 message. h2 is older than h3,
+    /// so it must not displace h3 — otherwise every later h3 message would be dropped.
+    @Test func aLateMessageFromAnOlderHelperNeverDisplacesTheNewestOne() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)]))
+        r.apply(snapshot(h3, [alarm(.micNotDelivering, at: t0 + 5)]))
+        r.apply(snapshot(h2, []))
+        r.noteFirstFrames(track: .mic, helperSessionId: h2)
+        #expect(r.helperSessionId == HelperSessionId(h3))
+        #expect(Set(r.alarms.keys) == [.remoteNotDelivering, .micNotDelivering])
+        r.apply(snapshot(h3, []))   // h3 keeps being heard
+        #expect(Set(r.alarms.keys) == [.remoteNotDelivering], "h3's own alarm follows h3's snapshot")
+        r.noteFirstFrames(track: .system, helperSessionId: h3)
+        #expect(r.isEmpty)
+    }
+
+    @Test func anEqualIdIsTheSameHelper() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot("1000-1", [alarm(.remoteNotDelivering, at: t0)]))
+        r.apply(snapshot("1000-01", [alarm(.remoteNotDelivering, at: t0)]))   // same numbers, other spelling
+        #expect(r.staleKinds.isEmpty)
+        r.apply(snapshot("1000-1", []))
+        #expect(r.isEmpty, "a same-helper snapshot is the truth for its kinds")
+    }
+
+    @Test func anUnparsableHelperIdIsIgnored() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)]))
+        r.apply(snapshot("garbage", []))
+        r.noteFirstFrames(track: .system, helperSessionId: "garbage")
+        #expect(r.helperSessionId == HelperSessionId(h1))
+        #expect(Set(r.alarms.keys) == [.remoteNotDelivering])
+        #expect(r.staleKinds.isEmpty)
+    }
+
+    /// Pull replies and pushes race: a same-helper snapshot that is not newer than the last applied
+    /// one is stale news and must not overwrite it.
+    @Test func aSameHelperSnapshotThatIsNotNewerIsIgnored() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.remoteNotDelivering, at: t0)], sequence: 5))
+        r.apply(snapshot(h1, [], sequence: 4))
+        #expect(r.alarms[.remoteNotDelivering] != nil, "an older snapshot arrived late")
+        r.apply(snapshot(h1, [], sequence: 5))
+        #expect(r.alarms[.remoteNotDelivering] != nil, "a duplicate is not newer")
+        r.apply(snapshot(h1, [], sequence: 6))
+        #expect(r.isEmpty)
+        // A newer helper starts its own sequence.
+        r.apply(snapshot(h2, [alarm(.micNotDelivering, at: t0)], sequence: 1))
+        #expect(r.alarms[.micNotDelivering] != nil)
+    }
+
+    /// One-off past events are not a flapping condition: a new one notifies at once.
+    @Test func acknowledgeableKindsAreExemptFromTheNotifyFloor() throws {
+        for kind in [AlarmKind.recordingStopped, .recordingResumedWithGap] {
+            var r = CaptureAlarmRegistry()
+            r.raise(kind, message: "first", now: t0)
+            r.markNotified(kind, now: t0)
+            _ = r.clear(kind)   // acknowledged
+            r.raise(kind, message: "second", now: t0 + 10)
+            let a = try #require(r.alarms[kind])
+            #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0 + 10), "\(kind.rawValue)")
+        }
+    }
+
     // MARK: - Helpers
 
     /// `kind` raised by helper h1, then left stale by its replacement h2.
     private func staleRegistry(_ kind: AlarmKind) -> CaptureAlarmRegistry {
         var r = CaptureAlarmRegistry()
-        r.apply(snapshot("h1", [alarm(kind, at: t0)]))
-        r.apply(snapshot("h2", []))
+        r.apply(snapshot(h1, [alarm(kind, at: t0)]))
+        r.apply(snapshot(h2, []))
         return r
     }
     private func other(_ track: CaptureTrack) -> CaptureTrack { track == .mic ? .system : .mic }

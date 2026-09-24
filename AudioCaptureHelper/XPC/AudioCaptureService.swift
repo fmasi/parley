@@ -10,12 +10,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
-    /// Names the helper's alarm-REGISTRY INSTANCE, not the process, in every `CaptureStatusSnapshot`
-    /// and first-frames call: a changed id tells the app the registry it knew is gone (crash restart),
-    /// so its alarms turn stale instead of vanishing (§6.2). H2 renews it on every registry reset
-    /// (stop, stopAndFinalize, cleanupAfterFailure); until H2 adds the registry there is none to
-    /// reset, so it is fixed for the life of the process.
-    let helperSessionId = UUID().uuidString
+    /// This process's start, in ms on the system's monotonic clock (boot-relative, never steps back),
+    /// so a helper started later always names a newer `HelperSessionId` — a wall-clock start could
+    /// step backwards and make the replacement look older than the helper it replaced.
+    private let processStartMillis = clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000
+    /// Alarm-registry resets in this process. Guarded by `stateLock`. H2 increments it on every
+    /// registry reset (stop, stopAndFinalize, cleanupAfterFailure), so each reset names a strictly
+    /// newer registry; until H2 adds the registry it stays 0.
+    private var registryResets: UInt64 = 0
+    /// Sequence of the last `CaptureStatusSnapshot` built (pull reply or push). Guarded by `stateLock`;
+    /// H2's pushes take the next value the same way.
+    private var snapshotSequence: UInt64 = 0
+
+    /// Names the helper's alarm-REGISTRY INSTANCE, not the process, as an ordered `HelperSessionId`
+    /// (`"<processStartMillis>-<registryResets>"`), in every snapshot and first-frames call: a newer id
+    /// tells the app the registry it knew is gone (crash restart), so its alarms turn stale instead of
+    /// vanishing (§6.2). Reads `stateLock`: never call it from inside a `stateLock.sync` block.
+    var helperSessionId: String {
+        let resets = stateLock.sync { registryResets }
+        return HelperSessionId(processStartMillis: processStartMillis, registryResets: resets).description
+    }
     /// One persistent serial queue for ALL stream callbacks across the session — initial stream
     /// and every in-place restart register on it, so writer swaps / finalization / sample appends
     /// can never run on two different queues concurrently (council F4). Never reassigned or nil'd.
@@ -336,8 +350,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     /// F4 stub: the registry arrives in H2. Until then the snapshot carries no alarms and no tracks.
     func captureStatus(reply: @escaping (Data?) -> Void) {
-        let capturing = stateLock.sync { isCapturing }
-        reply(CaptureStatusSnapshot(helperSessionId: helperSessionId, isCapturing: capturing, alarms: [], tracks: []).encoded())
+        let (capturing, resets, sequence) = stateLock.sync { () -> (Bool, UInt64, UInt64) in
+            snapshotSequence += 1
+            return (isCapturing, registryResets, snapshotSequence)
+        }
+        let id = HelperSessionId(processStartMillis: processStartMillis, registryResets: resets).description
+        reply(CaptureStatusSnapshot(helperSessionId: id, sequence: sequence, isCapturing: capturing, alarms: [], tracks: []).encoded())
     }
 
     /// Replies false ("not understood") for a payload it cannot read, and leaves `pendingOptions` as is.
