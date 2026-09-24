@@ -1,7 +1,9 @@
 # Capture reliability overhaul — design spec
 
 **Date:** 2026-09-24
-**Status:** Draft for owner review; implementation plan at
+**Status:** v2 (2026-09-24) — amended after the preflight conflict scan at §4.2, §5, §6.1, §6.2, §7.2,
+§7.3, §8.3, §8.8, §8.10, §10 and §11 (each amendment is marked "v2" with the scan item that showed the
+spec was wrong or incomplete); implementation plan (v2) at
 `docs/superpowers/plans/2026-09-24-capture-reliability.md`
 **Branch:** `fix/capture-reliability`, stacked on `fix/permission-readiness` (PR #222, not merged)
 **Closes / advances:** #220 (root cause + the class around it), #192/#193/#194/#195/#196 follow-ups,
@@ -174,15 +176,22 @@ Inputs per tick: `now`, `lastHeartbeat` (0 = never), `gateOpen`, plus the arm ti
 - `.healthy`
 - `.neverDelivered(seconds)` — armed, gate open, no heartbeat within `firstFrameThreshold`
   (mic 5 s from arm; tap 5 s from `max(arm, gateOpenSince)`).
-- `.stalled(seconds)` — delivered before this generation's arm, then no heartbeat for
-  `stallThreshold` (3 s) while the gate is open.
+- `.stalled(seconds)` — delivered in this generation, then no heartbeat for `stallThreshold` (3 s)
+  of gate-open time.
 - `.firstFrames` — first heartbeat of a generation (once); drives the honest "Resumed".
 - `.cleared(.heartbeat | .gateClosed)` — the open episode ended: a heartbeat arrived, or the track
   is no longer expected; clears the track's `NotDelivering` alarm.
 
-The gate closing ends the episode (existing tradeoff kept: a flap can re-report an old gap once). This
-closes hole H1 (`guard lastArrivalNanos != 0`), L2, and retires `PadRatioMonitor.finish()` /
-`trackNeverDelivered` (L-N2: dead in production, tested with impossible input).
+Both clocks count only time during which the gate was open: the never-delivered clock starts at
+max(arm, gate open), the stall clock at max(last heartbeat, gate open). Each gate-open period that
+lasts at least the threshold over a silent track is one episode, reported once; the gate closing
+ends the open episode (`.cleared(.gateClosed)`); a 1 Hz flap never reaches a threshold and reports
+nothing. *(v2, scan C5: v1 said "a flap can re-report an old gap once", which allowed a spurious
+`.stalled(<idle seconds>)` on the first tick after a call app resumed its output under
+`tap_auto_start = true`.)* An accelerator (§5) may open an episode early; the monitor then does not
+report the same stall again. This closes hole H1 (`guard lastArrivalNanos != 0`), L2, and retires
+`PadRatioMonitor.finish()` / `trackNeverDelivered` (L-N2: dead in production, tested with impossible
+input).
 
 ### 4.3 The gate and the owner scenarios
 
@@ -225,6 +234,14 @@ A rung runs on `configQueue`; a watchdog on the liveness queue records `.recover
 raises `.remoteRecoveryFailed` if a rung has not returned in 5 s (`AudioDeviceStop` on a paused
 context is unverified, M-C). Rate-drift remediation keeps its own budget (`ClockAnchorPolicy`).
 
+*(v2, scan A66/C9/C10.)* Every rung the ladder orders carries a token that the tap echoes with its
+result; a rebuild the ladder did not order (output-device change, rate drift, the permission
+grant/insurance path) reports with token 0 and counts against the episode's budget without
+completing a rung, so an output-change rebuild finishing mid-rung is never mistaken for the rung's
+result. When the gate closes, the episode ends and an exhausted ladder is un-exhausted: a still-dead
+tap gets a fresh fast episode (rungs, then alarm within ~15 s) when the gate reopens, instead of
+waiting for the next 60 s slow retry.
+
 `TapAutoStart`: becomes a `SystemTapSession` init parameter backed by config key `tap_auto_start`
 (diagnostic knob, default `true`). The default flips to `false` only if measurement M-B passes
 (§10). With `false` the IOProc runs continuously, "no callbacks" is unambiguous, the autostart
@@ -246,7 +263,7 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
 
 | Kind | Owner | Raised when | Cleared when |
 |---|---|---|---|
-| `micNotDelivering` | helper | `.neverDelivered`/`.stalled` on mic after `MicCaptureSession.attemptRecover()` did not restore a heartbeat within 5 s | `.recovered` |
+| `micNotDelivering` | helper | `.neverDelivered`/`.stalled` on mic after `MicCaptureSession.attemptRecover()` did not restore a heartbeat within 5 s, or the recover loop reported its restart budget exhausted (`onUnavailable`; v2, scan C11) | `.recovered` |
 | `micDigitalSilence` | helper | `ExactZeroRunMonitor` 12 s (existing) | first non-zero mic sample |
 | `remoteNotDelivering` | helper | ladder fast budget exhausted | `.recovered` |
 | `remoteRecoveryFailed` | helper | a rung threw or got stuck | next successful rung |
@@ -274,6 +291,12 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
 - Pull is what makes the state survive: a Flow-A re-attach restores it on connect; a helper
   restart starts an empty helper registry, but the app keeps its set until first frames clear it
   (`RecordingCoordinator.swift:661 clearRemoteAudioProblem()` is deleted).
+- *(v2, scan C6/C7.)* The snapshot carries `helperSessionId`. When it changes, the app marks the
+  previous helper's alarms **stale** (still shown, still sticky) and drops them only on
+  `captureDidDeliverFirstFrames(track:)` for that track (track-less helper kinds go with either
+  track's first frames). A same-helper snapshot replaces helper-owned kinds but preserves the
+  2-minute notify clock of a kind that is still active in the same episode, so the 5 s poll never
+  re-notifies.
 
 ### 6.3 Presentation (`AlarmPresenter`, app target, thin)
 
@@ -319,14 +342,20 @@ dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for 
   from `ProcessedChunk.issues` (codes: `asr_failed`, `diarization_failed`, `vad_unavailable`,
   `stream_empty`, `archive_failed`, `session_write_failed`, `duplicates_dropped`,
   `segments_filtered`, `clusters_absorbed`, `echo_flagged`).
+- *(v2, scan C13.)* `stream_empty` is informational — an idle side is not a processing problem
+  (§9). `processing_issue_count` counts content-affecting issues only (`asr_failed`,
+  `diarization_failed`, `archive_failed`, `session_write_failed`) and `processing_problem_chunks`
+  the distinct chunks that have one; the completion notice uses the latter.
 - `metadata.diarization` = diarizer present and no chunk has `diarization_failed`.
 - `metadata.merged_audio = {passthrough: Bool, gaps_inserted_seconds}` when concatenated.
 
 ### 7.3 Completion notice and summary
 
-`CaptureQualityNotice.completionTitle(anomalyCount:issueCount:segmentCount:)`: "Transcription
-Complete", "— capture anomalies", "— N chunks had processing problems", or "— no speech was
-transcribed". `MeetingSummarizer.parseTranscript` reads `metadata.capture`; `SummaryPromptBuilder`
+`CaptureQualityNotice.completionTitle(anomalyCount:problemChunkCount:segmentCount:)` picks exactly
+one of "Transcription Complete", "— capture anomalies", "— N chunks had processing problems",
+"— no speech was transcribed", with precedence no speech > capture anomalies > processing
+problems; the body names every non-zero count *(v2, scan C14: v1 left the combination undefined)*.
+`MeetingSummarizer.parseTranscript` reads `metadata.capture`; `SummaryPromptBuilder`
 adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expected)") and a rule
 ("state it in the Summary section when a side was not captured").
 
@@ -382,7 +411,9 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    rebuild the chunk pipeline seeded from `session.json`, salvage completed chunks in the
    background, record `launchRecovery` + `captureGap`, alarm `recordingResumedWithGap` ("Parley
    crashed at HH:MM:SS and resumed at HH:MM:SS — X s not recorded"); else → salvage + alarm
-   `recordingStopped`, `recovered = true`, gap recorded. The coordinator is constructed in
+   `recordingStopped`, `recovered = true`, gap recorded. A sentinel marked `stopping` (Stop sets it
+   before asking the helper, §8.8) is salvaged, never resumed: a crash during finalize must not
+   restart a recording the user stopped *(v2, scan A163/C16)*. The coordinator is constructed in
    `TranscriberApp.init` and injected into `MenuView`, and `recoverIfNeeded` becomes
    `RecordingCoordinator.recoverAtLaunch()` in Core (testable). This also settles the `@State`
    lifetime doubt.
@@ -407,14 +438,17 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    alarms/provenance events (the last one is a dead capture → crash path). The "preserved" wording
    is replaced by what is actually on disk.
 8. **Deadlines (L13).** Every `AudioCaptureClient` call gets a `ResumeOnce` deadline (start 15 s,
-   stop 20 s, rotate 10 s, mic 10 s, drain 3 s, status 3 s); the sentinel is deleted only after
-   `finalize` returns (or salvage completes). Closes #194/#195.
+   stop 20 s, rotate 10 s, mic 10 s, drain 3 s, status 3 s); Stop marks the sentinel `stopping`
+   before it asks the helper, and the sentinel is deleted only after `finalize` returns (or salvage
+   completes) *(v2, scan A163)*. Closes #194/#195.
 9. **Stale sentinel (L3).** `RecordingSentinel.bootSessionUUID` (`kern.bootsessionuuid`, immune to
    sleep and clock changes) replaces the `systemUptime` comparison (7.2 h of sleep excluded on
    this Mac). Stale → salvage + notify, never delete first; unreachable folder → leave it, alarm.
 10. **Sleep/wake/logout/quit (L12).** `SystemEventObserver` (app) forwards
-    `NSWorkspace.willSleep/didWake/sessionDidResignActive/willPowerOff` to the coordinator and, over
-    XPC, `systemPowerEvent(kind:)` to the helper. Sleep/wake intervals go into `metadata.capture.gaps`;
+    `NSWorkspace.willSleep/didWake/willPowerOff` to the coordinator and, over XPC,
+    `systemPowerEvent(kind:)` to the helper. Logout, shutdown and restart all arrive as
+    `willPowerOff`; `sessionDidResignActive` is fast user switching — the recording continues and
+    nothing is done *(v2, scan C18: v1 named an undefined `sessionResigned` handler)*. Sleep/wake intervals go into `metadata.capture.gaps`;
     wake forces a chunk rotation and re-arms both monitors (the tap heals via the ladder, the mic via
     `attemptRecover()`). `ProcessInfo.beginActivity(.idleSystemSleepDisabled)` while recording (lid
     close is the user's call: recorded, not fought). Quit while recording confirms, then bounded
@@ -458,7 +492,10 @@ empty) is out of scope for this overhaul.
 ## 10. Open questions only a device test can settle
 
 Each has a protocol and a stated degradation if the answer is "wrong". Protocols are the
-checklist entries in the plan (P4).
+checklist entries in the plan (Stream X). *(v2, scan A34.)* The never-delivered path is exercised
+end to end on device with the diagnostic config key `debug_drop_tap_frames`, which makes the helper
+drop every tap buffer before the heartbeat — Incident B on demand; a denied permission is a
+different, separate item (the tap delivers exact zeros; no ladder rung runs).
 
 - **M-A Muted-remote exact-zero census (Meet/Chrome, Meet/Safari, Zoom app, Teams, FaceTime,
   iPhone relay × AirPods, wired).** Start recording, join, remote mutes for 5 min, unmutes, speaks.
@@ -518,28 +555,28 @@ checklist entries in the plan (P4).
 
 ---
 
-## 11. Product defaults for the owner to decide
+## 11. Product defaults — owner decisions (2026-09-24)
 
-Both are flagged, not changed silently; each is a one-line change once decided.
+Decided by the owner after v1; each is a task in the plan (Stream D), with red-first tests.
 
-1. **`Config.default.systemAudioSource = .screenCaptureKit` (`Config.swift:189`).** Every new
-   install records with SCK, which has no content check (H2) and loses Continuity/iPhone calls.
-   This overhaul's health model applies to SCK's arrival stamp (a stalled SCK is caught and
-   alarmed the same way), but exact-zero content on SCK is meaningless (SCK renders zeros in
-   silence), so H2 stays open under SCK. **Recommendation:** flip the default for new installs to
-   `.coreAudioTap` now (existing configs are untouched; Settings still offers SCK until #221) and
-   relabel the picker so SCK is no longer "(default)".
-2. **`EngineID.default = .speechAnalyzer` (`EngineID.swift:28`) on macOS 26+.** The live chunk
-   path calls `transcribe(language: nil)`, which throws `languageRequired` on every chunk, and the
-   error is swallowed: a fresh install on macOS 26 produces empty transcripts with "Transcription
-   Complete" (P1; #147 already records the gap). **Recommendation:** `EngineID.default =
-   .fluidAudio`; label Apple Speech "needs a language setting — not yet usable" and hide it from
-   the Setup preselection until #147; preflight the chosen engine on a bundled 1 s WAV at Setup
-   Continue and Settings Save and refuse on throw. The preflight and the label ship regardless;
-   the default flip waits for the owner's answer.
-3. **Storage quota scope (P13).** The quota is scoped to the day folder, so it has never deleted
-   anything across days (1.72 GB on disk vs a 1.44 GB quota). Fixing the scope would start
-   deleting the oldest archives. Not changed here; the owner decides.
+1. **`Config.default.systemAudioSource` flips to `.coreAudioTap` for new installs** (plan D1;
+   `Config.swift:189`). SCK has no content check (H2) and loses Continuity/iPhone calls; the
+   health model still applies to SCK's arrival stamp (a stalled SCK is caught and alarmed the same
+   way). Existing configs are untouched — including a `config.json` that has no
+   `system_audio_source` key: its decode fallback stays `.screenCaptureKit`, because that install
+   was written by an SCK-era build and has behaved as SCK. SCK stays selectable, relabelled
+   "legacy, until #221"; #221 drops it once the tap is proven.
+2. **`EngineID.default = .fluidAudio`** (plan D2; `EngineID.swift:28`). The live chunk path calls
+   `transcribe(language: nil)`, which throws `languageRequired` on every chunk under Apple Speech,
+   and the error is swallowed (P1). Apple Speech stays listed and is **labelled** "Apple Speech —
+   not yet usable (#223)" — labelled, never hidden, so no picker can preselect an engine that is
+   not in its list *(v2, scan B P2.9/C3: v1 said "hide it from the Setup preselection")*. The
+   engine preflight (a synthetic 1 s WAV at Setup Continue and Settings Save, refuse on throw)
+   ships. The real fix is issue #223 (high priority, out of scope here).
+3. **Storage quota scope (P13)** is out of scope: issue #224. The quota is scoped to the day folder
+   and has never deleted anything across days (1.72 GB on disk vs a 1.44 GB quota); fixing the
+   scope would start deleting the oldest archives. Not changed here. The quota call still moves out
+   of the archive `catch` (plan R5).
 
 ---
 
@@ -566,7 +603,7 @@ I = invariants), P* from `11-validated-post-capture.md`, L* from `12-validated-l
 | C-Q4.5 (finalize skip; frames/callbacks/rebuilds) | CONFIRMED | §7.1 | P2.1 |
 | C-Q4.6 (TapAutoStart=false) | needs device test | §5, M-B | P1.4 |
 | C-H1 (never delivers → nothing fires) | CONFIRMED | §4.2 | P0.3 |
-| C-H2 (SCK no content check) | CONFIRMED | §11.1 (owner) | — (non-goal) |
+| C-H2 (SCK no content check) | CONFIRMED | §11.1 (owner: default flipped) | D1 |
 | C-H3 (deliver-then-stop, one banner, one rebuild) | CONFIRMED | §5, §6 | P0.4, P1.3 |
 | C-H3b (default-output gate) | CONFIRMED | §4.3 | P0.3 |
 | C-H4 (mic/SCK never delivers; mic on notDetermined) | CONFIRMED | §8.4 | P0.3 |
@@ -580,7 +617,7 @@ I = invariants), P* from `11-validated-post-capture.md`, L* from `12-validated-l
 | C-I2 (60 s exact-zero alarm) | PARTLY TRUE, conflicts with brief | §9, M-A | P1.3 (knob off) |
 | C-I3–I5 | CONFIRMED premises | §6, §7, §8.11 | P0.4, P2.1, P3.6 |
 | C-K (excessivePadding can't go live) | PARTLY TRUE | §5 (autostart false) | P1.4 |
-| P1 (SpeechAnalyzer default) | CONFIRMED | §11.2 | P2.9 (preflight+label; flip = owner) |
+| P1 (SpeechAnalyzer default) | CONFIRMED | §11.2 | D2 (preflight + label + default flip; owner 2026-09-24; real fix #223) |
 | P2 (dedup without time) | CONFIRMED | §7.4 | P2.4 |
 | P3 (chunk failures swallowed) | CONFIRMED | §7.2, §7.4 | P2.2 |
 | P4 (archiver/concatenator) | CONFIRMED + probe | §7.4 | P2.3 |
@@ -627,7 +664,7 @@ I = invariants), P* from `11-validated-post-capture.md`, L* from `12-validated-l
 - A standalone LaunchAgent helper that survives app death (changes the tap's TCC attribution,
   gotcha #70a) — only if M-L1 forces it, as its own spec.
 - Echo cancellation (#35), meeting sensing (#118), streaming.
-- Changing the quota scope or the CLI `run()` path's `dual_stream` semantics.
+- Changing the quota scope (#224) or the CLI `run()` path's `dual_stream` semantics.
 - App Store compatibility. New App Store-relevant choices here: none — `kAudioHardwarePropertyProcessObjectList`
   / `kAudioProcessPropertyIsRunningOutput` are public (AudioHardware.h, shipped with the tap API);
   `kern.bootsessionuuid` is a public sysctl; `launchctl bootstrap` is the LaunchAgent already
