@@ -106,6 +106,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Off-audio-queue 1 Hz liveness watchdog (#196). Started once capture is up, stopped on every
     /// teardown path.
     private let livenessWatchdog = LivenessWatchdogDriver()
+    /// Runs the tap's healing ladder from the system track's liveness verdicts (§5).
+    private let tapHealer = TapHealer()
+    /// Mic side of "heal, then alarm" (§6.1). Touched on the watchdog queue only.
+    private var micHealPolicy = MicHealPolicy()
 
     /// Keeps the tap honest about its System Audio Recording permission (#220): see
     /// `TapPermissionGuard`. Confined to `audioQueue`, like the samples that feed it.
@@ -193,6 +197,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.lastSystemHeartbeatNanos = tap.map { tap in { [weak tap] in tap?.lastHeartbeatNanos() ?? 0 } }
             ?? { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
         livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
+        // A new session starts a new mic episode; on the watchdog queue, like every other use.
+        livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy = MicHealPolicy() }
         mic.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .mic) }
         tap?.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }
         livenessWatchdog.start()
@@ -200,37 +206,103 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.arm(track: .system)
     }
 
-    /// Verdicts arrive on the watchdog queue. H1: record + transient banner + first-frames evidence;
-    /// H2: the NotDelivering alarms, raised directly for now (H4 routes the system track into the
-    /// ladder and the mic into MicHealPolicy, so both alarm only once healing has failed).
-    /// `helperSessionId` reads `stateLock`; this never runs inside a `stateLock.sync` block.
+    /// Verdicts arrive on the watchdog queue. Every verdict is recorded and first frames go to the app
+    /// as evidence. The mic heals before it alarms (`MicHealPolicy`); the tap's verdicts drive the
+    /// healing ladder, which alarms only once it has given up (§5). An SCK system stream has no ladder
+    /// (its #86 restart path is separate), so its verdicts alarm directly — SCK keeps the watchdog and
+    /// its alarms (§13). `helperSessionId` reads `stateLock`; this never runs inside a `stateLock.sync`.
     private func handleLiveness(track: CaptureTrack, verdict: TrackLivenessMonitor.Verdict) {
         let t = track.rawValue
-        let notDelivering: AlarmKind = track == .mic ? .micNotDelivering : .remoteNotDelivering
         switch verdict {
         case .firstFrames:
             record(.firstFrames, .info, ["track": t])
             onFirstFrames?(track, helperSessionId)
-            // Only the NotDelivering/RecoveryFailed kinds: first frames prove the OS is calling us,
-            // not that the content is real (permission and digital-silence kinds clear on real audio).
-            clearAlarm(notDelivering)
-            if track == .system { clearAlarm(.remoteRecoveryFailed) }
         case .neverDelivered(let s):
             record(.neverDelivered, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            let message = track == .mic
-                ? "The microphone isn’t delivering any audio." : "The other side of the call isn’t reaching Parley although audio is playing."
-            onQualityAnomaly?(CaptureEventKind.neverDelivered.rawValue, message)
-            raiseAlarm(notDelivering, message)
         case .stalled(let s):
             record(.livenessGap, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            let message = track == .mic
-                ? "The microphone stopped delivering audio \(Int(s))s ago." : "System audio stopped delivering \(Int(s))s ago."
-            onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, message)
-            raiseAlarm(notDelivering, message)
         case .cleared(let reason):
             record(.livenessRecovered, .info, ["track": t, "reason": "\(reason)"])
-            clearAlarm(notDelivering)
         case .healthy:
+            return
+        }
+        switch track {
+        case .mic:
+            handleMicLiveness(verdict)
+        case .system:
+            if stateLock.sync(execute: { tapSession != nil }) { handleTapLiveness(verdict) } else { handleStreamLiveness(verdict) }
+        }
+    }
+
+    /// The transient banner for a silence verdict (the alarm, if any, is separate).
+    private func livenessBanner(track: CaptureTrack, verdict: TrackLivenessMonitor.Verdict) -> (CaptureEventKind, String)? {
+        switch verdict {
+        case .neverDelivered:
+            return (.neverDelivered, track == .mic
+                ? "The microphone isn’t delivering any audio." : "The other side of the call isn’t reaching Parley although audio is playing.")
+        case .stalled(let s):
+            return (.livenessGap, track == .mic
+                ? "The microphone stopped delivering audio \(Int(s))s ago." : "System audio stopped delivering \(Int(s))s ago.")
+        default:
+            return nil
+        }
+    }
+
+    /// Mic: heal on the first silence verdict of an episode, heal AND alarm on the second (C5).
+    private func handleMicLiveness(_ verdict: TrackLivenessMonitor.Verdict) {
+        if let (kind, message) = livenessBanner(track: .mic, verdict: verdict) { onQualityAnomaly?(kind.rawValue, message) }
+        let alarmMessage = "The microphone isn’t delivering any audio. Try another microphone from the menu."
+        switch micHealPolicy.onVerdict(verdict) {
+        case .heal:
+            stateLock.sync { micSession }?.heal()
+        case .healAndAlarm:
+            stateLock.sync { micSession }?.heal()
+            raiseAlarm(.micNotDelivering, alarmMessage)
+        case .alarm:
+            raiseAlarm(.micNotDelivering, alarmMessage)
+        case .clear:
+            clearAlarm(.micNotDelivering)
+        case .none:
+            break
+        }
+    }
+
+    /// Tap: the ladder heals; `TapHealer.onGiveUp` raises `remoteNotDelivering`, `onRecovered` clears it.
+    private func handleTapLiveness(_ verdict: TrackLivenessMonitor.Verdict) {
+        switch verdict {
+        case .neverDelivered:
+            tapHealer.trigger(.neverDelivered)
+        case .stalled:
+            tapHealer.trigger(.stalled)
+        case .firstFrames:
+            tapHealer.heartbeatObserved()
+            // First frames disprove the delivery kinds (never the permission kinds, which clear on real audio).
+            clearAlarm(.remoteNotDelivering)
+            clearAlarm(.remoteRecoveryFailed)
+        case .cleared(.heartbeat):
+            tapHealer.heartbeatObserved()
+        case .cleared(.gateClosed):
+            tapHealer.gateClosed()
+            clearAlarm(.remoteNotDelivering)
+        case .healthy:
+            break
+        }
+    }
+
+    /// SCK system stream: no ladder here, so a silence verdict alarms at once and a heartbeat clears it.
+    private func handleStreamLiveness(_ verdict: TrackLivenessMonitor.Verdict) {
+        if let (kind, message) = livenessBanner(track: .system, verdict: verdict) {
+            onQualityAnomaly?(kind.rawValue, message)
+            raiseAlarm(.remoteNotDelivering, message)
+            return
+        }
+        switch verdict {
+        case .firstFrames:
+            clearAlarm(.remoteNotDelivering)
+            clearAlarm(.remoteRecoveryFailed)
+        case .cleared:
+            clearAlarm(.remoteNotDelivering)
+        default:
             break
         }
     }
@@ -397,6 +469,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // second) are not in these facts: `system_exact_zero_seconds` can understate by that margin.
         record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
+        tapHealer.cancelAll()
         stopTapGuardTimer()
         // Stop mic + tap delivery before finalize so no buffer lands on the audio queue after the WAV
         // headers are sealed (a late buffer would be a no-op anyway — finalize is idempotent).
@@ -562,7 +635,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     guard epoch == self.tapGuardEpoch else { reply(false, "Capture session changed"); return }
                     let actions = self.tapGuard.permissionChecked(status, evidence: .none, now: self.guardNow())
                     self.apply(actions)
-                    let rebuilt = actions.contains(.rebuildTap)
+                    let rebuilt = actions.contains { if case .rebuildTap = $0 { return true }; return false }
                     reply(rebuilt, rebuilt ? nil : "No rebuild needed (permission \(SystemAudioRecordingPermission.wireValue(status)))")
                 }
             }
@@ -594,9 +667,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             t.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
             t.setEventHandler { [weak self] in
                 guard let self else { return }
-                // The HAL read only happens while a grant rebuild still owes proof.
-                let outputRunning = self.tapGuard.wantsOutputState ? self.livenessWatchdog.othersRunningOutput() : nil
-                self.apply(self.tapGuard.tick(now: self.guardNow(), outputRunning: outputRunning))
+                self.apply(self.tapGuard.tick(now: self.guardNow()))
             }
             t.resume()
             self.tapGuardTimer = t
@@ -637,10 +708,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                         self.apply(self.tapGuard.permissionChecked(status, evidence: evidence, now: self.guardNow()))
                     }
                 }
-            case .rebuildTap:
-                let tap = stateLock.sync { isUserStopping ? nil : tapSession }
-                Logger.audio.info("System tap: rebuilding for the System Audio Recording permission")
-                tap?.rebuild(rung: .rebuildAggregate, token: 0, reason: "system audio permission")
+            case .rebuildTap(let reason):
+                guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
+                Logger.audio.info("System tap: rebuilding for the System Audio Recording permission (\(reason == .grant ? "grant" : "insurance", privacy: .public))")
+                // Through the ladder, so it counts against the episode's budget (§5).
+                tapHealer.trigger(reason == .grant ? .permissionGrant : .permissionInsurance)
             case .reportDenied(let status):
                 guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
                 Logger.audio.error("System tap: System Audio Recording permission \(SystemAudioRecordingPermission.wireValue(status), privacy: .public) — the other side is not being captured")
@@ -678,6 +750,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // denial still reports how much of its remote track was exact zeros (#220).
         record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
+        tapHealer.cancelAll()
         stopTapGuardTimer()
 
         // Stop mic + tap delivery, then finalize synchronously on the persistent audio queue so WAV
@@ -714,6 +787,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     private func cleanupAfterFailure() {
         livenessWatchdog.stop()
+        tapHealer.cancelAll()
         stopTapGuardTimer()
         // Snapshot and clear state under the lock, then run the blocking teardown (mic stopRunning,
         // writer finalize, file deletes) OUTSIDE the lock so we never hold stateLock across a blocking
@@ -762,6 +836,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // Record the anomaly so the session is flagged and diagnostics flush.
             Logger.audio.error("Microphone unavailable mid-session: \(reason, privacy: .public)")
             self?.record(.restartFailed, .anomaly, ["source": "mic", "reason": reason])
+            // The heal gave up, so no second verdict will come: alarm now (scan C11).
+            self?.livenessWatchdog.queue.async {
+                guard let self else { return }
+                if self.micHealPolicy.healFailed() == .alarm {
+                    self.raiseAlarm(.micNotDelivering, "The microphone stopped delivering audio and could not be reopened. Try another microphone from the menu.")
+                }
+            }
         }
         try mic.start(deviceId: microphoneDeviceId)
         // Commit-or-abort against a stop that raced in during start (mirrors buildAndStartStream's
@@ -785,7 +866,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// `options` is the start's own copy (`startCapture` consumes `pendingOptions`, F4 round 1).
     private func startSystemTap(handler: AudioOutputHandler, options: CaptureOptions) throws {
         audioQueue.sync {
-            tapGuard = TapPermissionGuard()
+            tapGuard = TapPermissionGuard(softAlarmSeconds: options.remoteExactZeroSoftAlarmSeconds.map(Double.init))
             tapGuardEpoch += 1
         }
         let tap = SystemTapSession(
@@ -801,13 +882,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
-        // §6.1: `remoteRecoveryFailed` is raised when a rung threw and cleared by the next successful
-        // rung (scan C8). Interim until H4 routes the results into `TapHealer`.
-        tap.onRebuildResult = { [weak self] rung, _, succeeded, _ in
-            guard let self else { return }
-            if succeeded { self.clearAlarm(.remoteRecoveryFailed) }
-            else { self.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture (\(rung.rawValue)). The other side may not be recorded.") }
-        }
+        wireTapHealer(to: tap)
         try tap.start()
         // Commit-or-abort against a stop that raced in during start (mirrors startMicSession's council-F1
         // guard): if the app began stopping while the tap was coming up, tear it down rather than leak a
@@ -818,6 +893,30 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return false
         }
         if stopping { tap.stop() }
+    }
+
+    /// The tap's rebuild results and aggregate events feed the healer; the healer's verdicts feed the
+    /// alarms (§5, §6.1): `remoteRecoveryFailed` raised when a rung threw or got stuck and cleared by the
+    /// next successful rung (scan C8), `remoteNotDelivering` raised on give-up and cleared on recovery.
+    private func wireTapHealer(to tap: SystemTapSession) {
+        tapHealer.tap = tap
+        // A new session starts a new episode: forget the previous session's budget, exhaustion and
+        // dead-gate memory (its timers were cancelled at its stop). Tokens stay monotonic.
+        tapHealer.trigger(.wake)
+        tap.onRebuildResult = { [weak self] rung, token, ok, _ in self?.tapHealer.rebuildResult(rung: rung, token: token, succeeded: ok) }
+        tap.onAggregateEvent = { [weak self] _ in self?.livenessWatchdog.accelerate(track: .system) }
+        tapHealer.onEvent = { [weak self] k, s, d in self?.record(k, s, d) }
+        tapHealer.onGiveUp = { [weak self] in
+            self?.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.")
+        }
+        tapHealer.onRecovered = { [weak self] in self?.clearAlarm(.remoteNotDelivering) }
+        tapHealer.onStuck = { [weak self] in
+            self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
+        }
+        tapHealer.onRungFailed = { [weak self] rung in
+            self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture (\(rung.rawValue)). The other side may not be recorded.")
+        }
+        tapHealer.onRungSucceeded = { [weak self] in self?.clearAlarm(.remoteRecoveryFailed) }
     }
 
     /// Build a fresh system-audio SCStream around the given handler and start it. Used both for the

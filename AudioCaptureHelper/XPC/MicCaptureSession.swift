@@ -350,6 +350,9 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         attemptRecover()
     }
 
+    /// Silent-but-not-errored session; the liveness verdict is the only caller (H4).
+    func heal() { attemptRecover() }
+
     /// Kick off a recovery loop on a background queue, at most one at a time.
     private func attemptRecover() {
         let shouldStart: Bool = stateLock.sync {

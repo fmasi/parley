@@ -25,7 +25,7 @@ final class LivenessWatchdogDriver {
     /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
     var onGate: ((Bool, UInt64) -> Void)?
     /// The last tick's gate reading. Cheap and lock-only, so `trackHealth()` (H6) can read it from
-    /// the audio queue; `othersRunningOutput()` is a HAL read and must not run there.
+    /// the audio queue; the probe itself is a HAL read and must not run there.
     var lastGateOpen: Bool { gateOpenLock.withLock { $0 } }
 
     private static func freshMonitors() -> [CaptureTrack: TrackLivenessMonitor] {
@@ -62,9 +62,6 @@ final class LivenessWatchdogDriver {
             for track in CaptureTrack.allCases { self.monitors[track]?.pause() }
         }
     }
-
-    /// Synchronous HAL read of the process-level gate (the tap guard timer until H4, and `accelerate`).
-    func othersRunningOutput() -> Bool { outputActivity.othersRunningOutput() }
 
     /// An aggregate listener (`goin`→0, `stpd`, `diff`) said IO may have stopped. Accelerators never
     /// rebuild blindly (§5): one second later, if no heartbeat has arrived since the event and the
