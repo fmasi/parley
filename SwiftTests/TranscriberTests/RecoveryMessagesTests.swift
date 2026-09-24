@@ -36,6 +36,15 @@ import Testing
         #expect(m.contains("kept on disk") && !m.contains("Stopping the recording failed"))
     }
 
+    /// L round 5, item 16: the finish failed, then the salvage wrote the transcript — say that, not
+    /// "could not be finished … were transcribed".
+    @Test func aRecoveredTranscriptAfterAFailedFinishIsWordedHonestly() {
+        let m = RecoveryMessages.transcriptionFailed(
+            after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2), error: "disk busy")
+        #expect(m.contains("recovered") && m.contains("2 chunks") && m.contains("m.json") && m.contains("disk busy"))
+        #expect(!m.contains("could not be finished"), "\(m)")
+    }
+
     /// Item 9: the same error is printed once, not in the lead-in AND in the outcome sentence.
     @Test func theErrorIsPrintedOnce() {
         let outcome = SalvageOutcome(kind: .finalizeFailed("helper gone"), chunkCount: 2)

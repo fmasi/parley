@@ -9,6 +9,8 @@ public struct SalvageOutcome: Equatable, Sendable {
     /// audio is on disk, untranscribed (L6 fix round 1).
     public let lastChunkKeptOnDisk: Bool
     public init(kind: Kind, chunkCount: Int, lastChunkKeptOnDisk: Bool = false) {
+        // Chunks on disk are never "no recorded audio": callers report them as kept (`finalizeFailed`).
+        assert(!(kind == .nothingToSalvage && chunkCount > 0), "nothingToSalvage with \(chunkCount) chunks on disk")
         self.kind = kind; self.chunkCount = chunkCount; self.lastChunkKeptOnDisk = lastChunkKeptOnDisk
     }
 }
@@ -37,9 +39,8 @@ public enum RecoveryMessages {
             let (noun, wasWere, _) = chunkPhrase(outcome.chunkCount)
             return "The \(noun) recorded before it \(wasWere) transcribed to \(url.lastPathComponent)." + tail
         case .nothingToSalvage:
-            // Callers use this only when nothing of the session is on disk: with no live pipeline, or a
-            // salvage that produced nothing, they count the chunks on disk first and report those as
-            // kept but not transcribed (`finalizeFailed`) — L6 fix round 1.
+            // Only when nothing of the session is on disk (asserted at construction: chunkCount == 0).
+            // With chunks there, callers report them as kept but not transcribed (`finalizeFailed`).
             return "No transcript could be written: no recorded audio was found to salvage."
         case .finalizeFailed(let why):
             guard outcome.chunkCount > 0 else {
@@ -59,9 +60,15 @@ public enum RecoveryMessages {
         "Stopping the recording failed\(errorClause(error, unlessIn: outcome)). " + outcomeSentence(outcome)
     }
 
-    /// The stop succeeded; finishing the transcript afterwards failed (L6 fix round 1).
+    /// The stop succeeded; finishing the transcript afterwards failed (L6 fix round 1). When the
+    /// salvage then wrote it after all, that is what it says (L round 5): no "could not be finished".
     public static func transcriptionFailed(after outcome: SalvageOutcome, error: String) -> String {
-        "The recording stopped, but its transcript could not be finished\(errorClause(error, unlessIn: outcome)). " + outcomeSentence(outcome)
+        if case .transcriptWritten(let url) = outcome.kind {
+            let what = outcome.chunkCount > 0 ? "the \(chunkPhrase(outcome.chunkCount).noun)" : "the recording"
+            let tail = outcome.lastChunkKeptOnDisk ? " The last chunk is kept on disk, not transcribed." : ""
+            return "The recording stopped. The first attempt to finish its transcript failed (\(error)); Parley recovered and transcribed \(what) to \(url.lastPathComponent)." + tail
+        }
+        return "The recording stopped, but its transcript could not be finished\(errorClause(error, unlessIn: outcome)). " + outcomeSentence(outcome)
     }
 
     /// The alert title after a stop that did not end in a normal transcript. It follows the outcome: a

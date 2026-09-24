@@ -82,8 +82,13 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var isCapturingResult = false
     /// Whether crash detection was armed (`captureReattached`) when the Flow-A ping ran.
     var armedAtPing: Bool?
+    /// Whether the crash callbacks were wired when the Flow-A ping ran (L round 5, item 12).
+    var wiredAtPing: Bool?
+    var isCapturingCalls = 0
     func isCapturing() async -> Bool {
+        isCapturingCalls += 1
         armedAtPing = captureReattachedCalls > 0
+        wiredAtPing = onServiceCrash != nil
         return isCapturingResult
     }
 
@@ -899,6 +904,58 @@ private struct Harness {
         coordinator.presentAlarms(now: t0 + 7920); #expect(shown.value == 5)
     }
 
+    /// L round 5, item 11: a recording start is in flight — and a hand-over must wait — from the very
+    /// top of `startRecording` until it returns, whatever the outcome.
+    @Test func startInFlightCoversTheWholeStart() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        let coordinator = h.coordinator
+        let duringStart = Harness.Box<Bool?>(nil)
+        h.client.onStart = { duringStart.value = coordinator.startInFlight }
+        #expect(!coordinator.startInFlight)
+        await coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        #expect(duringStart.value == true && !coordinator.startInFlight)
+
+        h.appState.phase = .idle
+        h.client.startError = FakeCaptureError()
+        await coordinator.startRecording(sessionName: "Again", microphoneDeviceId: "mic-1")
+        #expect(!coordinator.startInFlight, "cleared on the failure path too")
+    }
+
+    /// L round 5, item 15: a failed stop whose sentinel is MISSING still salvages from the live
+    /// pipeline's own session location — never "no recorded audio" while chunks are on disk.
+    @Test func aFailedStopWithoutTheSentinelSalvagesFromTheLivePipeline() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let rotator = try #require(h.runner.chunkRotator)
+        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try Self.headerOnlyWAV().write(to: outDir.appendingPathComponent(rotator.currentBaseName + ".wav"))
+        RecordingSentinel.delete(directory: h.tmp)   // e.g. deleted mid-recording
+        h.client.stopError = FakeCaptureError()
+
+        await h.coordinator.stopRecording()
+
+        let critical = try #require(h.criticals.value.first)
+        #expect(!critical.body.contains("no recorded audio"), "\(critical.body)")
+    }
+
     // MARK: - L round 4
 
     private func coordinatorShowing(_ h: Harness, _ state: AppState, repairPresents: Bool,
@@ -1124,6 +1181,33 @@ private struct Harness {
         #expect(pipelineAliveAtCaptureEnded.value == true)
     }
 
+    /// L round 5, item 10 (IMPORTANT): a queued crash event is a duplicate or stale (an interruption
+    /// plus an invalidation for the same death) when the restarted helper is capturing. Re-running
+    /// recovery would `start()` a capturing helper, fail, and end a healthy recording as "Failed".
+    @Test func aStaleQueuedCrashIsDroppedWhileTheHelperCaptures() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        let client = h.client, coordinator = h.coordinator
+        let starts = Harness.Box(0)
+        client.onStart = {
+            starts.value += 1
+            if starts.value > 1 { client.startError = FakeCaptureError() }   // "capture already in progress"
+            client.isCapturingResult = true
+        }
+        let fired = Harness.Box(false)
+        client.onStartAsync = {
+            guard !fired.value else { return }
+            fired.value = true
+            await coordinator.handleXPCCrash()   // the duplicate event for the same death
+        }
+
+        await h.coordinator.handleXPCCrash()
+
+        #expect(h.criticals.value.isEmpty && h.appState.isRecording, "the healthy recording goes on")
+        #expect(starts.value == 1 && h.client.retryEvents.count == 1)
+    }
+
     /// A crash queued while a restart SUCCEEDS runs next, and counts toward the cap.
     @Test func aCrashQueuedDuringASuccessfulRestartRunsNext() async throws {
         let h = try Harness()
@@ -1166,6 +1250,8 @@ private struct Harness {
         #expect(h.client.captureReattachedCalls == 1 && h.client.captureEndedCalls == 0)
         // L1 fix round 1, item 2: armed BEFORE the ping — an interruption between the two is not lost.
         #expect(h.client.armedAtPing == true)
+        // L round 5, item 12: and wired before it, so a crash reported during the ping is heard.
+        #expect(h.client.wiredAtPing == true)
         #expect(h.appState.activeAlarms[.micDigitalSilence] != nil)
         #expect(RecordingSentinel.read(directory: h.tmp) != nil)
     }
@@ -1933,7 +2019,7 @@ private struct Harness {
     }
 
     /// §7.4 P6: a relaunch that cannot resume transcribes what reached disk, presents it like a normal
-    /// stop, and says loudly — critical notice + sticky alarm — that the recording STOPPED.
+    /// stop, and says loudly — the sticky alarm, presented at once — that the recording STOPPED.
     @Test func launchSalvageIsPresentedAndSaysTheRecordingStopped() async throws {
         let h = try Harness()
         let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])

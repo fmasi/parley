@@ -13,12 +13,18 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
     /// cannot both reach `present()` and leave an orphaned panel on screen.
     private var showTask: Task<Void, Never>?
+    /// The current `show()` until its panel is up (or it ended without one): parsing happens before any
+    /// window exists, and a crash-protection hand-over must not exit in that gap (L round 5).
+    private var preparingRequest: UUID?
+    var isPreparing: Bool { preparingRequest != nil }
 
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.
         showTask?.cancel()
         panel?.close()
+        let request = UUID()
+        preparingRequest = request
 
         // parseSpeakers opens an AVAudioFile per chunk to measure durations — O(N) file opens, which
         // visibly stalls the menu bar before the window appears (worst on a network-mounted or cold
@@ -28,6 +34,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // transcript on every "Re-detect" press — the file open+parse that used to happen
         // synchronously on the main actor for the "this will clear your names" warning (#207).
         showTask = Task { @MainActor in
+            defer { self.endPreparing(request) }
             let (speakers, channelNames) = await Task.detached(priority: .userInitiated) {
                 Self.parseSpeakersAndChannelNames(from: jsonPath)
             }.value
@@ -46,6 +53,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             }
             self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, onDismiss: onDismiss)
         }
+    }
+
+    /// Only the current request's end counts; a superseded one leaves the flag to its successor.
+    private func endPreparing(_ request: UUID) {
+        guard preparingRequest == request else { return }
+        preparingRequest = nil
+        NotificationCenter.default.post(name: .parleyActivityEnded, object: nil)
     }
 
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.

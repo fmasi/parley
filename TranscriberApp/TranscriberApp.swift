@@ -167,6 +167,7 @@ struct TranscriberApp: App {
             }
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
+        Self.busyCoordinator = coordinator
 
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,
@@ -280,11 +281,18 @@ struct TranscriberApp: App {
     /// The one pending bounded re-check of a window deferral.
     private static var windowDeferralRecheck: Task<Void, Never>?
 
+    /// The coordinator, for the busy check only (a recording start in flight). Weak: the App owns it.
+    private static weak var busyCoordinator: RecordingCoordinator?
+
     /// Whether Parley is doing work a hand-over (an exit) would cut short: a recording or its
-    /// transcription, or post-recording work (the auto-summary) (L3 fix round 1).
+    /// transcription, a recording START in flight (the phase is still `.idle` while the helper starts),
+    /// post-recording work (the auto-summary), or a panel still preparing before its window exists
+    /// (rename parsing, the SessionName / MicSwitch device scans) (L3 fix round 1, L round 5).
     @MainActor
     static func isBusy(_ appState: AppState) -> Bool {
-        !appState.isIdle || PostRecordingWork.inFlight > 0
+        !appState.isIdle || PostRecordingWork.inFlight > 0 || (busyCoordinator?.startInFlight ?? false)
+            || RenameWindowController.shared.isPreparing || SessionNameWindowController.shared.isPreparing
+            || MicSwitchWindowController.shared.isPreparing
     }
 
     /// Any Parley window the user may be working in — Settings, the menu-bar dropdown, a panel: a
@@ -391,7 +399,10 @@ struct TranscriberApp: App {
             Task { @MainActor in await verifyCrashProtection(appState: appState) }
         }
         idleWatch = watch
-        watch.start(observing: appState)
+        watch.start {
+            _ = appState.phase
+            _ = busyCoordinator?.startInFlight
+        }
     }
 
     /// Holds the single-instance lock fd for the whole process lifetime. It must stay open (closing
@@ -555,26 +566,28 @@ private final class IdleWatch {
         self.onIdle = onIdle
     }
 
-    func start(observing appState: AppState) {
+    /// `observed`: reads the observable state whose change is also a transition (the phase, a start in
+    /// flight).
+    func start(observing observed: @escaping @MainActor () -> Void) {
         let center = NotificationCenter.default
         for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification,
-                     NSWindow.didChangeOcclusionStateNotification, PostRecordingWork.finished] {
+                     NSWindow.didChangeOcclusionStateNotification, .parleyActivityEnded] {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // willClose fires while the window is still up: look again on the next turn.
                 Task { @MainActor in self?.evaluate() }
             })
         }
-        observePhase(of: appState)
+        observe(observed)
     }
 
-    private func observePhase(of appState: AppState) {
+    private func observe(_ observed: @escaping @MainActor () -> Void) {
         withObservationTracking {
-            _ = appState.phase
+            observed()
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self, !self.done else { return }
                 self.evaluate()
-                if !self.done { self.observePhase(of: appState) }
+                if !self.done { self.observe(observed) }
             }
         }
     }

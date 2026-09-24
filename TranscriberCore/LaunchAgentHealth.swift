@@ -32,7 +32,7 @@ public enum LaunchAgentHealth {
         /// `.loadedButNotThisProcess`: `launchctl kickstart -k` launchd's own copy; on success, THIS
         /// process releases the single-instance lock and exits 0 (fix round 3, item 5 — it does not
         /// merely "yield": see `SingleInstancePolicy` for why B must wait for the lock rather than
-        /// yield on it). See `LaunchAgentManager.handOverToJob` and `shouldAttemptHandOver` below.
+        /// yield on it). See `LaunchAgentManager.handOverToJob` and `crashProtectionAction` above.
         case handOverToJob
     }
 
@@ -88,7 +88,7 @@ public enum LaunchAgentHealth {
             // "Quit and reopen" is not honest here (fix round 2, item 3): reopening from Finder
             // just recreates this same state, since it still isn't the process launchd's KeepAlive
             // tracks. The hand-over (`LaunchAgentManager.handOverToJob`, gated by
-            // `shouldAttemptHandOver`) re-enables protection on its own once not recording.
+            // `crashProtectionAction`) re-enables protection on its own once not recording.
             return "Crash protection is off — Parley will re-enable it automatically the next time you're not recording."
         }
     }
@@ -187,24 +187,10 @@ public enum LaunchAgentHealth {
         }
     }
 
-    // MARK: - Hand-over guard (owner-ruled robustness gap, fix round 1, item 4)
+    // MARK: - Hand-over cooldown (owner-ruled robustness gap, fix round 1, item 4)
 
-    /// Minimum time between two `.handOverToJob` attempts, to avoid a kickstart loop.
+    /// Minimum time between two `.handOverToJob` attempts, to avoid a kickstart loop. The rest of the
+    /// hand-over guard (never while busy or recording, never by the launchd job itself, never without
+    /// the single-instance lock) is `crashProtectionAction` (L round 5 retired `shouldAttemptHandOver`).
     public static let handOverCooldown: TimeInterval = 30
-
-    /// Whether it is safe to attempt `.handOverToJob` right now. Pure; the caller (L3) supplies the
-    /// facts — this type has no idea whether a recording is in progress or a kickstart was already
-    /// tried. Never during a recording (killing this process mid-recording would lose audio still
-    /// buffered here), never in CLI mode (there is no menu-bar app instance to hand over to, and a
-    /// one-shot CLI invocation is not what KeepAlive is meant to protect), never when THIS process
-    /// already IS the launchd job (fix round 3, item 4 — it would be handing over to itself), never
-    /// without the single-instance lock (fix round 5, item 1 — `kickstart -k` kills the running
-    /// job, which is only safe when the lock proves no other instance can be recording; an
-    /// unguarded process, lock unavailable, has no such proof), and never twice within
-    /// `handOverCooldown` of the last attempt.
-    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, isLaunchdJob: Bool, holdsInstanceLock: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
-        guard !isRecording, !isCLI, !isLaunchdJob, holdsInstanceLock else { return false }
-        if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown { return false }
-        return true
-    }
 }

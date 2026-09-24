@@ -54,6 +54,11 @@ public final class ChunkRotator {
     /// The base name for the current chunk's WAV files.
     public var currentBaseName: String { "\(sessionBaseName)-\(currentChunkIndex)" }
 
+    /// Where this live session's chunks are: a salvage without the sentinel still finds them (L round 5).
+    public var sessionLocation: (outputDir: URL, sessionId: String) {
+        (URL(fileURLWithPath: outputDirectory), sessionBaseName)
+    }
+
     /// Info about the current (in-progress) chunk for final processing.
     public var currentChunkInfo: (index: Int, startTime: Date) {
         (index: currentChunkIndex, startTime: currentChunkStartTime)

@@ -185,7 +185,7 @@ public enum LaunchAgentManager {
     /// `.loadedButNotThisProcess` is judged (via `currentPID`, default `getpid()`) but never
     /// auto-repaired here: whether a hand-over is safe depends on recording/CLI-mode state this
     /// function has no access to. Call `LaunchAgentManager.handOverToJob` directly, gated by
-    /// `LaunchAgentHealth.shouldAttemptHandOver`, when that context is available (L3).
+    /// `LaunchAgentHealth.crashProtectionAction`, when that context is available (L3).
     ///
     /// `holdsInstanceLock` (fix round 5, item 1; deliberately no default): whether this process
     /// holds the single-instance lock. Without it (`SingleInstanceGuard.LockOutcome.unavailable`,
@@ -324,7 +324,7 @@ public enum LaunchAgentManager {
     /// `SingleInstancePolicy.lockWaitTimeout` window from A's kickstart. It is safe ONLY because A
     /// holds the single-instance lock, so any running job process is a B waiting for it, never one
     /// recording. An unguarded A (lock unavailable) has no such proof and could kill a recording
-    /// job, so `shouldAttemptHandOver` requires `holdsInstanceLock` (fix round 5, item 1).
+    /// job, so `crashProtectionAction` requires `holdsInstanceLock` (fix round 5, item 1).
     ///
     /// The full hand-over protocol (fix round 2, item 2 — a design correction: round 1's plan was
     /// "kickstart then yield", which as DOCUMENTED left NO instance running. This process, A, still
@@ -353,12 +353,12 @@ public enum LaunchAgentManager {
     ///    lingered past B's window and then exited would leave none. (Fix round 4, item 2; round
     ///    5, item 4.)
     ///
-    /// `LaunchAgentHealth.shouldAttemptHandOver`'s `lastHandOverAt` guard must be persisted ACROSS
+    /// `LaunchAgentHealth.crashProtectionAction`'s `lastHandOverAt` guard must be persisted ACROSS
     /// PROCESSES (e.g. `UserDefaults`, by L3): A does not survive a successful hand-over to
     /// remember it in memory, so an in-memory `lastHandOverAt` would reset to nil on every attempt
     /// and the cooldown would never actually apply.
     ///
-    /// Callers MUST gate this call with `LaunchAgentHealth.shouldAttemptHandOver` first (never while
+    /// Callers MUST gate this call with `LaunchAgentHealth.crashProtectionAction` first (never while
     /// recording, never in CLI mode, never from the launchd job itself (`isLaunchdJob`), never
     /// without the single-instance lock (`holdsInstanceLock`), never twice within
     /// `handOverCooldown`) — this method performs no such guard itself, since it has no idea
