@@ -60,8 +60,12 @@ public enum SystemAudioRecordingPermission {
     }
 
     /// Show the system "would like to record your system audio" prompt if the user has never answered
-    /// it; returns immediately with the stored answer otherwise. Must be called from the APP process —
-    /// the prompt is attributed to the app. Returns `nil` if the SPI is unavailable.
+    /// it. Must be called from the APP process: the prompt is attributed to the app.
+    ///
+    /// Returns `.authorized` when granted, and `nil` for EVERYTHING else: `TCCAccessRequest` reports
+    /// `false` for an explicit "Don't Allow", for a prompt dismissed without answering, and for a
+    /// request that raised no prompt at all, so `false` can't be read as "denied". The caller asks the
+    /// helper (whose preflight is fresh) for the real status.
     public static func request() async -> PermissionStatus? {
         guard let tcc, let sym = dlsym(tcc, "TCCAccessRequest") else {
             Logger.permissions.error("TCCAccessRequest unavailable — cannot prompt for System Audio Recording")
@@ -71,7 +75,7 @@ public enum SystemAudioRecordingPermission {
         let granted: Bool = await withCheckedContinuation { cont in
             request(service, nil) { cont.resume(returning: $0) }
         }
-        return granted ? .authorized : .denied
+        return granted ? .authorized : nil
     }
 
     // MARK: - XPC wire format

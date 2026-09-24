@@ -54,9 +54,12 @@ struct SystemPermissionChecker: PermissionChecking {
         // The prompt is attributed to the app, so it must be requested from the app process
         // (spike 2026-09-23). The request's own answer is authoritative, unlike a cached preflight.
         let answer = await SystemAudioRecordingPermission.request()
-        // The app's own TCC view can be stale (cached per process), so the helper has the last word.
+        if answer == .authorized { return .authorized }
+        // Anything but a grant is ambiguous (denied, dismissed, or no prompt), so the helper's fresh
+        // preflight has the last word. If it can't answer, fall back to this process's own (possibly
+        // cached) view, and failing that to "never asked", which sends the user to System Settings.
         if let helper = await helperSystemAudioStatus() { return helper }
-        return answer ?? .authorized
+        return SystemAudioRecordingPermission.preflight() ?? .notDetermined
     }
 
     func requestMicrophone() async -> PermissionStatus {

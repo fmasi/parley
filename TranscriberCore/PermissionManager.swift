@@ -121,10 +121,19 @@ public final class PermissionManager {
     /// Re-check just the permissions a recording needs: cheap enough for record start and for the
     /// repair window's refresh while it is open.
     public func refreshRequired() async {
-        microphone = checker.checkMicrophone()
-        switch systemAudioSource {
-        case .screenCaptureKit: screenRecording = await checker.checkScreenRecording()
-        case .coreAudioTap: systemAudioRecording = await checker.checkSystemAudioRecording()
+        await refresh(CaptureReadiness.required(for: systemAudioSource))
+    }
+
+    /// Re-check exactly these permissions, leaving `systemAudioSource` alone. The repair window
+    /// refreshes what IT lists, so it never has to repoint the source that drives the Settings and
+    /// Setup rows (PR #222 review).
+    public func refresh(_ permissions: [CapturePermission]) async {
+        for permission in permissions {
+            switch permission {
+            case .microphone: microphone = checker.checkMicrophone()
+            case .screenRecording: screenRecording = await checker.checkScreenRecording()
+            case .systemAudioRecording: systemAudioRecording = await checker.checkSystemAudioRecording()
+            }
         }
     }
 

@@ -75,6 +75,23 @@ public enum CaptureReadiness {
         case openSystemSettings
     }
 
+    /// The source a permission check should judge. A report from a RUNNING tap outranks the configured
+    /// source: Settings can be switched to ScreenCaptureKit mid-recording (that applies to the next
+    /// recording), while the tap that is actually running is the one being denied.
+    public static func sourceToVerify(configured: SystemAudioSource, tapReportedProblem: Bool) -> SystemAudioSource {
+        tapReportedProblem ? .coreAudioTap : configured
+    }
+
+    /// Whether a check that found something missing should open (or update) the repair window. An open
+    /// window is always updated in place, and only REPEATED helper reports are snoozed after "Later":
+    /// launch, record start, a Settings change and a tap on the menu row always open it.
+    public static func shouldOpenRepairWindow(
+        isCaptureEvidence: Bool, windowIsOpen: Bool, lastDismissedAt: Date?, now: Date
+    ) -> Bool {
+        if windowIsOpen || !isCaptureEvidence { return true }
+        return shouldPresentRepair(lastDismissedAt: lastDismissedAt, now: now)
+    }
+
     /// "System Audio Recording is off" / "Microphone and System Audio Recording are off".
     public static func offPhrase(for permissions: [CapturePermission]) -> String {
         guard !permissions.isEmpty else { return "" }

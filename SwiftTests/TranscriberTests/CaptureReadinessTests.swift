@@ -116,6 +116,50 @@ struct CaptureReadinessTests {
         #expect(CaptureReadiness.shouldPresentRepair(lastDismissedAt: now.addingTimeInterval(-181), now: now))
     }
 
+    // MARK: - sourceToVerify (PR #222 review: evidence from a running tap outranks the config)
+
+    @Test func configuredSourceIsVerifiedWhenNothingIsWrong() {
+        #expect(CaptureReadiness.sourceToVerify(configured: .screenCaptureKit, tapReportedProblem: false) == .screenCaptureKit)
+        #expect(CaptureReadiness.sourceToVerify(configured: .coreAudioTap, tapReportedProblem: false) == .coreAudioTap)
+    }
+
+    /// Settings can be switched to ScreenCaptureKit mid-recording (it applies to the NEXT recording)
+    /// while the tap that is running keeps reporting: the permission to check is the tap's.
+    @Test func aTapProblemIsVerifiedAgainstTheTapWhateverTheConfigSays() {
+        #expect(CaptureReadiness.sourceToVerify(configured: .screenCaptureKit, tapReportedProblem: true) == .coreAudioTap)
+        let missing = CaptureReadiness.missing(
+            for: CaptureReadiness.sourceToVerify(configured: .screenCaptureKit, tapReportedProblem: true)
+        ) { $0 == .systemAudioRecording ? .denied : .authorized }
+        #expect(missing == [.systemAudioRecording])
+    }
+
+    // MARK: - shouldOpenRepairWindow
+
+    @Test func aFreshHelperReportRightAfterLaterIsSnoozed() {
+        let now = Date()
+        #expect(!CaptureReadiness.shouldOpenRepairWindow(
+            isCaptureEvidence: true, windowIsOpen: false, lastDismissedAt: now.addingTimeInterval(-30), now: now))
+    }
+
+    @Test func aFreshHelperReportAfterTheSnoozeOpensTheWindow() {
+        let now = Date()
+        #expect(CaptureReadiness.shouldOpenRepairWindow(
+            isCaptureEvidence: true, windowIsOpen: false, lastDismissedAt: now.addingTimeInterval(-200), now: now))
+    }
+
+    /// The snooze is for repeated helper reports only: an explicit action or a lifecycle check opens it.
+    @Test func nonEvidenceTriggersIgnoreTheSnooze() {
+        let now = Date()
+        #expect(CaptureReadiness.shouldOpenRepairWindow(
+            isCaptureEvidence: false, windowIsOpen: false, lastDismissedAt: now.addingTimeInterval(-5), now: now))
+    }
+
+    @Test func anOpenWindowIsAlwaysUpdated() {
+        let now = Date()
+        #expect(CaptureReadiness.shouldOpenRepairWindow(
+            isCaptureEvidence: true, windowIsOpen: true, lastDismissedAt: now.addingTimeInterval(-5), now: now))
+    }
+
     // MARK: - offPhrase (PR #222 review: "X and Y is off" is ungrammatical)
 
     @Test func noPermissionsGivesAnEmptyPhrase() {

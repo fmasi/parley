@@ -33,9 +33,10 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     private var lastDismissedAt: Date?
     /// Collapses overlapping verify() calls (record start + a helper report can land together).
     private var verifying = false
-    /// A helper report that arrived while another verify() was running. Re-run once afterwards
-    /// instead of dropping it, which would leave the window closed until the next 60 s re-report.
-    private var pendingEvidence = false
+    /// The most urgent trigger that arrived while another verify() was running. Re-run once afterwards
+    /// instead of dropping it: a helper report outranks the rest, and a tap on the menu row or a
+    /// Settings change must not be silently ignored.
+    private var pendingTrigger: Trigger?
 
     private weak var permissionManager: PermissionManager?
     private weak var appState: AppState?
@@ -53,39 +54,35 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     func verify(trigger: Trigger) async {
         guard let permissionManager else { return }
         if verifying {
-            if trigger == .captureEvidence { pendingEvidence = true }
+            if pendingTrigger != .captureEvidence { pendingTrigger = trigger }
             return
         }
         verifying = true
         await performVerify(trigger: trigger, permissionManager: permissionManager)
         verifying = false
-        if pendingEvidence {
-            pendingEvidence = false
-            await verify(trigger: .captureEvidence)
+        if let next = pendingTrigger {
+            pendingTrigger = nil
+            await verify(trigger: next)
         }
     }
 
     private func performVerify(trigger: Trigger, permissionManager: PermissionManager) async {
-
-        // Evidence only ever comes from a running tap, whatever the config says now. This leaves
-        // `systemAudioSource` on the tap even if Settings was switched to ScreenCaptureKit mid-recording
-        // (which applies to the NEXT recording). Deliberately not restored here: an open repair window
-        // refreshes through this same setting, so restoring it would stop the window seeing the fix.
-        // It self-corrects at the next verify() or Settings save, and once the recording ends the sticky
-        // state that selects the tap is cleared.
-        let tapIsTheProblem = trigger == .captureEvidence || appState?.remoteAudioNotCaptured == true
-        permissionManager.systemAudioSource = tapIsTheProblem ? .coreAudioTap : configManager.config.systemAudioSource
-        await permissionManager.refreshRequired()
+        // The source is a LOCAL decision: nothing here repoints `permissionManager.systemAudioSource`,
+        // which drives the Settings and Setup rows. A report from a running tap outranks the config.
+        let source = CaptureReadiness.sourceToVerify(
+            configured: configManager.config.systemAudioSource,
+            tapReportedProblem: trigger == .captureEvidence || appState?.remoteAudioNotCaptured == true
+        )
+        await permissionManager.refresh(CaptureReadiness.required(for: source))
 
         // The one gap a system prompt fixes by itself: a System Audio Recording permission that was
         // never asked for. Raise the real prompt first, but never let an unanswered prompt keep the
         // window away.
-        if permissionManager.systemAudioSource == .coreAudioTap,
-           permissionManager.systemAudioRecording == .notDetermined {
+        if source == .coreAudioTap, permissionManager.systemAudioRecording == .notDetermined {
             await Self.withDeadline(seconds: 10) { await permissionManager.requestSystemAudioRecording() }
         }
 
-        let missing = permissionManager.missingRequired
+        let missing = CaptureReadiness.missing(for: source) { permissionManager.status(of: $0) }
         Logger.permissions.info("Permission check (\(trigger.rawValue, privacy: .public)): missing \(missing.map(\.rawValue), privacy: .public)")
         guard !missing.isEmpty else {
             // Granted now. If a recording is running on the tap, let the helper confirm and rebuild.
@@ -93,17 +90,18 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
             Task { await self.nudgeHelperIfRecording() }
             return
         }
-        let isNewWindow = !(panel?.isVisible ?? false)
-        if isNewWindow, trigger == .captureEvidence,
-           !CaptureReadiness.shouldPresentRepair(lastDismissedAt: lastDismissedAt, now: Date()) {
-            return   // snoozed; the sticky banner and menu-bar icon still say it
-        }
-        show(missing: missing, trigger: trigger)
+        guard CaptureReadiness.shouldOpenRepairWindow(
+            isCaptureEvidence: trigger == .captureEvidence,
+            windowIsOpen: panel?.isVisible ?? false,
+            lastDismissedAt: lastDismissedAt,
+            now: Date()
+        ) else { return }   // snoozed; the sticky banner and menu-bar icon still say it
+        show(missing: missing, source: source, trigger: trigger)
     }
 
-    private func show(missing: [CapturePermission], trigger: Trigger) {
+    private func show(missing: [CapturePermission], source: SystemAudioSource, trigger: Trigger) {
         guard let permissionManager, let appState else { return }
-        let required = CaptureReadiness.required(for: permissionManager.systemAudioSource)
+        let required = CaptureReadiness.required(for: source)
         let merged = (listed + missing.filter { !listed.contains($0) }).filter { required.contains($0) }
         if let panel, panel.isVisible, merged == listed {
             panel.orderFrontRegardless()

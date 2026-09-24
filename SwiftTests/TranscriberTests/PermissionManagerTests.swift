@@ -148,6 +148,31 @@ struct PermissionManagerTests {
         #expect(checker.systemAudioQueries.value == 0)
     }
 
+    // MARK: - PR #222 review: refresh what a window lists, without touching the configured source
+
+    @Test func refreshingSpecificPermissionsChecksOnlyThose() async {
+        let checker = SourceAwareMockChecker(
+            microphone: .authorized, screenRecording: .authorized, systemAudio: .denied
+        )
+        let manager = PermissionManager(checker: checker)
+        await manager.refresh([.systemAudioRecording])
+        #expect(manager.systemAudioRecording == .denied)
+        #expect(checker.systemAudioQueries.value == 1)
+        #expect(manager.screenRecording == .notDetermined)   // not asked, so untouched
+    }
+
+    /// A repair window for the running tap must not repoint the Settings/Setup rows at the tap.
+    @Test func refreshingDoesNotChangeTheConfiguredSource() async {
+        let checker = SourceAwareMockChecker(
+            microphone: .authorized, screenRecording: .authorized, systemAudio: .authorized
+        )
+        let manager = PermissionManager(checker: checker)
+        manager.systemAudioSource = .screenCaptureKit
+        await manager.refresh([.microphone, .systemAudioRecording])
+        #expect(manager.systemAudioSource == .screenCaptureKit)
+        #expect(manager.status(of: .systemAudioRecording) == .authorized)
+    }
+
     @Test func requestSystemAudioUpdatesStatus() async {
         let checker = SourceAwareMockChecker(
             microphone: .authorized, screenRecording: .authorized, systemAudio: .authorized
