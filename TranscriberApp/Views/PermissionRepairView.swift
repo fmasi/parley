@@ -11,14 +11,6 @@ extension CapturePermission {
         }
     }
 
-    var displayName: String {
-        switch self {
-        case .microphone: return "Microphone"
-        case .screenRecording: return "Screen Recording"
-        case .systemAudioRecording: return "System Audio Recording"
-        }
-    }
-
     var detail: String {
         switch self {
         case .microphone: return "Record your voice during meetings"
@@ -135,13 +127,13 @@ struct PermissionRepairView: View {
     }
 
     private var explanation: String {
-        let names = unresolved.map(\.displayName)
-        let list = ListFormatter.localizedString(byJoining: names.isEmpty ? permissions.map(\.displayName) : names)
+        let shown = unresolved.isEmpty ? permissions : unresolved
+        let off = CaptureReadiness.offPhrase(for: shown)
         if isRecording {
             return unresolved.contains(.systemAudioRecording) || unresolved.contains(.screenRecording)
-                ? "\(list) is off, so the other side of the call is not being captured. Your recording continues; grant it and remote audio resumes in this same recording."
-                : "\(list) is off, so part of this meeting is not being captured. Your recording continues; grant it to fix it."
+                ? "\(off), so the other side of the call is not being captured. Your recording continues; grant it and remote audio resumes in this same recording."
+                : "\(off), so part of this meeting is not being captured. Your recording continues; grant it to fix it."
         }
-        return "\(list) is needed to record meetings. Grant it now so your next recording captures everything."
+        return "\(off). Parley needs it to record meetings. Grant it now so your next recording captures everything."
     }
 }

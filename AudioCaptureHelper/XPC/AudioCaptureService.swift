@@ -79,6 +79,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Bumped per tap session, so a permission check still in flight from a previous session can't
     /// land in the next session's fresh guard. Read and written on `audioQueue`.
     private var tapGuardEpoch = 0
+    /// Serial queue for every TCC permission read: they are synchronous IPC round-trips, so they must
+    /// never run on `audioQueue` or on `SystemTapSession`'s config queue (a slow one would delay a
+    /// rebuild), and serial so results reach the guard in the order they were asked for.
+    private let tccQueue = DispatchQueue(label: "audio-capture.tcc", qos: .utility)
     private let guardEpoch = DispatchTime.now().uptimeNanoseconds
     private func guardNow() -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - guardEpoch) / 1_000_000_000
@@ -400,13 +404,19 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             reply(false, "System audio is not being captured with the Core Audio tap")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let status = SystemAudioRecordingPermission.preflight()
+        // Read the epoch on audioQueue asynchronously: a stalled audio queue must not block this XPC thread.
+        audioQueue.async { [weak self] in
             guard let self else { reply(false, nil); return }
-            self.audioQueue.async {
-                let actions = self.tapGuard.permissionChecked(status, evidence: .none, now: self.guardNow())
-                self.apply(actions)
-                reply(actions.contains(.rebuildTap), actions.contains(.rebuildTap) ? nil : "No rebuild needed (permission \(SystemAudioRecordingPermission.wireValue(status)))")
+            let epoch = self.tapGuardEpoch
+            self.tccQueue.async {
+                let status = SystemAudioRecordingPermission.preflight()
+                self.audioQueue.async {
+                    guard epoch == self.tapGuardEpoch else { reply(false, "Capture session changed"); return }
+                    let actions = self.tapGuard.permissionChecked(status, evidence: .none, now: self.guardNow())
+                    self.apply(actions)
+                    let rebuilt = actions.contains(.rebuildTap)
+                    reply(rebuilt, rebuilt ? nil : "No rebuild needed (permission \(SystemAudioRecordingPermission.wireValue(status)))")
+                }
             }
         }
     }
@@ -454,9 +464,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Called from `SystemTapSession` after every successful (re)build, on its config queue. The
     /// grant is decided when the aggregate starts, so this is when to ask.
     private func tapDidBuild() {
-        let status = SystemAudioRecordingPermission.preflight()
-        audioQueue.async {
-            self.apply(self.tapGuard.tapBuilt(status: status, now: self.guardNow()))
+        // Off the caller's queue: a slow TCC read must not hold up the next rebuild.
+        tccQueue.async { [weak self] in
+            let status = SystemAudioRecordingPermission.preflight()
+            guard let self else { return }
+            self.audioQueue.async {
+                self.apply(self.tapGuard.tapBuilt(status: status, now: self.guardNow()))
+            }
         }
     }
 
@@ -466,7 +480,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             case .checkPermission(let evidence):
                 // A TCC IPC round-trip: never on the audio queue.
                 let epoch = tapGuardEpoch
-                DispatchQueue.global(qos: .utility).async { [weak self] in
+                tccQueue.async { [weak self] in
                     let status = SystemAudioRecordingPermission.preflight()
                     guard let self else { return }
                     self.audioQueue.async {

@@ -6,6 +6,14 @@ public enum CapturePermission: String, CaseIterable, Sendable {
     case screenRecording
     /// `kTCCServiceAudioCapture` — what the Core Audio tap needs (#103, #220).
     case systemAudioRecording
+
+    public var displayName: String {
+        switch self {
+        case .microphone: return "Microphone"
+        case .screenRecording: return "Screen Recording"
+        case .systemAudioRecording: return "System Audio Recording"
+        }
+    }
 }
 
 /// Pure decisions about whether Parley is ready to record (#174, #220).
@@ -65,6 +73,18 @@ public enum CaptureReadiness {
         case requestPrompt
         /// Explicitly denied or switched off: macOS will not prompt again, only System Settings can fix it.
         case openSystemSettings
+    }
+
+    /// "System Audio Recording is off" / "Microphone and System Audio Recording are off".
+    public static func offPhrase(for permissions: [CapturePermission]) -> String {
+        let names = permissions.map(\.displayName)
+        let list: String
+        switch names.count {
+        case 0, 1: list = names.first ?? ""
+        case 2: list = "\(names[0]) and \(names[1])"
+        default: list = names.dropLast().joined(separator: ", ") + ", and " + names[names.count - 1]
+        }
+        return "\(list) \(names.count > 1 ? "are" : "is") off"
     }
 
     /// After the user clicks "Later" on the repair window, a persisting problem reopens it only once

@@ -33,6 +33,9 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     private var lastDismissedAt: Date?
     /// Collapses overlapping verify() calls (record start + a helper report can land together).
     private var verifying = false
+    /// A helper report that arrived while another verify() was running. Re-run once afterwards
+    /// instead of dropping it, which would leave the window closed until the next 60 s re-report.
+    private var pendingEvidence = false
 
     private weak var permissionManager: PermissionManager?
     private weak var appState: AppState?
@@ -48,9 +51,21 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     /// Check what a recording needs and, if anything is missing, open the repair window. Never blocks
     /// or stops a recording.
     func verify(trigger: Trigger) async {
-        guard let permissionManager, !verifying else { return }
+        guard let permissionManager else { return }
+        if verifying {
+            if trigger == .captureEvidence { pendingEvidence = true }
+            return
+        }
         verifying = true
-        defer { verifying = false }
+        await performVerify(trigger: trigger, permissionManager: permissionManager)
+        verifying = false
+        if pendingEvidence {
+            pendingEvidence = false
+            await verify(trigger: .captureEvidence)
+        }
+    }
+
+    private func performVerify(trigger: Trigger, permissionManager: PermissionManager) async {
 
         // Evidence only ever comes from a running tap, whatever the config says now.
         let tapIsTheProblem = trigger == .captureEvidence || appState?.remoteAudioNotCaptured == true
@@ -168,9 +183,8 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
 
     private func postNotification(missing: [CapturePermission], recording: Bool) {
         let content = UNMutableNotificationContent()
-        let names = ListFormatter.localizedString(byJoining: missing.map(\.displayName))
         content.title = recording ? "Parley isn’t recording everything" : "Parley needs a permission"
-        content.body = "\(names) is off. Use the window Parley just opened to fix it."
+        content.body = "\(CaptureReadiness.offPhrase(for: missing)). Use the window Parley just opened to fix it."
         content.sound = .default
         content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(identifier: "permission-repair", content: content, trigger: nil)

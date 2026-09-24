@@ -116,6 +116,22 @@ struct CaptureReadinessTests {
         #expect(CaptureReadiness.shouldPresentRepair(lastDismissedAt: now.addingTimeInterval(-181), now: now))
     }
 
+    // MARK: - offPhrase (PR #222 review: "X and Y is off" is ungrammatical)
+
+    @Test func onePermissionUsesIs() {
+        #expect(CaptureReadiness.offPhrase(for: [.systemAudioRecording]) == "System Audio Recording is off")
+    }
+
+    @Test func twoPermissionsUseAre() {
+        #expect(CaptureReadiness.offPhrase(for: [.microphone, .systemAudioRecording])
+            == "Microphone and System Audio Recording are off")
+    }
+
+    @Test func threePermissionsUseAre() {
+        #expect(CaptureReadiness.offPhrase(for: [.microphone, .screenRecording, .systemAudioRecording])
+            == "Microphone, Screen Recording, and System Audio Recording are off")
+    }
+
     // MARK: - fixAction
 
     @Test func notDeterminedIsFixedByRequestingThePrompt() {
