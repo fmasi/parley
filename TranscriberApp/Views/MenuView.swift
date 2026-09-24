@@ -433,11 +433,13 @@ struct MenuView: View {
     /// interruption level). `nonisolated` + self-free so it is safe to call from a detached
     /// (`@Sendable`) task off the main actor — e.g. reporting a failed background auto-summary
     /// (#134). `UNUserNotificationCenter` is thread-safe, so no main-actor hop is needed.
+    /// `identifier`: pass a stable one to REPLACE the previous notification of that kind rather than stack.
     nonisolated static func postNotification(
         title: String,
         body: String,
         sound: UNNotificationSound = .default,
-        interruptionLevel: UNNotificationInterruptionLevel = .timeSensitive
+        interruptionLevel: UNNotificationInterruptionLevel = .timeSensitive,
+        identifier: String? = nil
     ) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         Logger.state.debug("Sending notification: \(title, privacy: .public)")
@@ -447,7 +449,7 @@ struct MenuView: View {
         content.sound = sound
         content.interruptionLevel = interruptionLevel
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString, content: content, trigger: nil
+            identifier: identifier ?? UUID().uuidString, content: content, trigger: nil
         )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {

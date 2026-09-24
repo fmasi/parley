@@ -140,6 +140,8 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         newPanel.delegate = self
         // Floats over the meeting app without taking it over: the user can keep talking and fix this.
         newPanel.level = .floating
+        // Also over a full-screen Zoom/Teams/Meet, on whichever Space the user is looking at.
+        newPanel.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
         newPanel.hidesOnDeactivate = false
         newPanel.isReleasedWhenClosed = false
         newPanel.setContentSize(newPanel.contentView?.fittingSize ?? PermissionRepairView.preferredSize)

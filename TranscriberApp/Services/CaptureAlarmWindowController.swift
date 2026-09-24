@@ -4,37 +4,45 @@ import TranscriberCore
 import os
 
 /// Presents capture alarms (§6.3): a floating panel listing every active alarm, and a time-sensitive
-/// notification. The coordinator decides WHEN (the per-kind notify floor); this decides whether the
-/// window opens: at once for a newly raised kind, otherwise only once "Later" is older than the snooze.
-/// The permission alarms keep their own repair window: while it is open, their rows are left to it.
+/// notification. The coordinator decides WHEN (the per-kind notify floor); `AlarmRealarmPolicy.presentation`
+/// decides what: the notification names a due alarm, and the window opens at once for a newly raised
+/// kind, otherwise only once "Later" is older than the snooze. The permission alarms keep their own
+/// repair window: while it is open, their rows and their notifications are left to it.
 @MainActor
 final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
     static let shared = CaptureAlarmWindowController()
+
+    /// One identifier for every alarm notification: a re-notify replaces the previous one instead of
+    /// stacking a new banner every 2 minutes.
+    static let notificationIdentifier = "parley-capture-alarm"
 
     private var panel: NSPanel?
     /// "Later" (or the close button): the window stays closed until the snooze passes or a new kind arrives.
     private var lastDismissedAt: Date?
 
-    /// `userRequest`: the user clicked a menu row — open the window whatever the snooze, and post no
-    /// notification (they are already looking).
-    func present(_ alarms: [ActiveAlarm], newlyRaised: [AlarmKind], appState: AppState, userRequest: Bool = false) {
-        guard !alarms.isEmpty else { return }
-        if !userRequest {
-            // Once per call: the coordinator calls only when something is due.
-            let lead = alarms.first { newlyRaised.contains($0.kind) } ?? alarms[0]
-            MenuView.postNotification(title: "Parley isn’t recording everything", body: lead.message)
+    /// `due`: the alarms the coordinator's notify floor lets present now. `userRequest`: the user clicked
+    /// a menu row — open the window whatever the snooze, and post no notification (they are already looking).
+    func present(_ due: [ActiveAlarm], newlyRaised: [AlarmKind], appState: AppState, userRequest: Bool = false) {
+        if userRequest {
+            if !Self.windowRows(appState.alarms.sorted).isEmpty { show(appState: appState) }
+            return
         }
-        guard !Self.windowRows(alarms).isEmpty else { return }   // only rows the repair window already shows
-        guard userRequest || !newlyRaised.isEmpty
-                || AlarmRealarmPolicy.shouldReopenWindow(lastDismissedAt: lastDismissedAt, now: Date())
-        else { return }   // snoozed; the sticky menu rows and the menu-bar icon still say it
-        show(appState: appState)
+        let presentation = AlarmRealarmPolicy.presentation(
+            due: due, newlyRaised: newlyRaised,
+            repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen,
+            lastDismissedAt: lastDismissedAt, now: Date()
+        )
+        if let alarm = presentation.notify {
+            MenuView.postNotification(title: alarm.kind.headline, body: alarm.message,
+                                      identifier: Self.notificationIdentifier)
+        }
+        // Otherwise snoozed; the sticky menu rows and the menu-bar icon still say it.
+        if presentation.openWindow { show(appState: appState) }
     }
 
     /// The rows the window lists: every alarm, minus the permission ones while the repair window is up.
     static func windowRows(_ alarms: [ActiveAlarm]) -> [ActiveAlarm] {
-        guard PermissionRepairWindowController.shared.isPanelOpen else { return alarms }
-        return alarms.filter { $0.kind != .remotePermissionDenied && $0.kind != .remoteCantConfirm }
+        AlarmRealarmPolicy.windowRows(alarms, repairWindowOpen: PermissionRepairWindowController.shared.isPanelOpen)
     }
 
     private func show(appState: AppState) {
@@ -43,9 +51,11 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
             return
         }
         closePanel()
+        // Non-activating: pops up over the meeting WITHOUT taking focus from it (owner rule; push-to-talk
+        // and chat keep working).
         let newPanel = NSPanel(
             contentRect: .zero,
-            styleMask: [.titled, .closable, .utilityWindow],
+            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -62,6 +72,8 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
         newPanel.delegate = self
         // Floats over the meeting app without taking it over, and never steals focus mid-call.
         newPanel.level = .floating
+        // Also over a full-screen Zoom/Teams/Meet, on whichever Space the user is looking at.
+        newPanel.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
         newPanel.hidesOnDeactivate = false
         newPanel.isReleasedWhenClosed = false
         newPanel.setContentSize(newPanel.contentView?.fittingSize ?? NSSize(width: CaptureAlarmView.preferredWidth, height: 240))

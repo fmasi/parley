@@ -87,6 +87,10 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// Survives the end of a recording: a machine-level condition, or a past event the user has
     /// not acknowledged yet ("the recording STOPPED at 16:02" must outlive the recording it is about).
     public var outlivesRecording: Bool { self == .crashProtectionOff || isAcknowledgeable }
+
+    /// The permission kinds keep their own repair window (§6.3): while it is open, the alarm window
+    /// leaves their rows — and their notifications — to it.
+    public var hasOwnRepairWindow: Bool { self == .remotePermissionDenied || self == .remoteCantConfirm }
 }
 
 public struct ActiveAlarm: Codable, Equatable, Sendable {
@@ -152,9 +156,11 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
     /// the current helper, is ignored. The current helper's snapshot is then the truth for every
     /// helper-owned kind that is not stale. An alarm continuing in the same episode, or re-raised by
     /// the replacing helper, keeps its `raisedAt`. App-owned kinds inside a snapshot are ignored.
-    public mutating func apply(_ snapshot: CaptureStatusSnapshot) {
-        guard adoptHelper(snapshot.helperSessionId) else { return }
-        if let last = lastAppliedSequence, snapshot.sequence <= last { return }
+    /// Returns whether the snapshot was adopted, so nothing downstream acts on a rejected one.
+    @discardableResult
+    public mutating func apply(_ snapshot: CaptureStatusSnapshot) -> Bool {
+        guard adoptHelper(snapshot.helperSessionId) else { return false }
+        if let last = lastAppliedSequence, snapshot.sequence <= last { return false }
         lastAppliedSequence = snapshot.sequence
         for kind in AlarmKind.allCases where kind.isHelperOwned && !staleKinds.contains(kind) {
             if !snapshot.alarms.contains(where: { $0.kind == kind }) { alarms.removeValue(forKey: kind) }
@@ -170,6 +176,7 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
                                                 message: incoming.message, episode: incoming.episode)
             staleKinds.remove(incoming.kind)
         }
+        return true
     }
 
     /// First frames of `track` from helper `helperSessionId`: the stale DELIVERY alarms on that track
@@ -348,5 +355,30 @@ public enum AlarmRealarmPolicy {
 
     public static func shouldReopenWindow(lastDismissedAt: Date?, now: Date) -> Bool {
         CaptureReadiness.shouldPresentRepair(lastDismissedAt: lastDismissedAt, now: now)
+    }
+
+    /// What one presentation does (§6.3). `notify`: the due alarm the notification names (a newly
+    /// raised one first), nil = post nothing. `openWindow`: at once for a new row, else only once the
+    /// "Later" snooze has passed.
+    public struct Presentation: Equatable, Sendable {
+        public let notify: ActiveAlarm?
+        public let openWindow: Bool
+        public init(notify: ActiveAlarm?, openWindow: Bool) { self.notify = notify; self.openWindow = openWindow }
+    }
+
+    /// `due`: the alarms whose notify floor allows a presentation now. Rows the open repair window
+    /// already shows are left to it — including the notification, which it posts itself.
+    public static func presentation(due: [ActiveAlarm], newlyRaised: [AlarmKind], repairWindowOpen: Bool,
+                                    lastDismissedAt: Date?, now: Date) -> Presentation {
+        let rows = windowRows(due, repairWindowOpen: repairWindowOpen)
+        guard !rows.isEmpty else { return Presentation(notify: nil, openWindow: false) }
+        let newRow = rows.first { newlyRaised.contains($0.kind) }
+        return Presentation(notify: newRow ?? rows[0],
+                            openWindow: newRow != nil || shouldReopenWindow(lastDismissedAt: lastDismissedAt, now: now))
+    }
+
+    /// The rows the alarm window lists: every alarm, minus the permission ones while the repair window is up.
+    public static func windowRows(_ alarms: [ActiveAlarm], repairWindowOpen: Bool) -> [ActiveAlarm] {
+        repairWindowOpen ? alarms.filter { !$0.kind.hasOwnRepairWindow } : alarms
     }
 }

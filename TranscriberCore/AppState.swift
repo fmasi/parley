@@ -63,13 +63,17 @@ public final class AppState {
 
     /// Applies the helper's snapshot; a kind this build does not know becomes one generic app alarm
     /// (never silently dropped — a newer helper is telling us something), cleared once it is gone.
-    public func applyHelperSnapshot(_ snapshot: CaptureStatusSnapshot) {
-        alarms.apply(snapshot)
+    /// Returns whether the registry adopted it: a rejected (late or replaced-helper) snapshot changes
+    /// nothing, the unknown-kind alarm included.
+    @discardableResult
+    public func applyHelperSnapshot(_ snapshot: CaptureStatusSnapshot) -> Bool {
+        guard alarms.apply(snapshot) else { return false }
         if snapshot.unknownAlarmKinds.isEmpty {
             _ = alarms.clear(.unknownHelperAlarm)
         } else {
             alarms.raise(.unknownHelperAlarm, message: "The capture helper reported a problem this version of Parley can’t show (\(snapshot.unknownAlarmKinds.joined(separator: ", "))). Update Parley.", now: Date())
         }
+        return true
     }
     @discardableResult
     public func raiseAppAlarm(_ kind: AlarmKind, message: String, now: Date = Date()) -> Bool { alarms.raise(kind, message: message, now: now) }

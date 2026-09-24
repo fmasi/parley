@@ -346,6 +346,17 @@ struct AppStateTests {
         #expect(state.activeAlarms[.unknownHelperAlarm] == nil)
     }
 
+    /// Fix round 1 item 4: a snapshot the registry rejects (an older sequence) must not touch the
+    /// unknown-kind alarm either.
+    @Test func aRejectedSnapshotNeverChangesTheUnknownKindAlarm() throws {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        let json = #"{"helperSessionId":"1000-0","sequence":2,"isCapturing":true,"tracks":[],"alarms":[{"kind":"somethingNew","raisedAt":"2026-09-24T10:00:00.000Z","message":"m","episode":1}]}"#
+        #expect(state.applyHelperSnapshot(try #require(CaptureStatusSnapshot.decode(Data(json.utf8)))))
+        #expect(!state.applyHelperSnapshot(snapshot("1000-0", 1, [])), "an older sequence is rejected")
+        #expect(state.activeAlarms[.unknownHelperAlarm] != nil)
+    }
+
     @Test func noAlertsWhenNothingIsWrong() {
         #expect(!AppState().hasMenuAlerts)
     }

@@ -29,8 +29,9 @@ public final class RecordingCoordinator {
     /// The helper found the tap running without its System Audio Recording permission (#220): the
     /// app opens its repair window. Injected because Core can't present AppKit windows.
     private let onSystemAudioPermissionDenied: @MainActor () -> Void
-    /// Present the alarm UI (floating window + notification): (every active alarm, the kinds that are
-    /// new since the last presentation). Called only when something is due (the per-kind notify floor).
+    /// Present the alarm UI (floating window + notification): (the DUE alarms — the ones the per-kind
+    /// notify floor lets present now, oldest first; the kinds that are new since the last presentation).
+    /// Called only when something is due.
     private let presentAlarmsUI: @MainActor ([ActiveAlarm], [AlarmKind]) -> Void
 
     // MARK: - Alarm state (§6)
@@ -40,8 +41,17 @@ public final class RecordingCoordinator {
     private var statusPoll: Task<Void, Never>?
     /// Consecutive `captureStatus` polls that got no answer; 3 raise `helperUnresponsive` (§8.13).
     private var missedPolls = 0
+    /// Consecutive polls answering `isCapturing == false`; 2 take the crash-recovery path.
+    private var notCapturingPolls = 0
     /// The kinds the last `presentAlarms` saw, so a kind is "new" only once per appearance.
     private var presentedKinds: Set<AlarmKind> = []
+    /// The presenter's cadence while NOT recording (§6.3 "every 2 min while any alarm is active"): only
+    /// while an alarm is active (one that outlives a recording) — no timer at all otherwise, so an idle
+    /// app with nothing to say has zero wakeups. Tests shorten it.
+    var idleRealarmInterval: Duration = .seconds(AlarmRealarmPolicy.notifyInterval)
+    private var idleRealarm: Task<Void, Never>?
+    /// Internal for tests.
+    var idleRealarmActive: Bool { idleRealarm != nil }
 
     // MARK: - Restart confirmation (§8.4, §8.5)
 
@@ -54,6 +64,9 @@ public final class RecordingCoordinator {
     private var recoveryFramesAt: Date?
     /// The last time a snapshot carried `micNotDelivering`: inside the window it voids the confirmation.
     private var lastMicAlarmAt: Date?
+    /// The awaited restart is a relaunch (Flow B): audio between the crash and the relaunch was lost,
+    /// and "Resumed" says so — until L7's `recordingResumedWithGap` states the gap exactly.
+    private var restartLostAudio = false
     /// Builds the engines launch recovery transcribes with; nil = `transcriptionRunner.prepareEngine`.
     /// Injected so tests never construct a real engine.
     private let engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))?
@@ -121,6 +134,7 @@ public final class RecordingCoordinator {
         self.presentTranscript = presentTranscript
         recordingMicrophone.addObserver(self)
         recordingMicrophoneChanged(to: recordingMicrophone.current)   // a re-attach may have marked it already
+        updateIdleRealarm()
     }
 
     // MARK: - Pure decision helpers (unit-tested)
@@ -291,6 +305,7 @@ public final class RecordingCoordinator {
             awaitingRecoveryFrames = false
             recoveryFramesAt = nil
             lastMicAlarmAt = nil
+            restartLostAudio = false
         } catch {
             clearHelperMic()
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
@@ -575,8 +590,7 @@ public final class RecordingCoordinator {
         captureClient.onAlarmsChanged = { [weak self] snapshot in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
-                self.appState.applyHelperSnapshot(snapshot)
-                if snapshot.alarms.contains(where: { $0.kind == .micNotDelivering }) { self.lastMicAlarmAt = Date() }
+                self.applySnapshot(snapshot)
                 self.presentAlarms()
             }
         }
@@ -604,6 +618,7 @@ public final class RecordingCoordinator {
     private func startStatusPoll() {
         statusPoll?.cancel()
         missedPolls = 0
+        notCapturingPolls = 0
         // The previous recording's alarms went with it, unpresented: the same kind in this one is new.
         presentedKinds.formIntersection(appState.activeAlarms.keys)
         statusPoll = Task { [weak self] in
@@ -620,9 +635,22 @@ public final class RecordingCoordinator {
         statusPoll?.cancel()
         statusPoll = nil
         missedPolls = 0
+        notCapturingPolls = 0
+    }
+
+    /// Push (`onAlarmsChanged`) and pull (`pollHelperStatus`) land here: ONE path, so every mic
+    /// NotDelivering alarm — whichever channel carried it — voids a pending restart confirmation (§8.5;
+    /// the pull is the source of truth, §6.2). Returns whether the registry adopted the snapshot.
+    @discardableResult
+    private func applySnapshot(_ snapshot: CaptureStatusSnapshot) -> Bool {
+        guard appState.applyHelperSnapshot(snapshot) else { return false }
+        if snapshot.alarms.contains(where: { $0.kind == .micNotDelivering }) { lastMicAlarmAt = Date() }
+        return true
     }
 
     /// One pull. Three unanswered in a row raise `helperUnresponsive`; any answer clears it (§8.13).
+    /// Two in a row answering "not capturing" mean the recording died without an XPC event: the same
+    /// crash-recovery path as a crash (restart under the retry cap) — never a silent dead recording.
     func pollHelperStatus() async {
         let snapshot = await captureClient.captureStatus()
         // The recording may have ended during the (up to 3 s) wait: its alarms went with it.
@@ -630,7 +658,18 @@ public final class RecordingCoordinator {
         if let snapshot {
             missedPolls = 0
             appState.clearAppAlarm(.helperUnresponsive)
-            appState.applyHelperSnapshot(snapshot)
+            if applySnapshot(snapshot) {
+                // A restart or a stop legitimately passes through "not capturing": never counted then.
+                notCapturingPolls = snapshot.isCapturing || recoveryInFlight || stopInFlight ? 0 : notCapturingPolls + 1
+            }
+            if notCapturingPolls >= 2 {
+                notCapturingPolls = 0
+                Logger.state.error("The helper answers but is not capturing (2 polls) — crash recovery")
+                captureClient.record(.xpcInterruption, .anomaly, ["classification": "not capturing", "detectedBy": "status poll"])
+                presentAlarms()
+                await handleXPCCrash()
+                return
+            }
         } else {
             missedPolls += 1
             if missedPolls >= 3 {
@@ -654,22 +693,54 @@ public final class RecordingCoordinator {
         guard !due.isEmpty else { return }
         for alarm in due { appState.markNotified(alarm.kind, now: now) }
         let dueKinds = Set(due.map(\.kind))
-        presentAlarmsUI(active, newKinds.filter { dueKinds.contains($0) })
+        presentAlarmsUI(due, newKinds.filter { dueKinds.contains($0) })
+    }
+
+    /// Starts or stops the idle presenter from the alarms and the phase, then re-evaluates on their next
+    /// change (Observation: one outstanding registration, re-armed here only). While recording, the
+    /// status poll presents instead.
+    private func updateIdleRealarm() {
+        let needed = !appState.isRecording && !appState.alarms.isEmpty
+        if needed, idleRealarm == nil {
+            idleRealarm = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let interval = self?.idleRealarmInterval else { return }
+                    try? await Task.sleep(for: interval)
+                    guard !Task.isCancelled, let self else { return }
+                    self.presentAlarms()
+                }
+            }
+        } else if !needed, let timer = idleRealarm {
+            timer.cancel()
+            idleRealarm = nil
+        }
+        withObservationTracking {
+            _ = appState.alarms
+            _ = appState.phase
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.updateIdleRealarm() }
+        }
     }
 
     /// The new helper's frames clear the previous helper's DELIVERY alarms on that track (L2). After a
     /// restart, the first MIC frames are what "Recording Resumed" waits for (§8.4) — never `start()`
     /// returning — and they open the confirmation window that may reset the retry streak (L9).
     func noteFirstFrames(track: CaptureTrack, helperSessionId: String, now: Date = Date()) {
-        guard appState.isRecording else { return }
+        // A relaunch's restart (Flow B) awaits frames before the phase is `.recording`: they count too.
+        guard appState.isRecording || awaitingRecoveryFrames else { return }
         appState.noteFirstFrames(track: track, helperSessionId: helperSessionId)
         presentAlarms(now: now)
         guard track == .mic, awaitingRecoveryFrames else { return }
         awaitingRecoveryFrames = false
         recoveryFramesAt = now
         lastMicAlarmAt = nil
-        appState.interruptionWarning = "Recording briefly interrupted. Resumed."
-        notify("Recording Resumed", "Recording was briefly interrupted and has been restarted.")
+        if restartLostAudio {
+            appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
+            notify("Recording Resumed", "Recording was briefly interrupted. Some audio may have been lost.")
+        } else {
+            appState.interruptionWarning = "Recording briefly interrupted. Resumed."
+            notify("Recording Resumed", "Recording was briefly interrupted and has been restarted.")
+        }
         let window = recoveryConfirmationSeconds
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(window))
@@ -683,7 +754,8 @@ public final class RecordingCoordinator {
         guard appState.isRecording, let since = recoveryFramesAt,
               now.timeIntervalSince(since) >= recoveryConfirmationSeconds,
               lastCrashAt.map({ $0 <= since }) ?? true,
-              lastMicAlarmAt.map({ $0 <= since }) ?? true else { return }
+              lastMicAlarmAt.map({ $0 <= since }) ?? true,
+              appState.activeAlarms[.micNotDelivering] == nil else { return }
         xpcRetryCount = 0
         recoveryFramesAt = nil
     }
@@ -773,6 +845,13 @@ public final class RecordingCoordinator {
             setHelperMic(sentinel.micDeviceUID)
             // The restarted helper must report into the same closures (scan B P0.4(5)).
             wireCaptureCallbacks()
+            // L9: `start()` returning proves nothing — the helper replies before its first frame, and
+            // a first-sample crash comes back as another interruption. The streak resets only after
+            // confirmed frames (`confirmRecoveryHealthy`), and "Resumed" waits for them (§8.4). Armed
+            // BEFORE the start: its first frames may land while `start()` is still being awaited.
+            awaitingRecoveryFrames = true
+            recoveryFramesAt = nil
+            restartLostAudio = false
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
@@ -787,20 +866,17 @@ public final class RecordingCoordinator {
             if stopRequestedDuringRecovery {
                 stopRequestedDuringRecovery = false
                 recoveryInFlight = false
+                awaitingRecoveryFrames = false
                 Logger.state.info("Honoring stop requested during recovery")
                 await stopRecording()
                 return
             }
-            // L9: `start()` returning proves nothing — the helper replies before its first frame, and
-            // a first-sample crash comes back as another interruption. The streak resets only after
-            // confirmed frames (`confirmRecoveryHealthy`), and "Resumed" waits for them (§8.4).
             // The old helper's alarms stay: the new helper's snapshot turns them stale, and only its
             // evidence on that track clears each one (§6.2).
-            awaitingRecoveryFrames = true
-            recoveryFramesAt = nil
-            appState.interruptionWarning = "Recording restarted — waiting for audio…"
+            if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
         } catch {
             Logger.state.error("Restart failed: \(error, privacy: .public)")
+            awaitingRecoveryFrames = false
             // council F3: the orphan was already re-ingested above, so just finalize what's been
             // processed rather than abandoning the whole session.
             let outcome = await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: false)
@@ -880,6 +956,13 @@ public final class RecordingCoordinator {
         // counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart owns the
         // collision guard + naming sequence, shared by every no-live-pipeline restart site (#170).
         let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+        // Wired and armed BEFORE the start, as the other start sites do: a helper reporting (first
+        // frames included) while `start()` is awaited must find someone listening. Honest "Resumed"
+        // (§8.4): announced by `noteFirstFrames` once the new helper delivers.
+        wireCaptureCallbacks()
+        awaitingRecoveryFrames = true
+        recoveryFramesAt = nil
+        restartLostAudio = true
         do {
             try await captureClient.start(
                 outputDirectory: outputDir,
@@ -893,14 +976,11 @@ public final class RecordingCoordinator {
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
             captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
-            wireCaptureCallbacks()
             startStatusPoll()
-            // Honest "Resumed" (§8.4): announced by `noteFirstFrames` once the new helper delivers.
-            awaitingRecoveryFrames = true
-            recoveryFramesAt = nil
-            appState.interruptionWarning = "Recording restarted — waiting for audio…"
+            if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
         } catch {
             Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
+            awaitingRecoveryFrames = false
             appState.criticalError = "Recording failed — could not restart after crash recovery."
             RecordingSentinel.delete(directory: sentinelDirectory)
             captureClient.captureEnded()

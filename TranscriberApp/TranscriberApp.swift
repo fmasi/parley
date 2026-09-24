@@ -162,8 +162,8 @@ struct TranscriberApp: App {
             onSystemAudioPermissionDenied: {
                 Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
             },
-            presentAlarmsUI: { alarms, new in
-                CaptureAlarmWindowController.shared.present(alarms, newlyRaised: new, appState: state)
+            presentAlarmsUI: { due, new in
+                CaptureAlarmWindowController.shared.present(due, newlyRaised: new, appState: state)
             }
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))

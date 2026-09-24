@@ -600,6 +600,221 @@ private struct Harness {
         #expect(h.notified.value.isEmpty)
     }
 
+    // MARK: - L2/L4 fix round 1
+
+    /// Item 1: the 5 s PULL is the source of truth (§6.2): a mic alarm only the pull saw, even one
+    /// cleared again before the window ended, voids the confirmation (§8.5).
+    @Test func aPulledMicAlarmDuringTheConfirmationWindowKeepsTheStreak() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        let t0 = Date()
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
+        h.client.statusSnapshot = snapshot("2000-0", 1, [.micNotDelivering])
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = snapshot("2000-0", 2, [])
+        await h.coordinator.pollHelperStatus()
+        h.coordinator.confirmRecoveryHealthy(now: t0 + 61)
+        #expect(h.coordinator.xpcRetryCount == 1)
+    }
+
+    /// Item 1: a mic NotDelivering alarm still active when the window ends means the frames were not
+    /// confirmed, whenever it was raised.
+    @Test func aMicAlarmStillActiveAtTheEndOfTheWindowKeepsTheStreak() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        h.client.onAlarmsChanged?(snapshot("2000-0", 1, [.micNotDelivering]))
+        for _ in 0..<50 { await Task.yield() }
+        let t0 = Date()
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
+        h.coordinator.confirmRecoveryHealthy(now: t0 + 61)
+        #expect(h.coordinator.xpcRetryCount == 1)
+    }
+
+    /// Item 2: first frames can land while `start()` is still awaited (a main-actor stall); the flag is
+    /// armed before the start, so "Resumed" is still said and the banner is not reset to "waiting".
+    @Test func firstFramesDuringTheRestartStillAnnounceResumed() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        let coordinator = h.coordinator
+        h.client.onStart = { coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0") }
+        await h.coordinator.handleXPCCrash()
+        #expect(h.notified.value.map(\.title) == ["Recording Resumed"])
+        #expect(h.appState.interruptionWarning == "Recording briefly interrupted. Resumed.")
+    }
+
+    @Test func aFailedRestartDoesNotLeaveTheRecoveryArmed() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.client.startError = FakeCaptureError()
+        await h.coordinator.handleXPCCrash()
+        h.appState.phase = .recording(since: Date())   // a later recording, however it began
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "3000-0")
+        #expect(!h.notified.value.contains { $0.title == "Recording Resumed" })
+    }
+
+    /// Items 3, 7, 10: Flow B at launch wires the callbacks BEFORE `start()`, says nothing about
+    /// "Resumed" until frames arrive, and then keeps the relaunch's loss wording (L7 replaces it with
+    /// `recordingResumedWithGap`).
+    @Test func flowBWaitsForFramesAndSaysAudioMayHaveBeenLost() async throws {
+        let h = try Harness()
+        try writeLegacySentinelWithAudio(h)
+        let wiredAtStart = Harness.Box(false)
+        h.client.onStart = { wiredAtStart.value = h.client.onFirstFrames != nil && h.client.onServiceCrash != nil }
+        await h.coordinator.recoverAtLaunch()
+        #expect(wiredAtStart.value, "a helper reporting during start() must find the callbacks wired")
+        #expect(h.appState.isRecording && h.notified.value.isEmpty)
+        #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
+
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
+        let resumed = try #require(h.notified.value.first)
+        #expect(resumed.title == "Recording Resumed" && resumed.body.contains("Some audio may have been lost"))
+        #expect(h.appState.interruptionWarning?.contains("Some audio may have been lost") == true)
+    }
+
+    /// Items 2, 3: at launch the phase is not yet `.recording` while `start()` runs; frames arriving then
+    /// are still the restart's first frames.
+    @Test func flowBFramesDuringStartAreNotLost() async throws {
+        let h = try Harness()
+        try writeLegacySentinelWithAudio(h)
+        let coordinator = h.coordinator
+        h.client.onStart = { coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0") }
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.notified.value.map(\.title) == ["Recording Resumed"])
+        #expect(h.appState.interruptionWarning?.contains("waiting for audio") == false)
+    }
+
+    /// Item 10: the confirmation is scheduled by the first frames themselves.
+    @Test func theScheduledConfirmationResetsTheStreak() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.recoveryConfirmationSeconds = 0
+        await h.coordinator.handleXPCCrash()
+        #expect(h.coordinator.xpcRetryCount == 1)
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
+        var waited = 0
+        while h.coordinator.xpcRetryCount != 0, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(h.coordinator.xpcRetryCount == 0)
+    }
+
+    /// Item 10: "Resumed" waits for the MIC: remote frames alone do not prove the user is recorded.
+    @Test func systemFirstFramesDoNotAnnounceResumed() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        h.coordinator.noteFirstFrames(track: .system, helperSessionId: "2000-0")
+        #expect(h.notified.value.isEmpty)
+        #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
+    }
+
+    private func notCapturing(_ id: String, _ sequence: UInt64) -> CaptureStatusSnapshot {
+        CaptureStatusSnapshot(helperSessionId: id, sequence: sequence, isCapturing: false, alarms: [], tracks: [])
+    }
+
+    /// Item 5 (defense in depth): a helper that answers but is not capturing is a dead recording. Two
+    /// consecutive such polls take the crash-recovery path, and the evidence is recorded.
+    @Test func twoNotCapturingPollsEscalateToCrashRecovery() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.client.statusSnapshot = notCapturing("1000-0", 1)
+        await h.coordinator.pollHelperStatus()
+        #expect(h.client.startCalls.isEmpty, "one poll is not enough")
+        h.client.statusSnapshot = notCapturing("1000-0", 2)
+        await h.coordinator.pollHelperStatus()
+        #expect(h.client.startCalls.count == 1, "restarted like an XPC crash")
+        #expect(h.client.retryEvents.count == 1, "under the same retry cap")
+        #expect(h.client.recordedEvents.contains { $0.kind == .xpcInterruption && $0.detail["classification"] == "not capturing" })
+    }
+
+    @Test func oneNotCapturingPollFollowedByCapturingDoesNotEscalate() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.client.statusSnapshot = notCapturing("1000-0", 1)
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = snapshot("1000-0", 2, [])
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = notCapturing("1000-0", 3)
+        await h.coordinator.pollHelperStatus()
+        #expect(h.client.startCalls.isEmpty)
+    }
+
+    @Test func notCapturingPollsNeverEscalateWhileARestartOrStopIsInFlight() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.recoveryInFlight = true
+        h.client.statusSnapshot = notCapturing("1000-0", 1)
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = notCapturing("1000-0", 2)
+        await h.coordinator.pollHelperStatus()
+        h.coordinator.recoveryInFlight = false
+        h.coordinator.stopInFlight = true
+        h.client.statusSnapshot = notCapturing("1000-0", 3)
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = notCapturing("1000-0", 4)
+        await h.coordinator.pollHelperStatus()
+        #expect(h.client.startCalls.isEmpty)
+    }
+
+    /// Item 9 (§6.3 "every 2 min while any alarm is active"): an alarm that outlives the recording keeps
+    /// being presented while idle; the timer exists only while such an alarm does.
+    @Test func anIdleAlarmIsPresentedOnTheIdleTimerUntilItIsAcknowledged() async throws {
+        let h = try Harness()
+        let shown = Harness.Box<[[AlarmKind]]>([])
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { due, _ in shown.value.append(due.map(\.kind)) }, recordingMicrophone: h.recordingMic)
+        coordinator.idleRealarmInterval = .milliseconds(20)
+        #expect(!coordinator.idleRealarmActive, "no alarm, no timer")
+
+        h.appState.raiseAppAlarm(.recordingStopped, message: "stopped")
+        var waited = 0
+        while shown.value.isEmpty, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(shown.value.first == [.recordingStopped])
+        #expect(coordinator.idleRealarmActive)
+
+        h.appState.acknowledge(.recordingStopped)
+        waited = 0
+        while coordinator.idleRealarmActive, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(!coordinator.idleRealarmActive, "stopped as soon as nothing is active")
+    }
+
+    @Test func theIdleTimerStopsWhenTheAlarmClears() async throws {
+        let h = try Harness()
+        h.coordinator.idleRealarmInterval = .milliseconds(20)
+        h.appState.raiseAppAlarm(.crashProtectionOff, message: "off")
+        var waited = 0
+        while !h.coordinator.idleRealarmActive, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(h.coordinator.idleRealarmActive)
+        h.appState.clearAppAlarm(.crashProtectionOff)
+        waited = 0
+        while h.coordinator.idleRealarmActive, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(!h.coordinator.idleRealarmActive)
+    }
+
+    /// Legacy single-file audio (no `-N` chunk name, so not a chunked session) that Flow B restarts.
+    private func writeLegacySentinelWithAudio(_ h: Harness) throws {
+        let outDir = h.tmp.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(), sessionName: "Test",
+            systemAudioPath: outDir.appendingPathComponent("legacy.wav").path,
+            micAudioPath: outDir.appendingPathComponent("legacy_mic.wav").path,
+            micDeviceUID: "mic-1", segment: 1, chunkIndex: 0)
+        try RecordingSentinel.write(sentinel, directory: h.tmp)
+        try Data(count: 4096).write(to: URL(fileURLWithPath: sentinel.systemAudioPath))
+    }
+
     @Test func firstFramesOutsideARecoveryDoNotAnnounceResumed() async throws {
         let h = try Harness()
         h.appState.phase = .recording(since: Date())

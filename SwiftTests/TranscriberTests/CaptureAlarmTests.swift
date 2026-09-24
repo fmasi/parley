@@ -20,6 +20,47 @@ import Testing
         ActiveAlarm(kind: kind, raisedAt: at, lastNotifiedAt: nil, message: kind.rawValue, episode: episode)
     }
 
+    // MARK: - L2/L4 fix round 1: adoption result, the presentation decision
+
+    /// `apply` says whether the snapshot was adopted, so nothing downstream (the unknown-kind alarm, the
+    /// app's evidence bookkeeping) acts on a snapshot the registry itself rejected.
+    @Test func applyReportsWhetherTheSnapshotWasAdopted() {
+        var r = CaptureAlarmRegistry()
+        let results = [
+            r.apply(snapshot(h1, [], sequence: 5)),
+            r.apply(snapshot(h1, [], sequence: 5)),        // a duplicate sequence
+            r.apply(snapshot(h1, [], sequence: 4)),        // an older sequence
+            r.apply(snapshot(h3, [], sequence: 1)),        // a newer helper
+            r.apply(snapshot(h2, [], sequence: 9)),        // a replaced helper
+            r.apply(snapshot("garbage", [], sequence: 10)) // an unparsable id
+        ]
+        #expect(results == [true, false, false, true, false, false])
+    }
+
+    /// §6.3 + fix round 1 item 6: the notification names a DUE alarm (a new one first); nothing is
+    /// posted when every due row is left to the open repair window; the window opens for a new row or
+    /// once the "Later" snooze has passed.
+    @Test func presentationNamesTheDueAlarmAndLeavesPermissionRowsToTheRepairWindow() {
+        let disk = alarm(.diskLow, at: t0), denied = alarm(.remotePermissionDenied, at: t0 + 1)
+        let fresh = AlarmRealarmPolicy.presentation(due: [disk, denied], newlyRaised: [.remotePermissionDenied],
+                                                    repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+        #expect(fresh == .init(notify: denied, openWindow: true))
+
+        let repairOpen = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
+                                                         repairWindowOpen: true, lastDismissedAt: nil, now: t0)
+        #expect(repairOpen == .init(notify: nil, openWindow: false), "the repair window posts its own notification")
+
+        let snoozed = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindowOpen: false,
+                                                      lastDismissedAt: t0, now: t0 + 60)
+        #expect(snoozed == .init(notify: disk, openWindow: false), "re-notify, but the window stays snoozed")
+        let snoozeOver = AlarmRealarmPolicy.presentation(due: [disk], newlyRaised: [], repairWindowOpen: false,
+                                                         lastDismissedAt: t0, now: t0 + CaptureReadiness.repairSnooze)
+        #expect(snoozeOver.openWindow)
+
+        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: true) == [disk])
+        #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: false) == [disk, denied])
+    }
+
     @Test func raiseIsIdempotentAndKeepsTheOriginalTimestamp() {
         var r = CaptureAlarmRegistry()
         #expect(r.raise(.remoteNotDelivering, message: "m", now: t0) == true)
