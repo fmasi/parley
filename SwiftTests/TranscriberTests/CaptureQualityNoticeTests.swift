@@ -130,4 +130,15 @@ import Foundation
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(CaptureQualityNotice.segmentCount(inTranscriptAt: url) == 0)
     }
+
+    /// Review round 1 item 8: the count comes from the issues themselves, never a stored summary key
+    /// that could disagree with them (or be missing).
+    @Test func problemChunkCountIsComputedFromTheIssues() throws {
+        let url = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 1, "code": "asr_failed", "track": "remote"],
+            ["chunk": 4, "code": "stream_empty", "track": "local"],
+        ], "processing_problem_chunks": 5], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 1)
+    }
 }

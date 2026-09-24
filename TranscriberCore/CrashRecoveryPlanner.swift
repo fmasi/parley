@@ -66,11 +66,10 @@ public enum CrashRecoveryPlanner {
 
     /// The full restart-naming plan for a "no live pipeline" restart: derive the collision-free
     /// base name for the new capture file and the sentinel to persist once capture is confirmed
-    /// running. Hoisted from three near-identical call sites — crash-relaunch Flow B
-    /// (`TranscriberApp.recoverIfNeeded`), the XPC-crash restart when no live rotator exists
-    /// (`RecordingCoordinator.handleXPCCrash`), and Flow A re-attach's crash handler
-    /// (`TranscriberApp.setupCrashHandler`) — so a future fix to the naming sequence lands once
-    /// instead of needing to land in all three (#170). Not used by the LIVE-pipeline restart case
+    /// running. Shared by every restart that has no live pipeline — the crash-relaunch restart
+    /// (Flow B), a Flow A re-attach's crash restart, and the XPC-crash restart when no live rotator
+    /// exists (`RecordingCoordinator.handleXPCCrash`) — so a future fix to the naming sequence
+    /// lands once instead of in each of them (#170). Not used by the LIVE-pipeline restart case
     /// (see `RecordingCoordinator.liveRestartPlan`), which derives its base name from the
     /// rotator's own recovery plan instead of a disk scan.
     public static func planRestart(

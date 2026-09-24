@@ -16,7 +16,7 @@ public enum TranscriptAssembler {
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
-        processingIssues: [[String: Any]] = [],
+        processingIssues: [[String: Any]]? = nil,
         mergedAudio: [String: Any]? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
@@ -66,11 +66,12 @@ public enum TranscriptAssembler {
             }
             metadata["capture"] = capture
         }
-        // What went wrong or was removed while processing chunks (§7.2, P3): `{chunk, code, track?,
+        // What went wrong or was removed while processing chunks (§7.2, P3): `{chunk?, code, track?,
         // count?}` per issue. The two counts cover only content-affecting codes — an idle side
-        // (`stream_empty`) is not a processing problem — and the completion notice reads
-        // `processing_problem_chunks`.
-        if !processingIssues.isEmpty {
+        // (`stream_empty`) is not a processing problem. A tracked session always writes the key
+        // (empty when clean); nil means the path does not track issues (CLI `run()`), and the key is
+        // left out so absence is never read as "clean".
+        if let processingIssues {
             metadata["processing_issues"] = processingIssues
             let counts = ChunkIssue.problemCounts(in: processingIssues)
             metadata["processing_issue_count"] = counts.issues

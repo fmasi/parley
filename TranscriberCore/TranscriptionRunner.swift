@@ -568,13 +568,22 @@ public final class TranscriptionRunner {
         if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
 
-        let sessionState = seededState ?? SessionState(
+        var sessionState = seededState ?? SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
             engine: config.engine.rawValue,
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )
+        // A seed from another session or engine is accepted — refusing would lose the chunks it
+        // holds — but never silently: it is logged and recorded in the transcript.
+        if let seededState,
+           seededState.sessionId != sessionBaseName || seededState.engine != config.engine.rawValue {
+            Logger.state.error(
+                "Seeded session \(seededState.sessionId, privacy: .sensitive) (engine \(seededState.engine, privacy: .public)) does not match \(sessionBaseName, privacy: .sensitive) (engine \(config.engine.rawValue, privacy: .public)) — resuming anyway"
+            )
+            sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil)))
+        }
 
         let processor = ChunkProcessor(
             config: config,

@@ -10,29 +10,52 @@ import os
 /// `metadata.processing_issues`, so the record states what it lost instead of presenting a
 /// degraded chunk as a clean one (§7.2, P3).
 public struct ChunkIssue: Codable, Equatable, Sendable {
-    public enum Code: String, Codable, Sendable {
-        case asrFailed = "asr_failed"
-        case diarizationFailed = "diarization_failed"
-        case vadUnavailable = "vad_unavailable"
-        case streamEmpty = "stream_empty"
-        case archiveFailed = "archive_failed"
-        case sessionWriteFailed = "session_write_failed"
-        case duplicatesDropped = "duplicates_dropped"
-        case segmentsFiltered = "segments_filtered"
-        case clustersAbsorbed = "clusters_absorbed"
-        case echoFlagged = "echo_flagged"
+    /// An issue code. A struct over its raw string rather than a closed enum, so a code written by a
+    /// newer build decodes here as itself (unknown, not content-affecting) instead of failing the
+    /// whole session.json and dropping an in-progress recording (a downgrade mid-recording).
+    public struct Code: RawRepresentable, Codable, Hashable, Sendable {
+        public let rawValue: String
+        public init(rawValue: String) { self.rawValue = rawValue }
+
+        public static let asrFailed = Code(rawValue: "asr_failed")
+        public static let diarizationFailed = Code(rawValue: "diarization_failed")
+        /// The VAD model is not cached: the quality gate ran without a speech map (informational).
+        public static let vadUnavailable = Code(rawValue: "vad_unavailable")
+        /// VAD threw at runtime (a real failure, unlike `vadUnavailable`).
+        public static let vadFailed = Code(rawValue: "vad_failed")
+        /// The stream's WAV holds no audio (a header only): an idle side, not a problem.
+        public static let streamEmpty = Code(rawValue: "stream_empty")
+        /// The stream's WAV does not exist at all.
+        public static let streamMissing = Code(rawValue: "stream_missing")
+        public static let archiveFailed = Code(rawValue: "archive_failed")
+        public static let sessionWriteFailed = Code(rawValue: "session_write_failed")
+        public static let duplicatesDropped = Code(rawValue: "duplicates_dropped")
+        public static let segmentsFiltered = Code(rawValue: "segments_filtered")
+        public static let clustersAbsorbed = Code(rawValue: "clusters_absorbed")
+        public static let echoFlagged = Code(rawValue: "echo_flagged")
         /// A chunk arrived under an index already held by a different recording file; it was
         /// processed under a fresh index. `count` carries the index it collided with.
-        case chunkIndexCollision = "chunk_index_collision"
+        public static let chunkIndexCollision = Code(rawValue: "chunk_index_collision")
+        /// A resumed session was seeded with a session.json of another session id or engine.
+        public static let seedMismatch = Code(rawValue: "seed_mismatch")
 
-        /// Whether this issue means content may be missing or wrong. `streamEmpty` is NOT: an
-        /// idle side (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13).
-        public var affectsContent: Bool {
-            switch self {
-            case .asrFailed, .diarizationFailed, .archiveFailed, .sessionWriteFailed, .chunkIndexCollision: true
-            case .vadUnavailable, .streamEmpty, .duplicatesDropped, .segmentsFiltered,
-                 .clustersAbsorbed, .echoFlagged: false
-            }
+        /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
+        /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
+        /// unknown code (from a newer build) is not one either.
+        static let contentAffecting: Set<Code> = [
+            .asrFailed, .diarizationFailed, .vadFailed, .streamMissing, .archiveFailed,
+            .sessionWriteFailed, .chunkIndexCollision, .seedMismatch,
+        ]
+
+        public var affectsContent: Bool { Self.contentAffecting.contains(self) }
+
+        public init(from decoder: Decoder) throws {
+            rawValue = try decoder.singleValueContainer().decode(String.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.singleValueContainer()
+            try c.encode(rawValue)
         }
     }
 
@@ -48,7 +71,7 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         self.count = count
     }
 
-    /// asrFailed, diarizationFailed, archiveFailed, sessionWriteFailed. NOT streamEmpty.
+    /// See `Code.contentAffecting`. NOT streamEmpty.
     public var affectsContent: Bool { code.affectsContent }
 }
 
@@ -59,7 +82,7 @@ extension ChunkIssue {
     /// completion notice is never silent about them. Unknown codes do not count.
     public static func problemCounts(in dictionaries: [[String: Any]]) -> (issues: Int, chunks: Int) {
         let affecting = dictionaries.filter { issue in
-            (issue["code"] as? String).flatMap(Code.init(rawValue:))?.affectsContent ?? false
+            (issue["code"] as? String).map(Code.init(rawValue:))?.affectsContent ?? false
         }
         let chunks = Set(affecting.compactMap { $0["chunk"] as? Int }).count
         let sessionLevel = affecting.contains { $0["chunk"] == nil } ? 1 : 0
@@ -226,13 +249,26 @@ public struct CaptureGap: Codable, Equatable, Sendable {
     public let end: Date
     /// Why nothing was recorded: "app relaunch" | "sleep".
     public let reason: String
-
-    public var seconds: Double { end.timeIntervalSince(start) }
+    /// The gap's length, computed once from the PRECISE dates and stored: session.json's date coder
+    /// keeps whole seconds, so recomputing after a round trip would drift. Never negative (a clock
+    /// step can put `end` before `start`).
+    public let seconds: Double
 
     public init(start: Date, end: Date, reason: String) {
         self.start = start
         self.end = end
         self.reason = reason
+        self.seconds = max(0, end.timeIntervalSince(start))
+    }
+
+    private enum CodingKeys: String, CodingKey { case start, end, reason, seconds }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        start = try c.decode(Date.self, forKey: .start)
+        end = try c.decode(Date.self, forKey: .end)
+        reason = try c.decode(String.self, forKey: .reason)
+        seconds = max(0, try c.decodeIfPresent(Double.self, forKey: .seconds) ?? end.timeIntervalSince(start))
     }
 }
 

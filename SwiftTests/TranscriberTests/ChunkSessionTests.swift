@@ -162,4 +162,39 @@ struct ChunkSessionTests {
         #expect(SessionState.read(directory: dir, sessionId: id) != nil)
         #expect(SessionState.read(directory: dir, sessionId: id + "-other") == nil)
     }
+
+    /// Review round 1 item 11: a code written by a newer build must not make an older build drop
+    /// the whole session.json (a downgrade mid-recording).
+    @Test("unknownIssueCodesDecodeWithoutFailingTheSession")
+    func unknownIssueCodesDecodeWithoutFailingTheSession() throws {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let chunk = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{},"issues":[{"code":"from_the_future","track":"remote"},{"code":"asr_failed"}]}"#.utf8)
+        let decoded = try decoder.decode(ProcessedChunk.self, from: chunk)
+        #expect(decoded.issues.map(\.code.rawValue) == ["from_the_future", "asr_failed"])
+        #expect(decoded.issues[0].affectsContent == false)
+        let session = Data(#"{"sessionId":"s","meetingStart":"2026-09-24T16:00:00Z","engine":"fluid_audio","chunkDurationMinutes":5,"chunks":[],"issues":[{"issue":{"code":"from_the_future"}}]}"#.utf8)
+        #expect(try decoder.decode(SessionState.self, from: session).issues.map(\.issue.code.rawValue) == ["from_the_future"])
+    }
+
+    @Test("issueCodesThatAffectContent")
+    func issueCodesThatAffectContent() {
+        #expect(ChunkIssue.Code.vadFailed.affectsContent && ChunkIssue.Code.streamMissing.affectsContent)
+        #expect(ChunkIssue.Code.seedMismatch.affectsContent)
+        #expect(!ChunkIssue.Code.vadUnavailable.affectsContent && !ChunkIssue.Code.streamEmpty.affectsContent)
+    }
+
+    /// Review round 1 item 9: session.json's coder keeps whole seconds; the gap length must not drift.
+    @Test("captureGapSecondsSurviveWholeSecondDates")
+    func captureGapSecondsSurviveWholeSecondDates() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        var state = makeSession(chunks: [])
+        state.gaps = [CaptureGap(start: Date(timeIntervalSince1970: 100.4), end: Date(timeIntervalSince1970: 220.9), reason: "sleep")]
+        try SessionState.write(state, directory: dir)
+        #expect(SessionState.read(directory: dir)?.gaps.first?.seconds == 120.5)
+    }
+
+    @Test("negativeCaptureGapIsClampedToZero")
+    func negativeCaptureGapIsClampedToZero() {
+        #expect(CaptureGap(start: Date(timeIntervalSince1970: 10), end: Date(timeIntervalSince1970: 5), reason: "app relaunch").seconds == 0)
+    }
 }

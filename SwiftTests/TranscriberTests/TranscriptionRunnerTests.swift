@@ -123,4 +123,50 @@ import Testing
         let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
         #expect((json?["metadata"] as? [String: Any])?["dual_stream"] as? Bool == true)
     }
+
+    @Test func processingIssueDictionariesFlattenChunkAndSessionIssues() {
+        let chunk = ProcessedChunk(index: 2, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-2.m4a", segments: [], speakerDatabase: [:],
+                                   issues: [ChunkIssue(code: .asrFailed, track: "remote", count: nil),
+                                            ChunkIssue(code: .duplicatesDropped, track: "local", count: 3)])
+        let dicts = TranscriptionRunner.processingIssueDictionaries(
+            chunks: [chunk],
+            sessionIssues: [SessionIssue(chunk: 2, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil)),
+                            SessionIssue(chunk: nil, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))])
+        #expect(dicts.count == 4)
+        #expect(dicts[0]["chunk"] as? Int == 2 && dicts[0]["code"] as? String == "asr_failed" && dicts[0]["track"] as? String == "remote" && dicts[0]["count"] == nil)
+        #expect(dicts[1]["count"] as? Int == 3 && dicts[1]["track"] as? String == "local")
+        #expect(dicts[2]["chunk"] as? Int == 2 && dicts[2]["track"] == nil)
+        #expect(dicts[3]["chunk"] == nil && dicts[3]["code"] as? String == "session_write_failed")
+    }
+
+    /// §7.2: `metadata.diarization` is false when a chunk's diarization failed; a clean tracked
+    /// session writes an empty `processing_issues`.
+    @Test func finalizeStampsDiarizationFromChunkIssues() async throws {
+        func finalize(_ issues: [ChunkIssue]) async throws -> [String: Any] {
+            let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+            let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                segments: [.init(start: 0, end: 5, text: "hi", speaker: "Speaker 1", source: "remote")],
+                speakerDatabase: ["Speaker 1": [1, 0, 0]], issues: issues)
+            let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
+            let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+            let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
+            return try #require(json?["metadata"] as? [String: Any])
+        }
+        let failed = try await finalize([ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)])
+        #expect(failed["diarization"] as? Bool == false)
+        let clean = try await finalize([])
+        #expect(clean["diarization"] as? Bool == true)
+        #expect((clean["processing_issues"] as? [Any])?.isEmpty == true)
+    }
+
+    /// Review round 1 item 10: a seed from another session or engine is accepted but never silently.
+    @Test func aMismatchedSeedIsRecorded() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let seeded = SessionState(sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10)
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        let state = try #require(await runner.chunkProcessor?.getSessionState())
+        #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))
+        runner.teardownChunkedPipeline()
+    }
 }

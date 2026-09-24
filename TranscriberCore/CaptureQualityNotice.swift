@@ -80,12 +80,15 @@ public enum CaptureQualityNotice {
         return provenance["quality_anomaly_count"] as? Int ?? 0
     }
 
-    /// Distinct chunks with a content-affecting processing issue, from
-    /// `metadata.processing_problem_chunks`. 0 when absent or unreadable (never invent an alarm).
-    /// Synchronous file I/O — call off the main actor, like `anomalyCount(inTranscriptAt:)`.
+    /// Distinct chunks with a content-affecting processing issue, computed from
+    /// `metadata.processing_issues` itself — never a stored summary key that could disagree with it.
+    /// 0 when absent or unreadable (never invent an alarm). Synchronous file I/O — call off the main
+    /// actor, like `anomalyCount(inTranscriptAt:)`.
     public static func problemChunkCount(inTranscriptAt url: URL) -> Int {
-        guard let metadata = readRoot(url)?["metadata"] as? [String: Any] else { return 0 }
-        return metadata["processing_problem_chunks"] as? Int ?? 0
+        guard let metadata = readRoot(url)?["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return 0 }
+        return ChunkIssue.problemCounts(in: issues).chunks
     }
 
     /// How many readable segments the transcript holds — flagged ones (`filtered` / `echo`) are

@@ -157,4 +157,25 @@ struct TranscriptAssemblerTests {
         #expect(r["status"] as? String == "neverDelivered" && r["expected_seconds"] as? Double == 2736)
         #expect(capture["local"] == nil)
     }
+
+    /// Review round 1 item 7: a tracked session with no issues says so; an untracked path says nothing.
+    @Test func trackedCleanSessionWritesEmptyProcessingIssues() throws {
+        let tracked = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                   diarization: false, dualStream: false, processingIssues: [])
+        let m = try #require(tracked["metadata"] as? [String: Any])
+        #expect((m["processing_issues"] as? [Any])?.isEmpty == true)
+        #expect(m["processing_issue_count"] as? Int == 0 && m["processing_problem_chunks"] as? Int == 0)
+
+        let untracked = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                     diarization: false, dualStream: false)
+        #expect((untracked["metadata"] as? [String: Any])?["processing_issues"] == nil)
+    }
+
+    @Test func aSessionLevelIssueCountsAsAProblem() throws {
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false,
+                                                processingIssues: [["code": "session_write_failed"]])
+        let m = try #require(json["metadata"] as? [String: Any])
+        #expect(m["processing_issue_count"] as? Int == 1 && m["processing_problem_chunks"] as? Int == 1)
+    }
 }

@@ -106,6 +106,9 @@ struct ChunkProcessorTests {
         let chunk = try #require(await processor.getSessionState().chunks.first)
         #expect(chunk.issues.contains(ChunkIssue(code: .asrFailed, track: "remote", count: nil)))
         #expect(FileManager.default.fileExists(atPath: sysURL.path), "the WAV of an ASR-failed chunk is kept for re-transcription")
+        // ...alongside a successful archive: keeping the WAV is not an archive failure.
+        #expect(chunk.audioPath.hasSuffix(".m4a"))
+        #expect(!chunk.issues.contains { $0.code == .archiveFailed })
     }
 
     /// §7.1/§9 (scan C13): an empty side is recorded, but it is not a "processing problem".
@@ -220,5 +223,16 @@ struct ChunkProcessorTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         #expect(reported.indices == [nil])
         #expect(await processor.getSessionState().issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))))
+    }
+
+    /// Review round 1 item 6: a system WAV that does not exist is not an idle side.
+    @Test func aMissingSystemWavIsStreamMissingNotEmpty() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let processor = makeProcessor(dir: dir, engine: FakeEngine())
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        let issue = try #require(chunk.issues.first { $0.code == .streamMissing })
+        #expect(issue.track == "remote" && issue.affectsContent)
+        #expect(!chunk.issues.contains { $0.code == .streamEmpty })
     }
 }

@@ -380,6 +380,13 @@ public final class ChunkProcessor {
         // Rebuild the size fields from the real length before reading the audio.
         WavFileWriter.repairHeader(path: audioPath.path)
 
+        // A WAV that does not exist is not an idle side: something lost or never wrote it.
+        guard FileManager.default.fileExists(atPath: audioPath.path) else {
+            Logger.transcription.error("Missing \(label, privacy: .public) audio file: \(audioPath.lastPathComponent, privacy: .sensitive)")
+            return StreamResult(segments: [], speakerDatabase: [:],
+                                issues: [ChunkIssue(code: .streamMissing, track: source, count: nil)])
+        }
+
         // Skip empty files (WAV header only)
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
@@ -414,10 +421,18 @@ public final class ChunkProcessor {
                 async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
                 let diarizationResult = try await diarizedResult
-                let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
-                if speechMap == nil {
-                    // No VAD (model not cached, or it threw): the quality gate ran without a speech map.
-                    issues.append(ChunkIssue(code: .vadUnavailable, track: source, count: nil))
+                // No speech map either way means the quality gate ran without one. A model that is not
+                // cached is informational; VAD throwing is a real failure and is filed as one.
+                let speechMap: [SpeechRegion]?
+                do {
+                    speechMap = try await speechMapResult
+                    if speechMap == nil {
+                        issues.append(ChunkIssue(code: .vadUnavailable, track: source, count: nil))
+                    }
+                } catch {
+                    Logger.transcription.error("VAD failed for \(label, privacy: .public): \(error, privacy: .public)")
+                    speechMap = nil
+                    issues.append(ChunkIssue(code: .vadFailed, track: source, count: nil))
                 }
 
                 let result = StreamLabeling.withDiarization(
