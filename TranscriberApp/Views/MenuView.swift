@@ -32,63 +32,33 @@ func quitAfterUninstallingLaunchAgent() {
 
 struct MenuView: View {
     @Bindable var appState: AppState
-    let captureClient: AudioCaptureClient
-    let transcriptionRunner: TranscriptionRunner
+    /// Owns the recording lifecycle + crash recovery (#139 PR-6). Built once by `TranscriberApp` (it
+    /// also runs launch recovery, before any menu exists) and injected here (§8.3).
+    let coordinator: RecordingCoordinator
     let configManager: ConfigManager
     let calendarService: CalendarService
     let updater: SPUUpdater
     /// Read for the ongoing notifications-off signal (#150); refreshed on panel open.
     let permissionManager: PermissionManager
     @State private var selectedMicId: String?
-    /// Owns the recording lifecycle + crash recovery (moved out of this view, #139 PR-6).
-    /// `@State`-held so it has exactly the lifetime the old `@State` counters had.
-    @State private var coordinator: RecordingCoordinator
     /// Closes the window-style MenuBarExtra panel (macOS 14+ honors dismiss here).
     @Environment(\.dismiss) private var dismissPanel
 
     init(
         appState: AppState,
-        captureClient: AudioCaptureClient,
-        transcriptionRunner: TranscriptionRunner,
+        coordinator: RecordingCoordinator,
         configManager: ConfigManager,
         calendarService: CalendarService,
         updater: SPUUpdater,
         permissionManager: PermissionManager
     ) {
         self.appState = appState
-        self.captureClient = captureClient
-        self.transcriptionRunner = transcriptionRunner
+        self.coordinator = coordinator
         self.configManager = configManager
         self.calendarService = calendarService
         self.updater = updater
         self.permissionManager = permissionManager
         self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
-        // The coordinator owns orchestration; the app-target UI side effects it needs
-        // (notifications, the critical panel, the rename dialog + auto-summary) are injected here.
-        self._coordinator = State(initialValue: RecordingCoordinator(
-            appState: appState,
-            captureClient: captureClient,
-            transcriptionRunner: transcriptionRunner,
-            configManager: configManager,
-            notify: { title, body in
-                MenuView.postNotification(title: title, body: body)
-            },
-            notifyCritical: { title, body in
-                MenuView.sendCriticalNotification(title: title, body: body)
-            },
-            presentTranscript: { jsonPath, config in
-                RenameWindowController.shared.show(jsonPath: jsonPath) {
-                    // Auto-summarize after rename completes (so summary has real speaker names)
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
-                }
-            },
-            onSystemAudioPermissionDenied: {
-                Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
-            },
-            presentAlarmsUI: { alarms, new in
-                CaptureAlarmWindowController.shared.present(alarms, newlyRaised: new, appState: appState)
-            }
-        ))
     }
 
     var body: some View {

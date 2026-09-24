@@ -156,6 +156,7 @@ private struct Harness {
             notifyCritical: { criticals.value.append(($0, $1)) },
             presentTranscript: { url, _ in presented.value.append(url) },
             onSystemAudioPermissionDenied: { repairRequests.value += 1 },
+            engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
             recordingMicrophone: recordingMic
         )
     }
@@ -361,9 +362,9 @@ private struct Harness {
     // startRecording call that loses the re-entrancy race still shows a banner for a recording it
     // isn't driving.
 
-    // #193/#196 review fix: onQualityAnomaly must be wired by startRecording itself, not only by
-    // TranscriberApp's setupCrashHandler (which only runs on the launch-time crash-recovery
-    // re-attach paths) — otherwise a live anomaly banner never appears during a normal recording.
+    // #193/#196 review fix: onQualityAnomaly must be wired by startRecording itself, not only on the
+    // launch-time crash-recovery re-attach paths — otherwise a live anomaly banner never appears
+    // during a normal recording.
     @Test func qualityAnomalyDuringNormalRecordingShowsBanner() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
@@ -524,6 +525,94 @@ private struct Harness {
         #expect(shown.value.count == 4 && shown.value[3].new == [.recordingStopped], "acknowledgeable kinds are exempt from the floor")
     }
 
+    // MARK: - L9: retry cap on confirmed frames; honest "Resumed"; launch recovery (§8.3–8.5)
+
+    @Test func retryStreakResetsOnlyAfterConfirmedFrames() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.recoveryConfirmationSeconds = 60
+        await h.coordinator.handleXPCCrash()
+        #expect(h.coordinator.xpcRetryCount == 1)
+
+        let t0 = Date()
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
+        #expect(h.notified.value.map(\.title) == ["Recording Resumed"])
+        h.coordinator.confirmRecoveryHealthy(now: t0 + 30)
+        #expect(h.coordinator.xpcRetryCount == 1, "30 s of frames is not yet confirmation")
+        h.coordinator.confirmRecoveryHealthy(now: t0 + 60)
+        #expect(h.coordinator.xpcRetryCount == 0)
+    }
+
+    /// Spec §8.5 (scan C15): "60 s of CONFIRMED frames" — a mic NotDelivering alarm inside the window
+    /// means the frames were not confirmed; the streak stays.
+    @Test func aMicAlarmDuringTheConfirmationWindowKeepsTheStreak() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        let t0 = Date()
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
+        h.client.onAlarmsChanged?(CaptureStatusSnapshot(helperSessionId: "2000-0", sequence: 1, isCapturing: true,
+            alarms: [ActiveAlarm(kind: .micNotDelivering, raisedAt: t0 + 10, lastNotifiedAt: nil, message: "m", episode: 1)], tracks: []))
+        for _ in 0..<50 { await Task.yield() }
+        h.coordinator.confirmRecoveryHealthy(now: t0 + 61)
+        #expect(h.coordinator.xpcRetryCount == 1)
+    }
+
+    /// Gotcha #50 / L9: a helper that crashes on its first sample never delivers frames, so the
+    /// streak never resets and the third crash inside the window gives up.
+    @Test func firstSampleCrashLoopGivesUpAtTheCap() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        _ = try h.writeSentinel()
+        await h.coordinator.handleXPCCrash()
+        #expect(h.coordinator.xpcRetryCount == 2)
+        _ = try h.writeSentinel()
+        await h.coordinator.handleXPCCrash()
+        #expect(h.appState.isIdle)
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
+    }
+
+    /// A restart that never saw frames (the user stopped first) must not leak into the next recording:
+    /// that recording's first frames are not a recovery.
+    @Test func aNewRecordingNeverInheritsAnUnconfirmedRestart() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()
+        h.appState.phase = .idle   // the recording ended before the restarted helper delivered
+
+        await h.coordinator.startRecording(sessionName: "Next", microphoneDeviceId: "mic-1")
+        #expect(h.appState.isRecording)
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "3000-0")
+        #expect(h.notified.value.isEmpty)
+    }
+
+    @Test func firstFramesOutsideARecoveryDoNotAnnounceResumed() async throws {
+        let h = try Harness()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "1000-0")
+        #expect(h.notified.value.isEmpty)
+    }
+
+    /// Flow A at launch: the helper is still capturing → re-attach, restore its alarm state, no salvage.
+    @Test func recoverAtLaunchReattachesToACapturingHelper() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.client.isCapturingResult = true
+        h.client.statusSnapshot = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 1, isCapturing: true,
+            alarms: [ActiveAlarm(kind: .micDigitalSilence, raisedAt: Date(), lastNotifiedAt: nil, message: "m", episode: 1)], tracks: [])
+        await h.coordinator.recoverAtLaunch()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.appState.isRecording && h.client.startCalls.isEmpty)
+        #expect(h.client.launchRecoveries.first?["flow"] == "A")
+        #expect(h.appState.activeAlarms[.micDigitalSilence] != nil)
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+    }
+
     @Test func failedStartReleasesTheRecordingMic() async throws {
         let h = try Harness()
         h.client.startError = FakeCaptureError()
@@ -670,11 +759,13 @@ private struct Harness {
     }
 
     @Test func reattachedRecordingMirrorsHelperAutoSwitches() async throws {
-        // Flow A/B: no coordinator started this recording, so the app wires the helper's mic-change
-        // report through mirrorMicSwitches — meters and the menu label must follow an auto-switch.
+        // Flow A: launch recovery re-attaches through the coordinator, which wires the helper's
+        // mic-change report — meters and the menu label must follow an auto-switch (#192).
         let h = try Harness()
-        h.appState.phase = .recording(since: Date())
-        RecordingCoordinator.mirrorMicSwitches(of: h.client, while: h.appState, into: h.recordingMic)
+        _ = try h.writeSentinel(micDeviceUID: "mic-1")
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.recordingMic.current == .some("mic-1"))
 
         h.client.onMicDeviceChanged?("mic-7")
         var waited = 0
@@ -684,10 +775,10 @@ private struct Harness {
         #expect(h.recordingMic.current == .some("mic-7"))
         #expect(h.coordinator.helperMicId == "mic-7", "the menu's mic label did not follow the auto-switch")
 
-        // A late report after the recording ended is ignored — checked on the handler itself, so this
-        // negative doesn't depend on how soon the hop to the main actor runs.
+        // A late report after the recording ended is ignored.
         h.appState.phase = .idle
-        RecordingCoordinator.applyMirroredMicSwitch(to: "mic-8", while: h.appState, into: h.recordingMic)
+        h.client.onMicDeviceChanged?("mic-8")
+        for _ in 0..<50 { await Task.yield() }
         #expect(h.recordingMic.current == .some("mic-7"))
     }
 
@@ -845,7 +936,7 @@ private struct Harness {
     // #155: the Flow-A stop-path catch (which also covers `ChunkedSessionRecovery.recover()`
     // throwing) is the user's only signal on this path — the sentinel above is deleted
     // unconditionally, so relaunching will not retry. It must tell the user their raw audio is
-    // still on disk, mirroring the Flow B catch in `TranscriberApp.recoverIfNeeded`.
+    // still on disk, mirroring the Flow B catch in `recoverAtLaunch`.
     @Test func stopFailureNotifiesCriticallyThatAudioWasPreserved() async throws {
         let h = try Harness()
         // stopResult nil → stop() throws, landing in the outer catch.
@@ -893,9 +984,13 @@ private struct Harness {
         #expect(rewritten.systemAudioPath.hasSuffix("sess-1.wav"))
         #expect(rewritten.micAudioPath.hasSuffix("sess-1_mic.wav"))
 
-        #expect(h.appState.interruptionWarning == "Recording briefly interrupted. Resuming.")
-        #expect(h.notified.value.map { $0.title } == ["Recording Resumed"])
-        #expect(h.coordinator.xpcRetryCount == 0)  // streak reset after a successful restart
+        // L9: `start()` returning proves nothing (the helper replies before its first frame, and a
+        // first-sample crash comes back as another interruption). The streak resets only after
+        // confirmed frames — see retryStreakResetsOnlyAfterConfirmedFrames.
+        #expect(h.coordinator.xpcRetryCount == 1)
+        // Honest "Resumed" (L2): nothing is announced until frames arrive.
+        #expect(h.notified.value.isEmpty)
+        #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
         #expect(h.coordinator.recoveryInFlight == false)
     }
 
@@ -944,7 +1039,7 @@ private struct Harness {
 
         #expect(h.client.startCalls.count == 1)  // restarted instead of giving up
         #expect(h.appState.criticalError == nil)
-        #expect(h.notified.value.map { $0.title } == ["Recording Resumed"])
+        #expect(h.notified.value.isEmpty && h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
     }
 
     @Test func stopDuringRecoveryDefersToTheRecoveryHandler() async throws {

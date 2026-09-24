@@ -43,6 +43,21 @@ public final class RecordingCoordinator {
     /// The kinds the last `presentAlarms` saw, so a kind is "new" only once per appearance.
     private var presentedKinds: Set<AlarmKind> = []
 
+    // MARK: - Restart confirmation (§8.4, §8.5)
+
+    /// How long the restarted capture must deliver frames — with no newer crash and no mic
+    /// NotDelivering alarm — before the retry streak resets (L9). Tests set it.
+    public var recoveryConfirmationSeconds: TimeInterval = 60
+    /// A restart is waiting for the new helper's first mic frames before it says "Resumed".
+    private var awaitingRecoveryFrames = false
+    /// When the restarted capture delivered its first mic frames: the confirmation window's start.
+    private var recoveryFramesAt: Date?
+    /// The last time a snapshot carried `micNotDelivering`: inside the window it voids the confirmation.
+    private var lastMicAlarmAt: Date?
+    /// Builds the engines launch recovery transcribes with; nil = `transcriptionRunner.prepareEngine`.
+    /// Injected so tests never construct a real engine.
+    private let engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))?
+
     // MARK: - Lifecycle state (previously `@State` in MenuView)
 
     /// Consecutive XPC-crash count within the decay window (#61). Internal for test seeding.
@@ -66,8 +81,8 @@ public final class RecordingCoordinator {
     public private(set) var helperMicId: String? = nil
     /// The mic being recorded, process-wide, so no level meter opens it while the helper holds it
     /// (#192). The single source of truth: `helperMicKnown`/`helperMicId` mirror it (see
-    /// `recordingMicrophoneChanged`), so a writer outside the coordinator — the relaunch re-attach
-    /// paths, which run before any coordinator exists — keeps the menu's mic label right too.
+    /// `recordingMicrophoneChanged`), so any writer — including one outside the coordinator — keeps
+    /// the menu's mic label right too.
     private let recordingMicrophone: RecordingMicrophone
 
     private func setHelperMic(_ deviceId: String?) {
@@ -89,10 +104,12 @@ public final class RecordingCoordinator {
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
         onSystemAudioPermissionDenied: @escaping @MainActor () -> Void = {},
         presentAlarmsUI: @escaping @MainActor ([ActiveAlarm], [AlarmKind]) -> Void = { _, _ in },
+        engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))? = nil,
         recordingMicrophone: RecordingMicrophone = .shared
     ) {
         self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
         self.presentAlarmsUI = presentAlarmsUI
+        self.engineFactory = engineFactory
         self.recordingMicrophone = recordingMicrophone
         self.appState = appState
         self.captureClient = captureClient
@@ -270,6 +287,10 @@ public final class RecordingCoordinator {
             lastCrashAt = nil
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
+            // A restart from an earlier recording that never saw frames must not say "Resumed" here.
+            awaitingRecoveryFrames = false
+            recoveryFramesAt = nil
+            lastMicAlarmAt = nil
         } catch {
             clearHelperMic()
             RecordingSentinel.delete(directory: sentinelDirectory)
@@ -343,32 +364,6 @@ public final class RecordingCoordinator {
             "Recovery File Not Updated",
             "The microphone switch worked, but if the recording is interrupted it may resume on the previous microphone."
         )
-    }
-
-    /// For a recording no coordinator started — the relaunch re-attach (Flow A/B): mirror the helper's
-    /// auto-switches into `recordingMicrophone`, so level meters stay off the mic actually being
-    /// captured and the menu's label follows (#192). A coordinator does this itself in startRecording.
-    @MainActor
-    public static func mirrorMicSwitches(
-        of client: any RecordingCaptureClient,
-        while appState: AppState,
-        into recordingMicrophone: RecordingMicrophone = .shared
-    ) {
-        client.onMicDeviceChanged = { deviceId in
-            Task { @MainActor in
-                RecordingCoordinator.applyMirroredMicSwitch(to: deviceId, while: appState, into: recordingMicrophone)
-            }
-        }
-    }
-
-    /// One mirrored report, on the main actor: applied only while a recording is running — a late
-    /// report after it ended is ignored. Split out so that rule is testable without timing.
-    @MainActor
-    static func applyMirroredMicSwitch(
-        to deviceId: String?, while appState: AppState, into recordingMicrophone: RecordingMicrophone
-    ) {
-        guard appState.isRecording else { return }
-        recordingMicrophone.set(deviceId)
     }
 
     public enum MicSwitchError: Error, LocalizedError {
@@ -519,7 +514,7 @@ public final class RecordingCoordinator {
             // #155: this catch is the Flow-A re-attach stop path's only signal to the user — the
             // sentinel above is deleted unconditionally, so relaunching will not retry. Without an
             // explicit "audio preserved" message here (mirroring the Flow B catch in
-            // TranscriberApp.recoverIfNeeded), a user who sees only "Transcription Failed" has no
+            // `recoverAtLaunch`), a user who sees only "Transcription Failed" has no
             // way to know their raw .wav/.m4a files are still safely on disk.
             notifyCritical(
                 "Transcription Failed",
@@ -545,9 +540,8 @@ public final class RecordingCoordinator {
         // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
         // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
         // — both keep recording silently. Only a fatal give-up escalates.
-        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
-        // This supersedes any `mirrorMicSwitches` handler left by a re-attached recording (Flow A/B):
-        // the coordinator owns the handler for the recordings it starts.
+        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner) —
+        // for recordings this coordinator started and the ones it re-attached at launch alike.
         captureClient.onMicDeviceChanged = { [weak self] deviceId in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
@@ -579,6 +573,7 @@ public final class RecordingCoordinator {
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
                 self.appState.applyHelperSnapshot(snapshot)
+                if snapshot.alarms.contains(where: { $0.kind == .micNotDelivering }) { self.lastMicAlarmAt = Date() }
                 self.presentAlarms()
             }
         }
@@ -659,12 +654,35 @@ public final class RecordingCoordinator {
         presentAlarmsUI(active, newKinds.filter { dueKinds.contains($0) })
     }
 
-    /// L2: the new helper's frames clear the previous helper's DELIVERY alarms on that track. L4 extends
-    /// this same method with the recovery confirmation ("Recording Resumed").
-    func noteFirstFrames(track: CaptureTrack, helperSessionId: String) {
+    /// The new helper's frames clear the previous helper's DELIVERY alarms on that track (L2). After a
+    /// restart, the first MIC frames are what "Recording Resumed" waits for (§8.4) — never `start()`
+    /// returning — and they open the confirmation window that may reset the retry streak (L9).
+    func noteFirstFrames(track: CaptureTrack, helperSessionId: String, now: Date = Date()) {
         guard appState.isRecording else { return }
         appState.noteFirstFrames(track: track, helperSessionId: helperSessionId)
-        presentAlarms()
+        presentAlarms(now: now)
+        guard track == .mic, awaitingRecoveryFrames else { return }
+        awaitingRecoveryFrames = false
+        recoveryFramesAt = now
+        lastMicAlarmAt = nil
+        appState.interruptionWarning = "Recording briefly interrupted. Resumed."
+        notify("Recording Resumed", "Recording was briefly interrupted and has been restarted.")
+        let window = recoveryConfirmationSeconds
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(window))
+            self?.confirmRecoveryHealthy()
+        }
+    }
+
+    /// L9 / §8.5: the streak resets only after `recoveryConfirmationSeconds` of frames since the
+    /// restart's first frame, with no newer crash and no mic NotDelivering alarm in that window.
+    func confirmRecoveryHealthy(now: Date = Date()) {
+        guard appState.isRecording, let since = recoveryFramesAt,
+              now.timeIntervalSince(since) >= recoveryConfirmationSeconds,
+              lastCrashAt.map({ $0 <= since }) ?? true,
+              lastMicAlarmAt.map({ $0 <= since }) ?? true else { return }
+        xpcRetryCount = 0
+        recoveryFramesAt = nil
     }
 
     // MARK: - Crash recovery
@@ -770,14 +788,14 @@ public final class RecordingCoordinator {
                 await stopRecording()
                 return
             }
-            xpcRetryCount = 0
+            // L9: `start()` returning proves nothing — the helper replies before its first frame, and
+            // a first-sample crash comes back as another interruption. The streak resets only after
+            // confirmed frames (`confirmRecoveryHealthy`), and "Resumed" waits for them (§8.4).
             // The old helper's alarms stay: the new helper's snapshot turns them stale, and only its
             // evidence on that track clears each one (§6.2).
-            appState.interruptionWarning = "Recording briefly interrupted. Resuming."
-            notify(
-                "Recording Resumed",
-                "Recording was briefly interrupted and has been restarted."
-            )
+            awaitingRecoveryFrames = true
+            recoveryFramesAt = nil
+            appState.interruptionWarning = "Recording restarted — waiting for audio…"
         } catch {
             Logger.state.error("Restart failed: \(error, privacy: .public)")
             // council F3: the orphan was already re-ingested above, so just finalize what's been
@@ -792,6 +810,148 @@ public final class RecordingCoordinator {
                 "Microphone capture crashed and could not restart. The portion recorded before the failure has been transcribed."
             )
         }
+    }
+
+    // MARK: - Launch recovery (§8.3)
+
+    /// A recording was running when the app last quit or crashed (the sentinel survived): re-attach to
+    /// a helper that is still capturing (Flow A), rehydrate a chunked session (Flow B, chunked), or
+    /// restart capture on partial legacy audio (Flow B). Formerly `TranscriberApp.recoverIfNeeded`;
+    /// moved here so every crash path is owned — and testable — in one place (§8.3, §8.5).
+    public func recoverAtLaunch() async {
+        guard let sentinel = RecordingSentinel.read(directory: sentinelDirectory) else { return }
+
+        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
+
+        // Check if sentinel is stale (from before last boot)
+        let bootTime = ProcessInfo.processInfo.systemUptime
+        let bootDate = Date().addingTimeInterval(-bootTime)
+        if sentinel.startedAt < bootDate {
+            Logger.state.info("Stale sentinel from before last boot — cleaning up")
+            RecordingSentinel.delete(directory: sentinelDirectory)
+            return
+        }
+
+        // Flow A: Is XPC service still alive and capturing?
+        if await captureClient.isCapturing() {
+            Logger.state.info("XPC service alive — re-attaching (Flow A)")
+            appState.phase = .recording(since: sentinel.startedAt)
+            setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
+            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
+            wireCaptureCallbacks()
+            startStatusPoll()
+            // Restore the helper's alarm state now: the pull on connect ran before anything listened.
+            Task { await pollHelperStatus() }
+            return
+        }
+
+        // Flow B: XPC is dead. A chunked session's session.json is rewritten after every
+        // completed chunk, so it survives independently of whichever single WAV
+        // AudioArchiver has since deleted — check for a recoverable chunked session FIRST,
+        // before the stat-based single-file check below (which stats a WAV that a chunked
+        // recording archives-and-deletes at the first rotation, so it would always read 0
+        // bytes and wrongly conclude "no usable audio files") (#135).
+        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: outputDir, sessionId: sessionId) {
+            Logger.state.info("Recoverable chunked session found — rehydrating (Flow B, chunked)")
+            appState.phase = .transcribing(progress: "Recovering…")
+            do {
+                let config = configManager.config
+                let (transcriber, diarizer) = try prepareEngines(config: config)
+                // Captured so the rename dialog + auto-summary fire after the shared teardown below,
+                // as they do after a normal stop (#135 minor).
+                var recoveredJsonPath: URL?
+                // Drain capture diagnostics and stamp the always-present provenance into the
+                // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
+                // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+                let provenance = await captureClient.finalizeSessionDiagnostics(
+                    sessionId: sessionId,
+                    engine: config.engine.rawValue,
+                    recordingDirectory: outputDir
+                )
+                if let result = try await ChunkedSessionRecovery.recover(
+                    outputDirectory: outputDir, sessionId: sessionId, config: config,
+                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                    provenance: provenance
+                ) {
+                    appState.lastJsonPath = result.jsonPath.path
+                    appState.lastTranscriptPath = result.jsonPath.path
+                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
+                    recoveredJsonPath = result.jsonPath
+                } else {
+                    Logger.state.info("Chunked session had nothing to recover — discarding")
+                }
+                RecordingSentinel.delete(directory: sentinelDirectory)
+                appState.phase = .idle
+                if let jsonPath = recoveredJsonPath {
+                    presentTranscript(jsonPath, config)
+                }
+            } catch {
+                Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
+                appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
+                RecordingSentinel.delete(directory: sentinelDirectory)
+                appState.phase = .idle
+                notifyCritical(
+                    "Recovery Failed",
+                    "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
+                )
+            }
+            return
+        }
+
+        // Flow B (legacy, non-chunked/single-file): check for partial audio files
+        let sysSize = (try? FileManager.default.attributesOfItem(
+            atPath: sentinel.systemAudioPath
+        )[.size] as? Int) ?? 0
+
+        guard sysSize > 44 else {
+            Logger.state.info("No usable audio files — cleaning up sentinel")
+            RecordingSentinel.delete(directory: sentinelDirectory)
+            return
+        }
+
+        Logger.state.info("Partial audio found (\(sysSize) bytes) — restarting recording (Flow B)")
+        let seg = sentinel.segment + 1
+        // #135: name the restart capture in the chunk-index namespace, never the legacy segment
+        // counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart owns the
+        // collision guard + naming sequence, shared by every no-live-pipeline restart site (#170).
+        let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+        do {
+            try await captureClient.start(
+                outputDirectory: outputDir,
+                baseName: restart.baseName,
+                microphoneDeviceId: sentinel.micDeviceUID,
+                systemAudioSource: configManager.config.systemAudioSource,
+                options: CaptureOptions(config: configManager.config),
+                sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
+            )
+            try RecordingSentinel.write(restart.newSentinel, directory: sentinelDirectory)
+            appState.phase = .recording(since: sentinel.startedAt)
+            setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
+            captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
+            wireCaptureCallbacks()
+            startStatusPoll()
+            // Honest "Resumed" (§8.4): announced by `noteFirstFrames` once the new helper delivers.
+            awaitingRecoveryFrames = true
+            recoveryFramesAt = nil
+            appState.interruptionWarning = "Recording restarted — waiting for audio…"
+        } catch {
+            Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
+            appState.criticalError = "Recording failed — could not restart after crash recovery."
+            RecordingSentinel.delete(directory: sentinelDirectory)
+            notifyCritical(
+                "Recording Failed",
+                "Crash recovery attempted but could not restart recording."
+            )
+        }
+    }
+
+    /// The engines a launch recovery transcribes with: the injected factory (tests), else the runner's.
+    private func prepareEngines(config: Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?) {
+        if let engineFactory { return try engineFactory(config) }
+        let prepared = try transcriptionRunner.prepareEngine(config: config)
+        return (prepared.transcriber, prepared.diarizer)
     }
 
     /// Best-effort finalize a live chunked session being abandoned after an unrecoverable crash, so

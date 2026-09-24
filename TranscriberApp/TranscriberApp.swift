@@ -114,10 +114,12 @@ final class ManifestHealthStore {
 
 @main
 struct TranscriberApp: App {
-    @State private var appState = AppState()
+    @State private var appState: AppState
     @State private var launchGate: LaunchGate
     private let captureClient: AudioCaptureClient
-    private let transcriptionRunner = TranscriptionRunner()
+    /// Owns the recording lifecycle and every crash path, launch recovery included (§8.3). Built here,
+    /// once, and injected into `MenuView` — a view-owned coordinator would not exist yet at launch.
+    private let coordinator: RecordingCoordinator
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
     // Recording app: never silent-install (no userDriverDelegate override) — the standard user
@@ -135,6 +137,35 @@ struct TranscriberApp: App {
     init() {
         let client = AudioCaptureClient()
         captureClient = client
+        let state = AppState()
+        _appState = State(initialValue: state)
+        let runner = TranscriptionRunner()
+        // The app-target UI side effects the coordinator needs (notifications, the critical panel, the
+        // rename dialog + auto-summary, the repair and alarm windows) are injected here.
+        coordinator = RecordingCoordinator(
+            appState: state,
+            captureClient: client,
+            transcriptionRunner: runner,
+            configManager: ConfigManager.shared,
+            notify: { title, body in
+                MenuView.postNotification(title: title, body: body)
+            },
+            notifyCritical: { title, body in
+                MenuView.sendCriticalNotification(title: title, body: body)
+            },
+            presentTranscript: { jsonPath, config in
+                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                    // Auto-summarize after rename completes (so summary has real speaker names)
+                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                }
+            },
+            onSystemAudioPermissionDenied: {
+                Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
+            },
+            presentAlarmsUI: { alarms, new in
+                CaptureAlarmWindowController.shared.present(alarms, newlyRaised: new, appState: state)
+            }
+        )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
 
         // CLI mode: only enter for known subcommands (not system-injected args)
@@ -171,10 +202,9 @@ struct TranscriberApp: App {
         )
 
         // Crash recovery: check sentinel before anything else
-        let state = appState
-        let runner = transcriptionRunner
+        let c = coordinator
         Task { @MainActor in
-            await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
+            await c.recoverAtLaunch()
         }
 
         Task.detached(priority: .background) {
@@ -203,8 +233,9 @@ struct TranscriberApp: App {
                 content.body = ManifestHealthStore.problemMessage(for: result)
                 content.sound = .default
                 // .active (not .timeSensitive): a model-integrity problem at launch is worth surfacing
-                // but isn't urgent enough to punch through Focus/DND. (The "Recording Resumed" alerts
-                // below stay .timeSensitive — those fire mid-recording when audio may be at risk.)
+                // but isn't urgent enough to punch through Focus/DND. (The "Recording Resumed" and
+                // capture-alarm notifications stay .timeSensitive — they fire mid-recording when audio
+                // may be at risk.)
                 content.interruptionLevel = .active
                 let request = UNNotificationRequest(
                     identifier: "manifest-verify", content: content, trigger: nil
@@ -256,267 +287,12 @@ struct TranscriberApp: App {
         }
     }
 
-    @MainActor
-    private static func recoverIfNeeded(
-        captureClient: AudioCaptureClient,
-        appState: AppState,
-        transcriptionRunner: TranscriptionRunner
-    ) async {
-        guard let sentinel = RecordingSentinel.read() else { return }
-
-        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
-
-        // Check if sentinel is stale (from before last boot)
-        let bootTime = ProcessInfo.processInfo.systemUptime
-        let bootDate = Date().addingTimeInterval(-bootTime)
-        if sentinel.startedAt < bootDate {
-            Logger.state.info("Stale sentinel from before last boot — cleaning up")
-            RecordingSentinel.delete()
-            return
-        }
-
-        // Flow A: Is XPC service still alive and capturing?
-        let isAlive = await captureClient.isCapturing()
-        if isAlive {
-            Logger.state.info("XPC service alive — re-attaching (Flow A)")
-            appState.phase = .recording(since: sentinel.startedAt)
-            RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
-            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
-            setupCrashHandler(captureClient: captureClient, appState: appState)
-            return
-        }
-
-        // Flow B: XPC is dead. A chunked session's session.json is rewritten after every
-        // completed chunk, so it survives independently of whichever single WAV
-        // AudioArchiver has since deleted — check for a recoverable chunked session FIRST,
-        // before the stat-based single-file check below (which stats a WAV that a chunked
-        // recording archives-and-deletes at the first rotation, so it would always read 0
-        // bytes and wrongly conclude "no usable audio files") (#135).
-        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-        if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: outputDir, sessionId: sessionId) {
-            Logger.state.info("Recoverable chunked session found — rehydrating (Flow B, chunked)")
-            appState.phase = .transcribing(progress: "Recovering…")
-            do {
-                let config = ConfigManager.shared.config
-                let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
-                // Captured so the rename dialog + auto-summary can fire after the shared
-                // teardown below — mirrors MenuView.stopRecording, whose success branch is the only
-                // other place a recovered transcript reaches this wiring (#135 minor: relaunch
-                // recovery previously left the user with no rename prompt and no summary).
-                var recoveredJsonPath: URL?
-                // Drain capture diagnostics and stamp the always-present provenance into the
-                // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
-                // otherwise a recovered session's `sessionState.provenance` stays nil forever.
-                let provenance = await captureClient.finalizeSessionDiagnostics(
-                    sessionId: sessionId,
-                    engine: config.engine.rawValue,
-                    recordingDirectory: outputDir
-                )
-                if let result = try await ChunkedSessionRecovery.recover(
-                    outputDirectory: outputDir, sessionId: sessionId, config: config,
-                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                    provenance: provenance
-                ) {
-                    appState.lastJsonPath = result.jsonPath.path
-                    appState.lastTranscriptPath = result.jsonPath.path
-                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
-                    recoveredJsonPath = result.jsonPath
-                } else {
-                    Logger.state.info("Chunked session had nothing to recover — discarding")
-                }
-                RecordingSentinel.delete()
-                appState.phase = .idle
-                if let jsonPath = recoveredJsonPath {
-                    RenameWindowController.shared.show(jsonPath: jsonPath) {
-                        MenuView.autoSummarize(jsonPath: jsonPath, config: config)
-                    }
-                }
-            } catch {
-                Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
-                appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
-                RecordingSentinel.delete()
-                appState.phase = .idle
-                CriticalAlertController.shared.show(
-                    title: "Recovery Failed",
-                    message: "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
-                )
-            }
-            return
-        }
-
-        // Flow B (legacy, non-chunked/single-file): check for partial audio files
-        let sysSize = (try? FileManager.default.attributesOfItem(
-            atPath: sentinel.systemAudioPath
-        )[.size] as? Int) ?? 0
-
-        if sysSize > 44 {
-            Logger.state.info("Partial audio found (\(sysSize) bytes) — restarting recording (Flow B)")
-
-            let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-            let seg = sentinel.segment + 1
-            // #135: name the restart capture in the chunk-index namespace, never the legacy segment
-            // counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart owns the
-            // collision guard + naming sequence, shared by every no-live-pipeline restart site (#170).
-            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
-            let baseName = restart.baseName
-            let newSentinel = restart.newSentinel
-
-            do {
-                try await captureClient.start(
-                    outputDirectory: outputDir,
-                    baseName: baseName,
-                    microphoneDeviceId: sentinel.micDeviceUID,
-                    systemAudioSource: ConfigManager.shared.config.systemAudioSource,
-                    options: CaptureOptions(config: ConfigManager.shared.config),
-                    sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
-                )
-                try RecordingSentinel.write(newSentinel)
-                appState.phase = .recording(since: sentinel.startedAt)
-                RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
-                appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
-                captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
-                setupCrashHandler(captureClient: captureClient, appState: appState)
-
-                // Send notification
-                if Bundle.main.bundleIdentifier != nil {
-                    let content = UNMutableNotificationContent()
-                    content.title = "Recording Resumed"
-                    content.body = "Recording was briefly interrupted. Some audio may have been lost."
-                    content.sound = .default
-                    content.interruptionLevel = .timeSensitive
-                    let request = UNNotificationRequest(
-                        identifier: UUID().uuidString, content: content, trigger: nil
-                    )
-                    try? await UNUserNotificationCenter.current().add(request)
-                }
-            } catch {
-                Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
-                appState.criticalError = "Recording failed — could not restart after crash recovery."
-                RecordingSentinel.delete()
-                CriticalAlertController.shared.show(
-                    title: "Recording Failed",
-                    message: "Crash recovery attempted but could not restart recording."
-                )
-            }
-        } else {
-            Logger.state.info("No usable audio files — cleaning up sentinel")
-            RecordingSentinel.delete()
-        }
-    }
-
-    @MainActor
-    private static func setupCrashHandler(
-        captureClient: AudioCaptureClient,
-        appState: AppState
-    ) {
-        // Mirror helper auto-switches into the recording-mic record, as the coordinator does for a
-        // recording it started, so level meters stay off the mic actually being captured (#192).
-        RecordingCoordinator.mirrorMicSwitches(of: captureClient, while: appState)
-        captureClient.onServiceCrash = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                guard let sentinel = RecordingSentinel.read() else { return }
-
-                let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                // #135: name the restart capture in the chunk-index namespace, never the legacy
-                // segment counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart
-                // owns the collision guard + naming sequence, shared by every no-live-pipeline
-                // restart site (#170).
-                let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
-                let baseName = restart.baseName
-                let newSentinel = restart.newSentinel
-
-                do {
-                    RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // before the helper opens it (#192)
-                    try await captureClient.start(
-                        outputDirectory: outputDir,
-                        baseName: baseName,
-                        microphoneDeviceId: sentinel.micDeviceUID,
-                        systemAudioSource: ConfigManager.shared.config.systemAudioSource,
-                        options: CaptureOptions(config: ConfigManager.shared.config),
-                        sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
-                    )
-                    try RecordingSentinel.write(newSentinel)
-                    appState.interruptionWarning = "Recording briefly interrupted. Resuming."
-
-                    if Bundle.main.bundleIdentifier != nil {
-                        let content = UNMutableNotificationContent()
-                        content.title = "Recording Resumed"
-                        content.body = "Recording was briefly interrupted and has been restarted."
-                        content.sound = .default
-                        content.interruptionLevel = .timeSensitive
-                        let request = UNNotificationRequest(
-                            identifier: UUID().uuidString, content: content, trigger: nil
-                        )
-                        try? await UNUserNotificationCenter.current().add(request)
-                    }
-                } catch {
-                    Logger.state.error("Recovery crash handler failed: \(error, privacy: .public)")
-                    appState.criticalError = "Recording failed — capture crashed and could not restart."
-                    appState.phase = .idle
-                    RecordingMicrophone.shared.clear()
-                    RecordingSentinel.delete()
-                    CriticalAlertController.shared.show(
-                        title: "Recording Failed",
-                        message: "Capture crashed during recovery and could not restart."
-                    )
-                }
-            }
-        }
-        // #86: benign route changes during a recovered recording resume in place; only a fatal
-        // give-up escalates to the relaunch handler above.
-        captureClient.onRestartInPlace = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Audio device changed — recording resumed automatically."
-            }
-        }
-        captureClient.onBriefInterruption = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Recording briefly interrupted — continuing."
-            }
-        }
-        // #86: the helper could not restart the mid-recording system (remote) stream within budget.
-        // The local mic keeps recording on its own AVCaptureSession — warn, never stop. A transient
-        // notice: the sticky state is the helper's `remoteRecoveryFailed` alarm.
-        captureClient.onSystemAudioUnrecoverable = { _ in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
-            }
-        }
-        // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a
-        // disk-full write failure) — surfaced WHILE the recording is still running, while there is
-        // still time to react. The recording is never stopped by this.
-        // Also set by RecordingCoordinator.startRecording() — that site covers a normal recording
-        // start, this one covers the launch-time crash-recovery re-attach paths (Flow A/B), which
-        // never go through startRecording(). Keep both in sync if this wiring changes.
-        captureClient.onQualityAnomaly = { kind, message in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                // #220: the tap is running without its permission — put the fix in front of the user.
-                if appState.noteQualityAnomaly(kind: kind, message: message) {
-                    await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence)
-                }
-            }
-        }
-        captureClient.onFatalFailure = { _ in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                captureClient.onServiceCrash?()
-            }
-        }
-    }
-
     var body: some Scene {
         MenuBarExtra("Parley", systemImage: appState.menuBarIcon) {
             if launchGate.permissionsReady {
                 MenuView(
                     appState: appState,
-                    captureClient: captureClient,
-                    transcriptionRunner: transcriptionRunner,
+                    coordinator: coordinator,
                     configManager: configManager,
                     calendarService: calendarService,
                     updater: updaterController.updater,
