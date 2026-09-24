@@ -42,6 +42,12 @@ public final class TranscriptionRunner {
     public private(set) var chunkRotator: ChunkRotator?
     public private(set) var chunkProcessor: ChunkProcessor?
 
+    /// Test seam: `setupChunkedPipeline` throws before creating the processor.
+    var failSetupForTesting = false
+    /// Test seam: `finalize` sleeps this long before doing anything.
+    var finalizeDelayForTesting: Duration?
+    private enum SetupFailure: Error { case forTesting }
+
     private let wavHeaderSize = 44
     private var detectedLanguages: [String] = []
 
@@ -337,6 +343,7 @@ public final class TranscriptionRunner {
         outputDirectory: URL,
         config: Config
     ) async throws -> TranscriptionResult {
+        if let d = finalizeDelayForTesting { try await Task.sleep(for: d) }
         let startTime = ContinuousClock.now
 
         // 1. Speaker reconciliation — chunks must be in recording order so the reconciler's
@@ -450,7 +457,8 @@ public final class TranscriptionRunner {
             echoSegmentsRemoved: totalEchoRemoved,
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
-            recordedAt: sessionState.meetingStart
+            recordedAt: sessionState.meetingStart,
+            captureGaps: sessionState.gaps
         )
 
         let baseName = sessionState.sessionId
@@ -509,15 +517,22 @@ public final class TranscriptionRunner {
     }
 
     /// Set up chunked recording pipeline.
+    ///
+    /// `seededState` resumes a persisted session after a relaunch (L7): its chunks, id and
+    /// `meetingStart` carry over so completed chunks are not re-done. The rotator is still anchored
+    /// at the CURRENT time — the monotonic clock behind it cannot be persisted, so a resume
+    /// re-anchors at resume time rather than at the seeded `meetingStart`.
     public func setupChunkedPipeline(
         captureClient: any ChunkRotationClient,
         outputDirectory: URL,
         sessionBaseName: String,
-        config: Config
+        config: Config,
+        seededState: SessionState? = nil
     ) throws {
+        if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
 
-        let sessionState = SessionState(
+        let sessionState = seededState ?? SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
             engine: config.engine.rawValue,
@@ -544,6 +559,13 @@ public final class TranscriptionRunner {
             processor?.processChunk(chunk)
         }
         self.chunkRotator = rotator
+    }
+
+    /// Record a period with no capture (relaunch, sleep) into the live session. Fire-and-forget:
+    /// the processor persists it to session.json and `finalize` stamps it into the transcript.
+    public func recordCaptureGap(_ gap: CaptureGap) {
+        let p = chunkProcessor
+        Task { await p?.appendGap(gap) }
     }
 
     public func startChunkRotation() {

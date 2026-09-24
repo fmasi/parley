@@ -122,4 +122,17 @@ struct TranscriptAssemblerTests {
         #expect(parsed?["metadata"] != nil)
         #expect(parsed?["segments"] != nil)
     }
+
+    /// Scan A113: gaps must land in metadata.capture even when no coverage was stamped (a fake or an
+    /// old helper); the `capture` dictionary is created on demand.
+    @Test func captureGapsLandInMetadataCaptureEvenWithoutCoverage() throws {
+        let gap = CaptureGap(start: Date(timeIntervalSince1970: 10), end: Date(timeIntervalSince1970: 14), reason: "app relaunch")
+        let json = TranscriptAssembler.assemble(
+            segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+            diarization: false, dualStream: false, captureGaps: [gap])
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        let gaps = try #require(capture["gaps"] as? [[String: Any]])
+        #expect(gaps.count == 1 && gaps[0]["reason"] as? String == "app relaunch" && gaps[0]["seconds"] as? Double == 4)
+        #expect(gaps[0]["start"] as? String == "1970-01-01T00:00:10Z")
+    }
 }

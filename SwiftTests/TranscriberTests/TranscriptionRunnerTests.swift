@@ -55,3 +55,50 @@ import Testing
         #expect(Set(mapping.values).count == 1)
     }
 }
+
+@MainActor
+@Suite struct TranscriptionRunnerPipelineSeamTests {
+    private final class NoopRotationClient: ChunkRotationClient {
+        func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+            ("\(outputDirectory)/\(newBaseName).wav", "\(outputDirectory)/\(newBaseName)_mic.wav")
+        }
+    }
+    private func tempDir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("runner-seam-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// L7: a relaunch seeds the pipeline with the persisted session so completed chunks are not re-done.
+    @Test func seededStateIsUsedByTheChunkPipeline() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                                   segments: [], speakerDatabase: [:])
+        let seeded = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        let state = try #require(await runner.chunkProcessor?.getSessionState())
+        #expect(state.chunks.map(\.index) == [0] && state.sessionId == "m")
+        runner.teardownChunkedPipeline()
+    }
+
+    @Test func recordCaptureGapPersistsIntoSessionJson() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default)
+        let processor = try #require(runner.chunkProcessor)
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
+        #expect(SessionState.read(directory: dir)?.gaps.map(\.reason) == ["sleep"])
+        runner.teardownChunkedPipeline()
+    }
+
+    @Test func failSetupForTestingThrowsBeforeCreatingTheProcessor() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let runner = TranscriptionRunner()
+        runner.failSetupForTesting = true
+        #expect(throws: (any Error).self) {
+            try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default)
+        }
+        #expect(runner.chunkProcessor == nil)
+    }
+}

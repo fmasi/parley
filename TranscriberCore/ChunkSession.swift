@@ -105,6 +105,26 @@ public struct ProcessedChunk: Codable {
     }
 }
 
+// MARK: - CaptureGap
+
+/// A wall-clock period during a recording in which nothing was captured — the app relaunched
+/// after a crash, or the Mac slept. Persisted in `session.json` and stamped into the transcript's
+/// `metadata.capture.gaps` so the record states the hole instead of silently closing it (§7.2).
+public struct CaptureGap: Codable, Equatable, Sendable {
+    public let start: Date
+    public let end: Date
+    /// Why nothing was recorded: "app relaunch" | "sleep".
+    public let reason: String
+
+    public var seconds: Double { end.timeIntervalSince(start) }
+
+    public init(start: Date, end: Date, reason: String) {
+        self.start = start
+        self.end = end
+        self.reason = reason
+    }
+}
+
 // MARK: - SessionState
 
 /// Persistent session state written to `session.json` alongside transcript files.
@@ -117,8 +137,10 @@ public struct SessionState: Codable {
     public let chunkDurationMinutes: Int
     public var chunks: [ProcessedChunk]
     /// Capture provenance stamp (#95). Optional → omitted/`nil` for legacy session.json and
-    /// for sessions that never recorded one; synthesized Codable decodes a missing key as nil.
+    /// for sessions that never recorded one.
     public var provenance: CaptureProvenance?
+    /// Periods with no capture (relaunch, sleep). Absent in legacy session.json → `[]`.
+    public var gaps: [CaptureGap]
 
     public init(
         sessionId: String,
@@ -126,7 +148,8 @@ public struct SessionState: Codable {
         engine: String,
         chunkDurationMinutes: Int,
         chunks: [ProcessedChunk] = [],
-        provenance: CaptureProvenance? = nil
+        provenance: CaptureProvenance? = nil,
+        gaps: [CaptureGap] = []
     ) {
         self.sessionId = sessionId
         self.meetingStart = meetingStart
@@ -134,6 +157,24 @@ public struct SessionState: Codable {
         self.chunkDurationMinutes = chunkDurationMinutes
         self.chunks = chunks
         self.provenance = provenance
+        self.gaps = gaps
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, meetingStart, engine, chunkDurationMinutes, chunks, provenance, gaps
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        meetingStart = try c.decode(Date.self, forKey: .meetingStart)
+        engine = try c.decode(String.self, forKey: .engine)
+        chunkDurationMinutes = try c.decode(Int.self, forKey: .chunkDurationMinutes)
+        chunks = try c.decode([ProcessedChunk].self, forKey: .chunks)
+        provenance = try c.decodeIfPresent(CaptureProvenance.self, forKey: .provenance)
+        gaps = try c.decodeIfPresent([CaptureGap].self, forKey: .gaps) ?? []
     }
 
     // MARK: - File location

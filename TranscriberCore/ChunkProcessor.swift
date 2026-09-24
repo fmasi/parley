@@ -35,6 +35,11 @@ public final class ChunkProcessor {
             return sessionState
         }
 
+        func appendGap(_ gap: CaptureGap) -> SessionState {
+            sessionState.gaps.append(gap)
+            return sessionState
+        }
+
         func getSessionState() -> SessionState {
             sessionState
         }
@@ -89,6 +94,14 @@ public final class ChunkProcessor {
     /// Actor-isolated access to current session state.
     public func getSessionState() async -> SessionState {
         await stateStore.getSessionState()
+    }
+
+    /// A period during which nothing was recorded (relaunch, sleep). Persisted with the session so a
+    /// later relaunch and the final transcript both see it (§7.2 metadata.capture.gaps).
+    public nonisolated func appendGap(_ gap: CaptureGap) async {
+        let snapshot = await stateStore.appendGap(gap)
+        do { try SessionState.write(snapshot, directory: outputDirectory) }
+        catch { Logger.state.error("Failed to write session.json after a capture gap: \(error, privacy: .public)") }
     }
 
     // MARK: - Private

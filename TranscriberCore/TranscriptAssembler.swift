@@ -14,7 +14,8 @@ public enum TranscriptAssembler {
         dualStream: Bool,
         echoSegmentsRemoved: Int = 0,
         provenance: CaptureProvenance? = nil,
-        recordedAt: Date? = nil
+        recordedAt: Date? = nil,
+        captureGaps: [CaptureGap] = []
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -39,6 +40,21 @@ public enum TranscriptAssembler {
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.
         if let provenance {
             metadata["capture_provenance"] = provenance.asMetadataDictionary()
+        }
+        // Periods with no capture (relaunch, sleep) — §7.2 `metadata.capture.gaps`. The `capture`
+        // dictionary is created on demand: gaps must be stated even when no coverage was stamped.
+        if !captureGaps.isEmpty {
+            let formatter = ISO8601DateFormatter()
+            var capture = metadata["capture"] as? [String: Any] ?? [:]
+            capture["gaps"] = captureGaps.map { gap -> [String: Any] in
+                [
+                    "start": formatter.string(from: gap.start),
+                    "end": formatter.string(from: gap.end),
+                    "seconds": gap.seconds,
+                    "reason": gap.reason,
+                ]
+            }
+            metadata["capture"] = capture
         }
         // Disclosure (#138): the transcript testifies whether its contents left the machine.
         // A transcript is airgapped at assembly time — summaries are generated later (and only

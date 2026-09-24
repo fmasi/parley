@@ -131,4 +131,17 @@ struct ChunkSessionTests {
         SessionState.delete(directory: dir)
         #expect(SessionState.read(directory: dir) == nil)
     }
+
+    @Test("sessionStateGapsDefaultToEmptyAndRoundTrip")
+    func sessionStateGapsDefaultToEmptyAndRoundTrip() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        var state = makeSession(chunks: [])
+        try SessionState.write(state, directory: dir)
+        #expect(SessionState.read(directory: dir)?.gaps == [])
+        let gap = CaptureGap(start: Date(timeIntervalSince1970: 100), end: Date(timeIntervalSince1970: 220), reason: "sleep")
+        state.gaps.append(gap)
+        try SessionState.write(state, directory: dir)
+        let back = try #require(SessionState.read(directory: dir))
+        #expect(back.gaps.count == 1 && back.gaps[0].reason == "sleep" && back.gaps[0].seconds == 120)
+    }
 }
