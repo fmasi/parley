@@ -13,9 +13,11 @@ public enum RelaunchDecision: Equatable, Sendable {
         case tooOld(seconds: TimeInterval)
         case noLiveness
         /// The sentinel was marked `stopping` before post-Stop finalize (L7) began. This wins over
-        /// every other input, including a helper that still reports `helperCapturing` (a
-        /// stop-in-flight race) — the coordinator (L7) is responsible for stopping the helper
-        /// itself; this decision only ever says "don't reattach, don't resume". (Fix round 1, item 7.)
+        /// `helperCapturing` (a stop-in-flight race never resumes) — the coordinator (L7) is
+        /// responsible for stopping the helper itself; this decision only ever says "don't
+        /// reattach, don't resume". It does NOT win over `folderReachable`: an unreachable folder
+        /// (e.g. an unmounted external drive) still waits rather than salvaging, even mid-stop —
+        /// see `decide`. (Fix round 1, item 7; corrected by fix round 2, item 4 — a regression.)
         case wasStopping
     }
 

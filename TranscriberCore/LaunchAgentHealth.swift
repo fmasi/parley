@@ -29,8 +29,10 @@ public enum LaunchAgentHealth {
         case bootoutInstallAndBootstrap
         case rewriteAndBootstrap
         case bootstrap
-        /// `.loadedButNotThisProcess`: `launchctl kickstart` launchd's own copy, then this process
-        /// yields. See `LaunchAgentManager.handOverToJob` and `shouldAttemptHandOver` below.
+        /// `.loadedButNotThisProcess`: `launchctl kickstart` launchd's own copy; on success, THIS
+        /// process releases the single-instance lock and exits 0 (fix round 3, item 5 — it does not
+        /// merely "yield": see `SingleInstancePolicy` for why B must wait for the lock rather than
+        /// yield on it). See `LaunchAgentManager.handOverToJob` and `shouldAttemptHandOver` below.
         case handOverToJob
     }
 
@@ -105,10 +107,11 @@ public enum LaunchAgentHealth {
     /// facts — this type has no idea whether a recording is in progress or a kickstart was already
     /// tried. Never during a recording (killing this process mid-recording would lose audio still
     /// buffered here), never in CLI mode (there is no menu-bar app instance to hand over to, and a
-    /// one-shot CLI invocation is not what KeepAlive is meant to protect), and never twice within
-    /// `handOverCooldown` of the last attempt.
-    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
-        guard !isRecording, !isCLI else { return false }
+    /// one-shot CLI invocation is not what KeepAlive is meant to protect), never when THIS process
+    /// already IS the launchd job (fix round 3, item 4 — it would be handing over to itself), and
+    /// never twice within `handOverCooldown` of the last attempt.
+    public static func shouldAttemptHandOver(isRecording: Bool, isCLI: Bool, isLaunchdJob: Bool, lastHandOverAt: Date?, now: Date) -> Bool {
+        guard !isRecording, !isCLI, !isLaunchdJob else { return false }
         if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown { return false }
         return true
     }

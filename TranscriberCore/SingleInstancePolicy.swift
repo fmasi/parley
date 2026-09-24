@@ -17,7 +17,21 @@ import Foundation
 public enum SingleInstancePolicy: Equatable, Sendable {
     case proceed
     case yield
-    case waitForLock(seconds: TimeInterval)
+    case waitForLock(seconds: TimeInterval, onTimeout: TimeoutOutcome)
+
+    /// What B must do if `waitForLock`'s timeout elapses without A releasing the lock. Typed and
+    /// documented rather than left for the caller to decide (fix round 3, item 1 — CRITICAL gap):
+    /// launchd starts a KeepAlive job at EVERY `bootstrap` (`runs = 1`, `minimum runtime = 10` in
+    /// this job's own `launchctl print` output), so B hits this timeout on every launch-time repair
+    /// from a Finder-launched instance, not just rarely. Exiting non-zero would make KeepAlive
+    /// respawn B roughly every 10 s — a relaunch loop (`SuccessfulExit: false` only suppresses a
+    /// relaunch after a CLEAN exit). Proceeding without the lock would leave two instances running.
+    /// `.exitZero` is the only outcome that is safe either way: A never released the lock (the
+    /// hand-over effectively failed), so A is still the one surviving instance; B's clean exit is
+    /// never relaunched by KeepAlive.
+    public enum TimeoutOutcome: Equatable, Sendable {
+        case exitZero
+    }
 
     /// How long the launchd job (B) waits for the outgoing process (A) to release the lock during
     /// a hand-over before giving up.
@@ -25,6 +39,6 @@ public enum SingleInstancePolicy: Equatable, Sendable {
 
     public static func decide(isLaunchdJob: Bool, lockHeldByOther: Bool) -> SingleInstancePolicy {
         guard lockHeldByOther else { return .proceed }
-        return isLaunchdJob ? .waitForLock(seconds: lockWaitTimeout) : .yield
+        return isLaunchdJob ? .waitForLock(seconds: lockWaitTimeout, onTimeout: .exitZero) : .yield
     }
 }

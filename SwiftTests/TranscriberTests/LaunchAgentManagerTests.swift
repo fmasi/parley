@@ -452,6 +452,79 @@ struct LaunchAgentManagerTests {
         ])
     }
 
+    /// Fix round 3, item 2 (the realistic repair test round 2 asked for): the LIVE shape captured
+    /// from `launchctl print` for a freshly-bootstrapped, not-yet-running job
+    /// (`.superpowers/sdd/2026-09-24-capture-reliability/launchctl-print-live.txt`) has
+    /// `state = not running` and NO `pid =` line at all. Starting from `.notLoaded`, the repair
+    /// (enable + bootstrap) still correctly reports `.loadedButNotThisProcess` for that shape,
+    /// rather than assuming an absent pid means it's this process.
+    @Test func realisticPostBootstrapPrintWithNoPidLineIsLoadedButNotThisProcess() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+        try await LaunchAgentManager.install(executablePath: exe, launchAgentsDir: dir, loadAgent: false)
+
+        // launchctl-print-live.txt's own shape: "state = not running", program present, no pid line.
+        let liveShapeNoPid = """
+        gui/501/eu.fmasi.parley = {
+        \tactive count = 0
+        \tpath = /Users/fmasi/Library/LaunchAgents/eu.fmasi.parley.plist
+        \ttype = LaunchAgent
+        \tstate = not running
+
+        \tprogram = \(exe)
+        \targuments = {
+        \t\t\(exe)
+        \t}
+
+        \tdomain = gui/501 [100016]
+        \tminimum runtime = 10
+        \truns = 1
+        \tlast exit code = 0
+        }
+        """
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [LaunchctlResult(status: 1), LaunchctlResult(status: 0, output: liveShapeNoPid)]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .loadedButNotThisProcess)
+        let calls = await runner.calls
+        #expect(calls == [
+            ["print", job(uid)],
+            ["enable", job(uid)],
+            ["bootstrap", gui(uid), plistPath],
+            ["print", job(uid)],
+        ])
+    }
+
+    /// Fix round 3, item 3: a pid match is authoritative — launchd definitely spawned THIS process,
+    /// so a mismatched program string (a stale/inconsistent on-disk plist, or a symlink/normalization
+    /// quirk in `print`'s output) must not trigger a bootout/bootstrap dance. Just correct the file
+    /// and report healthy, with no launchctl calls beyond the initial `print`.
+    @Test func pidMatchWithADifferentProgramStringRewritesQuietlyAndIsHealthy() async throws {
+        let dir = makeTempDir()
+        defer { cleanup(dir) }
+        let uid: uid_t = 501
+        let plistPath = dir.appendingPathComponent(LaunchAgentManager.plistName).path
+        let old = "/Users/x/Downloads/Parley.app/Contents/MacOS/Parley"
+        try await LaunchAgentManager.install(executablePath: old, launchAgentsDir: dir, loadAgent: false)
+
+        let runner = RecordingLaunchctlRunner(responses: [
+            "print": [LaunchctlResult(status: 0, output: "program = \(old)\npid = 4242\n")]
+        ])
+        let state = await LaunchAgentManager.verifyAndRepair(
+            executablePath: exe, launchAgentsDir: dir, uid: uid, currentPID: 4242, runner: runner
+        )
+        #expect(state == .healthy)
+        let calls = await runner.calls
+        #expect(calls == [["print", job(uid)]])
+        let written = try String(contentsOfFile: plistPath, encoding: .utf8)
+        #expect(LaunchAgentManager.programPath(inPlist: written) == exe)
+    }
+
     // MARK: - install runs enable before bootstrap (item 1)
 
     @Test func installWithLoadAgentEnablesThenBootstraps() async throws {

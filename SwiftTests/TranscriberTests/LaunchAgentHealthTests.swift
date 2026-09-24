@@ -119,26 +119,32 @@ import Testing
     // MARK: - shouldAttemptHandOver (fix round 1, item 4 guards)
 
     @Test func handOverIsAllowedWhenIdleAndNotCLIWithNoPriorAttempt() {
-        #expect(LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
+        #expect(LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, isLaunchdJob: false, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
     }
 
     @Test func handOverIsNeverAttemptedWhileRecording() {
-        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: true, isCLI: false, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
+        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: true, isCLI: false, isLaunchdJob: false, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
     }
 
     @Test func handOverIsNeverAttemptedInCLIMode() {
-        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: true, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
+        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: true, isLaunchdJob: false, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
+    }
+
+    /// Fix round 3, item 4: the launchd job IS already the process KeepAlive tracks — it never
+    /// needs to hand over to itself.
+    @Test func handOverIsNeverAttemptedByTheLaunchdJobItself() {
+        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, isLaunchdJob: true, lastHandOverAt: nil, now: .init(timeIntervalSince1970: 1000)))
     }
 
     @Test func handOverIsSkippedWithinTheCooldownOfTheLastAttempt() {
         let now = Date(timeIntervalSince1970: 1000)
         let last = now.addingTimeInterval(-(LaunchAgentHealth.handOverCooldown - 1))
-        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, lastHandOverAt: last, now: now))
+        #expect(!LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, isLaunchdJob: false, lastHandOverAt: last, now: now))
     }
 
     @Test func handOverIsAllowedOnceTheCooldownHasElapsed() {
         let now = Date(timeIntervalSince1970: 1000)
         let last = now.addingTimeInterval(-LaunchAgentHealth.handOverCooldown)
-        #expect(LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, lastHandOverAt: last, now: now))
+        #expect(LaunchAgentHealth.shouldAttemptHandOver(isRecording: false, isCLI: false, isLaunchdJob: false, lastHandOverAt: last, now: now))
     }
 }

@@ -227,12 +227,26 @@ public enum LaunchAgentManager {
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
-        case .bootoutInstallAndBootstrap, .rewriteAndBootstrap:
+        case .bootoutInstallAndBootstrap:
             // A stale job must be booted out first or bootstrap fails with "already loaded" —
             // unless it would boot out THIS process (item 1b above).
             if !isSelf {
                 _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
             }
+            try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
+            _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
+            _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
+        case .rewriteAndBootstrap:
+            if isSelf {
+                // pid proves launchd already runs exactly this process (fix round 3, item 3): a
+                // mismatched program string (a stale/inconsistent on-disk plist, or a symlink/
+                // normalization quirk in `print`'s output) is not real staleness — no launchctl
+                // call is needed or wanted. Silently correct the file and report healthy.
+                try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
+                Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → healthy (pid confirmed self; plist rewritten, no launchctl calls)")
+                return .healthy
+            }
+            _ = await runner.run(["bootout", "gui/\(uid)/\(label)"])
             try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false, runner: runner)
             _ = await runner.run(["enable", "gui/\(uid)/\(label)"])
             _ = await runner.run(["bootstrap", "gui/\(uid)", plistURL.path])
@@ -242,11 +256,19 @@ public enum LaunchAgentManager {
         }
         let after = (await query()).state
         // Paths never appear `.public` (Global Constraints); state NAMES carry no user data.
-        if after == .healthy {
+        switch after {
+        case .healthy:
             Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → \(LaunchAgentHealth.logName(for: after), privacy: .public)")
-        } else {
-            // A non-healthy after-state means repair failed: `.error` so `log show` surfaces it
-            // (fix round 1, item 5).
+        case .loadedButNotThisProcess:
+            // `bootstrap` always succeeds and starts the job as ITS OWN process: if THIS process
+            // isn't that one (e.g. a Finder-launched duplicate that just repaired launchd's own
+            // copy), that is a NORMAL outcome, not a failed repair — `.error` would be misleading.
+            // The hand-over (`handOverToJob`) is what resolves it next, not another repair attempt
+            // here. (Fix round 3, item 6.)
+            Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → healthy but not launchd's process; hand-over pending")
+        default:
+            // Any OTHER non-healthy after-state means repair genuinely failed: `.error` so
+            // `log show` surfaces it (fix round 1, item 5).
             Logger.config.error("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → \(LaunchAgentHealth.logName(for: after), privacy: .public)")
         }
         if case .stalePath(let found) = state {
@@ -273,6 +295,12 @@ public enum LaunchAgentManager {
     ///    true, lockHeldByOther: true)` → `.waitForLock`) and WAITS up to
     ///    `SingleInstancePolicy.lockWaitTimeout` for A to release the lock, instead of yielding —
     ///    every OTHER duplicate launch still yields immediately (`.yield`).
+    /// 4. If that wait times out (A never released the lock — the hand-over effectively failed),
+    ///    `SingleInstancePolicy.TimeoutOutcome.exitZero` is B's ONLY allowed outcome: B exits 0.
+    ///    launchd starts this job at EVERY `bootstrap` (this is not a rare case — a Finder-launched
+    ///    instance hits it on every launch-time repair), so B must neither exit non-zero (KeepAlive
+    ///    would respawn it roughly every 10 s, a relaunch loop) nor proceed unlocked (two
+    ///    instances); A, still running, remains the one surviving instance. (Fix round 3, item 1.)
     ///
     /// `LaunchAgentHealth.shouldAttemptHandOver`'s `lastHandOverAt` guard must be persisted ACROSS
     /// PROCESSES (e.g. `UserDefaults`, by L3): A does not survive a successful hand-over to
