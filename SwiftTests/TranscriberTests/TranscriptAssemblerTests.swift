@@ -203,4 +203,24 @@ struct TranscriptAssemblerTests {
         #expect(segs[2]["filtered"] as? Bool == true)
         #expect(segs[3]["duplicate"] as? Bool == true)
     }
+
+    /// C-M17: a non-finite time or confidence reached `JSONSerialization`, which raises an uncatchable
+    /// Objective-C exception — every finalize (and every retry) of that session crashed. The segment
+    /// and its words are kept; an unknown time is written as null (never an invented number), an
+    /// unknown confidence is left out.
+    @Test func nonFiniteSegmentNumbersAreWrittenAsUnknownNotCrashed() throws {
+        let json = TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: .nan, end: .infinity, speaker: "A", text: "kept words", source: "remote", confidence: .nan),
+                       LabeledSegment(start: 1, end: 2, speaker: "A", text: "fine", source: "remote", confidence: 0.9)],
+            audioPaths: [], outputFormat: "json", language: "en", numSpeakers: nil, diarization: false, dualStream: false)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("assembler-nan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("t.json")
+        try TranscriptAssembler.write(json, to: url)
+        let back = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["segments"] as? [[String: Any]])
+        #expect(back.count == 2 && back[0]["text"] as? String == "kept words")
+        #expect(back[0]["start"] is NSNull && back[0]["end"] is NSNull && back[0]["confidence"] == nil)
+        #expect(back[1]["start"] as? Double == 1 && back[1]["confidence"] != nil)
+    }
 }

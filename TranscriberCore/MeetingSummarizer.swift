@@ -28,6 +28,12 @@ public enum MeetingSummarizer {
 
         Logger.transcription.info("Generating summary for '\(metadata.sessionName)' (\(segments.count) segments)")
 
+        // #138 / C-I6: the transcript testifies BEFORE its content leaves the machine. Stamped only
+        // after a written summary, a request that timed out after sending (the documented -1001
+        // case) left `transcript_transmitted: false` on a transcript that went to a remote endpoint.
+        // If the stamp cannot be written, nothing is sent.
+        try Self.stampDisclosure(.attempted(endpoint: endpoint), into: transcriptPath)
+
         let response = try await provider.summarizeDetailed(segments: segments, metadata: metadata)
 
         // Parley's own statement of what was not captured comes first, deterministically: a model
@@ -47,8 +53,7 @@ public enum MeetingSummarizer {
             .appendingPathComponent(baseName + "-summary.md")
         try stamped.write(to: summaryPath, atomically: true, encoding: .utf8)
 
-        // #138: the content was sent to `endpoint` to produce this summary — update the
-        // transcript's disclosure from its airgapped default so the artifact testifies to it.
+        // #138: the summary exists — the final state of the disclosure stamped above.
         try Self.stampDisclosure(.generated(endpoint: endpoint), into: transcriptPath)
 
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
@@ -58,11 +63,23 @@ public enum MeetingSummarizer {
 
     /// Rewrite the transcript JSON's `metadata.disclosure` block in place (#138), preserving all
     /// other keys. Atomic. A transcript with no readable metadata is left unchanged.
+    ///
+    /// Never un-says a disclosure: once `transcript_transmitted` or `summary_generated` is true it
+    /// stays true, and a later local run keeps naming the endpoint the content was sent to — a
+    /// re-summary on this Mac must not make a transcript that left the machine read "airgapped".
     static func stampDisclosure(_ disclosure: SummaryDisclosure, into transcriptPath: URL) throws {
         let data = try Data(contentsOf: transcriptPath)
         guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         var metadata = (json["metadata"] as? [String: Any]) ?? [:]
-        metadata["disclosure"] = disclosure.asMetadataDictionary()
+        let previous = metadata["disclosure"] as? [String: Any]
+        let wasTransmitted = previous?["transcript_transmitted"] as? Bool == true
+        let stamped = SummaryDisclosure(
+            summaryGenerated: disclosure.summaryGenerated || previous?["summary_generated"] as? Bool == true,
+            summaryEndpoint: wasTransmitted && !disclosure.transcriptTransmitted
+                ? (previous?["summary_endpoint"] as? String ?? disclosure.summaryEndpoint) : disclosure.summaryEndpoint,
+            transcriptTransmitted: disclosure.transcriptTransmitted || wasTransmitted
+        )
+        metadata["disclosure"] = stamped.asMetadataDictionary()
         json["metadata"] = metadata
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try out.write(to: transcriptPath, options: .atomic)

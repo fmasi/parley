@@ -138,12 +138,43 @@ struct SummaryPromptBuilderTests {
                 == "Remote audio: not captured (0 s delivered of 60 s expected)\nYour microphone: partly captured (20 s delivered of 60 s expected)")
     }
 
-    /// The owner's muted-remote case: every second delivered, all digital zero, permission fine.
-    @Test func aHealthyMutedRemoteGetsNoLine() {
+    /// The owner's muted-remote case (A-I2 ruling): every second delivered, all digital zero, the
+    /// permission CONFIRMED granted (a healthy tap: no denial of any kind was reported). One neutral,
+    /// informational header line — never a banner, never failure wording.
+    @Test func aHealthyMutedRemoteGetsOneNeutralLineAndNoBanner() {
         let m = meta(remote: CaptureSideNote(status: "healthy", deliveredSeconds: 2736, expectedSeconds: 2736,
                                              exactZeroSeconds: 2736, permissionDenied: false))
-        #expect(SummaryPromptBuilder.captureLine(m) == nil)
+        #expect(SummaryPromptBuilder.captureLine(m) == "Remote audio: only digital silence was received (the other side may have been muted)")
         #expect(SummaryPromptBuilder.captureBanner(m) == nil)
+        #expect(!SummaryPromptBuilder.systemMessage(metadata: m).contains("Dual-Stream Audio Context"), "no remote audio to compare echo against")
+    }
+
+    /// Only when (almost) all of it was silence: under a second of real audio left. A remote side that
+    /// spoke for a minute says nothing; so does one whose zeros were never measured (SCK).
+    @Test func theNeutralLineNeedsAllOfTheRemoteToBeSilence() {
+        let spoke = meta(remote: CaptureSideNote(status: "healthy", deliveredSeconds: 2736, expectedSeconds: 2736, exactZeroSeconds: 2676))
+        #expect(SummaryPromptBuilder.captureLine(spoke) == nil)
+        let almost = meta(remote: CaptureSideNote(status: "healthy", deliveredSeconds: 2736, expectedSeconds: 2736, exactZeroSeconds: 2735.5))
+        #expect(SummaryPromptBuilder.captureLine(almost) == "Remote audio: only digital silence was received (the other side may have been muted)")
+        let unmeasured = meta(remote: CaptureSideNote(status: "healthy", deliveredSeconds: 2736, expectedSeconds: 2736, exactZeroSeconds: nil))
+        #expect(SummaryPromptBuilder.captureLine(unmeasured) == nil)
+        let mic = meta(local: CaptureSideNote(status: "healthy", deliveredSeconds: 600, expectedSeconds: 600, exactZeroSeconds: 600))
+        #expect(SummaryPromptBuilder.captureLine(mic) == nil, "the neutral line is about the other side only")
+    }
+
+    /// C-I2 (#220's shape): the permission was lost part-way — 29 of 52 min exact zeros after a
+    /// mid-call revocation, 23 min really captured. "Not captured" for the whole remote side was false.
+    @Test func aMidCallPermissionLossIsPartlyCaptured() {
+        let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120,
+                                             exactZeroSeconds: 1740, permissionDenied: true, anomalyCount: 1))
+        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence while system audio permission was not granted"
+        #expect(SummaryPromptBuilder.captureLine(m) == line)
+        #expect(SummaryPromptBuilder.captureBanner(m)?.contains("> \(line)") == true, "the banner shows it")
+        #expect(SummaryPromptBuilder.systemMessage(metadata: m).contains("Dual-Stream Audio Context"), "part of the remote side was captured")
+        // Under a second of real audio left is still "not captured".
+        let whole = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120,
+                                                 exactZeroSeconds: 3119.5, permissionDenied: true))
+        #expect(SummaryPromptBuilder.captureLine(whole)?.hasPrefix("Remote audio: not captured — system audio permission was not granted") == true)
     }
 
     @Test func anUnknownOrMissingStatusFailsClosed() {
@@ -191,7 +222,10 @@ struct SummaryPromptBuilderTests {
 
     @Test func theRuleNamesEveryIncompleteCase() {
         #expect(SummaryPromptBuilder.systemPrompt.contains(
-            "not captured, partly captured, uncertain, compromised, recorded only digital silence, or partly digital silence"))
+            "not captured, partly captured (including digital silence while system audio permission was not granted), uncertain, compromised, recorded only digital silence, or partly digital silence"))
+        // The neutral muted-remote line is information, not a fault the model must report.
+        #expect(SummaryPromptBuilder.systemPrompt.contains(
+            "A \"Remote audio: only digital silence was received\" line is information, not a fault: never describe it as a capture failure."))
     }
 
     // MARK: - Round 4 wording

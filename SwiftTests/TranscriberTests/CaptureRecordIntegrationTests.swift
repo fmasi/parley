@@ -1,4 +1,4 @@
-// RED-FIRST-EXEMPT: characterization tests of merged cross-stream behaviour (streams C, F, D, E, H, R); each test was proven able to fail by temporarily breaking the production line it pins (task XI report)
+// RED-FIRST-EXEMPT: characterization tests of merged cross-stream behaviour (streams C, F, D, E, H, R); each test was proven able to fail by temporarily breaking the production line it pins (task XI report). The R2c changes (the two re-enabled BUG tests, the neutral muted-remote line in (e), the mid-call denial in (c′)) were run red first (task R2c report)
 import Foundation
 import Testing
 @testable import TranscriberCore
@@ -276,7 +276,8 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
 
     /// (e) The owner's no-false-positive case: headphones, the remote side muted, frames flowing, every
     /// sample exact zero, and TCC confirms the permission is GRANTED. The guard spends its one insurance
-    /// rebuild through the real healer and then stays quiet. Nothing may say anything is wrong.
+    /// rebuild through the real healer and then stays quiet. Nothing may say anything is wrong: the
+    /// summary header gets one neutral, informational line (A-I2 ruling) — no banner, no failure word.
     @Test func grantedMutedRemoteRaisesNothing() async throws {
         let guardRun = H.permissionGuardRun(builtWith: .authorized, tcc: .authorized, seconds: 40)
         #expect(guardRun.rebuilds == [.insurance], "one insurance rebuild per episode, never a loop")
@@ -289,9 +290,29 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.provenance.remoteStatus == "healthy" && !r.provenance.systemPermissionDeniedConfirmed)
         #expect(r.remote?["status"] as? String == "healthy" && r.remote?["exact_zero_seconds"] as? Double == 600)
         #expect(r.stamp?["quality_anomaly_count"] as? Int == 0 && r.stamp?["system_audio_unrecovered"] as? Bool == false)
-        #expect(r.captureLine == nil)
+        #expect(r.captureLine == "Remote audio: only digital silence was received (the other side may have been muted)")
+        #expect(!r.userMessage.contains("not captured") && !r.userMessage.contains("uncertain") && !r.userMessage.contains("compromised"))
         #expect(!r.hasBanner && r.summaryMarkdown.hasPrefix("### Summary"))
         #expect(r.completionTitle == "Transcription Complete")
+    }
+
+    /// (c′) #220's real shape (C-I2): the permission was revoked mid-call — 1740 s of a 3120 s remote
+    /// side are exact zeros after it, the first 1380 s really captured. The record says "partly
+    /// captured … while system audio permission was not granted", never "not captured" for the whole.
+    @Test func aMidCallDenialSaysPartlyCaptured() async throws {
+        let guardRun = H.permissionGuardRun(builtWith: .authorized, tcc: .denied, seconds: 80)
+        #expect(guardRun.events.contains { $0.kind == .systemAudioPermissionDenied && $0.detail["status"] == "denied" })
+        let r = try await run(helper: [H.event(.captureStart, .info, at: 0)] + guardRun.events + [
+            H.captureStop(at: 3120, remote: H.side(expected: 3120, delivered: 3120, zeros: 1740, callbacks: 312_000),
+                          local: H.side(expected: 3120, delivered: 3120, callbacks: 312_000)),
+        ])
+        #expect(r.provenance.systemPermissionDeniedConfirmed && r.provenance.remoteStatus == "compromised")
+        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence while system audio permission was not granted"
+        #expect(r.captureLine == line)
+        #expect(r.hasBanner && r.summaryMarkdown.contains("> \(line)"))
+        #expect(!r.userMessage.contains("Remote audio: not captured"))
+        #expect(r.systemMessage.contains("Dual-Stream Audio Context"), "part of the remote side is real audio")
+        #expect(r.completionTitle == "Transcription Complete — capture anomalies")
     }
 
     /// (f) The mic went to exact digital zero 5 minutes into a 60-minute call (lid closed, #193): the
@@ -357,8 +378,7 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
     /// An SCK (legacy) session: the helper deliberately OMITS `remote_exact_zero_seconds` and
     /// `remote_heartbeat_callbacks` ("say nothing rather than 0", AudioCaptureService.swift:246-250). The
     /// record must keep them unmeasured, not turn them into a measured 0.
-    @Test(.disabled("BUG: SCK's unmeasured remote keys become measured zeros — TrackAccounting.swift:81 and :88 default a missing exact_zero_seconds/heartbeat_callbacks to 0, so metadata.capture.remote says exact_zero_seconds 0.0 / heartbeat_callbacks 0 and capture_provenance.system_exact_zero_seconds 0 (CaptureDiagnostics.swift:660) for a session that never measured them"))
-    func sckSessionKeepsUnmeasuredRemoteKeysAbsent() async throws {
+    @Test func sckSessionKeepsUnmeasuredRemoteKeysAbsent() async throws {
         let r = try await run(helper: [
             H.event(.captureStart, .info, at: 0),
             H.captureStop(at: 600, remote: H.side(expected: 600, delivered: 600), local: H.side(expected: 600, delivered: 600, callbacks: 60_000),
@@ -368,6 +388,10 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.remote?["heartbeat_callbacks"] == nil, "SCK never counted tap callbacks")
         #expect(r.stamp?["system_exact_zero_seconds"] == nil)
         #expect(r.summaryMetadata.remoteCapture?.exactZeroSeconds == nil)
+        #expect(r.remote?["delivered_seconds"] as? Double == 600 && r.remote?["status"] as? String == "healthy", "what WAS measured stays")
+        #expect(r.local?["exact_zero_seconds"] as? Double == 0 && r.local?["heartbeat_callbacks"] as? Int == 60_000,
+                "the mic measured both: a measured 0 stays a 0")
+        #expect(r.captureLine == nil)
     }
 }
 
@@ -481,11 +505,11 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
                 "merging the same log again changes nothing")
     }
 
-    /// The same eviction, seen by the two provenance fields the user-facing notice reads. They are
+    /// The same eviction, seen by the two provenance fields the user-facing notice reads. They were
     /// computed by scanning the ring (`qualityAnomalyCount`, `systemAudioUnrecovered`), so once the
-    /// evidence has left the ring the stamp contradicts its own `remote_status`.
-    @Test(.disabled("BUG: quality_anomaly_count and system_audio_unrecovered are scanned from the evicting ring (CaptureDiagnostics.swift:569-583), not kept out of ring like the side tallies — after eviction the stamp says quality_anomaly_count 0 / system_audio_unrecovered false beside remote_status compromised, and CaptureQualityNotice.anomalyCount (CaptureQualityNotice.swift:80) turns that into a plain 'Transcription Complete'"))
-    func evictedQualityEvidenceStillReachesTheCompletionNotice() throws {
+    /// evidence had left the ring the stamp contradicted its own `remote_status`; they are now counted
+    /// out of ring, once per event, like the side tallies.
+    @Test func evictedQualityEvidenceStillReachesTheCompletionNotice() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "weekly-sync")
         var ring = CaptureDiagnostics(maxEvents: 6)

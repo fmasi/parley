@@ -462,6 +462,12 @@ public struct CaptureDiagnostics: Sendable {
     /// which merges first present the events.
     private var lastConfirmedDenial: Date?
     private var lastPermissionRestore: Date?
+    /// The user-facing notice's two fields (XI bug 2), same out-of-ring lifetime: scanned from the
+    /// evicting ring, a compromised recording read "Transcription Complete" once its evidence aged
+    /// out. Any denial (confirmed or not) counts for `systemAudioUnrecovered`.
+    private var qualityAnomalyTally = 0
+    private var sawSystemAudioUnrecovered = false
+    private var lastDenial: Date?
 
     /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
     /// events the ring already evicted (read back from the live log) alongside events the ring
@@ -492,6 +498,9 @@ public struct CaptureDiagnostics: Sendable {
         guard countedKeys.insert(CaptureEvent.dedupKey(e)).inserted else { return }
         if e.kind == .retry { retryCount += 1 }
         if e.kind == .launchRecovery { launchRecoveries += 1 }
+        if CaptureEventKind.qualityCompromising.contains(e.kind) { qualityAnomalyTally += 1 }
+        if e.kind == .systemAudioUnrecovered { sawSystemAudioUnrecovered = true }
+        if e.kind == .systemAudioPermissionDenied { lastDenial = max(lastDenial ?? e.timestamp, e.timestamp) }
         if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
             contentAnomalyTallies[track, default: 0] += 1
         }
@@ -542,6 +551,9 @@ public struct CaptureDiagnostics: Sendable {
         coverageTallies.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
+        qualityAnomalyTally = 0
+        sawSystemAudioUnrecovered = false
+        lastDenial = nil
         countedKeys.removeAll()
         droppedKeys.removeAll()
     }
@@ -566,20 +578,16 @@ public struct CaptureDiagnostics: Sendable {
     public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
     /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
     /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
-    public var qualityAnomalyCount: Int {
-        events.lazy.filter { CaptureEventKind.qualityCompromising.contains($0.kind) }.count
-    }
+    /// Out-of-ring and once per event: correct after eviction, `clear()` and a re-merge (XI bug 2).
+    public var qualityAnomalyCount: Int { qualityAnomalyTally }
     /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
     /// True when the remote side stopped being captured and did not come back. That includes a
     /// System Audio Recording denial that was never restored: the 2026-09-23 recording reported
-    /// `false` here while holding no remote audio at all (#220).
+    /// `false` here while holding no remote audio at all (#220). Out-of-ring, like the count above.
     public var systemAudioUnrecovered: Bool {
-        if events.contains(where: { $0.kind == .systemAudioUnrecovered }) { return true }
-        guard let denied = events.lastIndex(where: { $0.kind == .systemAudioPermissionDenied }) else {
-            return false
-        }
-        let restored = events.lastIndex(where: { $0.kind == .systemAudioPermissionRestored })
-        return restored.map { $0 < denied } ?? true
+        if sawSystemAudioUnrecovered { return true }
+        guard let denied = lastDenial else { return false }
+        return lastPermissionRestore.map { $0 < denied } ?? true
     }
 
     /// The permission statuses that CONFIRM a denial: TCC answered "not granted". `unconfirmed` (the
@@ -607,9 +615,22 @@ public struct CaptureDiagnostics: Sendable {
         (try? Self.makeEncoder().encode(events)) ?? Data()
     }
 
-    /// Decode events transported across XPC. Returns `[]` on any failure (fail-soft).
+    /// Decode events transported across XPC. Returns `[]` when the payload is unreadable (fail-soft).
+    /// One event this build can't decode (a kind from a newer helper) is skipped and logged; it used
+    /// to fail the whole drain and lose every event of the session (C-M7).
     public static func events(from data: Data) -> [CaptureEvent] {
-        (try? makeDecoder().decode([CaptureEvent].self, from: data)) ?? []
+        guard let decoded = try? makeDecoder().decode([Lossy].self, from: data) else { return [] }
+        let events = decoded.compactMap(\.event)
+        if events.count < decoded.count {
+            Logger.state.error("Skipped \(decoded.count - events.count, privacy: .public) capture event(s) this build cannot read")
+        }
+        return events
+    }
+
+    /// One array element that may not decode as a `CaptureEvent`.
+    private struct Lossy: Decodable {
+        let event: CaptureEvent?
+        init(from decoder: Decoder) throws { event = try? CaptureEvent(from: decoder) }
     }
 
     /// Which side an event is about: its `track`/`source` detail, else the kind's own side.
@@ -657,7 +678,9 @@ public struct CaptureDiagnostics: Sendable {
             qualityAnomalyCount: qualityAnomalyCount,
             systemAudioUnrecovered: systemAudioUnrecovered,
             systemDeliveredSeconds: remote.map { Int($0.deliveredSeconds.rounded()) } ?? tapTrackSeconds("system_delivered_seconds"),
-            systemExactZeroSeconds: remote.map { Int($0.exactZeroSeconds.rounded()) } ?? tapTrackSeconds("system_exact_zero_seconds"),
+            // Per-track coverage when there is some — and then only what it measured (SCK measures
+            // no exact zeros: nil, never 0, XI bug 1); the legacy key otherwise.
+            systemExactZeroSeconds: remote.map { $0.exactZeroSeconds.map { Int($0.rounded()) } } ?? tapTrackSeconds("system_exact_zero_seconds"),
             localCoverage: local,
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },

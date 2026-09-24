@@ -451,3 +451,63 @@ struct CaptureProvenanceTests {
         #expect((dict["local_coverage"] as? [String: Any])?["content_anomaly_count"] as? Int == 0)
     }
 }
+
+// MARK: - R2 council (XI bug 2): the notice's two fields survive eviction
+
+struct CaptureDiagnosticsOutOfRingTests {
+    let base = Date(timeIntervalSinceReferenceDate: 3_000_000)
+
+    private func event(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, at offset: TimeInterval,
+                       origin: CaptureEvent.Origin = .app) -> CaptureEvent {
+        CaptureEvent(timestamp: base.addingTimeInterval(offset), origin: origin, kind: kind, severity: severity)
+    }
+
+    /// `quality_anomaly_count` and `system_audio_unrecovered` were scanned from the evicting ring:
+    /// once their evidence aged out, a compromised recording read "Transcription Complete". They are
+    /// counted out of ring, once per event (a re-merge is not a new anomaly), like the side tallies.
+    @Test func qualityCountAndUnrecoveredSurviveEvictionAndReMerge() {
+        var d = CaptureDiagnostics(maxEvents: 3)
+        let evidence = [
+            event(.rateDrift, .anomaly, at: 1, origin: .helper),
+            event(.systemAudioUnrecovered, .anomaly, at: 2, origin: .helper),
+        ]
+        evidence.forEach { d.record($0) }
+        for i in 0..<10 { d.record(event(.restartInPlace, .warning, at: 10 + Double(i))) }
+        #expect(!d.events.contains { CaptureEventKind.qualityCompromising.contains($0.kind) }, "the evidence has left the ring")
+        #expect(d.qualityAnomalyCount == 2)
+        #expect(d.systemAudioUnrecovered)
+        d.merge(evidence)   // the live log re-presents the evicted events at finalize
+        #expect(d.qualityAnomalyCount == 2, "the same event seen again is not a second anomaly")
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.qualityAnomalyCount == 2 && p.systemAudioUnrecovered)
+    }
+
+    /// An in-session restart (`clear()`) keeps them — they are this session's story; a new session
+    /// (`resetSession()`) zeroes them.
+    @Test func qualityCountAndUnrecoveredFollowTheSessionNotTheRing() {
+        var d = CaptureDiagnostics()
+        d.record(event(.livenessGap, .anomaly, at: 1, origin: .helper))
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 2, origin: .helper))
+        d.clear()
+        #expect(d.qualityAnomalyCount == 2 && d.systemAudioUnrecovered)
+        d.record(event(.systemAudioPermissionRestored, .info, at: 3, origin: .helper))
+        #expect(!d.systemAudioUnrecovered, "a later restore still clears a denial after the ring was cleared")
+        #expect(d.qualityAnomalyCount == 2, "the lost stretch still compromised the recording")
+        d.resetSession()
+        #expect(d.qualityAnomalyCount == 0 && !d.systemAudioUnrecovered)
+    }
+
+    /// C-M7: one event of a kind this build doesn't know (a newer helper) failed the WHOLE drain, so
+    /// every event of the session was lost. Unknown events are skipped; the rest arrive.
+    @Test func anUnknownEventKindDoesNotLoseTheWholeDrain() throws {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStart, .info, at: 0, origin: .helper))
+        d.record(event(.rateDrift, .anomaly, at: 1, origin: .helper))
+        var array = try #require(JSONSerialization.jsonObject(with: d.snapshotData()) as? [[String: Any]])
+        var future = array[0]; future["kind"] = "fromTheFuture"
+        array.insert(future, at: 1)
+        let restored = CaptureDiagnostics.events(from: try JSONSerialization.data(withJSONObject: array))
+        #expect(restored.map(\.kind) == [.captureStart, .rateDrift])
+        #expect(CaptureDiagnostics.events(from: Data("garbage".utf8)).isEmpty)
+    }
+}

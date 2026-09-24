@@ -95,17 +95,25 @@ public enum TranscriptAssembler {
         // field is never mistaken for "not disclosed".
         metadata["disclosure"] = SummaryDisclosure.airgapped.asMetadataDictionary()
 
+        // A non-finite number reaching `JSONSerialization` raises an uncatchable Objective-C exception:
+        // every finalize of the session, and every retry, would crash (C-M17). The segment and its words
+        // are kept; an unknown time is written as null — never an invented number — and an unknown
+        // confidence is left out.
+        let nonFinite = segments.filter { !$0.start.isFinite || !$0.end.isFinite || !($0.confidence?.isFinite ?? true) }.count
+        if nonFinite > 0 {
+            Logger.transcription.error("\(nonFinite, privacy: .public) segment(s) carried a non-finite time or confidence — written as unknown")
+        }
         let segmentDicts: [[String: Any]] = segments.map { seg in
             var dict: [String: Any] = [
-                "start": seg.start,
-                "end": seg.end,
+                "start": seg.start.isFinite ? seg.start : NSNull(),
+                "end": seg.end.isFinite ? seg.end : NSNull(),
                 "speaker": seg.speaker,
                 "text": seg.text,
             ]
             if !seg.source.isEmpty {
                 dict["source"] = seg.source
             }
-            if let confidence = seg.confidence {
+            if let confidence = seg.confidence, confidence.isFinite {
                 dict["confidence"] = confidence
             }
             if let language = seg.language {
