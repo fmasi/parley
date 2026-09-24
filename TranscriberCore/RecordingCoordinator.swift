@@ -149,6 +149,9 @@ public final class RecordingCoordinator {
     /// `recordingMicrophoneChanged`), so any writer — including one outside the coordinator — keeps
     /// the menu's mic label right too.
     private let recordingMicrophone: RecordingMicrophone
+    /// Free bytes on the volume holding a folder (§8.7); nil = unknown. Injected so tests never read the
+    /// machine's real disk.
+    private let freeBytesProvider: (URL) -> Int?
 
     private func setHelperMic(_ deviceId: String?) {
         recordingMicrophone.set(deviceId)
@@ -171,8 +174,10 @@ public final class RecordingCoordinator {
         presentAlarmsUI: @escaping @MainActor ([ActiveAlarm], [AlarmKind]) -> Void = { _, _ in },
         notifyAlarm: @escaping @MainActor (ActiveAlarm) -> Void = { _ in },
         engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))? = nil,
-        recordingMicrophone: RecordingMicrophone = .shared
+        recordingMicrophone: RecordingMicrophone = .shared,
+        freeBytesProvider: @escaping (URL) -> Int? = { DiskSpaceCheck.freeBytes(at: $0) }
     ) {
+        self.freeBytesProvider = freeBytesProvider
         self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
         self.presentAlarmsUI = presentAlarmsUI
         self.notifyAlarm = notifyAlarm
@@ -314,11 +319,20 @@ public final class RecordingCoordinator {
         // BEFORE the warning is set, so a call that loses the race never shows a banner for a
         // recording it isn't the one driving.
         guard appState.isIdle else { return }
+        let config = configManager.config
+        // §8.7: never start what the disk cannot hold — two chunks plus headroom. Read on the folder's
+        // nearest existing ancestor: a recording folder not created yet is still checked, never skipped.
+        // Before the sentinel and the helper, and before any banner: nothing of this recording exists.
+        let free = freeBytesProvider(Self.nearestExistingDirectory(URL(fileURLWithPath: config.recordingDirectory))) ?? .max
+        guard DiskSpaceCheck.canStart(freeBytes: free, chunkMinutes: config.validatedChunkDuration) else {
+            Logger.state.error("Recording not started: \(free / 1_000_000, privacy: .public) MB free")
+            notify("Recording not started", DiskSpaceCheck.message(freeBytes: free, chunkMinutes: config.validatedChunkDuration))
+            return
+        }
         if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
             appState.interruptionWarning = ClamshellMicGuard.warningMessage
         }
 
-        let config = configManager.config
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
 
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
@@ -366,7 +380,7 @@ public final class RecordingCoordinator {
                 config: config
             )
             transcriptionRunner.startChunkRotation()
-            wireRotationHooks()
+            wirePipelineHooks()
 
             appState.phase = .recording(since: Date())
             startStatusPoll()
@@ -1267,13 +1281,18 @@ public final class RecordingCoordinator {
     /// crash before the helper made the day folder), its nearest existing ancestor. An unmounted drive
     /// leaves only `/Volumes`, which is not writable.
     nonisolated static func folderReachable(_ dir: URL) -> Bool {
+        FileManager.default.isWritableFile(atPath: nearestExistingDirectory(dir).path)
+    }
+
+    /// `dir`, or its nearest ancestor that exists (at worst `/`).
+    nonisolated static func nearestExistingDirectory(_ dir: URL) -> URL {
         var candidate = dir.standardizedFileURL
         while !FileManager.default.fileExists(atPath: candidate.path) {
             let parent = candidate.deletingLastPathComponent()
-            guard parent.path != candidate.path else { return false }
+            guard parent.path != candidate.path else { break }
             candidate = parent
         }
-        return FileManager.default.isWritableFile(atPath: candidate.path)
+        return candidate
     }
 
     /// Resume the crashed recording as the SAME session (§8.3): a new capture at a free chunk index, the
@@ -1348,7 +1367,7 @@ public final class RecordingCoordinator {
             return
         }
         transcriptionRunner.startChunkRotation()
-        wireRotationHooks()
+        wirePipelineHooks()
         // Every chunk the crash cut short goes through the LIVE processor: its index lock is per instance
         // (`ChunkedSessionRecovery` builds its own). A duplicate index is a no-op (R2).
         if let processor = transcriptionRunner.chunkProcessor {
@@ -1454,9 +1473,64 @@ public final class RecordingCoordinator {
         }
     }
 
-    /// The live rotator's hooks: every rotation refreshes the sentinel's liveness (§8.3).
-    private func wireRotationHooks() {
-        transcriptionRunner.chunkRotator?.onRotated = { [weak self] in self?.refreshSentinelLiveness() }
+    // MARK: - Pipeline hooks: liveness, disk, rotation and session-write failures (§8.3, §8.7)
+
+    /// The live pipeline's hooks. Every rotation refreshes the sentinel's liveness and checks the disk; a
+    /// rotation failure and a `session.json` write failure become alarms and provenance events.
+    private func wirePipelineHooks() {
+        transcriptionRunner.chunkRotator?.onRotated = { [weak self] in
+            self?.refreshSentinelLiveness()
+            self?.rotationSucceeded()
+        }
+        transcriptionRunner.chunkRotator?.onRotationFailed = { [weak self] error in self?.rotationFailed(error) }
+        transcriptionRunner.chunkProcessor?.onSessionWriteFailure = { [weak self] index in self?.sessionWriteFailed(chunk: index) }
+    }
+
+    /// A rotation worked: rotation is not broken any more, and the disk is checked for the next chunk —
+    /// `diskLow` below one chunk, cleared only above two (hysteresis, `DiskSpaceCheck.rotationVerdict`).
+    private func rotationSucceeded() {
+        guard appState.isRecording else { return }
+        appState.clearAppAlarm(.rotationFailed)
+        guard let dir = transcriptionRunner.chunkRotator?.sessionLocation.outputDir,
+              let free = freeBytesProvider(Self.nearestExistingDirectory(dir)) else { return }
+        let verdict = DiskSpaceCheck.rotationVerdict(freeBytes: free, chunkMinutes: configManager.config.validatedChunkDuration,
+                                                     currentlyLow: appState.activeAlarms[.diskLow] != nil)
+        switch verdict {
+        case .low:
+            captureClient.record(.diskLow, .warning, ["free_mb": "\(free / 1_000_000)"])
+            if appState.raiseAppAlarm(.diskLow, message: "Less than one chunk of free space — Parley keeps recording, but free some space now.") {
+                presentAlarms()
+            }
+        case .ok:
+            appState.clearAppAlarm(.diskLow)
+        }
+    }
+
+    /// A rotation threw. The current chunk keeps recording under its index; the alarm says the file may
+    /// not rotate again. "No capture in progress" is the helper answering that it is not capturing — a
+    /// dead capture, so the crash path restarts it (§8.7).
+    private func rotationFailed(_ error: Error) {
+        guard appState.isRecording else { return }
+        let reason = error.localizedDescription
+        captureClient.record(.rotationFailed, .anomaly, ["error": reason])
+        if appState.raiseAppAlarm(.rotationFailed, message: "A chunk rotation failed — the current chunk keeps recording, but the file may not rotate again.") {
+            presentAlarms()
+        }
+        guard reason.contains("No capture in progress") else { return }
+        Logger.state.error("A rotation found the helper not capturing — crash recovery")
+        Task {
+            guard self.appState.isRecording else { return }
+            await self.handleXPCCrash()
+        }
+    }
+
+    /// R2's hook: `session.json` could not be written — after a chunk, or (nil) a session-level change such
+    /// as a capture gap. The audio is intact, but an interruption now may not recover the last chunk.
+    private func sessionWriteFailed(chunk index: Int?) {
+        captureClient.record(.sessionWriteFailed, .anomaly, ["chunk": index.map { "\($0)" } ?? "session"])
+        if appState.raiseAppAlarm(.sessionWriteFailed, message: "Parley could not save its progress file — if it is interrupted now, the last chunk may not be recovered.") {
+            presentAlarms()
+        }
     }
 
     /// A crashed recording that is not resumed: transcribe what reached disk, present it like a normal

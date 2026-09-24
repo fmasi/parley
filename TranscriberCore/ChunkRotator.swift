@@ -28,6 +28,9 @@ public final class ChunkRotator {
     /// After every successful rotation, once the finalized chunk was handed over: the coordinator
     /// refreshes the sentinel's liveness there (§8.3).
     public var onRotated: (@MainActor () -> Void)?
+    /// A rotation threw: the current chunk keeps recording under its index (§8.7). The coordinator
+    /// raises `rotationFailed`, and a helper that is no longer capturing takes the crash path.
+    public var onRotationFailed: (@MainActor (Error) -> Void)?
 
     /// - Parameter startIndex: the index of the chunk being recorded now. A resumed session starts
     ///   past its settled chunks; restarting at 0 made the last chunk collide with the seeded
@@ -112,6 +115,11 @@ public final class ChunkRotator {
         Task { await performRotation() }
     }
 
+    /// An immediate rotation, off the timer's schedule (wake, tests).
+    public func rotateNow() {
+        rotate()
+    }
+
     /// Test seam: one rotation, awaited.
     func rotateForTesting() async {
         await performRotation()
@@ -142,6 +150,7 @@ public final class ChunkRotator {
             self.onRotated?()
         } catch {
             Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
+            onRotationFailed?(error)
         }
     }
 

@@ -17,6 +17,11 @@ private final class FakeChunkRotationClient: ChunkRotationClient {
 /// A mutable cell a test's closures can write to.
 private final class Box<T> { var value: T; init(_ v: T) { value = v } }
 
+private final class ThrowingRotationClient: ChunkRotationClient {
+    struct Boom: Error {}
+    func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) { throw Boom() }
+}
+
 @MainActor
 struct ChunkRotatorTests {
 
@@ -136,5 +141,20 @@ struct ChunkRotatorTests {
         for _ in 0..<50 { await Task.yield() }
         rotator.stop()
         #expect(fired.value == 1 && rotator.currentChunkInfo.index == 1)
+    }
+
+    // MARK: - Rotation failures (L8, §8.7)
+
+    @Test func aThrowingRotateInvokesOnRotationFailedAndKeepsTheIndex() async throws {
+        let failures = Box(0)
+        let rotated = Box(0)
+        let rotator = ChunkRotator(captureClient: ThrowingRotationClient(), outputDirectory: "/tmp/out", sessionBaseName: "meeting",
+                                   chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0), onChunkFinalized: { _ in })
+        rotator.onRotationFailed = { _ in failures.value += 1 }
+        rotator.onRotated = { rotated.value += 1 }
+        rotator.rotateNow()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(failures.value == 1 && rotator.currentChunkInfo.index == 0)
+        #expect(rotated.value == 0, "a failed rotation is not a rotation")
     }
 }

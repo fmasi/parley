@@ -139,15 +139,24 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var captureReattachedCalls = 0
     func captureReattached() { captureReattachedCalls += 1 }
 
+    var rotateError: Error?
+    var rotateCalls = 0
     func rotateChunk(outputDirectory: String, newBaseName: String) async throws
         -> (systemPath: String, micPath: String) {
-        (outputDirectory + "/" + newBaseName + ".wav",
-         outputDirectory + "/" + newBaseName + "_mic.wav")
+        rotateCalls += 1
+        if let rotateError { throw rotateError }
+        return (outputDirectory + "/" + newBaseName + ".wav",
+                outputDirectory + "/" + newBaseName + "_mic.wav")
     }
 }
 
 private struct FakeCaptureError: Error, LocalizedError {
     var errorDescription: String? { "fake capture failure" }
+}
+
+/// The helper's reply to a rotate when it is not capturing: the capture is dead (§8.7).
+private struct NoCaptureError: Error, LocalizedError {
+    var errorDescription: String? { "No capture in progress" }
 }
 
 @MainActor
@@ -164,6 +173,9 @@ private struct Harness {
     let repairRequests: Box<Int> = Box(0)
     /// What the repair path answers: true = its window presented (L round 4, item 4).
     let repairPresents: Box<Bool> = Box(true)
+    /// The free space every disk check reads (L8): plenty unless a test says otherwise, so no test
+    /// depends on the machine's real disk.
+    let freeBytes: Box<Int?> = Box(Int.max)
     let recordingMic: RecordingMicrophone
 
     final class Box<T> { var value: T; init(_ value: T) { self.value = value } }
@@ -179,6 +191,7 @@ private struct Harness {
         let presented = presented
         let repairRequests = repairRequests
         let repairPresents = repairPresents
+        let freeBytes = freeBytes
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -190,7 +203,8 @@ private struct Harness {
             presentTranscript: { url, _ in presented.value.append(url) },
             onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
             engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
-            recordingMicrophone: recordingMic
+            recordingMicrophone: recordingMic,
+            freeBytesProvider: { _ in freeBytes.value }
         )
     }
 
@@ -2599,5 +2613,112 @@ private struct Harness {
         var waited = 0
         while h.appState.activeAlarms[.recordingStopped] == nil, waited < 400 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
         #expect(h.appState.activeAlarms[.recordingStopped] != nil && h.appState.activeAlarms[.recordingFolderUnavailable] == nil)
+    }
+}
+
+// MARK: - Disk (L8, §8.7)
+
+@MainActor
+@Suite struct RecordingCoordinatorDiskTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+    }
+
+    @Test func startIsRefusedWhenTheDiskIsFull() async throws {
+        let h = try Harness()
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { h.notified.value.append(($0, $1)) }, notifyCritical: { _, _ in },
+            presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic, freeBytesProvider: { _ in 1_000_000 })
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.isEmpty && h.appState.isIdle)
+        #expect(h.notified.value.first?.title == "Recording not started")
+        #expect(h.notified.value.first?.body.contains("MB free") == true)
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && !coordinator.isStartInFlight)
+    }
+
+    /// A recording folder not created yet (a fresh install, a deleted folder) is still checked: the free
+    /// space is read on its nearest existing ancestor, never skipped as "unknown".
+    @Test func theStartCheckReadsTheNearestExistingFolder() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec/not-yet").path }
+        let seen = Harness.Box<URL?>(nil)
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { h.notified.value.append(($0, $1)) }, notifyCritical: { _, _ in },
+            presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic,
+            freeBytesProvider: { url in seen.value = url; return 1_000_000 })
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(seen.value.map { FileManager.default.fileExists(atPath: $0.path) } == true)
+        #expect(h.client.startCalls.isEmpty)
+    }
+
+    @Test func aRotationFailureRaisesTheAlarmAndADeadCaptureBecomesACrash() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }   // never the real ~/Documents/Recordings
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try FileManager.default.createDirectory(at: try #require(h.client.startCalls.first).outputDirectory, withIntermediateDirectories: true)
+        h.client.rotateError = FakeCaptureError()
+        h.runner.chunkRotator?.rotateNow()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.appState.activeAlarms[.rotationFailed] != nil)
+        #expect(h.client.recordedEvents.contains { $0.kind == .rotationFailed })
+        #expect(h.client.startCalls.count == 1, "an ordinary rotate failure is not a crash")
+        h.client.rotateError = NoCaptureError()
+        h.runner.chunkRotator?.rotateNow()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.startCalls.count == 2, "\"No capture in progress\" means the capture is dead: the crash path restarts it")
+    }
+
+    /// A rotation that works again proves rotation works: the rotation alarm clears.
+    @Test func aSuccessfulRotationClearsTheRotationAlarm() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.client.rotateError = FakeCaptureError()
+        await h.runner.chunkRotator?.rotateForTesting()
+        #expect(h.appState.activeAlarms[.rotationFailed] != nil)
+        h.client.rotateError = nil
+        await h.runner.chunkRotator?.rotateForTesting()
+        #expect(h.appState.activeAlarms[.rotationFailed] == nil)
+    }
+
+    /// §8.7: below one chunk at a rotation → `diskLow` (recorded); it clears only above two chunks
+    /// (hysteresis), never flapping at the one-chunk line.
+    @Test func aLowDiskAtRotationRaisesDiskLowWithHysteresis() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let chunk = DiskSpaceCheck.bytesPerChunk(chunkMinutes: h.config.config.validatedChunkDuration)
+        h.freeBytes.value = chunk - 1
+        await h.runner.chunkRotator?.rotateForTesting()
+        #expect(h.appState.activeAlarms[.diskLow] != nil)
+        #expect(h.client.recordedEvents.contains { $0.kind == .diskLow && $0.severity == .warning && $0.detail["free_mb"] != nil })
+        h.freeBytes.value = chunk + 1
+        await h.runner.chunkRotator?.rotateForTesting()
+        #expect(h.appState.activeAlarms[.diskLow] != nil, "still low: under two chunks")
+        h.freeBytes.value = 2 * chunk
+        await h.runner.chunkRotator?.rotateForTesting()
+        #expect(h.appState.activeAlarms[.diskLow] == nil)
+    }
+
+    /// R2's hook: a session.json write that fails (here a capture gap's) is a sticky alarm and a
+    /// provenance event — nil chunk = a session-level write.
+    @Test func aSessionWriteFailureRaisesTheAlarmAndIsRecorded() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: outDir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: outDir.path) }
+        await h.runner.recordCaptureGap(CaptureGap(start: Date().addingTimeInterval(-5), end: Date(), reason: "sleep"))
+        #expect(h.appState.activeAlarms[.sessionWriteFailed] != nil)
+        #expect(h.client.recordedEvents.contains { $0.kind == .sessionWriteFailed && $0.detail["chunk"] == "session" })
     }
 }
