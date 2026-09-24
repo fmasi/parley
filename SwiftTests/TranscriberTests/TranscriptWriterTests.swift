@@ -207,11 +207,12 @@ struct TranscriptWriterTests {
             ["end": 4.0, "speaker": "Bob", "text": "no start"],
             ["start": 5.0, "end": "later", "speaker": "Bob", "text": "text end"],
         ]
-        // Round 3 item 8: the file itself says what it left out, not only the log.
+        // Round 3 item 8: the TXT itself says what it left out, not only the log. The SRT stays pure
+        // cues (round 3b: strict parsers reject a plain line after the last cue); the JSON has them.
         let txt = TranscriptWriter.formatTXT(segments: segments)
         #expect(txt == "[00:00:01] Alice: timed\n\nNote: 3 segments without timestamps are in the JSON transcript.\n")
         let srt = TranscriptWriter.formatSRT(segments: segments)
-        #expect(srt == "1\n00:00:01,000 --> 00:00:02,000\nAlice: timed\n\nNote: 3 segments without timestamps are in the JSON transcript.\n")
+        #expect(srt == "1\n00:00:01,000 --> 00:00:02,000\nAlice: timed\n\n")
         let one = TranscriptWriter.formatTXT(segments: [segments[0], segments[1]])
         #expect(one.hasSuffix("Note: 1 segment without a timestamp is in the JSON transcript.\n"))
         #expect(TranscriptWriter.formatTXT(segments: [segments[0]]) == "[00:00:01] Alice: timed\n", "no note when nothing was left out")
