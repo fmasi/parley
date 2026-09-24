@@ -1912,8 +1912,8 @@ public final class RecordingCoordinator {
 
     /// The post-transcription success sequence, previously duplicated verbatim in both the chunked
     /// and fallback branches of `stopRecording`: publish the transcript paths, return to idle,
-    /// notify, then hand off to the rename dialog + auto-summary.
-    private func presentCompletedTranscription(_ result: TranscriptionResult) async {
+    /// notify, then hand off to the rename dialog + auto-summary. Internal for tests.
+    func presentCompletedTranscription(_ result: TranscriptionResult) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         // Say so when the capture layer flagged something. This used to be an unconditional
@@ -1922,9 +1922,14 @@ public final class RecordingCoordinator {
         // Off the main actor: this is a synchronous file read of a transcript that can reach several
         // hundred KB for a long meeting, on a path that has just finished writing it. `RecordingCoordinator`
         // is @MainActor, so doing it inline would block the UI at exactly the wrong moment.
+        // The notice names every problem the transcript itself records (§7.3, council C-C2): capture
+        // anomalies, chunks with processing problems, and an empty transcript. A plain "Transcription
+        // Complete" only when it is truly clean.
         let jsonPath = result.jsonPath
-        let anomalies = await Task.detached(priority: .utility) {
-            CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath)
+        let (anomalies, problemChunks, segments) = await Task.detached(priority: .utility) {
+            (CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath),
+             CaptureQualityNotice.problemChunkCount(inTranscriptAt: jsonPath),
+             CaptureQualityNotice.segmentCount(inTranscriptAt: jsonPath))
         }.value
         // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
         // async read (setting it first let a new recording start mid-read), but deferring opens the
@@ -1945,9 +1950,10 @@ public final class RecordingCoordinator {
         // The notification is passive, so it always fires: the transcript IS finished, and staying
         // silent about it would be the bigger failure.
         notify(
-            CaptureQualityNotice.completionTitle(anomalyCount: anomalies),
+            CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: problemChunks, segmentCount: segments),
             CaptureQualityNotice.completionBody(
-                fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies)
+                fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies,
+                problemChunkCount: problemChunks, segmentCount: segments)
         )
         guard sessionStillOurs else {
             // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is

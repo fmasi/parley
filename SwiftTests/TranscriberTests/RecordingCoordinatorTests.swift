@@ -3035,3 +3035,42 @@ private struct Harness {
         #expect(h.client.stopCalls == 1 && !h.appState.isRecording)
     }
 }
+
+// MARK: - The completion notice (L12, §7.3, council C-C2)
+
+@MainActor
+@Suite struct RecordingCoordinatorCompletionNoticeTests {
+    /// A plain "Transcription Complete" only when the transcript is truly clean: processing problems and
+    /// an empty transcript are named.
+    @Test func completionNoticeNamesProcessingProblemsAndEmptyTranscripts() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("done.json")
+        // `problemChunkCount` counts distinct chunks with a content-affecting issue in `processing_issues`.
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["processing_issues": [["chunk": 0, "code": "asr_failed"], ["chunk": 1, "code": "asr_failed"]],
+                         "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+        #expect(h.notified.value.last?.title == "Transcription Complete — 2 chunks had processing problems")
+        #expect(h.notified.value.last?.body == "done.json — 2 chunks had processing problems")
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [] as [Any]]).write(to: url)
+        h.appState.phase = .transcribing(progress: "")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+        #expect(h.notified.value.last?.title == "Transcription Complete — no speech was transcribed")
+    }
+
+    @Test func aCleanTranscriptSaysTranscriptionComplete() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("clean.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+        #expect(h.notified.value.last?.title == "Transcription Complete")
+        #expect(h.notified.value.last?.body == "clean.json")
+    }
+}
