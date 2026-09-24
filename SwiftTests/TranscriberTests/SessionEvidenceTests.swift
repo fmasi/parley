@@ -104,7 +104,8 @@ import Testing
     }
 
     /// A helper that survived the app's crash seals its session on disconnect: that `captureStop`, drained
-    /// by the relaunched app, supersedes the same helper session's pre-crash snapshot.
+    /// by the relaunched app, supersedes the same helper session's pre-crash snapshot. In production order
+    /// (L11 review 68): a relaunch that salvages drains BEFORE anything binds the evidence, then finalizes.
     @Test func aDrainedCaptureStopSupersedesThePreCrashSnapshotOfItsHelperSession() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         do {
@@ -113,8 +114,7 @@ import Testing
             a.noteCoverage(statusPull(remote: 20, local: 20, helper: "1000-0"))
         }
         let b = SessionEvidence()
-        b.beginCapture(sessionId: "s", directory: d)
-        b.mergeHelperEvents([captureStop(remote: 25, local: 25, helper: "1000-0", at: 50)])   // sealed on disconnect
+        b.mergeHelperEvents([captureStop(remote: 25, local: 25, helper: "1000-0", at: 50)])   // the drain: sealed on disconnect
         #expect(provenance(b.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 25)
     }
 
@@ -149,6 +149,117 @@ import Testing
         let merged = b.finalize(sessionId: "s", directory: d)
         #expect(merged.events.contains { $0.kind == .xpcInterruption })
         #expect(provenance(merged).remoteCoverage?.deliveredSeconds == 20)
+    }
+
+    /// L11 review 61: the anomaly-gated `.diag.jsonl` is written — atomically — BEFORE the live log goes.
+    @Test func theDiagnosticsFileIsWrittenBeforeTheLiveLogGoes() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        _ = evidence.finalize(sessionId: "s", directory: d)
+        let written = try String(contentsOf: d.appendingPathComponent("s.diag.jsonl"), encoding: .utf8)
+        #expect(written.contains("xpcInterruption"))
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path))
+    }
+
+    /// … and when it cannot be written, the live log is KEPT and the failure is on record.
+    @Test func aFailedDiagnosticsWriteKeepsTheLiveLogAndSaysSo() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        try FileManager.default.createDirectory(at: d.appendingPathComponent("s.diag.jsonl"), withIntermediateDirectories: true)   // unwritable
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        let merged = evidence.finalize(sessionId: "s", directory: d)
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "the live log is kept")
+        #expect(merged.events.contains { $0.kind == .sessionWriteFailed && $0.detail["file"] == "diag.jsonl" })
+    }
+
+    /// L11 review 62 (pinned; L follow-up 43 made the resume adopt first): an app crash leaves a confirmed
+    /// denial undrained in the helper. The resume binds the session, drains it, and its own start resets
+    /// nothing: the record carries the denial.
+    @Test func aResumeKeepsTheCrashedAppsUndrainedHelperEvents() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {
+            let a = SessionEvidence()
+            a.beginCapture(sessionId: "s", directory: d)
+        }   // the app crashes; the helper still holds its events
+        let b = SessionEvidence()
+        b.beginCapture(sessionId: "s", directory: d)   // adopt
+        b.mergeHelperEvents([   // the drain
+            CaptureEvent(timestamp: Date(timeIntervalSince1970: 3), origin: .helper, kind: .systemAudioPermissionDenied, severity: .anomaly,
+                         detail: ["status": "denied"]),
+            CaptureEvent(timestamp: Date(timeIntervalSince1970: 4), origin: .helper, kind: .neverDelivered, severity: .anomaly, detail: ["track": "system"]),
+        ])
+        b.beginCapture(sessionId: "s", directory: d)   // the resume's start
+        let merged = b.finalize(sessionId: "s", directory: d)
+        #expect(provenance(merged).systemPermissionDeniedConfirmed)
+        #expect(merged.events.contains { $0.kind == .neverDelivered })
+    }
+
+    /// L11 review 66: a finished session is never inherited. Ids are `HHmmss-<name>` with no date: a recurring
+    /// meeting started at the same second another day has the same id — in another day folder.
+    @Test func aFinishedSessionIsNeverInheritedByOneWithTheSameName() throws {
+        let day1 = try dir(), day2 = try dir()
+        defer { try? FileManager.default.removeItem(at: day1); try? FileManager.default.removeItem(at: day2) }
+        let retry = CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .app, kind: .retry, severity: .warning, detail: ["attempt": "1"])
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "090000-standup", directory: day1)
+        evidence.record(retry)
+        _ = evidence.finalize(sessionId: "090000-standup", directory: day1)
+        #expect(evidence.sessionId == nil, "finalize ends the binding")
+        evidence.beginCapture(sessionId: "090000-standup", directory: day2)
+        #expect(provenance(evidence.finalize(sessionId: "090000-standup", directory: day2)).retries == 0)
+
+        // Unfinished (a crash), then the same id in another folder: still another session.
+        evidence.beginCapture(sessionId: "090000-standup", directory: day1)
+        evidence.record(retry)
+        evidence.beginCapture(sessionId: "090000-standup", directory: day2)
+        #expect(provenance(evidence.finalize(sessionId: "090000-standup", directory: day2)).retries == 0)
+    }
+
+    /// L11 review 67: a pull that raced a stop (the helper no longer capturing: full expected time, nothing
+    /// delivered) is not coverage — the helper session keeps its last capturing snapshot.
+    @Test func aPullFromAHelperThatIsNotCapturingIsIgnored() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.noteCoverage(statusPull(remote: 20, local: 20, helper: "1000-0"))
+        var r = TrackAccounting(); r.expectedSeconds = 30; r.deliveredSeconds = 0
+        let bogus = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 2, isCapturing: false, alarms: [], tracks: [],
+                                          coverage: r.asDetail(prefix: "remote").merging(["helper_session": "1000-0"]) { a, _ in a })
+        evidence.noteCoverage(bogus)
+        let p = provenance(evidence.finalize(sessionId: "s", directory: d))
+        #expect(p.remoteCoverage?.deliveredSeconds == 20 && p.remoteCoverage?.expectedSeconds == 20)
+    }
+
+    /// L11 review 67: which helper sessions stopped is kept OUT of the bounded ring: a `captureStop` evicted
+    /// from the ring (and, here, never reaching a live log that cannot be written) still supersedes its
+    /// helper session's snapshot — never counted twice.
+    @Test func aStopEvictedFromTheRingStillSupersedesItsSnapshot() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        try FileManager.default.createDirectory(at: d.appendingPathComponent("s.diag.live.jsonl"), withIntermediateDirectories: true)   // unwritable
+        let evidence = SessionEvidence(maxEvents: 3)
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.noteCoverage(statusPull(remote: 20, local: 20, helper: "1000-0"))
+        evidence.mergeHelperEvents([captureStop(remote: 30, local: 30, helper: "1000-0", at: 10)])
+        for i in 0..<5 {
+            evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 20 + Double(i)), origin: .app, kind: .restartInPlace, severity: .warning))
+        }
+        #expect(!evidence.diagnostics.events.contains { $0.kind == .captureStop }, "evicted")
+        #expect(provenance(evidence.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 30)
+    }
+
+    /// L11 review 68: a start that never became a recording leaves no orphan `.diag.live.jsonl` behind.
+    @Test func aDiscardedSessionLeavesNoLiveLog() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        let epoch = evidence.epoch
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcTimeout, severity: .anomaly))
+        evidence.discard(sessionId: "s", directory: d)
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path))
+        #expect(evidence.sessionId == nil && evidence.epoch != epoch)
     }
 
     /// L9 review 52: a helper call is tagged with the session it was made for. Its timeout, landing after

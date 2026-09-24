@@ -186,7 +186,12 @@ final class AudioCaptureClient {
     /// The resume's own `start` then keeps it all (the same session id resets nothing).
     func adoptSession(sessionId: String, directory: URL) async {
         evidence.beginCapture(sessionId: sessionId, directory: directory)
-        await drainHelperDiagnostics()
+        if !(await drainHelperDiagnostics()) { recordDrainTimeout() }
+    }
+
+    /// A start that never became a recording (L11 review 68): its evidence is dropped, its live log deleted.
+    func discardSessionEvidence(sessionId: String, directory: URL) {
+        evidence.discard(sessionId: sessionId, directory: directory)
     }
 
     /// Reverse-channel receipt of a system-stream-unrecoverable warning (#86). Records the anomaly into
@@ -228,28 +233,39 @@ final class AudioCaptureClient {
     }
 
     /// Pull and clear the helper's diagnostic ring over XPC, merging its events into the app ring.
-    /// Bounded at 3 s: a helper that does not answer leaves its events behind, never the caller stuck.
-    func drainHelperDiagnostics() async {
-        guard let conn = connection else { return }
-        let data: Data? = try? await bounded("drainDiagnostics", seconds: 3) { done in
+    /// Bounded at 3 s: a helper that does not answer leaves its events behind, never the caller stuck. False
+    /// on that timeout: the caller records it into the session it concerns (L11 review 68) — a start's drain,
+    /// say, is the NEW session's first call, while its events still belong to the previous one.
+    private func drainHelperDiagnostics() async -> Bool {
+        guard let conn = connection else { return true }
+        let reply: Result<Data?, Error> = await boundedReply("drainDiagnostics", seconds: 3) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
             proxy.drainDiagnostics { done(.success($0)) }
+        }
+        guard case .success(let data) = reply else {
+            Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
+            return false
         }
         if let data {
             evidence.mergeHelperEvents(CaptureDiagnostics.events(from: data))
         }
+        return true
     }
 
-    /// Drain the helper, merge the live log and the helper sessions' latest coverage (L11), build the
-    /// transcript provenance stamp, and — only when the session was anomalous — flush the full event ring
-    /// to `<sessionId>.diag.jsonl` beside the recording (#95). A clean session writes no log, only the
-    /// ~200-byte provenance stamp the caller embeds.
+    private func recordDrainTimeout() {
+        record(.xpcTimeout, .anomaly, ["call": "drainDiagnostics"])
+    }
+
+    /// Drain the helper, merge the live log and the helper sessions' latest coverage (L11), and build the
+    /// transcript provenance stamp. The evidence writes `<sessionId>.diag.jsonl` beside the recording only
+    /// when the session was anomalous (#95), before its live log goes (L11 review 61). A clean session writes
+    /// no log, only the ~200-byte provenance stamp the caller embeds.
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,
         recordingDirectory: URL
     ) async -> CaptureProvenance {
-        await drainHelperDiagnostics()
+        if !(await drainHelperDiagnostics()) { recordDrainTimeout() }
         let diagnostics = evidence.finalize(sessionId: sessionId, directory: recordingDirectory)
 
         func formatString(_ kind: CaptureEventKind) -> String? {
@@ -264,16 +280,6 @@ final class AudioCaptureClient {
             $0.kind == .micSwitch || $0.kind == .captureStart
                 || ($0.kind == .restartInPlace && $0.detail["source"] == "mic")
         }?.detail["mic"]
-
-        if diagnostics.isAnomalous {
-            let url = recordingDirectory.appendingPathComponent("\(sessionId).diag.jsonl")
-            do {
-                try diagnostics.jsonlData().write(to: url, options: .atomic)
-                Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(diagnostics.events.count) events)")
-            } catch {
-                Logger.files.error("Failed to flush diagnostics: \(error, privacy: .public)")
-            }
-        }
 
         return diagnostics.makeProvenance(
             engine: engine,
@@ -295,10 +301,12 @@ final class AudioCaptureClient {
     ) async throws {
         // The previous helper's events first (bounded, 3 s): its start clears its own ring, and an
         // in-session restart must not lose them (L11).
-        await drainHelperDiagnostics()
-        // A NEW session id resets every tally, so no recording inherits an earlier one's facts (council
-        // A-C1); the SAME id — an in-session restart — keeps the session's evidence.
+        let drained = await drainHelperDiagnostics()
+        // A NEW session resets every tally, so no recording inherits an earlier one's facts (council
+        // A-C1); the SAME session — an in-session restart, a resume — keeps its evidence.
         evidence.beginCapture(sessionId: sessionId, directory: outputDirectory)
+        // A drain that timed out is this start's news: recorded into the session starting (L11 review 68).
+        if !drained { recordDrainTimeout() }
         // Armed BEFORE the XPC start (C1): a crash during configure/start is this capture's crash.
         interruptionPolicy.captureStarted()
         let conn = try getConnection()

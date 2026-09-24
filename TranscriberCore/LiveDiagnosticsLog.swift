@@ -7,10 +7,23 @@ import os
 /// Beside it, `<session>.diag.coverage.json` keeps the LATEST coverage of each helper session (council
 /// A-I4 / C-I1): coverage otherwise lives only in `captureStop`, which a crashed helper never writes. One
 /// small file, rewritten atomically on every status pull, whatever the length of the call.
+///
+/// Every file operation runs on one serial background queue (L11 review 65): the app appends and pulls
+/// coverage on the main actor, and a slow disk must never stall it. Writes are queued; reads and deletes wait
+/// for the writes queued before them. The queue is shared by every log, so a second instance for the same
+/// session (a salvage, a relaunch's resume) sees what the first one queued.
 public final class LiveDiagnosticsLog: @unchecked Sendable {
     public let url: URL
     public let coverageURL: URL
+    /// Guards `coverageCache` and `writeObserver`.
     private let lock = NSLock()
+    private static let io = DispatchQueue(label: "eu.fmasi.parley.live-diagnostics", qos: .utility)
+    /// Runs on the write queue before each write. Internal for tests.
+    var writeObserver: (@Sendable () -> Void)? {
+        get { lock.withLock { observer } }
+        set { lock.withLock { observer = newValue } }
+    }
+    private var observer: (@Sendable () -> Void)?
 
     /// One helper session's coverage (`remote_*` / `local_*` detail keys) as last pulled.
     public struct CoverageSnapshot: Codable, Equatable, Sendable {
@@ -64,19 +77,27 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         guard event.severity != .info || Self.coverageKinds.contains(event.kind) else { return }
         guard var line = try? Self.encoder.encode(event) else { return }
         line.append(0x0A)
-        lock.lock(); defer { lock.unlock() }
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
-        } else if (try? line.write(to: url, options: .atomic)) == nil {
-            Logger.files.error("LiveDiagnosticsLog: could not write \(self.url.lastPathComponent, privacy: .sensitive)")
+        let url = url, observer = writeObserver
+        Self.io.async {
+            observer?()
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: line)
+            } else if (try? line.write(to: url, options: .atomic)) == nil {
+                Logger.files.error("LiveDiagnosticsLog: could not write \(url.lastPathComponent, privacy: .sensitive)")
+            }
         }
     }
 
+    /// Returns once every write queued before it is on disk. Internal for tests.
+    func flush() {
+        Self.io.sync {}
+    }
+
     public func events() -> [CaptureEvent] {
-        lock.lock(); defer { lock.unlock() }
-        guard let data = try? Data(contentsOf: url) else { return [] }
+        let url = url
+        guard let data = Self.io.sync(execute: { try? Data(contentsOf: url) }) else { return [] }
         return data.split(separator: 0x0A).compactMap { try? Self.decoder.decode(CaptureEvent.self, from: $0) }
     }
 
@@ -94,31 +115,40 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
 
     /// Keep `facts` as `helperSession`'s latest coverage.
     public func writeCoverage(helperSession: String, facts: [String: String], at date: Date) {
-        lock.lock(); defer { lock.unlock() }
-        var all = coverageCache ?? readCoverage()
-        all[helperSession] = CoverageSnapshot(at: date, facts: facts)
-        coverageCache = all
-        guard let data = try? Self.encoder.encode(all), (try? data.write(to: coverageURL, options: .atomic)) != nil else {
-            Logger.files.error("LiveDiagnosticsLog: could not write \(self.coverageURL.lastPathComponent, privacy: .sensitive)")
-            return
+        let all: [String: CoverageSnapshot] = lock.withLock {
+            var all = coverageCache ?? readCoverage()
+            all[helperSession] = CoverageSnapshot(at: date, facts: facts)
+            coverageCache = all
+            return all
+        }
+        guard let data = try? Self.encoder.encode(all) else { return }
+        let coverageURL = coverageURL, observer = writeObserver
+        Self.io.async {
+            observer?()
+            if (try? data.write(to: coverageURL, options: .atomic)) == nil {
+                Logger.files.error("LiveDiagnosticsLog: could not write \(coverageURL.lastPathComponent, privacy: .sensitive)")
+            }
         }
     }
 
     /// The latest coverage of every helper session of this recording session, by helper session id.
     public func coverageSnapshots() -> [String: CoverageSnapshot] {
-        lock.lock(); defer { lock.unlock() }
-        return coverageCache ?? readCoverage()
+        lock.withLock { coverageCache ?? readCoverage() }
     }
 
+    /// From disk, after the writes queued before it (an earlier instance's included).
     private func readCoverage() -> [String: CoverageSnapshot] {
-        guard let data = try? Data(contentsOf: coverageURL) else { return [:] }
+        let coverageURL = coverageURL
+        guard let data = Self.io.sync(execute: { try? Data(contentsOf: coverageURL) }) else { return [:] }
         return (try? Self.decoder.decode([String: CoverageSnapshot].self, from: data)) ?? [:]
     }
 
     public func delete() {
-        lock.lock(); defer { lock.unlock() }
-        try? FileManager.default.removeItem(at: url)
-        try? FileManager.default.removeItem(at: coverageURL)
-        coverageCache = nil
+        lock.withLock { coverageCache = nil }
+        let url = url, coverageURL = coverageURL
+        Self.io.sync {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: coverageURL)
+        }
     }
 }

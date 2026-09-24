@@ -96,6 +96,8 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     /// from now on, and the helper's events — a `captureStop` it sealed when the crashed app went, say — are
     /// drained into it BEFORE anything could reset them (L follow-up 43).
     func adoptSession(sessionId: String, directory: URL) async
+    /// A start that never became a recording (L11 review 68): its evidence is dropped and its live log deleted.
+    func discardSessionEvidence(sessionId: String, directory: URL)
     /// Forward an `NSWorkspace` sleep / wake ("sleep" | "wake") to the helper (§8.10).
     func systemPowerEvent(_ kind: String) async
     /// Record an app-origin event into the diagnostic ring.

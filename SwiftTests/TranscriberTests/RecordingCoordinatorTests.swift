@@ -109,6 +109,9 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     /// The order of the calls that decide which session the evidence belongs to (L follow-up 43).
     var sessionCalls: [String] = []
     func adoptSession(sessionId: String, directory: URL) async { sessionCalls.append("adopt:\(sessionId)") }
+    /// Sessions whose evidence was dropped: a start that never became a recording (L11 review 68).
+    var discardedSessions: [String] = []
+    func discardSessionEvidence(sessionId: String, directory: URL) { discardedSessions.append(sessionId) }
 
     var powerEvents: [String] = []
     /// Awaited before the event lands: lets a test slow a delivery down (a "sleep" still in flight).
@@ -3967,6 +3970,44 @@ private struct Harness {
         h.client.isCapturingResult = true
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.sessionCalls == ["adopt:sess"])
+    }
+
+    /// L11 review 63 (pinned; L follow-up 43 made the re-attach adopt): a later helper crash restarts the SAME
+    /// session — its recovery, retry and drained events are never reset away.
+    @Test func aReattachedRecordingsCrashRestartKeepsItsSession() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        _ = try freshSentinel(h)
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        h.client.isCapturingResult = false
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.sessionCalls == ["adopt:sess", "start:sess"])
+        #expect(h.appState.isRecording)
+    }
+
+    /// L11 review 68: a start that never became a recording leaves no evidence behind (no orphan live log)…
+    @Test func aFailedStartDiscardsItsSessionEvidence() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.client.startError = FakeCaptureError()
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        #expect(h.client.discardedSessions == [call.sessionId])
+    }
+
+    /// … but one whose helper would not let go keeps it: the next launch salvages that session, evidence included.
+    @Test func aFailedStartWhoseHelperHoldsOnKeepsItsEvidence() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.startDeadline = .milliseconds(150)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.discardedSessions.isEmpty && RecordingSentinel.read(directory: h.tmp) != nil)
     }
 
     /// 37: the newest orphan's last write IS when capture stopped. `lastAliveAt` is only the fallback: an

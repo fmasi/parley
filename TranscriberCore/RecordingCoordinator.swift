@@ -502,6 +502,8 @@ public final class RecordingCoordinator {
             if helperLetGo {
                 clearHelperMic()
                 RecordingSentinel.delete(directory: sentinelDirectory)
+                // No recording exists: no evidence of one either — never an orphan live log (L11 review 68).
+                captureClient.discardSessionEvidence(sessionId: naming.chunkBaseName, directory: outputDir)
             } else {
                 // The helper may still be capturing, and hold the mic: keep the mic marked and the sentinel,
                 // so the next launch sees the capturing helper and re-attaches or salvages it (L follow-up 27).

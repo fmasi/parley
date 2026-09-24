@@ -472,6 +472,9 @@ public struct CaptureDiagnostics: Sendable {
     /// disk/ring dedup. Out-of-ring: survive `clear()`, zeroed only by `resetSession()`.
     private var countedKeys: Set<String> = []
     private var droppedKeys: Set<String> = []
+    /// The helper sessions that wrote a `captureStop` (out-of-ring, same lifetime as `coverageTallies`): a
+    /// stop evicted from the ring still supersedes its helper session's pulled snapshot (L11 review 67).
+    public private(set) var stoppedHelperSessions: Set<String> = []
 
     public mutating func record(_ event: CaptureEvent) {
         store(event)
@@ -502,6 +505,7 @@ public struct CaptureDiagnostics: Sendable {
             lastPermissionRestore = max(lastPermissionRestore ?? e.timestamp, e.timestamp)
         }
         if e.kind == .captureStop {
+            if let helper = e.detail["helper_session"] { stoppedHelperSessions.insert(helper) }
             for prefix in ["local", "remote"] {
                 if let parsed = TrackAccounting(detail: e.detail, prefix: prefix) {
                     coverageTallies[prefix, default: TrackAccounting()] += parsed
@@ -540,6 +544,7 @@ public struct CaptureDiagnostics: Sendable {
         launchRecoveries = 0
         contentAnomalyTallies.removeAll()
         coverageTallies.removeAll()
+        stoppedHelperSessions.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
         countedKeys.removeAll()

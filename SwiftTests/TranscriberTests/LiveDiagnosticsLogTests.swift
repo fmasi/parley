@@ -18,6 +18,7 @@ import Testing
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
         log.append(retry(at: 1))
+        log.flush()
         #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path))
         var ring = CaptureDiagnostics()
         ring.record(retry(at: 1))
@@ -44,6 +45,7 @@ import Testing
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
         log.append(CaptureEvent(timestamp: Date(), origin: .app, kind: .captureStart, severity: .info))
+        log.flush()
         #expect(!FileManager.default.fileExists(atPath: log.url.path))
     }
 
@@ -67,6 +69,7 @@ import Testing
         log.writeCoverage(helperSession: "1000-0", facts: ["remote_expected_seconds": "10.0"], at: Date(timeIntervalSince1970: 10))
         log.writeCoverage(helperSession: "1000-0", facts: ["remote_expected_seconds": "20.0"], at: Date(timeIntervalSince1970: 15))
         log.writeCoverage(helperSession: "2000-0", facts: ["remote_expected_seconds": "5.0"], at: Date(timeIntervalSince1970: 20))
+        log.flush()
         let snapshots = LiveDiagnosticsLog(directory: d, sessionId: "s").coverageSnapshots()   // a later process reads it
         #expect(snapshots["1000-0"]?.facts["remote_expected_seconds"] == "20.0")
         #expect(snapshots["1000-0"]?.at == Date(timeIntervalSince1970: 15))
@@ -79,6 +82,7 @@ import Testing
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
         log.append(retry(at: 1))
+        log.flush()
         let handle = try FileHandle(forWritingTo: log.url)
         try handle.seekToEnd(); try handle.write(contentsOf: Data("{not json\n".utf8)); try handle.close()
         log.append(retry(at: 3))
@@ -114,5 +118,21 @@ import Testing
         #expect(merged.retryCount == 1, "the retry evicted from the ring must not be recounted from disk")
         let p = merged.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(p.eventsDropped == 3, "re-evicting the same events at merge must not inflate the drop count")
+    }
+
+    /// L11 review 65: the live log's file writes run on its own serial queue, never on the caller's thread —
+    /// the app appends and pulls coverage on the main actor every 5 s. Reads still see every write before them.
+    @MainActor
+    @Test func writesRunOffTheCallersThreadAndReadsSeeThem() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        final class Seen: @unchecked Sendable { var onMain: [Bool] = [] }
+        let seen = Seen()
+        log.writeObserver = { seen.onMain.append(Thread.isMainThread) }
+        log.append(retry(at: 1))
+        log.writeCoverage(helperSession: "1000-0", facts: ["remote_expected_seconds": "10.0"], at: Date(timeIntervalSince1970: 1))
+        #expect(log.events().map(\.timestamp.timeIntervalSince1970) == [1], "a read waits for the writes before it")
+        #expect(LiveDiagnosticsLog(directory: d, sessionId: "s").coverageSnapshots()["1000-0"] != nil)
+        #expect(seen.onMain == [false, false])
     }
 }
