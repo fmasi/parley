@@ -268,4 +268,43 @@ struct AudioConcatenatorTests {
             // Expected
         }
     }
+
+    private func tempDir(_ tag: String) throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("concat-\(tag)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    @Test func mixedWavAndM4aSourcesAreRefusedAndNothingIsDeleted() async throws {
+        let dir = try tempDir("mixed"); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("c-0.m4a"), b = dir.appendingPathComponent("c-1.wav")
+        try await Self.createTestM4a(at: a); try RecoveryFixtures.writeFakeWav(at: b, seconds: 1)
+        await #expect(throws: AudioConcatenatorError.self) {
+            _ = try await AudioConcatenator.concatenate(chunks: [ChunkAudio(url: a, startTime: nil), ChunkAudio(url: b, startTime: nil)], outputDirectory: dir, outputName: "c", deleteSources: true)
+        }
+        #expect(FileManager.default.fileExists(atPath: a.path) && FileManager.default.fileExists(atPath: b.path))
+    }
+
+    @Test func preserveKeepsTheSources() async throws {
+        let dir = try tempDir("preserve"); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("c-0.m4a"), b = dir.appendingPathComponent("c-1.m4a")
+        try await Self.createTestM4a(at: a); try await Self.createTestM4a(at: b)
+        _ = try await AudioConcatenator.concatenate(chunks: [ChunkAudio(url: a, startTime: nil), ChunkAudio(url: b, startTime: nil)], outputDirectory: dir, outputName: "c", deleteSources: false)
+        #expect(FileManager.default.fileExists(atPath: a.path) && FileManager.default.fileExists(atPath: b.path))
+    }
+
+    /// P9: a crash restart leaves a gap between chunk 0's end and chunk 1's start; the merged audio
+    /// must keep the transcript's wall-clock timeline.
+    @Test func gapsBetweenChunksAreFilledWithSilence() async throws {
+        let dir = try tempDir("gaps"); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("c-0.m4a"), b = dir.appendingPathComponent("c-1.m4a")
+        try await Self.createTestM4a(at: a, durationSeconds: 1); try await Self.createTestM4a(at: b, durationSeconds: 1)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let r = try await AudioConcatenator.concatenate(
+            chunks: [ChunkAudio(url: a, startTime: t0), ChunkAudio(url: b, startTime: t0.addingTimeInterval(3))],
+            outputDirectory: dir, outputName: "c", deleteSources: true)
+        let d = try await AVURLAsset(url: r.outputPath).load(.duration).seconds
+        #expect(abs(d - 4) < 0.3)
+        #expect(abs(r.gapsInsertedSeconds - 2) < 0.1)
+    }
 }

@@ -16,7 +16,8 @@ public enum TranscriptAssembler {
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
-        processingIssues: [[String: Any]] = []
+        processingIssues: [[String: Any]] = [],
+        mergedAudio: [String: Any]? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -68,6 +69,10 @@ public enum TranscriptAssembler {
             }
             metadata["processing_issue_count"] = contentAffecting.count
             metadata["processing_problem_chunks"] = Set(contentAffecting.compactMap { $0["chunk"] as? Int }).count
+        }
+        // How the chunks were merged into one file (§7.2): `{passthrough, gaps_inserted_seconds}`.
+        if let mergedAudio {
+            metadata["merged_audio"] = mergedAudio
         }
         // Disclosure (#138): the transcript testifies whether its contents left the machine.
         // A transcript is airgapped at assembly time — summaries are generated later (and only

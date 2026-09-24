@@ -412,23 +412,33 @@ public final class TranscriptionRunner {
             outputDirectory.appendingPathComponent($0.audioPath)
         }
 
-        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk)
+        // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
+        // Each chunk carries its start time so a gap (crash restart, sleep) is kept as silence and the
+        // merged audio stays on the transcript's wall-clock timeline (P9).
         let audioPaths: [URL]
+        var mergedAudio: [String: Any]?
         if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
             do {
                 let concatResult = try await AudioConcatenator.concatenate(
-                    sources: chunkAudioPaths,
+                    chunks: sortedChunks.map {
+                        ChunkAudio(url: outputDirectory.appendingPathComponent($0.audioPath), startTime: $0.startTime)
+                    },
                     outputDirectory: outputDirectory,
-                    outputName: sessionState.sessionId
+                    outputName: sessionState.sessionId,
+                    deleteSources: !(config.preserveSourceWAV ?? false)
                 )
                 audioPaths = [concatResult.outputPath]
+                mergedAudio = [
+                    "passthrough": concatResult.usedPassthrough,
+                    "gaps_inserted_seconds": concatResult.gapsInsertedSeconds,
+                ]
                 Logger.files.info(
                     "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .sensitive) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
-                // so on throw the chunk files are still intact.
-                Logger.files.error("Audio concatenation failed (\(type(of: error), privacy: .public)), keeping separate files: \(error, privacy: .public)")
+                // so on throw the chunk files are still intact. The error can name files: private.
+                Logger.files.error("Audio concatenation failed (\(type(of: error), privacy: .public)), keeping separate files: \(error, privacy: .private)")
                 audioPaths = chunkAudioPaths
             }
         } else {
@@ -461,7 +471,8 @@ public final class TranscriptionRunner {
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
             captureGaps: sessionState.gaps,
-            processingIssues: processingIssues
+            processingIssues: processingIssues,
+            mergedAudio: mergedAudio
         )
 
         let baseName = sessionState.sessionId

@@ -81,6 +81,18 @@ public enum AudioArchiver {
             }
             return result
         }
+        // The mirror (P4): a mic that delivered zero frames for a whole chunk leaves a bare header at
+        // its nominal rate (16 kHz), which is the absence of a stream, not a stream at another rate.
+        // Letting it reach the rate guard refused the chunk, it fell back to its WAV, and the
+        // concatenator later re-encoded the mono system WAV into BOTH channels and deleted it.
+        if micFile.length == 0, sysFile.length > 0 {
+            Logger.files.info("AudioArchiver: mic track is empty — archiving '\(baseName, privacy: .sensitive)' as system-only")
+            let result = try await archiveSystemOnly(systemAudio: systemAudio, outputDirectory: outputDirectory,
+                                                     bitrateKbps: bitrateKbps, preserveSourceWAV: preserveSourceWAV)
+            // Same rule as the branch above: the empty header goes only after the archive succeeded.
+            if !preserveSourceWAV { try? FileManager.default.removeItem(at: micAudio) }
+            return result
+        }
         guard micFile.length > 0 || sysFile.length > 0 else {
             throw AudioArchiverError.cannotReadAudio("both tracks are empty")
         }

@@ -338,4 +338,37 @@ struct AudioArchiverTests {
         #expect(out[1] == badSys)                          // bad segment kept as WAV
         #expect(FileManager.default.fileExists(atPath: badSys.path))
     }
+
+    private func channelRMS(_ url: URL, from: Double, to: Double) throws -> [Float] {
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        let start = AVAudioFramePosition(from * format.sampleRate), count = AVAudioFrameCount((to - from) * format.sampleRate)
+        file.framePosition = start
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count)!
+        try file.read(into: buffer, frameCount: count)
+        return (0..<Int(format.channelCount)).map { ch in
+            let p = buffer.floatChannelData![ch]
+            var sum: Float = 0
+            for i in 0..<Int(buffer.frameLength) { sum += p[i] * p[i] }
+            return (sum / Float(max(1, buffer.frameLength))).squareRoot()
+        }
+    }
+
+    /// P4 mirror of #183: a mic that delivered zero frames for a whole chunk left a 16 kHz header;
+    /// the rate guard refused, the chunk fell back to its WAV, and the concatenator re-encoded the
+    /// mono system WAV into BOTH channels (probe: RMS L=0.259 R=0.259) and deleted it.
+    @Test func micEmptyHeaderWithSystemAudioArchivesAsSystemOnly() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("archiver-micempty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("m-0.wav"), mic = dir.appendingPathComponent("m-0_mic.wav")
+        try Self.createTestWav(at: sys, frequency: 440, durationSeconds: 1, sampleRate: 48_000)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 0, sampleRate: 16_000)   // header only, 16 kHz — the real #183 shape
+        let result = try await AudioArchiver.archive(systemAudio: sys, micAudio: mic, outputDirectory: dir, bitrateKbps: 64)
+        #expect(result.archivePath.lastPathComponent == "m-0.m4a")
+        let rms = try channelRMS(result.archivePath, from: 0.2, to: 0.8)
+        #expect(rms[1] > 0.05 && rms[0] < 0.01, "system audio on the RIGHT channel, left silent")
+        #expect(!FileManager.default.fileExists(atPath: mic.path))
+        #expect(!FileManager.default.fileExists(atPath: sys.path))
+    }
 }
