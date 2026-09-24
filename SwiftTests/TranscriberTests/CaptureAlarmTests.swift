@@ -42,14 +42,14 @@ import Testing
     /// once the "Later" snooze has passed.
     @Test func presentationNamesTheDueAlarmAndLeavesPermissionRowsToTheRepairWindow() {
         let disk = alarm(.diskLow, at: t0), denied = alarm(.remotePermissionDenied, at: t0 + 1)
-        // Fix round 2, item 4: a NEWLY raised permission kind is the repair window's (it opens
-        // asynchronously, so `repairWindowOpen` is still false here): one window, one notification.
+        // L round 4, item 4: the coordinator hands a NEW permission kind to the repair window first and
+        // passes it here only when that window declined — then it presents at once like any other kind.
         let fresh = AlarmRealarmPolicy.presentation(due: [disk, denied], newlyRaised: [.remotePermissionDenied],
                                                     repairWindowOpen: false, lastDismissedAt: nil, now: t0)
-        #expect(fresh == .init(notify: disk, openWindow: true))
+        #expect(fresh == .init(notify: denied, openWindow: true))
         let onlyDenied = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
                                                          repairWindowOpen: false, lastDismissedAt: nil, now: t0)
-        #expect(onlyDenied == .init(notify: nil, openWindow: false))
+        #expect(onlyDenied == .init(notify: denied, openWindow: true), "never silent when the repair window declined")
         let reNotify = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [],
                                                        repairWindowOpen: false, lastDismissedAt: nil, now: t0)
         #expect(reNotify.notify == denied, "a later re-notify with the repair window closed is the alarm window's")
@@ -67,6 +67,17 @@ import Testing
 
         #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: true) == [disk])
         #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: false) == [disk, denied])
+    }
+
+    /// L round 4, item 7: a past event (acknowledgeable) is presented ONCE — never re-notified mid-call.
+    @Test func pastEventsNeverRenotify() {
+        var resumed = alarm(.recordingResumedWithGap, at: t0)
+        #expect(AlarmRealarmPolicy.shouldRenotify(resumed, now: t0))
+        resumed.lastNotifiedAt = t0
+        #expect(!AlarmRealarmPolicy.shouldRenotify(resumed, now: t0 + 86_400))
+        var disk = alarm(.diskLow, at: t0)
+        disk.lastNotifiedAt = t0
+        #expect(AlarmRealarmPolicy.shouldRenotify(disk, now: t0 + 120), "a live condition still re-notifies")
     }
 
     /// Fix round 2, item 5: the idle cadence — 2 min, then 10, then hourly; a past event once.
@@ -400,6 +411,8 @@ import Testing
         #expect(AlarmKind.crashProtectionOff.outlivesRecording)
         #expect(AlarmKind.diskLow.outlivesRecording == false)
         #expect(AlarmKind.unknownHelperAlarm.isHelperOwned == false)
+        // CROSS-TASK (L8): an unreachable recording folder is a machine condition — its idle backoff must hold.
+        #expect(AlarmKind.recordingFolderUnavailable.outlivesRecording)
         #expect(AlarmKind.unknownHelperAlarm.track == nil && AlarmKind.unknownHelperAlarm.outlivesRecording == false)
     }
 

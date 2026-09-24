@@ -53,12 +53,15 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Check what a recording needs and, if anything is missing, open the repair window. Never blocks
-    /// or stops a recording.
-    func verify(trigger: Trigger) async {
-        guard let permissionManager else { return }
+    /// or stops a recording. Returns whether the repair window is on screen afterwards: when it is not
+    /// (nothing missing app-side, or snoozed), a permission ALARM must be presented by the alarm window
+    /// instead — never silent (L round 4).
+    @discardableResult
+    func verify(trigger: Trigger) async -> Bool {
+        guard let permissionManager else { return false }
         if verifying {
             if pendingTrigger != .captureEvidence { pendingTrigger = trigger }
-            return
+            return isPanelOpen
         }
         verifying = true
         await performVerify(trigger: trigger, permissionManager: permissionManager)
@@ -67,6 +70,7 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
             pendingTrigger = nil
             await verify(trigger: next)
         }
+        return isPanelOpen
     }
 
     private func performVerify(trigger: Trigger, permissionManager: PermissionManager) async {

@@ -154,6 +154,8 @@ private struct Harness {
     let criticals: Box<[(title: String, body: String)]> = Box([])
     let presented: Box<[URL]> = Box([])
     let repairRequests: Box<Int> = Box(0)
+    /// What the repair path answers: true = its window presented (L round 4, item 4).
+    let repairPresents: Box<Bool> = Box(true)
     let recordingMic: RecordingMicrophone
 
     final class Box<T> { var value: T; init(_ value: T) { self.value = value } }
@@ -168,6 +170,7 @@ private struct Harness {
         let criticals = criticals
         let presented = presented
         let repairRequests = repairRequests
+        let repairPresents = repairPresents
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -177,7 +180,7 @@ private struct Harness {
             notify: { notified.value.append(($0, $1)) },
             notifyCritical: { criticals.value.append(($0, $1)) },
             presentTranscript: { url, _ in presented.value.append(url) },
-            onSystemAudioPermissionDenied: { repairRequests.value += 1 },
+            onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
             engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
             recordingMicrophone: recordingMic
         )
@@ -894,6 +897,116 @@ private struct Harness {
         coordinator.presentAlarms(now: t0 + 4319); #expect(shown.value == 3)
         coordinator.presentAlarms(now: t0 + 4320); #expect(shown.value == 4, "then hourly")
         coordinator.presentAlarms(now: t0 + 7920); #expect(shown.value == 5)
+    }
+
+    // MARK: - L round 4
+
+    private func coordinatorShowing(_ h: Harness, _ state: AppState, repairPresents: Bool,
+                                    into shown: Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>) -> RecordingCoordinator {
+        RecordingCoordinator(
+            appState: state, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            onSystemAudioPermissionDenied: { repairPresents },
+            presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) }, recordingMicrophone: h.recordingMic)
+    }
+
+    /// Item 4 (IMPORTANT): the repair window declines (nothing missing app-side — `remoteCantConfirm`,
+    /// or #220's coreaudiod refusal although granted — or its snooze): the alarm window presents at
+    /// once. Never silent for 2 min mid-call.
+    @Test func aPermissionAlarmTheRepairWindowDeclinesIsPresentedAtOnce() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = coordinatorShowing(h, state, repairPresents: false, into: shown)
+        state.phase = .recording(since: Date())
+        state.raiseAppAlarm(.diskLow, message: "low")   // (any other active alarm)
+        coordinator.presentAlarms()
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remoteCantConfirm]))
+        coordinator.presentAlarms()
+        for _ in 0..<50 where shown.value.count < 2 { await Task.yield() }
+        #expect(shown.value.count == 2 && shown.value[1].due == [.remoteCantConfirm] && shown.value[1].new == [.remoteCantConfirm])
+        #expect(state.activeAlarms[.remoteCantConfirm]?.lastNotifiedAt != nil, "a presentation that happened")
+    }
+
+    /// Item 4: the repair window did present — no second window or notification for the same alarm.
+    @Test func aPermissionAlarmTheRepairWindowShowsIsNotShownTwice() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = coordinatorShowing(h, state, repairPresents: true, into: shown)
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
+        coordinator.presentAlarms()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(shown.value.isEmpty)
+        #expect(state.activeAlarms[.remotePermissionDenied]?.lastNotifiedAt != nil, "the repair window's presentation counts")
+    }
+
+    /// Item 6: at recording start only live conditions are presented again — a past event is not.
+    @Test func pastEventsAreNotRepresentedAtRecordingStart() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = coordinatorShowing(h, state, repairPresents: true, into: shown)
+        state.raiseAppAlarm(.recordingStopped, message: "stopped")
+        state.raiseAppAlarm(.crashProtectionOff, message: "off")
+        coordinator.presentAlarms()
+        state.phase = .recording(since: Date())
+        coordinator.presentCarriedAlarmsAtRecordingStart()
+        #expect(shown.value.last?.due == [.crashProtectionOff])
+    }
+
+    /// Item 7: a past event is presented once, never re-notified every 2 min mid-call.
+    @Test func anAcknowledgeablePastEventNeverRenotifiesMidCall() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = coordinatorShowing(h, state, repairPresents: true, into: shown)
+        state.phase = .recording(since: Date())
+        let t0 = Date()
+        state.raiseAppAlarm(.recordingResumedWithGap, message: "gap", now: t0)
+        coordinator.presentAlarms(now: t0)
+        coordinator.presentAlarms(now: t0 + 121)
+        coordinator.presentAlarms(now: t0 + 3600)
+        #expect(shown.value.count == 1)
+    }
+
+    /// Item 8: the escalation is dispatched outside the poll task; if the recording ended meanwhile,
+    /// nothing is restarted.
+    @Test func aNotCapturingEscalationIsDroppedIfTheRecordingEnded() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.client.statusSnapshot = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 1, isCapturing: false, alarms: [], tracks: [])
+        await h.coordinator.pollHelperStatus()
+        h.client.statusSnapshot = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 2, isCapturing: false, alarms: [], tracks: [])
+        await h.coordinator.pollHelperStatus()
+        h.appState.phase = .idle   // stopped before the dispatched recovery ran
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.startCalls.isEmpty)
+    }
+
+    /// Item 9: the idle backoff CONTINUES after a recording — no extra 2-min step, and mid-call
+    /// presentations don't count toward it.
+    @Test func theIdleBackoffContinuesAfterARecording() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = coordinatorShowing(h, state, repairPresents: true, into: shown)
+        let t0 = Date()
+        state.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
+        coordinator.presentAlarms(now: t0)          // 1st
+        coordinator.presentAlarms(now: t0 + 120)    // 2nd: next gap is 10 min
+        state.phase = .recording(since: Date())
+        coordinator.presentCarriedAlarmsAtRecordingStart(now: t0 + 200)   // mid-call: not a backoff step
+        state.phase = .idle
+        let before = shown.value.count
+        coordinator.presentAlarms(now: t0 + 200 + 599)
+        #expect(shown.value.count == before, "still on the 10-min step, not back to 2 min")
+        coordinator.presentAlarms(now: t0 + 800)
+        #expect(shown.value.count == before + 1)
+        coordinator.presentAlarms(now: t0 + 800 + 3599)
+        #expect(shown.value.count == before + 1, "then hourly")
     }
 
     /// L round 3, item 2: an alarm raised while idle is presented AT ONCE (not at the first 2-min tick),

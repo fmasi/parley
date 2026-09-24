@@ -160,7 +160,7 @@ struct TranscriberApp: App {
                 }
             },
             onSystemAudioPermissionDenied: {
-                Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
+                await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence)
             },
             presentAlarmsUI: { due, new in
                 CaptureAlarmWindowController.shared.present(due, newlyRaised: new, appState: state)
@@ -287,18 +287,16 @@ struct TranscriberApp: App {
         !appState.isIdle || PostRecordingWork.inFlight > 0
     }
 
-    /// Any Parley window the user may be working in — Settings, a panel: a hand-over would close it
-    /// mid-edit (L2/L4 fix round 2, item 6). Only real ones count: on screen, a non-zero frame, at an
-    /// ordinary or floating level (L round 3), so an always-present helper or status-bar window can
-    /// never defer the hand-over forever.
+    /// Any Parley window the user may be working in — Settings, the menu-bar dropdown, a panel: a
+    /// hand-over would close it mid-edit (L2/L4 fix round 2, item 6). Only real ones count: on screen, a
+    /// non-zero frame, at most at the pop-up menu level (L rounds 3-4); the status item's own button
+    /// window never does, so no always-present window can defer the hand-over forever.
     @MainActor
     static func anyParleyWindowVisible() -> Bool {
         NSApp.windows.contains { window in
-            let level: LaunchAgentHealth.WindowLevelClass =
-                window.level == .normal ? .normal : window.level == .floating ? .floating : .other
-            return LaunchAgentHealth.windowDefersHandOver(
+            LaunchAgentHealth.windowDefersHandOver(
                 isVisible: window.isVisible, width: window.frame.width, height: window.frame.height,
-                level: level, className: window.className)
+                level: window.level.rawValue, maxLevel: NSWindow.Level.popUpMenu.rawValue, className: window.className)
         }
     }
 
@@ -542,9 +540,9 @@ private struct SetupRequiredPanel: View {
     }
 }
 
-/// Fires `onIdle` once, on the first transition to "not busy": a window closing or resigning key,
-/// post-recording work finishing, or the recording phase changing (L3 fix round 1). Observers only —
-/// no timer.
+/// Fires `onIdle` once, on the first transition to "not busy": a window closing, resigning key or
+/// changing occlusion (the menu-bar panel only hides — L round 4), post-recording work finishing, or
+/// the recording phase changing (L3 fix round 1). Observers only — no timer.
 @MainActor
 private final class IdleWatch {
     private let isBusy: @MainActor () -> Bool
@@ -559,7 +557,8 @@ private final class IdleWatch {
 
     func start(observing appState: AppState) {
         let center = NotificationCenter.default
-        for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification, PostRecordingWork.finished] {
+        for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didChangeOcclusionStateNotification, PostRecordingWork.finished] {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // willClose fires while the window is still up: look again on the next turn.
                 Task { @MainActor in self?.evaluate() }

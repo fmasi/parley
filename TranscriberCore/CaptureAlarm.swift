@@ -86,7 +86,7 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
 
     /// Survives the end of a recording: a machine-level condition, or a past event the user has
     /// not acknowledged yet ("the recording STOPPED at 16:02" must outlive the recording it is about).
-    public var outlivesRecording: Bool { self == .crashProtectionOff || isAcknowledgeable }
+    public var outlivesRecording: Bool { self == .crashProtectionOff || self == .recordingFolderUnavailable || isAcknowledgeable }
 
     /// The permission kinds keep their own repair window (§6.3): while it is open, the alarm window
     /// leaves their rows — and their notifications — to it.
@@ -348,8 +348,11 @@ private enum WireAlarm: Decodable {
 public enum AlarmRealarmPolicy {
     public static let notifyInterval: TimeInterval = 120
 
+    /// A past event (acknowledgeable) is presented ONCE: its sticky row stays until acknowledged, but it
+    /// never re-notifies (L round 4). A live condition re-notifies every `notifyInterval`.
     public static func shouldRenotify(_ alarm: ActiveAlarm, now: Date) -> Bool {
         guard let last = alarm.lastNotifiedAt else { return true }
+        if alarm.kind.isAcknowledgeable { return false }
         return now.timeIntervalSince(last) >= notifyInterval
     }
 
@@ -385,14 +388,13 @@ public enum AlarmRealarmPolicy {
         public init(notify: ActiveAlarm?, openWindow: Bool) { self.notify = notify; self.openWindow = openWindow }
     }
 
-    /// `due`: the alarms whose notify floor allows a presentation now. Rows the repair window shows
-    /// are left to it — including the notification, which it posts itself: every permission row while
-    /// it is open, and a NEWLY raised one always (the coordinator is opening it for that kind right now,
-    /// asynchronously — L2/L4 fix round 2, item 4).
+    /// `due`: the alarms whose notify floor allows a presentation now. Rows the open repair window
+    /// shows are left to it — including the notification, which it posts itself. A NEW permission kind
+    /// reaches here only when the repair window declined to open (the coordinator hands it over first,
+    /// L round 4): it is then presented like any other.
     public static func presentation(due: [ActiveAlarm], newlyRaised: [AlarmKind], repairWindowOpen: Bool,
                                     lastDismissedAt: Date?, now: Date) -> Presentation {
         let rows = windowRows(due, repairWindowOpen: repairWindowOpen)
-            .filter { !($0.kind.hasOwnRepairWindow && newlyRaised.contains($0.kind)) }
         guard !rows.isEmpty else { return Presentation(notify: nil, openWindow: false) }
         let newRow = rows.first { newlyRaised.contains($0.kind) }
         return Presentation(notify: newRow ?? rows[0],

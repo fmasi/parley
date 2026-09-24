@@ -28,7 +28,8 @@ public final class RecordingCoordinator {
     private let presentTranscript: @MainActor (URL, Config) -> Void
     /// The helper found the tap running without its System Audio Recording permission (#220): the
     /// app opens its repair window. Injected because Core can't present AppKit windows.
-    private let onSystemAudioPermissionDenied: @MainActor () -> Void
+    /// Returns whether the repair window actually presented: when it did not, the alarm window must.
+    private let onSystemAudioPermissionDenied: @MainActor () async -> Bool
     /// Present the alarm UI (floating window + notification): (the DUE alarms — the ones the per-kind
     /// notify floor lets present now, oldest first; the kinds that are new since the last presentation).
     /// Called only when something is due.
@@ -52,8 +53,11 @@ public final class RecordingCoordinator {
     private var idleRealarm: Task<Void, Never>?
     /// Which idle presenter task is current: a replaced (cancelled) one must not clear its successor.
     private var idleRealarmGeneration = 0
-    /// Presentations of each kind since the app last went idle: drives the idle backoff.
+    /// Presentations of each kind while idle: drives the idle backoff. Continues across a recording
+    /// (mid-call presentations don't count); a NEW raise starts its own (L round 4, item 9).
     private var idleNotifications: [AlarmKind: Int] = [:]
+    /// New permission kinds handed to the repair window, awaiting whether it presented (L round 4).
+    private var pendingRepairKinds: Set<AlarmKind> = []
     /// Internal for tests.
     var idleRealarmActive: Bool { idleRealarm != nil }
 
@@ -126,7 +130,7 @@ public final class RecordingCoordinator {
         notify: @escaping @MainActor (String, String) -> Void,
         notifyCritical: @escaping @MainActor (String, String) -> Void,
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
-        onSystemAudioPermissionDenied: @escaping @MainActor () -> Void = {},
+        onSystemAudioPermissionDenied: @escaping @MainActor () async -> Bool = { false },
         presentAlarmsUI: @escaping @MainActor ([ActiveAlarm], [AlarmKind]) -> Void = { _, _ in },
         engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))? = nil,
         recordingMicrophone: RecordingMicrophone = .shared
@@ -315,14 +319,7 @@ public final class RecordingCoordinator {
             lastCrashAt = nil
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
-            // Owner ruling (fix round 2, item 5): an alarm still active from before — crash protection
-            // off, an unacknowledged STOPPED — is presented again, at once, when a recording starts.
-            idleNotifications = [:]
-            let carried = appState.alarms.sorted.map(\.kind)
-            if !carried.isEmpty {
-                presentedKinds.subtract(carried)
-                presentAlarms(force: true)
-            }
+            presentCarriedAlarmsAtRecordingStart()
         } catch {
             clearHelperMic()
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
@@ -703,7 +700,10 @@ public final class RecordingCoordinator {
                 // NOT awaited inside the status-poll task: a Stop deferred during this restart cancels
                 // the poll (`stopStatusPoll`), and the whole stop + finalize would then run cancelled —
                 // AudioConcatenator's timeout sleep throws and the merged archive is skipped (fix round 2).
-                Task { await self.handleXPCCrash() }
+                Task {
+                    guard self.appState.isRecording else { return }   // it ended meanwhile (L round 4)
+                    await self.handleXPCCrash()
+                }
                 return
             }
         } else {
@@ -721,17 +721,22 @@ public final class RecordingCoordinator {
     /// raised with no floor and present at once. The permission kinds open the repair window when
     /// they are new (it has its own snooze).
     /// While not recording the idle backoff applies (2, 10, then 60 min; a past event once — owner
-    /// ruling, fix round 2). `force`: present every active alarm now, whatever its floor.
-    func presentAlarms(now: Date = Date(), force: Bool = false) {
+    /// ruling, fix round 2). `reshow`: kinds to present again now, window included, whatever their
+    /// floor — without restarting their backoff (L round 4).
+    func presentAlarms(now: Date = Date(), reshow: Set<AlarmKind> = []) {
         let active = appState.alarms.sorted
         let newKinds = active.map(\.kind).filter { !presentedKinds.contains($0) }
         presentedKinds = Set(active.map(\.kind))
         idleNotifications = idleNotifications.filter { presentedKinds.contains($0.key) }
         for kind in newKinds { idleNotifications[kind] = nil }   // a new raise starts its own backoff
-        if newKinds.contains(where: \.hasOwnRepairWindow) { onSystemAudioPermissionDenied() }
+        // A NEW permission kind goes to the repair window first; the alarm window steps in only if
+        // that window does not present (L round 4, item 4).
+        let toRepair = newKinds.filter(\.hasOwnRepairWindow)
+        if !toRepair.isEmpty { presentThroughRepairWindow(toRepair) }
         let idle = !appState.isRecording
         let due = active.filter { alarm in
-            if force { return true }
+            if pendingRepairKinds.contains(alarm.kind) { return false }
+            if reshow.contains(alarm.kind) { return true }
             guard idle else { return AlarmRealarmPolicy.shouldRenotify(alarm, now: now) }
             // While idle a newly raised kind presents at once, whatever its floor (L round 3); that
             // presentation is the first step of its backoff.
@@ -744,7 +749,35 @@ public final class RecordingCoordinator {
             if idle { idleNotifications[alarm.kind, default: 0] += 1 }
         }
         let dueKinds = Set(due.map(\.kind))
-        presentAlarmsUI(due, newKinds.filter { dueKinds.contains($0) })
+        presentAlarmsUI(due, (newKinds + reshow).filter { dueKinds.contains($0) })
+    }
+
+    /// The repair window names the missing permission and fixes it, so a NEW permission alarm goes
+    /// there first. When it does not present — nothing missing app-side (`remoteCantConfirm`, #220's
+    /// "coreaudiod refuses although granted"), or its snooze — the alarm window presents it at once:
+    /// never silent for 2 minutes mid-call. It counts as notified only once something was shown.
+    private func presentThroughRepairWindow(_ kinds: [AlarmKind]) {
+        pendingRepairKinds.formUnion(kinds)
+        Task { [weak self] in
+            guard let self else { return }
+            let presented = await self.onSystemAudioPermissionDenied()
+            self.pendingRepairKinds.subtract(kinds)
+            let alarms = kinds.compactMap { self.appState.activeAlarms[$0] }
+            guard !alarms.isEmpty else { return }
+            let now = Date()
+            for alarm in alarms { self.appState.markNotified(alarm.kind, now: now) }
+            if !presented { self.presentAlarmsUI(alarms, alarms.map(\.kind)) }
+        }
+    }
+
+    /// Owner ruling (fix round 2, item 5): an alarm still active from before — crash protection off, an
+    /// unacknowledged STOPPED — is presented again, at once, when a recording starts.
+    /// Only live conditions: a past event was presented once and stays a row until acknowledged (L
+    /// round 4, item 6). Their idle backoff continues after the recording (item 9).
+    func presentCarriedAlarmsAtRecordingStart(now: Date = Date()) {
+        let carried = Set(appState.alarms.sorted.map(\.kind).filter { !$0.isAcknowledgeable })
+        guard !carried.isEmpty else { return }
+        presentAlarms(now: now, reshow: carried)
     }
 
     /// (Re)starts or stops the idle presenter from the alarms and the phase, then re-evaluates on their

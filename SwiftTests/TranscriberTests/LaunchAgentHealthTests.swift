@@ -179,20 +179,24 @@ import Testing
         #expect(act(.stalePath(found: "/x"), lock: false) == .alarm(LaunchAgentHealth.noLockMessage))
     }
 
-    /// L round 3, item 1: only a real, on-screen, ordinary window defers the hand-over — never a
-    /// zero-size helper window, one ordered out, or a status-bar/menu-level one.
-    @Test func onlyRealOrdinaryWindowsDeferTheHandOver() {
-        func counts(visible: Bool = true, width: Double = 400, height: Double = 300, level: LaunchAgentHealth.WindowLevelClass = .normal,
+    /// L round 3, item 1 + round 4, item 3: a real, on-screen window at any level up to and including
+    /// the pop-up menu level defers the hand-over — the menu-bar dropdown panel included. Never a
+    /// zero-size helper window, one ordered out, one above that level, or the status item's own button.
+    @Test func realWindowsUpToTheMenuLevelDeferTheHandOver() {
+        let popUpMenu = 101   // NSWindow.Level.popUpMenu.rawValue; the app passes the real one
+        func counts(visible: Bool = true, width: Double = 400, height: Double = 300, level: Int = 0,
                     className: String = "NSPanel") -> Bool {
-            LaunchAgentHealth.windowDefersHandOver(isVisible: visible, width: width, height: height, level: level, className: className)
+            LaunchAgentHealth.windowDefersHandOver(isVisible: visible, width: width, height: height,
+                                                   level: level, maxLevel: popUpMenu, className: className)
         }
         #expect(counts())
-        #expect(counts(level: .floating))
+        #expect(counts(level: 3), "floating")
+        #expect(counts(level: popUpMenu, className: "SwiftUI.MenuBarExtraWindow"), "the menu-bar dropdown panel")
+        #expect(!counts(level: popUpMenu + 1), "above menus: overlays, screen savers")
         #expect(!counts(visible: false))
         #expect(!counts(width: 0))
         #expect(!counts(height: 0))
-        #expect(!counts(level: .other), "status bar / menu levels are not a window the user is editing")
-        #expect(!counts(className: "NSStatusBarWindow"), "fallback: the status item's own window")
+        #expect(!counts(level: 25, className: "NSStatusBarWindow"), "the status item's own button window")
     }
 
     // MARK: - Quit (L3, C2 final wiring 4)

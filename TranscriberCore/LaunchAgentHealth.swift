@@ -110,16 +110,12 @@ public enum LaunchAgentHealth {
 
     public static let windowsBlockingMessage = "Crash protection is waiting for you to close Parley’s windows — until then, if Parley crashes mid-recording it will not relaunch."
 
-    /// A window's level, as far as the hand-over cares: an ordinary or floating window the user may be
-    /// working in, or anything else (status bar, menus, overlays).
-    public enum WindowLevelClass: Sendable { case normal, floating, other }
-
-    /// Whether a window defers the hand-over (L round 3): on screen, a real size, at an ordinary or
-    /// floating level. The status item's own window is excluded by level; its class name is only the
-    /// fallback.
+    /// Whether a window defers the hand-over (L rounds 3-4): on screen, a real size, at any level up to
+    /// and including `maxLevel` (the app passes `NSWindow.Level.popUpMenu`, so the menu-bar dropdown
+    /// panel counts). Only the status item's own button window is excluded, by its class name.
     public static func windowDefersHandOver(isVisible: Bool, width: Double, height: Double,
-                                            level: WindowLevelClass, className: String) -> Bool {
-        guard isVisible, width > 0, height > 0, level != .other else { return false }
+                                            level: Int, maxLevel: Int, className: String) -> Bool {
+        guard isVisible, width > 0, height > 0, level <= maxLevel else { return false }
         return !className.contains("StatusBar")
     }
 
