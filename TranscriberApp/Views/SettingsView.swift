@@ -509,12 +509,15 @@ struct SettingsView: View {
     }
 
     private func save() {
+        // Decided once, up front, from the form state as it stands right now — NOT re-read inside
+        // commitSave(), which can run a moment later (after the async preflight resolves) by which
+        // point the user may have kept typing. Only `config.summary` (in-memory @State, not yet
+        // persisted anywhere) is computed here; the one actual persistent side effect below it
+        // (the Keychain write) is deferred to commitSave(), so a failed preflight leaves the
+        // Keychain — like config.json — untouched (review fix 1, item 2).
+        let apiKeyToPersist: String? = shouldSaveApiKey ? summaryApiKey : nil
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
-            // #48: the key never goes into `config`/config.json — Keychain only.
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
-            }
         } else if summaryEndpointMissing {
             // The user wants summaries but hasn't supplied an endpoint. Persist
             // their typed provider/model/key with enabled:false rather than
@@ -522,9 +525,6 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
-            }
         } else {
             // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
             // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
@@ -532,9 +532,6 @@ struct SettingsView: View {
             // the user actually cleared the field. Leaving a matching key in place means flipping
             // summaries back on later doesn't require re-typing it.
             config.summary = nil
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
-            }
         }
         // §11.2: the chosen engine is preflighted (one synthetic second transcribed) before the
         // config is committed, so a broken engine never gets saved silently — Save stays disabled
@@ -546,7 +543,7 @@ struct SettingsView: View {
                 try await EnginePreflight.run(engine: engine)
                 await MainActor.run {
                     isPreflighting = false
-                    commitSave()
+                    commitSave(apiKeyToPersist: apiKeyToPersist)
                 }
             } catch {
                 await MainActor.run {
@@ -557,9 +554,14 @@ struct SettingsView: View {
         }
     }
 
-    /// The remainder of Save once the chosen engine has been preflighted successfully:
-    /// commits `config` to disk and everything that follows from that.
-    private func commitSave() {
+    /// The remainder of Save once the chosen engine has been preflighted successfully: persists
+    /// the Keychain-only API key (review fix 1, item 2 — the last persistent side effect that used
+    /// to run before the preflight gate), commits `config` to disk, and everything that follows.
+    private func commitSave(apiKeyToPersist: String?) {
+        if let apiKeyToPersist {
+            // #48: the key never goes into `config`/config.json — Keychain only.
+            SummaryAPIKeyStore.save(apiKeyToPersist)
+        }
         config.lastMicrophoneDeviceId = settingsMicId
         let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }

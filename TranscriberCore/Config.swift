@@ -319,6 +319,9 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
+        // Unlike system_audio_source below, a missing key here follows the CURRENT default: on
+        // macOS 26+ the old default (SpeechAnalyzer) produces blank transcripts (#223), so pinning
+        // a legacy config to it would pin a total-loss bug rather than a live setup.
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         systemAudioSource = try c.decodeIfPresent(SystemAudioSource.self, forKey: .systemAudioSource) ?? .screenCaptureKit
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)

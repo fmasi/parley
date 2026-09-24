@@ -227,20 +227,26 @@ struct SetupView: View {
                 Task {
                     let granted = await verifyFolderAccess(recordingDirectory)
                     if !granted {
-                        checkingFolder = false
-                        folderCheckDenied = true
+                        await MainActor.run {
+                            checkingFolder = false
+                            folderCheckDenied = true
+                        }
                         return
                     }
                     do {
                         let (engine, _) = try TranscriptionRunner().prepareEngine(config: configManager.config)
                         try await EnginePreflight.run(engine: engine)
                     } catch {
-                        enginePreflightError = "This engine cannot transcribe on this Mac: \(error)"
-                        checkingFolder = false
+                        await MainActor.run {
+                            enginePreflightError = "This engine cannot transcribe on this Mac: \(error)"
+                            checkingFolder = false
+                        }
                         return
                     }
-                    checkingFolder = false
-                    onReady()
+                    await MainActor.run {
+                        checkingFolder = false
+                        onReady()
+                    }
                 }
             }
             .buttonStyle(.borderedProminent)
