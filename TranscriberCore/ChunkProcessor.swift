@@ -20,17 +20,21 @@ public final class ChunkProcessor {
     private nonisolated let stateStore: StateStore
     private nonisolated let wavHeaderSize = 44
     private nonisolated let taskPriority: TaskPriority
-    private var inFlightTasks: [Task<Void, Never>] = []
-    /// Every chunk index this processor has accepted. An index is claimed once and never released:
-    /// the orphan re-ingested by crash recovery and the same index arriving again from the rotator
-    /// must not produce two chunks (L6/L7, scan B P3.2). A lock, not main-actor state, because
-    /// `processLastChunk` is `nonisolated`.
-    private nonisolated let claimedIndices = OSAllocatedUnfairLock<Set<Int>>(initialState: [])
+    /// The recording file (base name, e.g. `meeting-0`) behind every chunk index this processor
+    /// knows: the seeded session's settled chunks plus every chunk scheduled here. An index is never
+    /// released. The same index from the SAME file again is a true duplicate (the orphan re-ingested
+    /// by crash recovery, or the rotator repeating itself) and is skipped; the same index from a
+    /// DIFFERENT file is a collision, and that audio is processed under a fresh index (L6/L7).
+    private var sourceByIndex: [Int: String]
+    /// The task processing each chunk scheduled here, so a duplicate can await the original and
+    /// `awaitAllProcessed` covers every chunk, the last one included.
+    private var tasksByIndex: [Int: Task<Void, Never>] = [:]
 
-    /// Called on the main actor with the chunk index when session.json could not be written after
-    /// that chunk — the coordinator raises `sessionWriteFailed` (L10). The failure is also recorded
-    /// in `SessionState.issues`, so the next successful write persists it.
-    public var onSessionWriteFailure: ((Int) -> Void)?
+    /// Called on the main actor when session.json could not be written: with the chunk index after
+    /// a chunk, nil after a session-level change (a capture gap). The coordinator raises
+    /// `sessionWriteFailed` (L10). The failure is also recorded in `SessionState.issues`, so the
+    /// next successful write persists it.
+    public var onSessionWriteFailure: ((_ chunkIndex: Int?) -> Void)?
 
     /// Actor-isolated mutable session state — replaces NSLock.
     private actor StateStore {
@@ -45,7 +49,7 @@ public final class ChunkProcessor {
             return sessionState
         }
 
-        func noteSessionWriteFailure(chunkIndex: Int) -> SessionState {
+        func noteSessionWriteFailure(chunkIndex: Int?) -> SessionState {
             sessionState.issues.append(SessionIssue(
                 chunk: chunkIndex, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil)
             ))
@@ -72,6 +76,10 @@ public final class ChunkProcessor {
         self.config = config
         self.outputDirectory = outputDirectory
         self.stateStore = StateStore(sessionState: sessionState)
+        self.sourceByIndex = Dictionary(
+            sessionState.chunks.map { ($0.index, Self.sourceBaseName(ofFile: $0.audioPath)) },
+            uniquingKeysWith: { first, _ in first }
+        )
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.taskPriority = switch config.resolvedQos {
@@ -84,39 +92,66 @@ public final class ChunkProcessor {
 
     /// Process a finalized chunk in the background (non-blocking).
     public func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
-        guard claim(chunk.index) else { return }
-        let priority = taskPriority
-        let task = Task(priority: priority) {
-            await self.processChunkAsync(chunk)
-        }
-        inFlightTasks.append(task)
+        schedule(chunk, priority: taskPriority)
     }
 
-    /// Process a chunk synchronously (inline `await`, no `inFlightTasks` enqueue). Called once at
-    /// end-of-recording for the final chunk, and once per orphan chunk during crash recovery
-    /// (`ChunkedSessionRecovery`, which awaits each orphan in turn rather than firing them
-    /// concurrently). `nonisolated` so the heavy work (ASR, diarization, AAC encoding) runs off the
-    /// main actor even when awaited from `@MainActor`.
+    /// Process a chunk and return when it is done. Called once at end-of-recording for the final
+    /// chunk, and once per orphan chunk during crash recovery (`ChunkedSessionRecovery`, which
+    /// awaits each orphan in turn rather than firing them concurrently). The heavy work (ASR,
+    /// diarization, AAC encoding) runs off the main actor. A duplicate of a chunk still being
+    /// processed waits for the original instead of returning early.
     public nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
-        guard claim(chunk.index) else { return }
-        await processChunkAsync(chunk)
+        let priority = Task.currentPriority
+        let task = await schedule(chunk, priority: priority)
+        await task?.value
     }
 
-    /// Claim a chunk index for processing; false (logged) when it was already claimed.
-    private nonisolated func claim(_ index: Int) -> Bool {
-        let claimed = claimedIndices.withLock { $0.insert(index).inserted }
-        if !claimed {
-            Logger.transcription.info("Chunk \(index, privacy: .public) already processed or in flight — skipping the duplicate")
-        }
-        return claimed
-    }
-
-    /// Wait for all background chunk processing to complete before merging.
+    /// Wait for all chunk processing to complete before merging.
     public func awaitAllProcessed() async {
-        for task in inFlightTasks {
+        for task in Array(tasksByIndex.values) {
             await task.value
         }
-        inFlightTasks.removeAll()
+    }
+
+    /// Start processing `chunk`, or return the task already processing it. nil for a duplicate of a
+    /// chunk that was settled before this processor existed (seeded) — nothing to wait for.
+    @discardableResult
+    private func schedule(_ chunk: ChunkRotator.FinalizedChunk, priority: TaskPriority) -> Task<Void, Never>? {
+        let source = Self.sourceBaseName(ofFile: URL(fileURLWithPath: chunk.systemPath).lastPathComponent)
+        var chunk = chunk
+        var extraIssues: [ChunkIssue] = []
+        if let known = sourceByIndex[chunk.index] {
+            if known == source {
+                Logger.transcription.info("Chunk \(chunk.index, privacy: .public) already processed or in flight — skipping the duplicate")
+                return tasksByIndex[chunk.index]
+            }
+            // Never skip audio because its index is taken: that silently dropped every word
+            // recorded after a resume. Process it under a fresh index and say so.
+            let fresh = (sourceByIndex.keys.max() ?? chunk.index) + 1
+            Logger.transcription.error(
+                "Chunk index \(chunk.index, privacy: .public) is already held by \(known, privacy: .private); \(source, privacy: .private) is a different recording file — processing it as chunk \(fresh, privacy: .public)"
+            )
+            extraIssues.append(ChunkIssue(code: .chunkIndexCollision, track: nil, count: chunk.index))
+            chunk = ChunkRotator.FinalizedChunk(
+                index: fresh, systemPath: chunk.systemPath, micPath: chunk.micPath, startTime: chunk.startTime
+            )
+        }
+        sourceByIndex[chunk.index] = source
+        let scheduled = chunk
+        let issues = extraIssues
+        let task = Task(priority: priority) {
+            await self.processChunkAsync(scheduled, extraIssues: issues)
+        }
+        tasksByIndex[chunk.index] = task
+        return task
+    }
+
+    /// The recording file a chunk came from, as its base name: `meeting-0.wav`, `meeting-0.m4a` and
+    /// `meeting-0_mic.wav` are all `meeting-0`.
+    nonisolated static func sourceBaseName(ofFile name: String) -> String {
+        var base = (URL(fileURLWithPath: name).lastPathComponent as NSString).deletingPathExtension
+        if base.hasSuffix("_mic") { base.removeLast(4) }
+        return base
     }
 
     /// Actor-isolated access to current session state.
@@ -128,18 +163,19 @@ public final class ChunkProcessor {
     /// later relaunch and the final transcript both see it (§7.2 metadata.capture.gaps).
     public nonisolated func appendGap(_ gap: CaptureGap) async {
         let snapshot = await stateStore.appendGap(gap)
-        do { try SessionState.write(snapshot, directory: outputDirectory) }
-        catch { Logger.state.error("Failed to write session.json after a capture gap: \(error, privacy: .public)") }
+        do {
+            try SessionState.write(snapshot, directory: outputDirectory)
+        } catch {
+            Logger.state.error("Failed to write session.json after a capture gap: \(error, privacy: .public)")
+            // Same path as a chunk's failed write: recorded, and reported (nil = session-level).
+            _ = await stateStore.noteSessionWriteFailure(chunkIndex: nil)
+            await MainActor.run { self.onSessionWriteFailure?(nil) }
+        }
     }
 
     // MARK: - Private
 
-    private nonisolated func processChunkAsync(_ chunk: ChunkRotator.FinalizedChunk) async {
-        // A seeded session (relaunch, L7) already holds its settled chunks: never re-do one.
-        if await stateStore.getSessionState().chunks.contains(where: { $0.index == chunk.index }) {
-            Logger.transcription.info("Chunk \(chunk.index, privacy: .public) is already in the session — skipping the duplicate")
-            return
-        }
+    private nonisolated func processChunkAsync(_ chunk: ChunkRotator.FinalizedChunk, extraIssues: [ChunkIssue] = []) async {
         let startTime = ContinuousClock.now
         Logger.transcription.info(
             "Chunk \(chunk.index, privacy: .public) processing started (qos: \(self.config.chunkProcessingQos, privacy: .public))"
@@ -167,7 +203,7 @@ public final class ChunkProcessor {
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
-        var issues = systemResult.issues + micResult.issues
+        var issues = extraIssues + systemResult.issues + micResult.issues
 
         // 3. Merge segments
         var allSegments = systemResult.segments + micResult.segments

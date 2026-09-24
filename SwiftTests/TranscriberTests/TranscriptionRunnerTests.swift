@@ -79,6 +79,17 @@ import Testing
         try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.chunks.map(\.index) == [0] && state.sessionId == "m")
+        // Critical (review round 1): the rotator must not restart at 0 over the seeded chunk 0.
+        #expect(runner.chunkRotator?.currentChunkInfo.index == 1)
+        runner.teardownChunkedPipeline()
+    }
+
+    @Test func firstChunkIndexIsPassedToTheRotator() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m",
+                                        config: .default, firstChunkIndex: 5)
+        #expect(runner.chunkRotator?.currentChunkInfo.index == 5)
         runner.teardownChunkedPipeline()
     }
 
@@ -86,8 +97,7 @@ import Testing
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let runner = TranscriptionRunner()
         try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default)
-        let processor = try #require(runner.chunkProcessor)
-        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
+        await runner.recordCaptureGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
         #expect(SessionState.read(directory: dir)?.gaps.map(\.reason) == ["sleep"])
         runner.teardownChunkedPipeline()
     }

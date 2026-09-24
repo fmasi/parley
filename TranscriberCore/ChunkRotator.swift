@@ -22,15 +22,19 @@ public final class ChunkRotator {
     private let sessionBaseName: String
     private let chunkDuration: TimeInterval
     private var timer: Timer?
-    private var currentChunkIndex: Int = 0
+    private var currentChunkIndex: Int
     private var currentChunkStartTime: Date
     private let onChunkFinalized: @MainActor (FinalizedChunk) -> Void
 
+    /// - Parameter startIndex: the index of the chunk being recorded now. A resumed session starts
+    ///   past its settled chunks; restarting at 0 made the last chunk collide with the seeded
+    ///   chunk 0, and every word after the resume was dropped as a "duplicate".
     public init(
         captureClient: any ChunkRotationClient,
         outputDirectory: String,
         sessionBaseName: String,
         chunkDurationMinutes: Int,
+        startIndex: Int = 0,
         startTime: Date,
         onChunkFinalized: @MainActor @escaping (FinalizedChunk) -> Void
     ) {
@@ -38,6 +42,7 @@ public final class ChunkRotator {
         self.outputDirectory = outputDirectory
         self.sessionBaseName = sessionBaseName
         self.chunkDuration = TimeInterval(chunkDurationMinutes * 60)
+        self.currentChunkIndex = startIndex
         self.currentChunkStartTime = startTime
         self.onChunkFinalized = onChunkFinalized
     }
@@ -61,7 +66,12 @@ public final class ChunkRotator {
     /// index has advanced (#92).
     @discardableResult
     public func recoverFromCrash(now: Date = Date()) -> ChunkRecoveryPlan {
-        let plan = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
+        let planned = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
+        // The recovery segment's name must not be a file already on disk (same rule as rotate()).
+        let recoveryIndex = nextFreeIndex(after: currentChunkIndex)
+        let plan = recoveryIndex == planned.recoveryIndex ? planned : ChunkRecoveryPlan(
+            orphanIndex: planned.orphanIndex, recoveryIndex: recoveryIndex,
+            orphanBaseName: planned.orphanBaseName, recoveryBaseName: "\(sessionBaseName)-\(recoveryIndex)")
         currentChunkIndex = plan.recoveryIndex
         currentChunkStartTime = now
         Logger.audio.info("ChunkRotator recovered: orphan chunk \(plan.orphanIndex, privacy: .public), resuming at \(plan.recoveryIndex, privacy: .public)")
@@ -91,31 +101,56 @@ public final class ChunkRotator {
     }
 
     private func rotate() {
+        Task { await performRotation() }
+    }
+
+    /// Test seam: one rotation, awaited.
+    func rotateForTesting() async {
+        await performRotation()
+    }
+
+    private func performRotation() async {
         let oldIndex = currentChunkIndex
         let oldStartTime = currentChunkStartTime
-        let nextIndex = oldIndex + 1
+        let nextIndex = nextFreeIndex(after: oldIndex)
         let nextBaseName = "\(sessionBaseName)-\(nextIndex)"
 
         Logger.audio.info("Rotating chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public)")
 
-        Task {
-            do {
-                let paths = try await captureClient.rotateChunk(
-                    outputDirectory: outputDirectory,
-                    newBaseName: nextBaseName
-                )
-                self.currentChunkIndex = nextIndex
-                self.currentChunkStartTime = Date()
-                let finalized = FinalizedChunk(
-                    index: oldIndex,
-                    systemPath: paths.systemPath,
-                    micPath: paths.micPath,
-                    startTime: oldStartTime
-                )
-                self.onChunkFinalized(finalized)
-            } catch {
-                Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
-            }
+        do {
+            let paths = try await captureClient.rotateChunk(
+                outputDirectory: outputDirectory,
+                newBaseName: nextBaseName
+            )
+            self.currentChunkIndex = nextIndex
+            self.currentChunkStartTime = Date()
+            let finalized = FinalizedChunk(
+                index: oldIndex,
+                systemPath: paths.systemPath,
+                micPath: paths.micPath,
+                startTime: oldStartTime
+            )
+            self.onChunkFinalized(finalized)
+        } catch {
+            Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
         }
+    }
+
+    /// The first index after `index` whose chunk files are not already on disk. The helper CREATES
+    /// the file it is given, so reusing a name overwrites that chunk's audio — the file a resumed
+    /// session is still writing, or an orphan that was never processed.
+    private func nextFreeIndex(after index: Int) -> Int {
+        var candidate = index + 1
+        while chunkFilesExist(index: candidate) {
+            Logger.audio.error("ChunkRotator: chunk \(candidate, privacy: .public) is already on disk — skipping to the next free name")
+            candidate += 1
+        }
+        return candidate
+    }
+
+    private func chunkFilesExist(index: Int) -> Bool {
+        let base = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(sessionBaseName)-\(index)")
+        return FileManager.default.fileExists(atPath: base.path + ".wav")
+            || FileManager.default.fileExists(atPath: base.path + "_mic.wav")
     }
 }

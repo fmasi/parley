@@ -21,12 +21,15 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         case segmentsFiltered = "segments_filtered"
         case clustersAbsorbed = "clusters_absorbed"
         case echoFlagged = "echo_flagged"
+        /// A chunk arrived under an index already held by a different recording file; it was
+        /// processed under a fresh index. `count` carries the index it collided with.
+        case chunkIndexCollision = "chunk_index_collision"
 
         /// Whether this issue means content may be missing or wrong. `streamEmpty` is NOT: an
         /// idle side (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13).
         public var affectsContent: Bool {
             switch self {
-            case .asrFailed, .diarizationFailed, .archiveFailed, .sessionWriteFailed: true
+            case .asrFailed, .diarizationFailed, .archiveFailed, .sessionWriteFailed, .chunkIndexCollision: true
             case .vadUnavailable, .streamEmpty, .duplicatesDropped, .segmentsFiltered,
                  .clustersAbsorbed, .echoFlagged: false
             }
@@ -49,13 +52,29 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
     public var affectsContent: Bool { code.affectsContent }
 }
 
-/// A chunk issue that could not be stored on the chunk itself — the chunk was already appended when
-/// it happened (a session.json write that failed after the append).
+extension ChunkIssue {
+    /// Over `metadata.processing_issues` entries (`{chunk?, code, …}`): how many issues affect
+    /// content, and how many distinct chunks have one. Content-affecting issues with no `chunk`
+    /// (session-level, e.g. a failed write after a capture gap) count as one more "chunk", so the
+    /// completion notice is never silent about them. Unknown codes do not count.
+    public static func problemCounts(in dictionaries: [[String: Any]]) -> (issues: Int, chunks: Int) {
+        let affecting = dictionaries.filter { issue in
+            (issue["code"] as? String).flatMap(Code.init(rawValue:))?.affectsContent ?? false
+        }
+        let chunks = Set(affecting.compactMap { $0["chunk"] as? Int }).count
+        let sessionLevel = affecting.contains { $0["chunk"] == nil } ? 1 : 0
+        return (affecting.count, chunks + sessionLevel)
+    }
+}
+
+/// An issue that could not be stored on a chunk itself — the chunk was already appended when it
+/// happened (a session.json write that failed after the append), or it concerns the session, not a
+/// chunk (`chunk == nil`: a failed write after a capture gap).
 public struct SessionIssue: Codable, Equatable, Sendable {
-    public let chunk: Int
+    public let chunk: Int?
     public let issue: ChunkIssue
 
-    public init(chunk: Int, issue: ChunkIssue) {
+    public init(chunk: Int?, issue: ChunkIssue) {
         self.chunk = chunk
         self.issue = issue
     }

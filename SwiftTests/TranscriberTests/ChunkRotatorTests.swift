@@ -80,4 +80,42 @@ struct ChunkRotatorTests {
         // given it — `.common` is a superset that still includes `.defaultRunLoopMode`.
         #expect(CFRunLoopContainsTimer(CFRunLoopGetMain(), cfTimer, .defaultMode))
     }
+
+    // MARK: - Start index and on-disk names (R0/R2 review round 1, Critical)
+
+    @Test func startIndexSetsTheFirstChunk() {
+        let rotator = ChunkRotator(captureClient: FakeChunkRotationClient(), outputDirectory: "/tmp/out",
+                                   sessionBaseName: "meeting", chunkDurationMinutes: 10, startIndex: 3,
+                                   startTime: Date(timeIntervalSince1970: 0), onChunkFinalized: { _ in })
+        #expect(rotator.currentBaseName == "meeting-3")
+        #expect(rotator.currentChunkInfo.index == 3)
+    }
+
+    /// A rotation must never ask the helper for a file already on disk: `WavFileWriter` creates
+    /// the file, so the helper would overwrite a chunk (the resumed recording's own file, or an
+    /// unprocessed orphan) and that audio would be gone.
+    @Test func rotationSkipsNamesAlreadyOnDisk() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rotator-names-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data().write(to: dir.appendingPathComponent("meeting-1.wav"))
+        try Data().write(to: dir.appendingPathComponent("meeting-2_mic.wav"))
+
+        final class Recorder: ChunkRotationClient {
+            var requested: [String] = []
+            func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+                requested.append(newBaseName)
+                return ("\(outputDirectory)/\(newBaseName).wav", "\(outputDirectory)/\(newBaseName)_mic.wav")
+            }
+        }
+        final class Sink { var finalized: [Int] = [] }
+        let client = Recorder(), sink = Sink()
+        let rotator = ChunkRotator(captureClient: client, outputDirectory: dir.path, sessionBaseName: "meeting",
+                                   chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0),
+                                   onChunkFinalized: { sink.finalized.append($0.index) })
+        await rotator.rotateForTesting()
+        #expect(client.requested == ["meeting-3"])
+        #expect(rotator.currentChunkInfo.index == 3)
+        #expect(sink.finalized == [0])
+    }
 }

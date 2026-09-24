@@ -137,7 +137,7 @@ struct ChunkProcessorTests {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
         let processor = makeProcessor(dir: dir, engine: FakeEngine())
-        final class Sink { var indices: [Int] = [] }
+        final class Sink { var indices: [Int?] = [] }
         let reported = Sink()
         processor.onSessionWriteFailure = { reported.indices.append($0) }
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)   // no new files in dir
@@ -146,5 +146,79 @@ struct ChunkProcessorTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         #expect(reported.indices == [0])
         #expect(await processor.getSessionState().issues.contains(SessionIssue(chunk: 0, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))))
+    }
+
+    private func seededProcessor(dir: URL, seededAudioPath: String) -> ChunkProcessor {
+        let seededChunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: seededAudioPath,
+                                         segments: [], speakerDatabase: [:])
+        return ChunkProcessor(config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio",
+                                       chunkDurationMinutes: 10, chunks: [seededChunk]),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+    }
+
+    /// Critical (review round 1): a resumed session holds chunk 0; an incoming chunk 0 from a
+    /// DIFFERENT recording file is not a duplicate. Skipping it silently lost every word after
+    /// the resume. It is processed under a fresh index and the collision is recorded.
+    @Test func aDifferentSourceIndexCollisionIsProcessedAndRecorded() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-1.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        let processor = seededProcessor(dir: dir, seededAudioPath: "meeting-0.m4a")
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+            index: 0, systemPath: sys.path, micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
+            startTime: Date(timeIntervalSince1970: 600)))
+        let state = await processor.getSessionState()
+        #expect(state.chunks.map(\.index) == [0, 1])
+        let added = try #require(state.chunks.first { $0.index == 1 })
+        #expect(added.issues.contains(ChunkIssue(code: .chunkIndexCollision, track: nil, count: 0)))
+    }
+
+    /// The seeded store's own chunk arriving again (crash re-ingest of the same file) is a true
+    /// duplicate: skipped, and its WAV is not touched.
+    @Test func aSameSourceSeededChunkIsSkipped() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        let processor = seededProcessor(dir: dir, seededAudioPath: "meeting-0.m4a")
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(await processor.getSessionState().chunks.count == 1)
+        #expect(FileManager.default.fileExists(atPath: sys.path), "a skipped duplicate is not archived")
+    }
+
+    /// Review round 1 item 4: a duplicate `processLastChunk` waits for the original rather than
+    /// returning while it is still running.
+    @Test func aDuplicateLastChunkWaitsForTheOriginal() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        struct SlowEngine: TranscriptionEngine {
+            let name = "Slow"
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+                try await Task.sleep(for: .milliseconds(300))
+                return [TranscriptSegment(start: 0, end: 1, text: "hi", language: "en")]
+            }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+        let processor = makeProcessor(dir: dir, engine: SlowEngine())
+        processor.processChunk(chunk0(in: dir))
+        await processor.processLastChunk(chunk0(in: dir))
+        #expect(await processor.getSessionState().chunks.map(\.index) == [0])
+    }
+
+    /// Important (review round 1 item 2): a gap whose session.json write fails goes through the
+    /// same hook (nil = session-level) and is recorded.
+    @Test func aGapWriteFailureIsReportedAndRecorded() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let processor = makeProcessor(dir: dir, engine: FakeEngine())
+        final class Sink { var indices: [Int?] = [] }
+        let reported = Sink()
+        processor.onSessionWriteFailure = { reported.indices.append($0) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        #expect(reported.indices == [nil])
+        #expect(await processor.getSessionState().issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))))
     }
 }

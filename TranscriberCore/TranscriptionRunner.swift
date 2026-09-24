@@ -514,8 +514,9 @@ public final class TranscriptionRunner {
     /// Flatten per-chunk issues and session-level issues into the `metadata.processing_issues`
     /// shape `{chunk, code, track?, count?}` — optional fields omitted, never written as null.
     static func processingIssueDictionaries(chunks: [ProcessedChunk], sessionIssues: [SessionIssue]) -> [[String: Any]] {
-        func dictionary(chunk: Int, issue: ChunkIssue) -> [String: Any] {
-            var d: [String: Any] = ["chunk": chunk, "code": issue.code.rawValue]
+        func dictionary(chunk: Int?, issue: ChunkIssue) -> [String: Any] {
+            var d: [String: Any] = ["code": issue.code.rawValue]
+            if let chunk { d["chunk"] = chunk }
             if let track = issue.track { d["track"] = track }
             if let count = issue.count { d["count"] = count }
             return d
@@ -553,12 +554,16 @@ public final class TranscriptionRunner {
     /// `meetingStart` carry over so completed chunks are not re-done. The rotator is still anchored
     /// at the CURRENT time — the monotonic clock behind it cannot be persisted, so a resume
     /// re-anchors at resume time rather than at the seeded `meetingStart`.
+    ///
+    /// `firstChunkIndex` is the index of the chunk being recorded now. Default: one past the highest
+    /// seeded index, or 0 — a resume must never restart at an index the session already holds.
     public func setupChunkedPipeline(
         captureClient: any ChunkRotationClient,
         outputDirectory: URL,
         sessionBaseName: String,
         config: Config,
-        seededState: SessionState? = nil
+        seededState: SessionState? = nil,
+        firstChunkIndex: Int? = nil
     ) throws {
         if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
@@ -585,6 +590,7 @@ public final class TranscriptionRunner {
             outputDirectory: outputDirectory.path,
             sessionBaseName: sessionBaseName,
             chunkDurationMinutes: config.validatedChunkDuration,
+            startIndex: firstChunkIndex ?? sessionState.chunks.map(\.index).max().map { $0 + 1 } ?? 0,
             startTime: Date()
         ) { [weak processor] chunk in
             processor?.processChunk(chunk)
@@ -592,11 +598,15 @@ public final class TranscriptionRunner {
         self.chunkRotator = rotator
     }
 
-    /// Record a period with no capture (relaunch, sleep) into the live session. Fire-and-forget:
-    /// the processor persists it to session.json and `finalize` stamps it into the transcript.
-    public func recordCaptureGap(_ gap: CaptureGap) {
-        let p = chunkProcessor
-        Task { await p?.appendGap(gap) }
+    /// Record a period with no capture (relaunch, sleep) into the live session; returns once it is
+    /// persisted to session.json (or its write failure is reported). `finalize` stamps it into the
+    /// transcript.
+    public func recordCaptureGap(_ gap: CaptureGap) async {
+        guard let processor = chunkProcessor else {
+            Logger.state.error("Capture gap (\(gap.reason, privacy: .public), \(gap.seconds, privacy: .public)s) not recorded: no chunk pipeline is running")
+            return
+        }
+        await processor.appendGap(gap)
     }
 
     public func startChunkRotation() {

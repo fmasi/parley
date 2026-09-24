@@ -72,11 +72,9 @@ public enum TranscriptAssembler {
         // `processing_problem_chunks`.
         if !processingIssues.isEmpty {
             metadata["processing_issues"] = processingIssues
-            let contentAffecting = processingIssues.filter { issue in
-                (issue["code"] as? String).flatMap(ChunkIssue.Code.init(rawValue:))?.affectsContent ?? false
-            }
-            metadata["processing_issue_count"] = contentAffecting.count
-            metadata["processing_problem_chunks"] = Set(contentAffecting.compactMap { $0["chunk"] as? Int }).count
+            let counts = ChunkIssue.problemCounts(in: processingIssues)
+            metadata["processing_issue_count"] = counts.issues
+            metadata["processing_problem_chunks"] = counts.chunks
         }
         // How the chunks were merged into one file (§7.2): `{passthrough, gaps_inserted_seconds}`.
         if let mergedAudio {
