@@ -247,7 +247,8 @@ public final class ChunkProcessor {
                 source: seg.source,
                 qualityScore: seg.confidence,
                 filtered: seg.filtered,
-                echo: seg.echo
+                echo: seg.echo,
+                duplicate: seg.duplicate
             )
         }
 
@@ -409,8 +410,11 @@ public final class ChunkProcessor {
         var issues: [ChunkIssue] = []
         let dedup = SpeakerAssignment.deduplicate(segments)
         segments = dedup.segments
-        if dedup.dropped > 0 {
-            issues.append(ChunkIssue(code: .duplicatesDropped, track: source, count: dedup.dropped))
+        if !dedup.duplicates.isEmpty {
+            issues.append(ChunkIssue(code: .duplicatesFlagged, track: source, count: dedup.duplicates.count))
+        }
+        if dedup.zeroLength > 0 {
+            issues.append(ChunkIssue(code: .zeroLengthDropped, track: source, count: dedup.zeroLength))
         }
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
@@ -464,6 +468,8 @@ public final class ChunkProcessor {
         } else {
             labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
         }
+        // The repeats go back in flagged — kept in the record, hidden when read (P2).
+        labeled = SpeakerAssignment.reattachDuplicates(dedup.duplicates, to: labeled)
 
         for i in labeled.indices {
             labeled[i].source = source

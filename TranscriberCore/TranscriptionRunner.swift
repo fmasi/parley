@@ -396,7 +396,8 @@ public final class TranscriptionRunner {
                 source: seg.source,
                 confidence: seg.qualityScore,
                 filtered: seg.filtered,
-                echo: seg.echo
+                echo: seg.echo,
+                duplicate: seg.duplicate
             )
         }
 
@@ -575,14 +576,20 @@ public final class TranscriptionRunner {
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )
-        // A seed from another session or engine is accepted — refusing would lose the chunks it
-        // holds — but never silently: it is logged and recorded in the transcript.
-        if let seededState,
-           seededState.sessionId != sessionBaseName || seededState.engine != config.engine.rawValue {
+        // A seed from another session is accepted — refusing would lose the chunks it holds — but
+        // never silently: it is logged and recorded as a problem. An engine change between crash and
+        // resume (a Settings change) is recorded as information only.
+        if let seededState, seededState.sessionId != sessionBaseName {
             Logger.state.error(
-                "Seeded session \(seededState.sessionId, privacy: .sensitive) (engine \(seededState.engine, privacy: .public)) does not match \(sessionBaseName, privacy: .sensitive) (engine \(config.engine.rawValue, privacy: .public)) — resuming anyway"
+                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — resuming anyway"
             )
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil)))
+        }
+        if let seededState, seededState.engine != config.engine.rawValue {
+            Logger.state.info(
+                "Seeded session was transcribed with \(seededState.engine, privacy: .public); resuming with \(config.engine.rawValue, privacy: .public)"
+            )
+            sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedEngineChanged, track: nil, count: nil)))
         }
 
         let processor = ChunkProcessor(
@@ -766,10 +773,11 @@ public final class TranscriptionRunner {
         Logger.transcription.info("Transcribing \(label, privacy: .public) audio: \(audioPath.lastPathComponent, privacy: .sensitive) (\(fileSize) bytes)")
 
         let rawSegments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
-        // This path has no chunk issues (the CLI `run()` semantics are a non-goal, §13): log the count.
-        let (segments, dropped) = SpeakerAssignment.deduplicate(rawSegments)
-        if dropped > 0 {
-            Logger.transcription.info("\(label.capitalized, privacy: .public): dropped \(dropped, privacy: .public) zero-length or stuttered segment(s)")
+        // This path has no chunk issues (the CLI `run()` semantics are a non-goal, §13): log the counts.
+        let dedup = SpeakerAssignment.deduplicate(rawSegments)
+        let segments = dedup.segments
+        if !dedup.duplicates.isEmpty || dedup.zeroLength > 0 {
+            Logger.transcription.info("\(label.capitalized, privacy: .public): flagged \(dedup.duplicates.count, privacy: .public) abutting repeat(s), dropped \(dedup.zeroLength, privacy: .public) zero-length segment(s)")
         }
 
         // Capture detected language from engine output
@@ -800,6 +808,7 @@ public final class TranscriptionRunner {
         } else {
             labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
         }
+        labeled = SpeakerAssignment.reattachDuplicates(dedup.duplicates, to: labeled)
 
         for i in labeled.indices {
             labeled[i].source = source

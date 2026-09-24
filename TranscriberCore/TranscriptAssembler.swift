@@ -107,6 +107,7 @@ public enum TranscriptAssembler {
             // Written only when set, so an unflagged segment looks exactly as it always did.
             if seg.filtered { dict["filtered"] = true }
             if seg.echo { dict["echo"] = true }
+            if seg.duplicate { dict["duplicate"] = true }
             return dict
         }
 
@@ -118,11 +119,13 @@ public enum TranscriptAssembler {
         ]
     }
 
-    /// Whether a transcript JSON segment is flagged `filtered` (failed the VAD/quality gate) or
-    /// `echo` (mic bleed). Flagged segments stay in the JSON record and are hidden from everything a
-    /// person reads: TXT, SRT, the summary prompt and the rename samples (P10/P11).
+    /// Whether a transcript JSON segment is flagged `filtered` (failed the VAD/quality gate),
+    /// `echo` (mic bleed) or `duplicate` (an abutting repeat). Flagged segments stay in the JSON
+    /// record and are hidden from everything a person reads: TXT, SRT, the summary prompt and the
+    /// rename samples (P2/P10/P11).
     public static func isFlagged(_ segment: [String: Any]) -> Bool {
         segment["filtered"] as? Bool == true || segment["echo"] as? Bool == true
+            || segment["duplicate"] as? Bool == true
     }
 
     public static func write(_ json: [String: Any], to path: URL) throws {

@@ -23,6 +23,7 @@ public enum TranscriptMerger {
         /// Carried from `ProcessedChunk.Segment` (P10/P11): kept in the record, hidden when read.
         public let filtered: Bool
         public let echo: Bool
+        public let duplicate: Bool
 
         public init(
             elapsed: Double,
@@ -33,7 +34,8 @@ public enum TranscriptMerger {
             source: String,
             qualityScore: Float?,
             filtered: Bool = false,
-            echo: Bool = false
+            echo: Bool = false,
+            duplicate: Bool = false
         ) {
             self.elapsed = elapsed
             self.elapsedEnd = elapsedEnd
@@ -44,6 +46,7 @@ public enum TranscriptMerger {
             self.qualityScore = qualityScore
             self.filtered = filtered
             self.echo = echo
+            self.duplicate = duplicate
         }
     }
 
@@ -134,7 +137,8 @@ public enum TranscriptMerger {
                     source: seg.source,
                     qualityScore: seg.qualityScore,
                     filtered: seg.filtered,
-                    echo: seg.echo
+                    echo: seg.echo,
+                    duplicate: seg.duplicate
                 ))
             }
         }

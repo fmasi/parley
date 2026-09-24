@@ -127,7 +127,7 @@ import Testing
     @Test func processingIssueDictionariesFlattenChunkAndSessionIssues() {
         let chunk = ProcessedChunk(index: 2, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-2.m4a", segments: [], speakerDatabase: [:],
                                    issues: [ChunkIssue(code: .asrFailed, track: "remote", count: nil),
-                                            ChunkIssue(code: .duplicatesDropped, track: "local", count: 3)])
+                                            ChunkIssue(code: .duplicatesFlagged, track: "local", count: 3)])
         let dicts = TranscriptionRunner.processingIssueDictionaries(
             chunks: [chunk],
             sessionIssues: [SessionIssue(chunk: 2, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil)),
@@ -167,6 +167,19 @@ import Testing
         try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))
+        runner.teardownChunkedPipeline()
+    }
+
+    /// R0/R2 round ruling (R345 item 9): an engine change between crash and resume is informational;
+    /// only a different session id is a problem.
+    @Test func anEngineOnlySeedChangeIsInformational() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let seeded = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "some_other_engine", chunkDurationMinutes: 10)
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default, seededState: seeded)
+        let state = try #require(await runner.chunkProcessor?.getSessionState())
+        #expect(state.issues.map(\.issue.code) == [.seedEngineChanged])
+        #expect(!ChunkIssue.Code.seedEngineChanged.affectsContent && ChunkIssue.Code.seedMismatch.affectsContent)
         runner.teardownChunkedPipeline()
     }
 }

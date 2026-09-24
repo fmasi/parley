@@ -189,4 +189,12 @@ struct TranscriptWriterTests {
         let txt = TranscriptWriter.formatTXT(segments: segments)
         #expect(txt.contains("Alice") && !txt.contains("noise") && !txt.contains("Bob"))
     }
+
+    @Test func duplicateFlaggedSegmentsAreHidden() {
+        let txt = TranscriptWriter.formatTXT(segments: [
+            ["start": 1.0, "end": 2.0, "speaker": "Alice", "text": "No."],
+            ["start": 2.1, "end": 3.0, "speaker": "Alice", "text": "No again", "duplicate": true],
+        ])
+        #expect(txt.contains("No.") && !txt.contains("No again"))
+    }
 }

@@ -235,4 +235,52 @@ struct ChunkProcessorTests {
         #expect(issue.track == "remote" && issue.affectsContent)
         #expect(!chunk.issues.contains { $0.code == .streamEmpty })
     }
+
+    /// R3 review round 1: an abutting repeat is kept and flagged (`duplicates_flagged`), a
+    /// zero-length segment is dropped and counted under its own code.
+    @Test func repeatsAreFlaggedAndZeroLengthIsCountedSeparately() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        struct RepeatingEngine: TranscriptionEngine {
+            let name = "Repeating"
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+                [TranscriptSegment(start: 0, end: 1, text: "No.", language: "en"),
+                 TranscriptSegment(start: 1.1, end: 2, text: "No.", language: "en"),
+                 TranscriptSegment(start: 3, end: 3, text: "x", language: "en")]
+            }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+        let processor = makeProcessor(dir: dir, engine: RepeatingEngine())
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.issues.contains(ChunkIssue(code: .duplicatesFlagged, track: "remote", count: 1)))
+        #expect(chunk.issues.contains(ChunkIssue(code: .zeroLengthDropped, track: "remote", count: 1)))
+        #expect(chunk.segments.count == 2)
+        #expect(chunk.segments.filter(\.duplicate).map(\.text) == ["No."])
+    }
+
+    /// R5: a quota delete that fails no longer relabels an archived chunk as "archival failed".
+    @Test func aQuotaFailureDoesNotRelabelAnArchivedChunk() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let locked = dir.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        let old = locked.appendingPathComponent("old.m4a")
+        try Data(count: 1024).write(to: old)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
+        var config = Config.default
+        config.audioArchiveLimitHours = 0   // every archive is over quota → the locked file's delete throws
+        let processor = ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio", chunkDurationMinutes: 10),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        await processor.processLastChunk(chunk0(in: dir))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.audioPath == "meeting-0.m4a")
+        #expect(!chunk.issues.contains { $0.code == .archiveFailed })
+        #expect(FileManager.default.fileExists(atPath: old.path), "the quota delete really failed")
+    }
 }

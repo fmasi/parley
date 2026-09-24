@@ -83,8 +83,6 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
-        var truncated = false
-
         if let stats {
             Logger.transcription.info(
                 "LM Studio summary stats — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
@@ -95,15 +93,9 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
             )
-            if Self.isLikelyTruncated(contextLength: resolvedContextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens) {
-                truncated = true
-                Logger.transcription.warning(
-                    "Summary may be truncated — output used \(stats.outputTokens)/\(resolvedContextLength - stats.inputTokens) available tokens. Consider increasing context window."
-                )
-            }
         }
 
-        return SummaryResponse(markdown: content, truncated: truncated)
+        return Self.detailedResponse(content: content, stats: stats, contextLength: resolvedContextLength)
     }
 
     /// Single retry with recalibrated context — no further retries to avoid loops.
@@ -125,8 +117,6 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
-        var truncated = false
-
         if let stats {
             Logger.transcription.info(
                 "LM Studio summary stats (retry) — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
@@ -136,14 +126,21 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
             )
-            if Self.isLikelyTruncated(contextLength: resolvedContextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens) {
-                truncated = true
-                Logger.transcription.warning(
-                    "Summary may be truncated (retry) — output used \(stats.outputTokens)/\(resolvedContextLength - stats.inputTokens) available tokens."
-                )
-            }
         }
 
+        return Self.detailedResponse(content: content, stats: stats, contextLength: resolvedContextLength)
+    }
+
+    /// The summary plus `truncated` (P14): the output filled the space the context left for it.
+    /// Shared by the first request and the retry. No stats → nothing to judge by → not truncated.
+    static func detailedResponse(content: String, stats: TokenStats?, contextLength: Int) -> SummaryResponse {
+        guard let stats else { return SummaryResponse(markdown: content, truncated: false) }
+        let truncated = isLikelyTruncated(contextLength: contextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens)
+        if truncated {
+            Logger.transcription.warning(
+                "Summary may be truncated — output used \(stats.outputTokens)/\(contextLength - stats.inputTokens) available tokens. Consider increasing context window."
+            )
+        }
         return SummaryResponse(markdown: content, truncated: truncated)
     }
 

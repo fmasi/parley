@@ -300,6 +300,14 @@ public enum TranscriptRediarizer {
         let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
         let found = Set(labeled.map { $0.speaker }).subtracting([unattributed]).count
         metadata["speaker_count_\(source)"] = found
+        // The stated count undid any minority absorption on this channel: its `clusters_absorbed`
+        // issue no longer describes the transcript (and would keep the rename dialog's hint alive).
+        // Not content-affecting, so the processing counts do not change.
+        if let issues = metadata["processing_issues"] as? [[String: Any]] {
+            metadata["processing_issues"] = issues.filter {
+                !($0["code"] as? String == ChunkIssue.Code.clustersAbsorbed.rawValue && $0["track"] as? String == source)
+            }
+        }
         json["metadata"] = metadata
 
         // Last check before the only irreversible step. Cancelling after diarization has run just

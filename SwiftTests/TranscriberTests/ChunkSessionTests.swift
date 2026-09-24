@@ -197,4 +197,17 @@ struct ChunkSessionTests {
     func negativeCaptureGapIsClampedToZero() {
         #expect(CaptureGap(start: Date(timeIntervalSince1970: 10), end: Date(timeIntervalSince1970: 5), reason: "app relaunch").seconds == 0)
     }
+
+    /// R5: a session.json left by ANOTHER recording in the same folder is never merged into this one.
+    @Test("foreignSessionJsonIsIgnoredByRecovery")
+    @MainActor
+    func foreignSessionJsonIsIgnoredByRecovery() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0, 1, 2])
+        #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+        #expect(CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: dir, sessionId: "m") == 0)
+        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: .default,
+                                                              transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner())
+        #expect(result == nil)
+    }
 }

@@ -559,6 +559,7 @@ struct TranscriptRediarizerTimelineTests {
         var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
         var segments = try #require(json["segments"] as? [[String: Any]])
         segments.append(["start": 10.3, "end": 10.7, "text": "bleed", "speaker": "Remote Unknown", "source": "remote", "filtered": true])
+        segments.append(["start": 10.75, "end": 10.9, "text": "hi", "speaker": "Remote Speaker 1", "source": "remote", "duplicate": true])
         json["segments"] = segments
         try JSONSerialization.data(withJSONObject: json).write(to: t)
 
@@ -569,6 +570,28 @@ struct TranscriptRediarizerTimelineTests {
         let flagged = try #require(out.first { $0["text"] as? String == "bleed" })
         #expect(flagged["filtered"] as? Bool == true)
         #expect(flagged["speaker"] as? String == "Remote Unknown")
-        #expect(out.count == 2)
+        #expect(out.filter { $0["duplicate"] as? Bool == true }.count == 1, "a duplicate keeps its flag too")
+        #expect(out.count == 3)
+    }
+
+    /// R5 review round 1: a re-detect at a stated count undoes the absorption on that channel, so
+    /// its `clusters_absorbed` issue goes — the rename dialog's hint would otherwise stay stale.
+    @Test func aRedetectClearsTheChannelsAbsorptionIssue() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
+        var metadata = try #require(json["metadata"] as? [String: Any])
+        metadata["processing_issues"] = [
+            ["chunk": 0, "code": "clusters_absorbed", "track": "remote", "count": 1],
+            ["chunk": 0, "code": "clusters_absorbed", "track": "local", "count": 1],
+            ["chunk": 1, "code": "asr_failed", "track": "remote"],
+        ]
+        json["metadata"] = metadata
+        try JSONSerialization.data(withJSONObject: json).write(to: t)
+
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+
+        let after = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])
+        let issues = try #require((after["metadata"] as? [String: Any])?["processing_issues"] as? [[String: Any]])
+        #expect(issues.map { "\($0["code"]!)/\($0["track"]!)" } == ["clusters_absorbed/local", "asr_failed/remote"])
     }
 }

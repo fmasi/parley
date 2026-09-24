@@ -93,6 +93,11 @@ public enum AudioConcatenator {
         deleteSources: Bool
     ) async throws -> AudioConcatenationResult {
         guard !chunks.isEmpty else { throw AudioConcatenatorError.noSources }
+        // Wall-clock order when every chunk has a start time — the order the transcript's timestamps
+        // use. A chunk re-indexed after a collision can have an index out of time order.
+        let chunks = chunks.allSatisfy({ $0.startTime != nil })
+            ? chunks.sorted { $0.startTime! < $1.startTime! }
+            : chunks
         let sources = chunks.map(\.url)
 
         Logger.files.info("AudioConcatenator: stitching \(sources.count, privacy: .public) chunks → \(outputName, privacy: .sensitive).m4a")
@@ -110,8 +115,10 @@ public enum AudioConcatenator {
             throw AudioConcatenatorError.mixedSources(sources.map(\.lastPathComponent))
         }
 
+        // An existing output is NOT removed here: on a finalize re-run it can be the only copy left
+        // (the chunk files were deleted by the first run), and a source that fails to load below
+        // must leave it alone. `exportVerified` replaces it only once every source has loaded.
         let outputURL = outputDirectory.appendingPathComponent("\(outputName).m4a")
-        try? FileManager.default.removeItem(at: outputURL)
 
         // Build composition
         let composition = AVMutableComposition()
@@ -122,10 +129,13 @@ public enum AudioConcatenator {
             throw AudioConcatenatorError.exportFailed("Cannot add composition track")
         }
 
+        // Each chunk goes at its ABSOLUTE wall-clock offset from the first chunk: the gap is
+        // measured against where the merged file actually is (`insertTime`), not the previous
+        // chunk's end, so sub-second shortfalls cannot add up — every boundary stays within 1 s.
         var insertTime = CMTime.zero
-        var previousEnd: Date?
         var sourceSeconds = 0.0
         var gapsInsertedSeconds = 0.0
+        let origin = chunks.first?.startTime
         for chunk in chunks {
             let asset = AVURLAsset(url: chunk.url)
             let tracks = try await asset.loadTracks(withMediaType: .audio)
@@ -133,8 +143,8 @@ public enum AudioConcatenator {
                 throw AudioConcatenatorError.cannotLoadTrack(chunk.url.lastPathComponent)
             }
             let duration = try await asset.load(.duration)
-            if let start = chunk.startTime, let previousEnd {
-                let gap = start.timeIntervalSince(previousEnd)
+            if let start = chunk.startTime, let origin {
+                let gap = start.timeIntervalSince(origin) - insertTime.seconds
                 if gap > gapThresholdSeconds {
                     let gapTime = CMTime(seconds: gap, preferredTimescale: 48_000)
                     compositionTrack.insertEmptyTimeRange(CMTimeRange(start: insertTime, duration: gapTime))
@@ -146,7 +156,6 @@ public enum AudioConcatenator {
             try compositionTrack.insertTimeRange(timeRange, of: track, at: insertTime)
             insertTime = CMTimeAdd(insertTime, duration)
             sourceSeconds += duration.seconds
-            previousEnd = chunk.startTime?.addingTimeInterval(duration.seconds)
         }
         if gapsInsertedSeconds > 0 {
             Logger.files.info("AudioConcatenator: inserted \(gapsInsertedSeconds, format: .fixed(precision: 1), privacy: .public)s of silence between chunks")
@@ -155,11 +164,16 @@ public enum AudioConcatenator {
         // The sources are deleted only when the merge is as long as they are (+ gaps): a truncated
         // export that "succeeded" would otherwise take the only copies with it.
         let expectedSeconds = sourceSeconds + gapsInsertedSeconds
-        let toleranceSeconds = 0.25 + 0.05 * Double(chunks.count)
+        let toleranceSeconds = verificationToleranceForTesting ?? (0.25 + 0.05 * Double(chunks.count))
 
-        // Try passthrough first
+        // Passthrough first — unless silence was inserted: a passthrough merge represents it as an
+        // empty edit that decode-based readers (re-detect, speaker samples) may not honour, leaving
+        // them 1-2 s off on a long session. The re-encode writes real silence.
         let usedPassthrough: Bool
         do {
+            guard gapsInsertedSeconds == 0 else {
+                throw AudioConcatenatorError.exportFailed("passthrough skipped: silence was inserted")
+            }
             try await exportVerified(
                 composition: composition, to: outputURL, preset: AVAssetExportPresetPassthrough,
                 expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds
@@ -167,8 +181,8 @@ public enum AudioConcatenator {
             usedPassthrough = true
             Logger.files.info("AudioConcatenator: passthrough export succeeded → \(outputURL.lastPathComponent, privacy: .sensitive)")
         } catch {
-            // Passthrough failed — re-encode with AAC
-            Logger.files.info("AudioConcatenator: passthrough failed, falling back to AAC re-encode")
+            // Passthrough failed or was skipped — re-encode with AAC
+            Logger.files.info("AudioConcatenator: re-encoding with AAC (\(gapsInsertedSeconds > 0 ? "silence inserted" : "passthrough failed", privacy: .public))")
             try await exportVerified(
                 composition: composition, to: outputURL, preset: AVAssetExportPresetAppleM4A,
                 expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds
@@ -194,6 +208,10 @@ public enum AudioConcatenator {
     /// forever. 5 minutes is generous — passthrough is near-instant and AAC re-encode runs many
     /// times faster than real time on Apple Silicon, so any longer means the export is stuck. (#51)
     private static let exportTimeout: Duration = .seconds(300)
+
+    /// Test seam: overrides the duration tolerance of the post-export check (a negative value makes
+    /// every export fail verification).
+    nonisolated(unsafe) static var verificationToleranceForTesting: Double?
 
     /// `export`, then check the output is `expectedSeconds` long (± `toleranceSeconds`). On any
     /// failure the output is removed so a bad merge is never mistaken for the recording.

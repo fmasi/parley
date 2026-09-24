@@ -29,15 +29,21 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         public static let streamMissing = Code(rawValue: "stream_missing")
         public static let archiveFailed = Code(rawValue: "archive_failed")
         public static let sessionWriteFailed = Code(rawValue: "session_write_failed")
-        public static let duplicatesDropped = Code(rawValue: "duplicates_dropped")
+        /// Repeats that abutted the previous segment: kept, flagged `duplicate`, hidden when read.
+        public static let duplicatesFlagged = Code(rawValue: "duplicates_flagged")
+        /// Zero-duration segments (no audio behind them) that were dropped.
+        public static let zeroLengthDropped = Code(rawValue: "zero_length_dropped")
         public static let segmentsFiltered = Code(rawValue: "segments_filtered")
         public static let clustersAbsorbed = Code(rawValue: "clusters_absorbed")
         public static let echoFlagged = Code(rawValue: "echo_flagged")
         /// A chunk arrived under an index already held by a different recording file; it was
         /// processed under a fresh index. `count` carries the index it collided with.
         public static let chunkIndexCollision = Code(rawValue: "chunk_index_collision")
-        /// A resumed session was seeded with a session.json of another session id or engine.
+        /// A resumed session was seeded with a session.json of another session id (a problem).
         public static let seedMismatch = Code(rawValue: "seed_mismatch")
+        /// A resumed session's seed was transcribed with another engine (informational: the
+        /// engine setting changed between crash and resume).
+        public static let seedEngineChanged = Code(rawValue: "seed_engine_changed")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
@@ -120,6 +126,8 @@ public struct ProcessedChunk: Codable {
         public let filtered: Bool
         /// Mic bleed of a remote speaker: kept, hidden from readable output (P11).
         public let echo: Bool
+        /// A repeat abutting the previous segment: kept, hidden from readable output (P2).
+        public let duplicate: Bool
 
         public init(
             start: Double,
@@ -129,7 +137,8 @@ public struct ProcessedChunk: Codable {
             source: String,
             qualityScore: Float? = nil,
             filtered: Bool = false,
-            echo: Bool = false
+            echo: Bool = false,
+            duplicate: Bool = false
         ) {
             self.start = start
             self.end = end
@@ -139,10 +148,11 @@ public struct ProcessedChunk: Codable {
             self.qualityScore = qualityScore
             self.filtered = filtered
             self.echo = echo
+            self.duplicate = duplicate
         }
 
         private enum CodingKeys: String, CodingKey {
-            case start, end, text, speaker, source, qualityScore, filtered, echo
+            case start, end, text, speaker, source, qualityScore, filtered, echo, duplicate
         }
 
         public init(from decoder: Decoder) throws {
@@ -156,6 +166,7 @@ public struct ProcessedChunk: Codable {
             // Absent in session.json written before P10/P11 → not flagged.
             filtered = try c.decodeIfPresent(Bool.self, forKey: .filtered) ?? false
             echo = try c.decodeIfPresent(Bool.self, forKey: .echo) ?? false
+            duplicate = try c.decodeIfPresent(Bool.self, forKey: .duplicate) ?? false
         }
     }
 

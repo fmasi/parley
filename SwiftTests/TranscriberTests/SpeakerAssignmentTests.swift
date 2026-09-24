@@ -11,16 +11,26 @@ struct SpeakerAssignmentTests {
     @Test func aRepeatFarApartSurvives() {
         let segs = [TranscriptSegment(start: 0, end: 1, text: "Yes.", language: nil), TranscriptSegment(start: 11, end: 12, text: "Yes.", language: nil)]
         let r = SpeakerAssignment.deduplicate(segs)
-        #expect(r.segments.count == 2 && r.dropped == 0)
+        #expect(r.segments.count == 2 && r.duplicates.isEmpty && r.zeroLength == 0)
     }
-    @Test func anAbuttingRepeatIsDroppedAndCounted() {
+    /// R3 review round 1: "No. No." split at the punctuation is two spoken words — an abutting
+    /// repeat is set aside to be FLAGGED, never deleted.
+    @Test func anAbuttingRepeatIsSetAsideNotDeleted() {
         let segs = [TranscriptSegment(start: 0, end: 1, text: "Yes.", language: nil), TranscriptSegment(start: 1.1, end: 2, text: " yes. ", language: nil)]
         let r = SpeakerAssignment.deduplicate(segs)
-        #expect(r.segments.count == 1 && r.dropped == 1)
+        #expect(r.segments.count == 1 && r.duplicates.map(\.start) == [1.1] && r.zeroLength == 0)
     }
     @Test func zeroDurationIsStillDropped() {
         let r = SpeakerAssignment.deduplicate([TranscriptSegment(start: 5, end: 5, text: "x", language: nil)])
-        #expect(r.segments.isEmpty && r.dropped == 1)
+        #expect(r.segments.isEmpty && r.duplicates.isEmpty && r.zeroLength == 1)
+    }
+    /// A set-aside repeat returns flagged, labelled like the segment it repeats.
+    @Test func duplicatesAreReattachedFlaggedWithTheRepeatedSpeaker() {
+        let labeled = [LabeledSegment(start: 0, end: 1, speaker: "Speaker 2", text: "No.", source: "")]
+        let out = SpeakerAssignment.reattachDuplicates([TranscriptSegment(start: 1.1, end: 2, text: "No.", language: "en")], to: labeled)
+        #expect(out.count == 2)
+        #expect(out[1].duplicate && out[1].speaker == "Speaker 2" && out[1].text == "No." && out[1].start == 1.1)
+        #expect(!out[0].duplicate)
     }
     @Test func nonConsecutiveRepeatsAreKept() {
         let segs = [TranscriptSegment(start: 0, end: 1, text: "hello", language: nil), TranscriptSegment(start: 1, end: 2, text: "world", language: nil),

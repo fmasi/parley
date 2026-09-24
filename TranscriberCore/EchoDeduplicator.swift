@@ -146,9 +146,9 @@ public enum EchoDeduplicator {
         let localCentroidDb  = localSpeakerDatabase.mapValues  { centroid(from: $0, dim: baseDim) }
         let remoteCentroidDb = remoteSpeakerDatabase.mapValues { centroid(from: $0, dim: baseDim) }
 
-        // A segment the VAD/quality gate already flagged is neither an echo candidate nor evidence
-        // for one: it was noise by that gate's reckoning, and it used to be gone by now.
-        let remoteSegments = segments.filter { $0.source == "remote" && !$0.filtered }
+        // An already-flagged segment (gate-filtered noise, an abutting repeat) is neither an echo
+        // candidate nor evidence for one: it used to be gone by now.
+        let remoteSegments = segments.filter { $0.source == "remote" && !$0.isFlagged }
         guard !remoteSegments.isEmpty else {
             return DeduplicationResult(segments: segments, flaggedCount: 0)
         }
@@ -156,7 +156,7 @@ public enum EchoDeduplicator {
         var result = segments
         var flaggedCount = 0
 
-        for i in result.indices where result[i].source == "local" && !result[i].filtered {
+        for i in result.indices where result[i].source == "local" && !result[i].isFlagged {
             if isEcho(local: result[i], remoteSegments: remoteSegments,
                       localDb: localCentroidDb, remoteDb: remoteCentroidDb,
                       temporalThreshold: tThresh, textThreshold: xThresh, embeddingThreshold: eThresh) {
