@@ -124,9 +124,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var micHealPolicy = MicHealPolicy()
     /// Per-track write progress (A-I3). Touched on the watchdog queue only.
     private var writeMonitors: [CaptureTrack: WriteProgressMonitor] = [:]
-    /// Tracks whose heartbeat flows while nothing is written: their not-delivering alarm clears on write
-    /// progress only, never on a heartbeat (A-I3). Lock-only: the healer queue clears through it too.
-    private let writeStuck = OSAllocatedUnfairLock<Set<CaptureTrack>>(initialState: [])
+    /// Per track, which clears its delivery alarm may take: one raised while the track is called but
+    /// writes nothing, or within 5 s of that, clears on write progress only (A-I3, round 2 item 16).
+    /// Lock-only: the audio, watchdog and healer queues all raise or clear through it.
+    private let deliveryGates = OSAllocatedUnfairLock<[CaptureTrack: DeliveryAlarmGate]>(initialState: [:])
     /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, rebuilds
     /// from the healer (gaps live in `gaps`). Delivered / padded / zero / heartbeat counts
     /// are merged in when read (`coverageFacts`). Lock-only, so the audio queue may read it too.
@@ -279,9 +280,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Returns true when newly raised.
     @discardableResult
     private func raiseAlarm(_ kind: AlarmKind, _ message: String) -> Bool {
-        let changed = stateLock.sync { () -> Bool in
-            guard handler != nil, !isUserStopping else { return false }
-            return alarms.raise(kind, message: message, now: Date())
+        let (changed, active, h) = stateLock.sync { () -> (Bool, Bool, AudioOutputHandler?) in
+            guard handler != nil, !isUserStopping else { return (false, false, nil) }
+            return (alarms.raise(kind, message: message, now: Date()), true, handler)
+        }
+        // A delivery alarm raised during (or just after) a write stall clears on write progress only.
+        if active, let track = Self.deliveryTrack(of: kind) {
+            let frames = h?.writtenFrames(track) ?? 0
+            let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+            deliveryGates.withLock { $0[track, default: DeliveryAlarmGate()].alarmRaised(now: now, frames: frames) }
         }
         guard changed else { return false }
         record(.alarmRaised, .anomaly, ["kind": kind.rawValue])
@@ -307,7 +314,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.onTick = { [weak self] now, gateOpen in self?.checkProgress(nowNanos: now, gateOpen: gateOpen) }
         livenessWatchdog.onResumed = { [weak self] work, reason in self?.resumeAfterSleep(work, reason: reason) }
         livenessWatchdog.fullWakeProbe = { SystemPowerObserver.isFullWake() }
-        writeStuck.withLock { $0 = [] }
+        deliveryGates.withLock { $0 = [:] }
         // A new session starts a new mic episode and fresh write checks; on the watchdog queue, like
         // every other use.
         livenessWatchdog.queue.async { [weak self] in
@@ -399,10 +406,21 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         mic.heal()
     }
 
-    /// A heartbeat must not clear a track's not-delivering alarm while that track is called but writes
-    /// nothing (A-I3): only write progress (or the track no longer being expected) clears that one.
-    private func clearDeliveryAlarm(_ kind: AlarmKind) {
-        if let track = kind.track, writeStuck.withLock({ $0.contains(track) }) { return }
+    /// The not-delivering kind whose clears `DeliveryAlarmGate` decides.
+    private static func deliveryTrack(of kind: AlarmKind) -> CaptureTrack? {
+        switch kind {
+        case .micNotDelivering: return .mic
+        case .remoteNotDelivering: return .system
+        default: return nil
+        }
+    }
+
+    /// A heartbeat must not clear a track's not-delivering alarm that is write-bound — raised while the
+    /// track is called but writes nothing, or within 5 s of that (A-I3, round 2 item 16): only write
+    /// progress, or the track no longer being expected, clears that one.
+    private func clearDeliveryAlarm(_ kind: AlarmKind, reason: DeliveryAlarmGate.ClearReason = .heartbeat) {
+        if let track = Self.deliveryTrack(of: kind),
+           !deliveryGates.withLock({ $0[track, default: DeliveryAlarmGate()].mayClear(reason) }) { return }
         clearAlarm(kind)
     }
 
@@ -431,21 +449,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Tap: its callback heartbeat. SCK: the arrival stamp, as the liveness watchdog uses.
         let systemHeartbeat = tap?.lastHeartbeatNanos() ?? h.lastSystemBufferArrivalNanos()
         for (track, heartbeat, expected) in [(CaptureTrack.mic, micHeartbeat, true), (.system, systemHeartbeat, gateOpen)] {
+            let frames = h.writtenFrames(track)
             var monitor = writeMonitors[track] ?? WriteProgressMonitor()
             let verdict = monitor.check(nowNanos: nowNanos, lastHeartbeatNanos: heartbeat, expected: expected,
-                                        writtenFrames: h.writtenFrames(track))
+                                        writtenFrames: frames)
             writeMonitors[track] = monitor
-            handleWriteProgress(track: track, verdict: verdict)
+            handleWriteProgress(track: track, verdict: verdict, frames: frames)
+            // A write-bound alarm raised outside a write-stall episode clears on write progress (item 16).
+            if deliveryGates.withLock({ $0[track, default: DeliveryAlarmGate()].tick(frames: frames) }) {
+                clearAlarm(track == .mic ? .micNotDelivering : .remoteNotDelivering)
+            }
         }
     }
 
     /// The track's own not-delivering alarm, detail "audio arrives but can't be recorded", and a
     /// quality event for the record (A-I3). Cleared on write progress.
-    private func handleWriteProgress(track: CaptureTrack, verdict: WriteProgressMonitor.Verdict) {
+    private func handleWriteProgress(track: CaptureTrack, verdict: WriteProgressMonitor.Verdict, frames: Int64) {
         let kind: AlarmKind = track == .mic ? .micNotDelivering : .remoteNotDelivering
         switch verdict {
         case .stuck(let s):
-            writeStuck.withLock { _ = $0.insert(track) }
+            deliveryGates.withLock { $0[track, default: DeliveryAlarmGate()].writeStuck(frames: frames) }
             let message = track == .mic
                 ? "The microphone’s audio arrives but can’t be recorded. Try another microphone from the menu."
                 : "The other side’s audio arrives but can’t be recorded."
@@ -454,9 +477,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, message)
             raiseAlarm(kind, message)
         case .cleared:
-            writeStuck.withLock { _ = $0.remove(track) }
+            let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+            deliveryGates.withLock { $0[track, default: DeliveryAlarmGate()].writeRecovered(now: now) }
             record(.livenessRecovered, .info, ["track": track.rawValue, "reason": "writing again, or no longer expected"])
-            clearDeliveryAlarm(kind)
+            clearAlarm(kind)
         case .none:
             break
         }
@@ -478,7 +502,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             tapHealer.heartbeatObserved()
         case .cleared(.gateClosed):
             tapHealer.gateClosed()
-            clearDeliveryAlarm(.remoteNotDelivering)
+            clearDeliveryAlarm(.remoteNotDelivering, reason: .notExpected)
         case .healthy:
             break
         }
@@ -495,8 +519,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         case .firstFrames:
             clearDeliveryAlarm(.remoteNotDelivering)
             clearAlarm(.remoteRecoveryFailed)
-        case .cleared:
-            clearDeliveryAlarm(.remoteNotDelivering)
+        case .cleared(let reason):
+            clearDeliveryAlarm(.remoteNotDelivering, reason: reason == .gateClosed ? .notExpected : .heartbeat)
         default:
             break
         }
@@ -578,6 +602,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             outputHandler.systemExpectedSeconds = { [weak self] in
                 self?.coverage.withLock { $0[.system]?.expectedSeconds ?? 0 } ?? 0
             }
+            // Lock-only: the watchdog's cached last gate reading, for counting the frames written while the
+            // remote was expected (round 2 item 17).
+            outputHandler.systemGateOpen = { [weak self] in self?.livenessWatchdog.lastGateOpen ?? true }
             outputHandler.onStreamStopped = { [weak self, weak outputHandler] error in
                 self?.handleStreamStopped(error, from: outputHandler)
             }

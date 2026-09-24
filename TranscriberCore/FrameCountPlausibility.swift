@@ -71,3 +71,17 @@ public enum FrameCountPlausibility {
         ].compactMap { $0 }
     }
 }
+
+/// The system frames written while the remote was EXPECTED (the gate open), for the end-of-recording
+/// check against the expected seconds (H2 round 2 item 17). Counting every frame lost sensitivity: a tap
+/// that delivered outside the call but went dead during it held enough frames in total to pass.
+public struct GateOpenFrameCounter: Equatable, Sendable {
+    public private(set) var frames: Int64 = 0
+
+    public init() {}
+
+    /// `n` frames (real or padding) appended while the gate was `gateOpen`.
+    public mutating func add(_ n: Int64, gateOpen: Bool) {
+        if gateOpen, n > 0 { frames += n }
+    }
+}

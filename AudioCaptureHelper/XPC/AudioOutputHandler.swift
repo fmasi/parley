@@ -112,6 +112,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `finalizeAll` judges the system track against. Set by the service; read on the audio queue
     /// (lock-only on the service side).
     var systemExpectedSeconds: (() -> Double)?
+    /// Whether the remote is expected right now (the watchdog's last gate reading, lock-only). Read on
+    /// the audio queue per system append.
+    var systemGateOpen: (() -> Bool)?
+    /// System frames (real and padding) written while the gate was open: judged against
+    /// `systemExpectedSeconds` at finalize (round 2 item 17). Audio-queue confined. Never reset.
+    private var gateOpenSystemFrames = GateOpenFrameCounter()
 
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
     /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
@@ -178,7 +184,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         let elapsed = Double(elapsedComponents.seconds) + Double(elapsedComponents.attoseconds) / 1e18
         let verdicts = FrameCountPlausibility.finalizeVerdicts(
             micFrames: totalMicFramesWritten, micRate: AudioConverter.outputSampleRate,
-            systemFrames: totalSystemFramesWritten, systemRate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate,
+            systemFrames: gateOpenSystemFrames.frames, systemRate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate,
             elapsedSeconds: elapsed, systemExpectedSeconds: systemExpectedSeconds?() ?? 0)
         verdicts.forEach(noteFrameCountMismatch)
     }
@@ -383,6 +389,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             dataFrames = Int64(count)
         }
         noteWritten(dataFrames, track: .system)
+        gateOpenSystemFrames.add(sysPad + dataFrames, gateOpen: systemGateOpen?() ?? true)
         notePadding(
             systemPadMonitor.record(padFrames: sysPad, dataFrames: dataFrames, rate: sysRate),
             track: "system")
@@ -425,6 +432,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         systemFramesWritten += Int64(samples.count)
         totalSystemFramesWritten += Int64(samples.count)
         noteWritten(Int64(samples.count), track: .system)
+        gateOpenSystemFrames.add(pad + Int64(samples.count), gateOpen: systemGateOpen?() ?? true)
         // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),

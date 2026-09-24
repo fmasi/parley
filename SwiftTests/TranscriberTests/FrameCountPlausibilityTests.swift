@@ -38,6 +38,21 @@ import Testing
         #expect(verdicts.map(\.track) == ["mic"])
     }
 
+    /// H2 round 2 item 17: only frames written while the remote was EXPECTED count against the expected
+    /// seconds. A tap that delivered outside the call (gate closed) but went dead during it held enough
+    /// frames in total to pass; counted against the gate it does not.
+    @Test func framesWrittenWhileTheGateWasClosedDoNotCount() {
+        var counter = GateOpenFrameCounter()
+        counter.add(Int64(300 * rate), gateOpen: false)   // before the call: delivering, not expected
+        counter.add(Int64(20 * rate), gateOpen: true)     // the call: 20 s of 300 s expected
+        #expect(counter.frames == Int64(20 * rate))
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: counter.frames, systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 300)
+        #expect(verdicts.map(\.track) == ["system"])
+    }
+
     /// Nothing ever played (gotcha #66): no expected time, nothing to judge.
     @Test func aRemoteNeverExpectedIsNotJudged() {
         let verdicts = FrameCountPlausibility.finalizeVerdicts(

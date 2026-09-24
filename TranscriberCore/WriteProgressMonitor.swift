@@ -78,3 +78,73 @@ public struct WriteProgressMonitor: Equatable, Sendable {
         to > from ? Double(to - from) / 1e9 : 0
     }
 }
+
+/// Which clears a track's delivery alarm (`micNotDelivering` / `remoteNotDelivering`) may take (H2
+/// round 2 item 16). An alarm raised while the track is called but writes nothing — or raised within
+/// `graceSeconds` of such an episode ending — is WRITE-BOUND: it clears only on write progress (or when
+/// the track is no longer expected), never on a heartbeat. Otherwise a track that returns with
+/// callbacks but still writes nothing flickers the alarm off and on. One per track.
+public struct DeliveryAlarmGate: Equatable, Sendable {
+    public enum ClearReason: Equatable, Sendable {
+        /// First frames, a heartbeat after a stall, a reopen that delivered, the healer's recovery.
+        case heartbeat
+        /// The track is no longer expected (the remote's gate closed).
+        case notExpected
+    }
+
+    public static let graceSeconds = WriteProgressMonitor.stuckSeconds
+
+    private var stuck = false
+    private var stuckEndedAt: Double?
+    private var writeBound = false
+    /// Written frames when the alarm became write-bound: only more than this is write progress.
+    private var framesAtBind: Int64 = 0
+
+    public init() {}
+
+    /// The write monitor reported the track called but not writing; its alarm is write-bound.
+    public mutating func writeStuck(frames: Int64) {
+        stuck = true
+        bind(frames: frames)
+    }
+
+    /// The write monitor's episode ended (frames written again, or the track no longer expected): the
+    /// alarm clears now, and one raised within `graceSeconds` from here is write-bound again.
+    public mutating func writeRecovered(now: Double) {
+        stuck = false
+        stuckEndedAt = now
+        writeBound = false
+    }
+
+    /// The track's delivery alarm was raised (by anyone: the write check, a liveness verdict, the
+    /// healer's give-up, the reopen deadline), with the written frames at that moment.
+    public mutating func alarmRaised(now: Double, frames: Int64) {
+        guard !writeBound else { return }
+        if stuck || stuckEndedAt.map({ now - $0 < Self.graceSeconds }) == true { bind(frames: frames) }
+    }
+
+    /// May the alarm clear for `reason`? A heartbeat may not clear a write-bound alarm; the track no
+    /// longer being expected always may, and unbinds it.
+    public mutating func mayClear(_ reason: ClearReason) -> Bool {
+        switch reason {
+        case .heartbeat:
+            return !writeBound
+        case .notExpected:
+            writeBound = false
+            return true
+        }
+    }
+
+    /// Every tick, with the written frames: true once when a write-bound alarm sees write progress —
+    /// the one evidence that clears it.
+    public mutating func tick(frames: Int64) -> Bool {
+        guard writeBound, !stuck, frames > framesAtBind else { return false }
+        writeBound = false
+        return true
+    }
+
+    private mutating func bind(frames: Int64) {
+        if !writeBound { framesAtBind = frames }
+        writeBound = true
+    }
+}
