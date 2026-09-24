@@ -37,6 +37,18 @@ func quitAfterUninstallingLaunchAgent() {
     }
 }
 
+/// The menu's Quit (§8.10): while recording — or while a start is in flight — ask first; on "Stop and
+/// Quit" the recording is stopped (bounded) BEFORE the LaunchAgent is uninstalled and the app terminates,
+/// so the 5 s safety-net terminate starts only then. The no-argument form stays for `SetupRequiredPanel`,
+/// which quits before permissions are ready and can never be recording.
+@MainActor
+func quitAfterUninstallingLaunchAgent(coordinator: RecordingCoordinator) {
+    Task {
+        guard await coordinator.prepareForQuit(confirm: { MenuView.confirmQuitWhileRecording() }) else { return }
+        quitAfterUninstallingLaunchAgent()
+    }
+}
+
 extension Notification.Name {
     /// Something a crash-protection hand-over (an exit) waits for has ended — post-recording work, a
     /// panel still preparing — so the hand-over's idle watch looks again (L3 fix round 1, L round 5).
@@ -161,7 +173,7 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    quitAfterUninstallingLaunchAgent()
+                    quitAfterUninstallingLaunchAgent(coordinator: coordinator)
                 }
                 .keyboardShortcut("q")
             }
@@ -386,6 +398,17 @@ struct MenuView: View {
         panel.directoryURL = URL(fileURLWithPath: configManager.config.recordingDirectory)
         NSApp.activate()  // macOS 14+ replacement for the deprecated ignoringOtherApps: form
         return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Quit while recording: stop it first, or stay.
+    static func confirmQuitWhileRecording() -> Bool {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = "Stop the recording and quit?"
+        alert.informativeText = "Parley stops the recording and keeps what was captured before it quits."
+        alert.addButton(withTitle: "Stop and Quit")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func toggleRecording() async {

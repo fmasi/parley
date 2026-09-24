@@ -120,6 +120,8 @@ struct TranscriberApp: App {
     /// Owns the recording lifecycle and every crash path, launch recovery included (§8.3). Built here,
     /// once, and injected into `MenuView` — a view-owned coordinator would not exist yet at launch.
     private let coordinator: RecordingCoordinator
+    /// Sleep, wake and power-off, forwarded to the coordinator for the app's lifetime (§8.10).
+    private let systemEvents: SystemEventObserver
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
     // Recording app: never silent-install (no userDriverDelegate override) — the standard user
@@ -169,6 +171,7 @@ struct TranscriberApp: App {
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
         Self.busyCoordinator = coordinator
+        systemEvents = SystemEventObserver(coordinator: coordinator)
 
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,

@@ -99,7 +99,12 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     func recordLaunchRecovery(_ detail: [String: String]) { launchRecoveries.append(detail) }
 
     var powerEvents: [String] = []
-    func systemPowerEvent(_ kind: String) async { powerEvents.append(kind) }
+    /// Awaited before the event lands: lets a test slow a delivery down (a "sleep" still in flight).
+    var onPowerEvent: ((String) async -> Void)?
+    func systemPowerEvent(_ kind: String) async {
+        await onPowerEvent?(kind)
+        powerEvents.append(kind)
+    }
 
     var recordedEvents: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])] = []
     func record(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, _ detail: [String: String]) {
@@ -2894,5 +2899,139 @@ private struct Harness {
         // The title follows what the salvage wrote (L6); the body says why the stop failed.
         #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+    }
+}
+
+// MARK: - Sleep, wake, power-off, quit (L10, §8.10)
+
+@MainActor
+@Suite struct RecordingCoordinatorSystemEventTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+    }
+
+    @Test func sleepAndWakeAreRecordedAsAGapAndForceARotation() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }   // never the real ~/Documents/Recordings
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try FileManager.default.createDirectory(at: try #require(h.client.startCalls.first).outputDirectory, withIntermediateDirectories: true)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        h.coordinator.systemWillSleep(at: t0)
+        h.coordinator.systemDidWake(at: t0 + 120)
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+        let powerKinds: [CaptureEventKind] = h.client.recordedEvents.map(\.kind).filter { $0 == .systemSleep || $0 == .systemWake }
+        #expect(powerKinds == [.systemSleep, .systemWake])
+        #expect(h.client.rotateCalls == 1, "wake forces a rotation")
+        let gaps = try #require(await h.runner.chunkProcessor?.getSessionState().gaps)
+        #expect(gaps.count == 1 && gaps[0].reason == "sleep" && gaps[0].seconds == 120)
+        #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
+    }
+
+    /// v3 note (H7): the helper pairs its sleep-time `cancelAll()` with the wake's `trigger(.wake)` — a
+    /// "wake" must never overtake a "sleep" still being delivered.
+    @Test func aWakeIsNeverDeliveredBeforeItsSleep() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.client.onPowerEvent = { kind in if kind == "sleep" { try? await Task.sleep(for: .milliseconds(80)) } }
+        h.coordinator.systemWillSleep(at: Date())
+        h.coordinator.systemDidWake(at: Date())
+        var waited = 0
+        while h.client.powerEvents.count < 2, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+    }
+
+    @Test func sleepAndWakeOutsideARecordingDoNothing() async throws {
+        let h = try Harness()
+        h.coordinator.systemWillSleep(at: Date())
+        h.coordinator.systemDidWake(at: Date())
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents.isEmpty && h.client.recordedEvents.isEmpty)
+    }
+
+    /// §8.10: the Mac does not idle-sleep while recording (a lid close is the user's call: recorded as a
+    /// gap, not fought); the assertion ends with the recording, whatever ended it.
+    @Test func idleSleepIsPreventedOnlyWhileRecording() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        #expect(!h.coordinator.preventsIdleSleep)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.coordinator.preventsIdleSleep)
+        h.client.stopError = FakeCaptureError()
+        await h.coordinator.stopRecording()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!h.coordinator.preventsIdleSleep)
+    }
+
+    @Test func quitWhileRecordingStopsFirstOnlyWhenConfirmed() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(await h.coordinator.prepareForQuit(confirm: { false }) == false)
+        #expect(h.client.stopCalls == 0 && h.appState.isRecording)
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }) == true)
+        #expect(h.client.stopCalls == 1)
+        let idle = try Harness()
+        #expect(await idle.coordinator.prepareForQuit(confirm: { false }) == true, "idle: nothing to confirm")
+    }
+
+    /// L5 review: with no `.starting` phase the phase is `.idle` while a start is in flight. A quit then
+    /// is a quit mid-recording: confirmed first, and it waits for the start, then stops the recording.
+    @Test func quitDuringAStartIsConfirmedWaitsForItAndStops() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        let released = Harness.Box(false)
+        h.client.onStartAsync = { while !released.value { await Task.yield() } }
+        let coordinator = h.coordinator
+        let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.coordinator.isStartInFlight && h.appState.isIdle)
+        #expect(await h.coordinator.prepareForQuit(confirm: { false }) == false, "a start in flight is busy, like a recording")
+        let asked = Harness.Box(false)
+        let quitting = Task { await coordinator.prepareForQuit(confirm: { asked.value = true; return true }) }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(asked.value && h.client.stopCalls == 0, "confirmed, and waiting for the start")
+        released.value = true
+        await starting.value
+        #expect(await quitting.value == true)
+        #expect(h.client.stopCalls == 1, "the recording the start began is stopped before the quit")
+    }
+
+    @Test func powerOffStopsARecording() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.systemWillPowerOff()
+        #expect(h.client.stopCalls == 0, "idle: nothing to stop")
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        await h.coordinator.systemWillPowerOff()
+        #expect(h.client.stopCalls == 1 && !h.appState.isRecording)
+    }
+
+    /// L5 review: logout or shutdown while a start is in flight waits for it, then stops the recording.
+    @Test func powerOffDuringAStartWaitsForItAndStops() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        let released = Harness.Box(false)
+        h.client.onStartAsync = { while !released.value { await Task.yield() } }
+        let coordinator = h.coordinator
+        let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
+        for _ in 0..<20 { await Task.yield() }
+        let poweringOff = Task { await coordinator.systemWillPowerOff() }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.client.stopCalls == 0)
+        released.value = true
+        await starting.value
+        await poweringOff.value
+        #expect(h.client.stopCalls == 1 && !h.appState.isRecording)
     }
 }

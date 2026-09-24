@@ -82,6 +82,20 @@ public final class RecordingCoordinator {
         (ClamshellMicGuard.isLidClosed(), ClamshellMicGuard.isBuiltInMicSelected(deviceId: deviceId))
     }
 
+    // MARK: - Sleep, wake, power-off (§8.10)
+
+    /// When the Mac went to sleep mid-recording: the wake records the interval as a capture gap.
+    private var sleptAt: Date?
+    /// The "sleep" delivery to the helper: the "wake" waits for it, so the helper's sleep-time
+    /// `cancelAll()` is always paired with its wake-time `trigger(.wake)` (H7).
+    private var sleepDelivery: Task<Void, Never>?
+    /// `ProcessInfo` activity that keeps the Mac from idle-sleeping while recording. Follows the phase,
+    /// so every path in and out of a recording is covered. A lid close or a user sleep still sleeps:
+    /// that is the user's call — recorded as a gap, not fought.
+    private var idleSleepActivity: NSObjectProtocol?
+    /// Internal for tests.
+    var preventsIdleSleep: Bool { idleSleepActivity != nil }
+
     // MARK: - Sentinel liveness and relaunch (§8.3, §8.9)
 
     /// How often the sentinel's `lastAliveAt` is refreshed while recording (also at every rotation). A
@@ -210,6 +224,7 @@ public final class RecordingCoordinator {
         recordingMicrophone.addObserver(self)
         recordingMicrophoneChanged(to: recordingMicrophone.current)   // a re-attach may have marked it already
         updateIdleRealarm()
+        trackIdleSleepActivity()
     }
 
     // MARK: - Pure decision helpers (unit-tested)
@@ -1522,6 +1537,94 @@ public final class RecordingCoordinator {
         .compactMap { (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent($0).path))?[.modificationDate] as? Date }
         let best = ([lastAlive ?? sentinel.startedAt] + orphanEnds).max() ?? sentinel.startedAt
         return min(best, Date())
+    }
+
+    // MARK: - Sleep, wake, power-off, quit (§8.10)
+
+    /// Begin or end the idle-sleep activity with the phase, then re-evaluate on its next change.
+    private func trackIdleSleepActivity() {
+        if appState.isRecording, idleSleepActivity == nil {
+            idleSleepActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Recording a meeting")
+        } else if !appState.isRecording, let activity = idleSleepActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            idleSleepActivity = nil
+        }
+        withObservationTracking {
+            _ = appState.phase
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.trackIdleSleepActivity() }
+        }
+    }
+
+    /// `NSWorkspace.willSleep` while recording: nothing is captured until the wake. The helper is told
+    /// (it pauses its detectors), the status poll and the rotation timer stop — a rotation the timer
+    /// would owe on wake is the wake's forced one.
+    public func systemWillSleep(at date: Date = Date()) {
+        guard appState.isRecording else { return }
+        Logger.state.info("System going to sleep while recording")
+        sleptAt = date
+        captureClient.record(.systemSleep, .info, [:])
+        stopStatusPoll()
+        transcriptionRunner.stopChunkRotation()
+        let previous = sleepDelivery
+        sleepDelivery = Task {
+            await previous?.value
+            await self.captureClient.systemPowerEvent("sleep")
+        }
+    }
+
+    /// `NSWorkspace.didWake`: the sleep becomes a capture gap in the session (re-detect's bound reads an
+    /// unrecorded gap as implausible timing), the helper is told — only after its "sleep" landed (H7) —
+    /// a rotation seals the chunk that spans the sleep, and "Resumed" waits for the first frames again.
+    public func systemDidWake(at date: Date = Date()) {
+        guard appState.isRecording, let start = sleptAt else { return }
+        sleptAt = nil
+        Logger.state.info("System woke while recording (\(Int(date.timeIntervalSince(start)), privacy: .public) s asleep)")
+        captureClient.record(.systemWake, .info, ["seconds": "\(max(0, Int(date.timeIntervalSince(start))))"])
+        let gap = CaptureGap(start: start, end: date, reason: "sleep")
+        Task { await self.transcriptionRunner.recordCaptureGap(gap) }
+        let sleep = sleepDelivery
+        sleepDelivery = Task {
+            await sleep?.value
+            await self.captureClient.systemPowerEvent("wake")
+        }
+        transcriptionRunner.chunkRotator?.rotateNow()
+        transcriptionRunner.startChunkRotation()
+        startStatusPoll()
+        awaitingRecoveryFrames = true
+        recoveryFramesAt = nil
+        restartLostAudio = true   // nothing was captured while the Mac slept
+        appState.interruptionWarning = "Recording restarted — waiting for audio…"
+    }
+
+    /// Logout, shutdown and restart all arrive as `willPowerOff` (fast user switching is not one: the
+    /// recording continues). A recording — or a start in flight, which is one about to begin (the phase is
+    /// still `.idle` then, L5 review) — is stopped, bounded, so what was captured is finalized or at least
+    /// left to the relaunch's salvage.
+    public func systemWillPowerOff() async {
+        guard appState.isRecording || isStartInFlight else { return }
+        Logger.state.info("System powering off while recording — stopping")
+        await stopForExit(label: "power off stop")
+    }
+
+    /// Quit. Idle → true. While recording, or while a start is in flight → `confirm()`: true → the start is
+    /// awaited, then a bounded stop (30 s), then true; false → false (Parley stays).
+    public func prepareForQuit(confirm: () async -> Bool) async -> Bool {
+        guard appState.isRecording || isStartInFlight else { return true }
+        guard await confirm() else { return false }
+        await stopForExit(label: "quit stop")
+        return true
+    }
+
+    /// Before the process ends: let a start in flight resolve (it is bounded by `startDeadline`), then
+    /// stop whatever recording there is, bounded.
+    private func stopForExit(label: String) async {
+        let startBy = ContinuousClock.now + startDeadline + .seconds(5)
+        while isStartInFlight, ContinuousClock.now < startBy {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard appState.isRecording else { return }
+        _ = try? await withDeadline(seconds: 30, label: label) { await self.stopRecording() }
     }
 
     // MARK: - Sentinel liveness (§8.3, §8.8)
