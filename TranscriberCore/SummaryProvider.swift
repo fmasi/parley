@@ -16,6 +16,21 @@ public struct SummarySegment: Sendable {
     }
 }
 
+/// How much of one side of the meeting was captured, read from the transcript's
+/// `metadata.capture.remote` / `.local` (§7.1/§7.3). `status` is a `TrackAccounting.Status` raw
+/// value ("healthy", "idle", "neverDelivered", "compromised").
+public struct CaptureSideNote: Equatable, Sendable {
+    public let status: String
+    public let deliveredSeconds: Double
+    public let expectedSeconds: Double
+
+    public init(status: String, deliveredSeconds: Double, expectedSeconds: Double) {
+        self.status = status
+        self.deliveredSeconds = deliveredSeconds
+        self.expectedSeconds = expectedSeconds
+    }
+}
+
 public struct SummaryMetadata: Sendable {
     public let sessionName: String
     public let date: Date
@@ -23,15 +38,21 @@ public struct SummaryMetadata: Sendable {
     public let speakers: [String]
     public let dualStream: Bool
     public let echoSegmentsRemoved: Int
+    /// Capture coverage per side; nil when the transcript carries none (older, or not recorded).
+    public let remoteCapture: CaptureSideNote?
+    public let localCapture: CaptureSideNote?
 
     public init(sessionName: String, date: Date, durationSeconds: Double, speakers: [String],
-                dualStream: Bool = false, echoSegmentsRemoved: Int = 0) {
+                dualStream: Bool = false, echoSegmentsRemoved: Int = 0,
+                remoteCapture: CaptureSideNote? = nil, localCapture: CaptureSideNote? = nil) {
         self.sessionName = sessionName
         self.date = date
         self.durationSeconds = durationSeconds
         self.speakers = speakers
         self.dualStream = dualStream
         self.echoSegmentsRemoved = echoSegmentsRemoved
+        self.remoteCapture = remoteCapture
+        self.localCapture = localCapture
     }
 }
 

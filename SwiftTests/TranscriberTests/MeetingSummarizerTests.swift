@@ -446,6 +446,18 @@ struct MeetingSummarizerTests {
         let (segments, _) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
         #expect(segments.map(\.text) == ["keep"])
     }
+
+    @Test func parsesCaptureCoverageFromMetadata() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("t-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["capture": ["remote": ["status": "neverDelivered", "delivered_seconds": 0.0, "expected_seconds": 2736.0]]],
+            "segments": [] as [Any],
+        ]).write(to: url)
+        let (_, meta) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(meta.remoteCapture == CaptureSideNote(status: "neverDelivered", deliveredSeconds: 0, expectedSeconds: 2736))
+        #expect(meta.localCapture == nil)
+    }
 }
 
 private struct TruncatingProvider: SummaryProvider {

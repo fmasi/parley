@@ -145,4 +145,16 @@ struct TranscriptAssemblerTests {
         #expect(m["processing_issue_count"] as? Int == 2, "stream_empty does not affect content")
         #expect(m["processing_problem_chunks"] as? Int == 2)
     }
+
+    @Test func coverageLandsInMetadataCapture() throws {
+        var remote = TrackAccounting(); remote.expectedSeconds = 2736; remote.deliveredSeconds = 0
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, remoteCoverage: remote, remoteStatus: "neverDelivered")
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false, provenance: p)
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        let r = try #require(capture["remote"] as? [String: Any])
+        #expect(r["status"] as? String == "neverDelivered" && r["expected_seconds"] as? Double == 2736)
+        #expect(capture["local"] == nil)
+    }
 }

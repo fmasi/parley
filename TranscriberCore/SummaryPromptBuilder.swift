@@ -16,15 +16,39 @@ enum SummaryPromptBuilder {
     /// The user message: the meeting-metadata header followed by the formatted transcript.
     static func userMessage(metadata: SummaryMetadata, segments: [SummarySegment]) -> String {
         let transcript = formatTranscript(segments, includeSource: metadata.dualStream)
+        // A side that was not captured is stated in the header (§7.3): otherwise the model reads a
+        // one-sided transcript as a one-sided meeting and summarises it as if nobody else spoke.
+        let capture = captureLine(metadata).map { "\n\($0)" } ?? ""
         return """
         Meeting: \(metadata.sessionName)
         Date: \(formatDate(metadata.date))
         Duration: \(formatDuration(metadata.durationSeconds))
-        Participants: \(metadata.speakers.joined(separator: ", "))
+        Participants: \(metadata.speakers.joined(separator: ", "))\(capture)
 
         --- TRANSCRIPT ---
         \(transcript)
         """
+    }
+
+    /// The header line(s) naming a side that was not (fully) captured, or nil when both sides were
+    /// captured (or the transcript carries no coverage). Both lines, newline-joined, when both apply.
+    static func captureLine(_ metadata: SummaryMetadata) -> String? {
+        let lines = [
+            metadata.remoteCapture.flatMap { sideLine("Remote audio", $0, isRemote: true) },
+            metadata.localCapture.flatMap { sideLine("Your microphone", $0, isRemote: false) },
+        ].compactMap { $0 }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> String? {
+        let amounts = "(\(Int(note.deliveredSeconds.rounded())) s delivered of \(Int(note.expectedSeconds.rounded())) s expected)"
+        switch TrackAccounting.Status(rawValue: note.status) {
+        case .neverDelivered: return "\(label): not captured \(amounts)"
+        case .compromised: return "\(label): partly captured \(amounts)"
+        // `idle` is a tap-only verdict (nothing played on this Mac); a mic is never idle.
+        case .idle: return isRemote ? "\(label): nothing was playing on this Mac (no remote side)" : nil
+        case .healthy, nil: return nil
+        }
     }
 
     static func formatTranscript(_ segments: [SummarySegment], includeSource: Bool = false) -> String {
@@ -90,6 +114,7 @@ enum SummaryPromptBuilder {
     - Do not include small talk, greetings, or off-topic banter
     - Keep the total summary under 500 words
     - Use professional, concise language
+    - If a "Remote audio" or "Your microphone" line says a side was not captured, state that in the Summary section before anything else.
     """
 
     static let dualStreamHint = """

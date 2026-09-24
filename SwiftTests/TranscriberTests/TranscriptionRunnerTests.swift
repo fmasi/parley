@@ -101,4 +101,16 @@ import Testing
         }
         #expect(runner.chunkProcessor == nil)
     }
+
+    /// P8: `dual_stream` is the capture-time flag the writer persisted, not "did a local segment survive".
+    @Test func finalizeStampsDualStreamFromTheChunkFlags() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+            segments: [.init(start: 0, end: 5, text: "hi", speaker: "Remote Speaker 1", source: "remote")],
+            speakerDatabase: ["Remote Speaker 1": [1, 0, 0]], localSpeakerDatabase: [:], isDualStream: true)
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
+        #expect((json?["metadata"] as? [String: Any])?["dual_stream"] as? Bool == true)
+    }
 }

@@ -74,4 +74,14 @@ struct SummaryPromptBuilderTests {
         #expect(single.contains("Alice: hi"))
         #expect(!single.contains("(local)"))
     }
+
+    @Test func headerNamesAnUncapturedRemoteSide() {
+        let m = SummaryMetadata(sessionName: "s", date: Date(timeIntervalSince1970: 0), durationSeconds: 60, speakers: ["Frederic"],
+                                dualStream: true, echoSegmentsRemoved: 0,
+                                remoteCapture: CaptureSideNote(status: "neverDelivered", deliveredSeconds: 0, expectedSeconds: 2736))
+        let msg = SummaryPromptBuilder.userMessage(metadata: m, segments: [])
+        #expect(msg.contains("Remote audio: not captured (0 s delivered of 2736 s expected)"))
+        #expect(SummaryPromptBuilder.captureLine(SummaryMetadata(sessionName: "s", date: Date(), durationSeconds: 1, speakers: [])) == nil)
+        #expect(SummaryPromptBuilder.systemPrompt.contains("state that in the Summary section"))
+    }
 }

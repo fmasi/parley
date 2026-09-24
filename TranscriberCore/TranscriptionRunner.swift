@@ -403,7 +403,9 @@ public final class TranscriptionRunner {
         allSegments.sort { $0.start < $1.start }
 
         // 4. Dual-stream tagging
-        let isDualStream = allSegments.contains { $0.source == "local" }
+        // The capture-time flag the chunk writer persisted (P8, §7.2) — never re-derived from "did a
+        // local segment survive": a dual-stream meeting where you said nothing is still dual-stream.
+        let isDualStream = chunksAreDualStream
         if isDualStream {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }

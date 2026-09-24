@@ -192,6 +192,7 @@ public enum MeetingSummarizer {
         let metadata_raw = json["metadata"] as? [String: Any]
         let dualStream = metadata_raw?["dual_stream"] as? Bool ?? false
         let echoRemoved = metadata_raw?["echo_segments_removed"] as? Int ?? 0
+        let capture = metadata_raw?["capture"] as? [String: Any]
 
         // Flagged segments (VAD-filtered noise, mic-bleed echo) are kept in the record but are not
         // what anybody said to the meeting: the model never sees them (P10/P11).
@@ -223,10 +224,22 @@ public enum MeetingSummarizer {
             durationSeconds: duration,
             speakers: speakers,
             dualStream: dualStream,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsRemoved: echoRemoved,
+            remoteCapture: captureSideNote(capture?["remote"]),
+            localCapture: captureSideNote(capture?["local"])
         )
 
         return (segments, metadata)
+    }
+
+    /// One side of `metadata.capture` (§7.2) as a `CaptureSideNote`; nil when absent or unusable.
+    private static func captureSideNote(_ raw: Any?) -> CaptureSideNote? {
+        guard let side = raw as? [String: Any], let status = side["status"] as? String else { return nil }
+        return CaptureSideNote(
+            status: status,
+            deliveredSeconds: side["delivered_seconds"] as? Double ?? 0,
+            expectedSeconds: side["expected_seconds"] as? Double ?? 0
+        )
     }
 
     /// Determine the canonical recording-start date for the summary (#49).

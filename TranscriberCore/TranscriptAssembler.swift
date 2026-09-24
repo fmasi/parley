@@ -41,7 +41,15 @@ public enum TranscriptAssembler {
         // Capture provenance (#95): a compact, always-present stamp of how this recording was
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.
         if let provenance {
-            metadata["capture_provenance"] = provenance.asMetadataDictionary()
+            let provenanceDictionary = provenance.asMetadataDictionary()
+            metadata["capture_provenance"] = provenanceDictionary
+            // How much of each side was captured (§7.2 `metadata.capture.remote/local`). Taken from
+            // the provenance dictionary so the status here is exactly the one stamped there,
+            // including its fail-closed fallback when a stored status is missing or unreadable.
+            var capture = metadata["capture"] as? [String: Any] ?? [:]
+            if let remote = provenanceDictionary["remote_coverage"] { capture["remote"] = remote }
+            if let local = provenanceDictionary["local_coverage"] { capture["local"] = local }
+            if !capture.isEmpty { metadata["capture"] = capture }
         }
         // Periods with no capture (relaunch, sleep) — §7.2 `metadata.capture.gaps`. The `capture`
         // dictionary is created on demand: gaps must be stated even when no coverage was stamped.
