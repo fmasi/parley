@@ -291,7 +291,7 @@ struct TranscriberApp: App {
     /// (rename parsing, the SessionName / MicSwitch device scans) (L3 fix round 1, L round 5).
     @MainActor
     static func isBusy(_ appState: AppState) -> Bool {
-        !appState.isIdle || PostRecordingWork.inFlight > 0 || (busyCoordinator?.startInFlight ?? false)
+        !appState.isIdle || PostRecordingWork.inFlight > 0 || (busyCoordinator?.isStartInFlight ?? false)
             || RenameWindowController.shared.isPreparing || SessionNameWindowController.shared.isPreparing
             || MicSwitchWindowController.shared.isPreparing
     }
@@ -413,7 +413,7 @@ struct TranscriberApp: App {
         idleWatch = watch
         watch.start {
             _ = appState.phase
-            _ = busyCoordinator?.startInFlight
+            _ = busyCoordinator?.isStartInFlight
         }
     }
 

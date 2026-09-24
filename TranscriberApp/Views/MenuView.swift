@@ -332,7 +332,8 @@ struct MenuView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .tint(.red)
-        .disabled(appState.isTranscribing)
+        // A start in flight (the phase is still `.idle` while the helper starts) must not offer a second Start.
+        .disabled(appState.isTranscribing || coordinator.isStartInFlight)
     }
 
     private var recordButtonTitle: String {

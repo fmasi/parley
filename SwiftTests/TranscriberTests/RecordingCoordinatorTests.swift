@@ -917,19 +917,19 @@ private struct Harness {
         }
         let coordinator = h.coordinator
         let duringStart = Harness.Box<Bool?>(nil)
-        h.client.onStart = { duringStart.value = coordinator.startInFlight }
-        #expect(!coordinator.startInFlight)
+        h.client.onStart = { duringStart.value = coordinator.isStartInFlight }
+        #expect(!coordinator.isStartInFlight)
         await coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         defer {
             h.runner.stopChunkRotation()
             h.runner.teardownChunkedPipeline()
         }
-        #expect(duringStart.value == true && !coordinator.startInFlight)
+        #expect(duringStart.value == true && !coordinator.isStartInFlight)
 
         h.appState.phase = .idle
         h.client.startError = FakeCaptureError()
         await coordinator.startRecording(sessionName: "Again", microphoneDeviceId: "mic-1")
-        #expect(!coordinator.startInFlight, "cleared on the failure path too")
+        #expect(!coordinator.isStartInFlight, "cleared on the failure path too")
     }
 
     /// L round 7, item 3: the Start is announced SYNCHRONOUSLY when the dialog commits, so no main-actor
@@ -941,13 +941,13 @@ private struct Harness {
             $0.engine = .fluidAudio
         }
         h.coordinator.announceStart()
-        #expect(h.coordinator.startInFlight, "from this very turn")
+        #expect(h.coordinator.isStartInFlight, "from this very turn")
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         defer {
             h.runner.stopChunkRotation()
             h.runner.teardownChunkedPipeline()
         }
-        #expect(h.appState.isRecording && !h.coordinator.startInFlight)
+        #expect(h.appState.isRecording && !h.coordinator.isStartInFlight)
     }
 
     /// L round 7, item 5: the phase is still `.idle` while the first start awaits the helper, so the
@@ -975,6 +975,109 @@ private struct Harness {
         #expect(h.client.startCalls.first?.microphoneDeviceId == "mic-1")
         #expect(h.appState.isRecording)
         #expect(RecordingSentinel.read(directory: h.tmp)?.micDeviceUID == "mic-1", "the loser wrote nothing")
+    }
+
+    // MARK: - L5: stop vs crash, double start, post-start failure (§8.6)
+
+    /// L6: the trailing invalidation of a stop lands mid-stop; the stop path owns the teardown.
+    @Test func aCrashDuringStopIsIgnoredByTheCrashHandler() async throws {
+        let h = try Harness(); _ = try h.writeSentinel(); h.appState.phase = .recording(since: Date())
+        h.client.stopError = FakeCaptureError()
+        h.client.onStop = { await h.coordinator.handleXPCCrash() }
+        await h.coordinator.stopRecording()
+        #expect(h.client.startCalls.isEmpty, "the stop path owns the teardown; no restart")
+        #expect(h.appState.isIdle)
+    }
+
+    /// L7: a second Start while the first is still setting up is ignored, not queued.
+    @Test func aSecondStartWhileOneIsInFlightIsIgnored() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }   // never the real ~/Documents/Recordings
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        h.client.onStart = { Task { await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil) } }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(h.client.startCalls.count == 1)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.sessionName == "a")
+        #expect(!h.coordinator.isStartInFlight)
+    }
+
+    /// L8: any failure after a successful helper start runs a bounded stop before reporting.
+    @Test func aFailureAfterAStartedHelperStopsTheHelper() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.runner.failSetupForTesting = true   // R0 seam: setupChunkedPipeline throws
+        let markedAtStop = Harness.Box<String??>(nil)
+        let recordingMic = h.recordingMic
+        h.client.onStop = { markedAtStop.value = recordingMic.current }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        #expect(h.client.stopCalls == 1)
+        #expect(markedAtStop.value == .some("mic-1"), "the mic marker is released only after the helper let go (#192)")
+        #expect(h.recordingMic.current == .none)
+        #expect(h.appState.isIdle)
+        #expect(h.notified.value.map(\.title) == ["Recording Failed"])
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// A helper start that fails never reached the helper's capture: nothing to stop.
+    @Test func aFailedHelperStartIsNotStopped() async throws {
+        let h = try Harness()
+        h.client.startError = FakeCaptureError()
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.stopCalls == 0)
+        #expect(h.notified.value.map(\.title) == ["Recording Failed"])
+    }
+
+    /// Ledger note (L5): a crash reported while `start()` is awaited arrives while the phase is still
+    /// `.idle`. It must not be dropped (the client reports it once per capture generation): it is handled
+    /// as soon as the recording is up.
+    @Test func aCrashDuringTheStartIsHandledOnceTheRecordingIsUp() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let client = h.client
+        let fired = Harness.Box(false)
+        client.onStartAsync = {
+            guard !fired.value else { return }
+            fired.value = true
+            client.onServiceCrash?()                      // the helper dies while start() is awaited
+            for _ in 0..<20 { await Task.yield() }        // the crash callback runs now, phase still .idle
+        }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        for _ in 0..<50 where client.startCalls.count < 2 { await Task.yield() }
+        #expect(client.startCalls.count == 2, "the recording's start, then the crash restart")
+        #expect(client.retryEvents.count == 1)
+        #expect(h.appState.isRecording)
+    }
+
+    /// A crash during a start that then FAILS is moot: the failure path ends it, and the next recording
+    /// never inherits it.
+    @Test func aCrashDuringAFailedStartIsNotInheritedByTheNextRecording() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let client = h.client
+        client.startError = FakeCaptureError()
+        client.onStartAsync = {
+            guard client.startCalls.count == 1 else { return }
+            client.onServiceCrash?()
+            for _ in 0..<20 { await Task.yield() }
+        }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        client.startError = nil
+        await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
+        for _ in 0..<50 { await Task.yield() }
+        #expect(client.startCalls.count == 2 && client.retryEvents.isEmpty, "no restart for the failed start's crash")
+        #expect(h.appState.isRecording)
     }
 
     /// L round 5, item 15: a failed stop whose sentinel is MISSING still salvages from the live
@@ -1902,6 +2005,7 @@ private struct Harness {
     @Test func crashAfterDecayIntervalStartsAFreshStreak() async throws {
         let h = try Harness()
         _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())   // the crash handler runs only for a live recording
         // #61: the streak decays — an old exhausted streak must NOT trip the cap.
         h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries
         h.coordinator.lastCrashAt = Date().addingTimeInterval(-(XPCRetryPolicy.defaultDecayInterval + 1))

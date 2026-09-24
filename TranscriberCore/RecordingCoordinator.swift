@@ -111,10 +111,14 @@ public final class RecordingCoordinator {
     /// A recording start is in flight: announced by the UI the moment its dialog commits (no main-actor
     /// turn in between counts as idle — L round 7), or running in `startRecording`, whatever the
     /// outcome. The phase is still `.idle` meanwhile, and a crash-protection hand-over (an exit) must
-    /// wait. L5's synchronous `.starting` phase may replace it.
-    public var startInFlight: Bool { startAnnounced || startRunning }
+    /// wait; the Record control is disabled (§8.6, mirrors `stopInFlight`).
+    public var isStartInFlight: Bool { startAnnounced || startRunning }
     private var startAnnounced = false
     private var startRunning = false
+    /// The helper crashed (or failed fatally) while a start awaited it: the phase was still `.idle`, and
+    /// the client reports a crash once per capture generation, so dropping it would leave a dead
+    /// recording. Handled as soon as the recording is up; moot if the start fails.
+    private var crashDuringStart = false
 
     /// The UI committed to a Start (the session dialog closed): in flight from this very turn. The
     /// caller's Task always reaches `startRecording`, which takes it over at its first line — even
@@ -312,6 +316,9 @@ public final class RecordingCoordinator {
         resetRecoveryConfirmation()
         // Wired before the helper starts, so nothing it reports in its first seconds is lost.
         wireCaptureCallbacks()
+        crashDuringStart = false
+        // Set once the helper's capture is running: every failure after that stops it (§8.6).
+        var captureStarted = false
 
         do {
             let sentinel = RecordingSentinel(
@@ -335,6 +342,7 @@ public final class RecordingCoordinator {
                 options: CaptureOptions(config: config),
                 sessionId: naming.chunkBaseName
             )
+            captureStarted = true
 
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient,
@@ -351,7 +359,21 @@ public final class RecordingCoordinator {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
             presentCarriedAlarmsAtRecordingStart()
+            if crashDuringStart {
+                crashDuringStart = false
+                Logger.state.warning("The helper crashed while the recording was starting — crash recovery now")
+                Task {
+                    guard self.appState.isRecording else { return }
+                    await self.handleXPCCrash()
+                }
+            }
         } catch {
+            crashDuringStart = false   // moot: this failure path ends the recording
+            // The helper is capturing (a later step failed): stop it — bounded — BEFORE the mic marker is
+            // released, so no meter opens the mic the helper still holds (#192, §8.6).
+            if captureStarted {
+                _ = try? await withDeadline(seconds: 20, label: "stop after failed start") { try await self.stopHelper() }
+            }
             clearHelperMic()
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
             RecordingSentinel.delete(directory: sentinelDirectory)
@@ -604,10 +626,7 @@ public final class RecordingCoordinator {
     /// cycle coordinator → captureClient → closure → coordinator.
     private func wireCaptureCallbacks() {
         captureClient.onServiceCrash = { [weak self] in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                await self.handleXPCCrash()
-            }
+            Task { @MainActor in await self?.crashReported() }
         }
         // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
         // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
@@ -621,10 +640,7 @@ public final class RecordingCoordinator {
             }
         }
         captureClient.onFatalFailure = { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                await self.handleXPCCrash()
-            }
+            Task { @MainActor in await self?.crashReported() }
         }
         // A transient notice only: the sticky state is the helper's `remoteRecoveryFailed` alarm.
         captureClient.onSystemAudioUnrecoverable = { [weak self] _ in
@@ -665,6 +681,16 @@ public final class RecordingCoordinator {
                 self.presentAlarms()
             }
         }
+    }
+
+    /// A crash or fatal failure from the helper. While a start awaits it the phase is still `.idle`: the
+    /// crash counts for that recording and is handled once it is up. Outside a recording: nothing.
+    private func crashReported() async {
+        guard appState.isRecording else {
+            if startRunning { crashDuringStart = true }
+            return
+        }
+        await handleXPCCrash()
     }
 
     /// Pull the helper's alarm state every `statusPollInterval` while recording (§6.2). Holds the
@@ -927,6 +953,12 @@ public final class RecordingCoordinator {
     /// successfully (counting toward the cap), or dropped when it gives up. Two concurrent recoveries
     /// ended with a capturing helper, an idle app and detection off.
     func handleXPCCrash() async {
+        // A stop's trailing interruption/invalidation lands while it is in flight: the stop path owns the
+        // teardown (it re-ingests the orphan and salvages on failure). A restart now would race it (§8.6).
+        guard !stopInFlight else {
+            Logger.state.info("Crash handler yielding to a stop in flight")
+            return
+        }
         guard !crashHandlingActive else {
             Logger.state.warning("Crash reported while a recovery is in flight — queued")
             pendingCrash = true
@@ -967,6 +999,8 @@ public final class RecordingCoordinator {
     }
 
     private func helperIsCapturing() async -> Bool { await captureClient.isCapturing() }
+    /// The helper's stop, its paths discarded: a bounded (`withDeadline`) body must return `Sendable`.
+    private func stopHelper() async throws { _ = try await captureClient.stop() }
 
     private func recoverFromCrash() async {
         // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
@@ -1076,6 +1110,13 @@ public final class RecordingCoordinator {
                 awaitingRecoveryFrames = false
                 Logger.state.info("Honoring stop requested during recovery")
                 await stopRecording()
+                return
+            }
+            // Re-checked after the await (§8.6): nothing else ends a recording mid-restart today, but a
+            // restart must never announce itself for a recording that is no longer running.
+            guard appState.isRecording, !stopInFlight else {
+                awaitingRecoveryFrames = false
+                Logger.state.warning("The recording ended while its capture restarted — not resuming it")
                 return
             }
             // The old helper's alarms stay: the new helper's snapshot turns them stale, and only its
