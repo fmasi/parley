@@ -48,6 +48,11 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// chunk. Never reset.
     private var totalMicFramesWritten: Int64 = 0
     private var totalSystemFramesWritten: Int64 = 0
+    /// Of the session totals above, the frames that were timeline padding (fabricated silence), and
+    /// the real mic frames that were exact digital zero — per-track coverage (§7.1). Never reset.
+    private var totalMicPadFrames: Int64 = 0
+    private var totalSystemPadFrames: Int64 = 0
+    private var micExactZeroFrames: Int64 = 0
     /// When this handler (and therefore the session — the same handler is reused across chunk
     /// rotations, see `swapWriters`) started, for the finalize wall-clock comparison. A
     /// `ContinuousClock` (monotonic) rather than `Date` (wall clock), so an NTP step-correction
@@ -94,6 +99,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// zero buffers before a call connects (gotcha #66) — `finalizeAll()`'s frame-count-plausibility
     /// backstop must not mistake "no call ever connected" for a dropped/missing system track.
     var isUsingSystemTap = false
+    /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1). Set by
+    /// the service; read in `finalizeAll`, on the audio queue (lock-only on the service side).
+    var systemExpectedSeconds: (() -> Double)?
 
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
     /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
@@ -124,6 +132,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Last mic-buffer arrival timestamp (`uptimeNanoseconds`), 0 until the first buffer (#196).
     func lastMicBufferArrivalNanos() -> UInt64 {
         micBufferArrival.withLock { $0 }
+    }
+
+    /// Session-wide frame totals for per-track coverage (§7.1): delivered = real frames (padding
+    /// excluded). MUST be read on the audio queue (the service uses `audioQueue.sync` from an XPC thread).
+    func trackTotals() -> (micDelivered: Int64, micPad: Int64, micZero: Int64, sysDelivered: Int64, sysPad: Int64) {
+        (totalMicFramesWritten - totalMicPadFrames, totalMicPadFrames, micExactZeroFrames,
+         totalSystemFramesWritten - totalSystemPadFrames, totalSystemPadFrames)
     }
 
     init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
@@ -158,13 +173,10 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             track: "mic", framesWritten: totalMicFramesWritten,
             rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed
         ))
-        // Skip the system-track check entirely for a tap recording that never received a single
-        // frame: on the tap, zero frames for the whole session means "recording started before any
-        // call connected" (gotcha #66), not a dropped/missing track. The liveness watchdog already
-        // gates its mid-recording check the same way (`isOutputDeviceRunningSomewhere()`); this is
-        // the finalize-time equivalent, using total frame count since the tap being silent NOW
-        // doesn't mean it was silent throughout — but zero frames for the ENTIRE session does.
-        if !(isUsingSystemTap && totalSystemFramesWritten == 0) {
+        // Skip the system-track check only for a tap recording that was never EXPECTED to deliver
+        // (Q4.5): nothing else played output for the whole session (gotcha #66), so no frames is
+        // correct. A tap that was expected and delivered nothing is exactly what this must catch.
+        if !(isUsingSystemTap && (systemExpectedSeconds?() ?? 0) < 1) {
             noteFrameCountMismatch(FrameCountPlausibility.check(
                 track: "system", framesWritten: totalSystemFramesWritten,
                 rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
@@ -347,6 +359,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         systemFramesWritten += sysPad
         totalSystemFramesWritten += sysPad
+        totalSystemPadFrames += sysPad
 
         let isFloat = isFloatFormat(from: sampleBuffer)
         var dataFrames: Int64 = 0
@@ -403,6 +416,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         systemFramesWritten += pad
         totalSystemFramesWritten += pad
+        totalSystemPadFrames += pad
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
         totalSystemFramesWritten += Int64(samples.count)
@@ -584,6 +598,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         micFramesWritten += pad
         totalMicFramesWritten += pad
+        totalMicPadFrames += pad
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
         totalMicFramesWritten += Int64(samples.count)
@@ -591,6 +606,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
                                  rate: AudioConverter.outputSampleRate),
             track: "mic")
+        if !samples.isEmpty, samples.allSatisfy({ $0 == 0 }) { micExactZeroFrames += Int64(samples.count) }
         noteExactZeroMic(
             micExactZeroMonitor.record(samples: samples, rate: AudioConverter.outputSampleRate))
     }

@@ -53,7 +53,7 @@ final class SystemTapSession {
 
     /// Stamped as the FIRST statement of every IOProc callback, whatever the guards below decide: a
     /// heartbeat means "the OS called us" (§4.2). Lock-only, read from the watchdog's queue.
-    private let heartbeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    private let heartbeat = OSAllocatedUnfairLock<(nanos: UInt64, count: Int)>(initialState: (0, 0))
     /// Aggregate generation, bumped on every successful build/rebuild. Guarded by `stateLock`.
     private var generation = 0
 
@@ -144,7 +144,9 @@ final class SystemTapSession {
     deinit { stop() }
 
     /// The last IOProc callback, in `DispatchTime` uptime nanoseconds (0 = never). Lock-only.
-    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0 } }
+    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0.nanos } }
+    /// Heartbeats since this session began, for coverage accounting (§7.1). Lock-only.
+    func heartbeatCount() -> Int { heartbeat.withLock { $0.count } }
     /// The current aggregate generation (0 = never built).
     func generationValue() -> Int { stateLock.sync { generation } }
 
@@ -524,7 +526,7 @@ final class SystemTapSession {
         // D-04: reproduce Incident B (no callbacks at all) on demand — the heartbeat is never stamped,
         // so never-delivered fires and the ladder runs against a tap this code keeps silent.
         if dropFramesForDiagnostics { return }
-        heartbeat.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        heartbeat.withLock { $0 = (DispatchTime.now().uptimeNanoseconds, $0.count + 1) }
         let (format, bpf, stopping) = stateLock.sync { (tapFormat, bytesPerFrame, isStopping) }
         guard !stopping, let format, bpf > 0 else { return }
 

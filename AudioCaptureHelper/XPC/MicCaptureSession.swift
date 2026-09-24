@@ -45,7 +45,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     /// Stamped on every delivered sample buffer, before it is forwarded: a heartbeat means "the OS
     /// called us" (§4.2). Lock-only, read from the watchdog's queue.
-    private let heartbeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    private let heartbeat = OSAllocatedUnfairLock<(nanos: UInt64, count: Int)>(initialState: (0, 0))
     /// Session generation, bumped on every successful (re)build. Guarded by `stateLock`.
     private var generation = 0
 
@@ -96,7 +96,9 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     var resolvedDeviceId: String? { stateLock.sync { currentDeviceId } }
 
     /// The last delivered sample buffer, in `DispatchTime` uptime nanoseconds (0 = never). Lock-only.
-    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0 } }
+    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0.nanos } }
+    /// Heartbeats since this session began, for coverage accounting (§7.1). Lock-only.
+    func heartbeatCount() -> Int { heartbeat.withLock { $0.count } }
     /// The current session generation (0 = never built).
     func generationValue() -> Int { stateLock.sync { generation } }
 
@@ -428,7 +430,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        heartbeat.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        heartbeat.withLock { $0 = (DispatchTime.now().uptimeNanoseconds, $0.count + 1) }
         onSampleBuffer(sampleBuffer)
     }
 }

@@ -110,6 +110,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private let tapHealer = TapHealer()
     /// Mic side of "heal, then alarm" (§6.1). Touched on the watchdog queue only.
     private var micHealPolicy = MicHealPolicy()
+    /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, gaps from
+    /// the liveness verdicts, rebuilds from the healer. Delivered / padded / zero / heartbeat counts
+    /// are merged in when read (`coverageFacts`). Lock-only, so the audio queue may read it too.
+    private let coverage = OSAllocatedUnfairLock<[CaptureTrack: TrackAccounting]>(
+        initialState: [.mic: TrackAccounting(), .system: TrackAccounting()])
+    /// The previous gate observation, for elapsed-time accounting (0 = none yet this session).
+    private let lastGateTickNanos = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
     /// Keeps the tap honest about its System Audio Recording permission (#220): see
     /// `TapPermissionGuard`. Confined to `audioQueue`, like the samples that feed it.
@@ -171,7 +178,71 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
-    private func trackHealth() -> [TrackHealthSnapshot] { [] }   // H6 fills this from the coverage counters
+    /// Per-track liveness for the snapshot (§6.2). Runs inside `raiseAlarm`/`clearAlarm`, which the
+    /// AUDIO queue calls, so it only takes leaf locks: the sessions' heartbeat / generation, and the
+    /// driver's cached last gate reading — no HAL read, no `audioQueue.sync`. Empty when not capturing.
+    private func trackHealth() -> [TrackHealthSnapshot] {
+        let (mic, tap, h) = stateLock.sync { (micSession, tapSession, handler) }
+        guard let mic else { return [] }
+        let now = DispatchTime.now().uptimeNanoseconds
+        func age(_ stamp: UInt64) -> Double? { stamp == 0 ? nil : Double(now > stamp ? now - stamp : 0) / 1e9 }
+        // Tap: its callback heartbeat. SCK: the arrival stamp, as the watchdog uses.
+        let systemStamp = tap?.lastHeartbeatNanos() ?? h?.lastSystemBufferArrivalNanos() ?? 0
+        return [
+            TrackHealthSnapshot(track: .mic, expected: true, heartbeatAgeSeconds: age(mic.lastHeartbeatNanos()),
+                                generation: mic.generationValue()),
+            TrackHealthSnapshot(track: .system, expected: livenessWatchdog.lastGateOpen, heartbeatAgeSeconds: age(systemStamp),
+                                generation: tap?.generationValue() ?? 0),
+        ]
+    }
+
+    // MARK: - Coverage (§7.1)
+
+    /// Expected seconds accumulate by ELAPSED time between gate observations (capped at 2 s), never
+    /// "+1 per call": a late or coalesced tick (a busy queue, sleep) must neither over- nor under-count.
+    private func accountGate(open: Bool, nowNanos: UInt64) {
+        let previous = lastGateTickNanos.withLock { p in defer { p = nowNanos }; return p }
+        guard previous != 0, nowNanos > previous else { return }
+        let dt = min(2.0, Double(nowNanos - previous) / 1e9)
+        coverage.withLock { c in
+            c[.mic, default: TrackAccounting()].expectedSeconds += dt
+            if open { c[.system, default: TrackAccounting()].expectedSeconds += dt }
+        }
+    }
+
+    private func noteGap(track: CaptureTrack, seconds: Double) {
+        coverage.withLock { c in
+            c[track, default: TrackAccounting()].gapCount += 1
+            c[track, default: TrackAccounting()].longestGapSeconds = max(c[track, default: TrackAccounting()].longestGapSeconds, seconds)
+        }
+    }
+
+    private func noteRebuild() {
+        coverage.withLock { $0[.system, default: TrackAccounting()].rebuilds += 1 }
+    }
+
+    /// Per-track coverage as `remote_*` / `local_*` detail keys, for `.captureStop` and every rotation's
+    /// `.trackCoverage`. Uses `audioQueue.sync`, so it must NEVER be called from a block running on
+    /// `audioQueue` (it would deadlock): only `stopCapture`, `stopAndFinalize` and `rotateChunk`, on XPC threads.
+    private func coverageFacts() -> [String: String] {
+        let (h, mic, tap) = stateLock.sync { (handler, micSession, tapSession) }
+        let totals = audioQueue.sync { h?.trackTotals() }
+        // The guard only sees tap samples; on SCK (or a stale guard from an earlier tap session) it says nothing.
+        let zeros: Int64 = tap == nil ? 0 : audioQueue.sync { tapGuard.exactZeroFrames }
+        var (remote, local) = coverage.withLock { c in (c[.system] ?? TrackAccounting(), c[.mic] ?? TrackAccounting()) }
+        let rate = AudioConverter.outputSampleRate   // both WAVs are 48 kHz mono
+        if let totals {
+            local.deliveredSeconds = Double(totals.micDelivered) / rate
+            local.paddedSeconds = Double(totals.micPad) / rate
+            local.exactZeroSeconds = Double(totals.micZero) / rate
+            remote.deliveredSeconds = Double(totals.sysDelivered) / rate
+            remote.paddedSeconds = Double(totals.sysPad) / rate
+        }
+        remote.exactZeroSeconds = Double(zeros) / rate
+        local.heartbeatCallbacks = mic?.heartbeatCount() ?? 0
+        remote.heartbeatCallbacks = tap?.heartbeatCount() ?? 0
+        return remote.asDetail(prefix: "remote").merging(local.asDetail(prefix: "local")) { a, _ in a }
+    }
 
     /// Both may be called from the audio queue (write failure, exact zeros, permission verdicts) and
     /// from the watchdog / config queues — never from inside `stateLock.sync`, and they do no HAL
@@ -197,6 +268,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.lastSystemHeartbeatNanos = tap.map { tap in { [weak tap] in tap?.lastHeartbeatNanos() ?? 0 } }
             ?? { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
         livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
+        livenessWatchdog.onGate = { [weak self] open, now in self?.accountGate(open: open, nowNanos: now) }
         // A new session starts a new mic episode; on the watchdog queue, like every other use.
         livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy = MicHealPolicy() }
         mic.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .mic) }
@@ -219,8 +291,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             onFirstFrames?(track, helperSessionId)
         case .neverDelivered(let s):
             record(.neverDelivered, .anomaly, ["track": t, "seconds": "\(Int(s))"])
+            noteGap(track: track, seconds: s)
         case .stalled(let s):
+            // An accelerator's early stall opens the monitor's episode, so each gap is counted once.
             record(.livenessGap, .anomaly, ["track": t, "seconds": "\(Int(s))"])
+            noteGap(track: track, seconds: s)
         case .cleared(let reason):
             record(.livenessRecovered, .info, ["track": t, "reason": "\(reason)"])
         case .healthy:
@@ -343,6 +418,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Per-session reset (#101): a skipped finalize (crash) leaves stale events in the helper ring,
         // which would otherwise be drained into the next session's provenance. Clear them up front.
         diagnostics.clear()
+        coverage.withLock { $0 = [.mic: TrackAccounting(), .system: TrackAccounting()] }
+        lastGateTickNanos.withLock { $0 = 0 }
         let options: CaptureOptions = stateLock.sync {
             let configured = pendingOptions
             pendingOptions = CaptureOptions()
@@ -366,6 +443,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 systemWriter: systemWriter, micWriter: micWriter
             )
             outputHandler.diagnostics = diagnostics
+            outputHandler.systemExpectedSeconds = { [weak self] in
+                self?.coverage.withLock { $0[.system]?.expectedSeconds ?? 0 } ?? 0
+            }
             outputHandler.onStreamStopped = { [weak self] error in
                 self?.handleStreamStopped(error)
             }
@@ -465,9 +545,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
 
         Logger.audio.info("Stopping capture")
-        // Read BEFORE the tap is stopped below, so frames delivered in that short window (well under a
-        // second) are not in these facts: `system_exact_zero_seconds` can understate by that margin.
-        record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
+        // Read BEFORE the sessions are stopped below, so frames delivered in that short window (well
+        // under a second) are not in these facts: the delivered/zero seconds can understate by that margin.
+        record(.captureStop, .info, coverageFacts())
         livenessWatchdog.stop()
         tapHealer.cancelAll()
         stopTapGuardTimer()
@@ -599,6 +679,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.micPath = newMicPath
             }
             Logger.audio.info("Chunk rotated — old: \(oldPaths.systemPath, privacy: .private)")
+            // Coverage survives in the record even if the ring evicts older events (§7.1). On this XPC
+            // thread, outside the `audioQueue.sync` above.
+            record(.trackCoverage, .info, ["chunk": newBaseName].merging(coverageFacts()) { a, _ in a })
             reply(oldPaths.systemPath, oldPaths.micPath, nil)
         } catch {
             Logger.audio.error("Chunk rotation failed: \(error, privacy: .public)")
@@ -643,18 +726,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     // MARK: - Tap permission guard plumbing (all on audioQueue unless noted)
-
-    /// Permission-independent facts about the tap track for provenance: how much of what it delivered
-    /// was exact digital zero. A denied tap is 100% zeros however healthy everything else looks.
-    /// Uses `audioQueue.sync`, so it must NEVER be called from a block running on `audioQueue` (it
-    /// would deadlock). Today only `stopCapture` and `stopAndFinalize` call it, on XPC threads.
-    private func tapTrackFacts() -> [String: String] {
-        let (delivered, zero) = audioQueue.sync { (tapGuard.deliveredFrames, tapGuard.exactZeroFrames) }
-        return [
-            "system_delivered_seconds": "\(delivered / 48_000)",
-            "system_exact_zero_seconds": "\(zero / 48_000)",
-        ]
-    }
 
     private func startTapGuardTimer() {
         audioQueue.async {
@@ -746,9 +817,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
-        // Same tap-track facts as a clean stop, so a recording the app crashed out of during a
-        // denial still reports how much of its remote track was exact zeros (#220).
-        record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
+        // Same coverage as a clean stop, so a recording the app crashed out of still reports how much
+        // of each side was captured (and, on the tap, how much of it was exact zeros, #220).
+        record(.captureStop, .info, coverageFacts())
         livenessWatchdog.stop()
         tapHealer.cancelAll()
         stopTapGuardTimer()
@@ -911,9 +982,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // A new session starts a new episode: forget the previous session's budget, exhaustion and
         // dead-gate memory (its timers were cancelled at its stop). Tokens stay monotonic.
         tapHealer.trigger(.wake)
-        tap.onRebuildResult = { [weak self] rung, token, ok, _ in self?.tapHealer.rebuildResult(rung: rung, token: token, succeeded: ok) }
+        tap.onRebuildResult = { [weak self] rung, token, ok, _ in
+            // A rebuild the ladder did not order (output change, rate drift) is still a rebuild (§7.1).
+            if token == 0, ok { self?.noteRebuild() }
+            self?.tapHealer.rebuildResult(rung: rung, token: token, succeeded: ok)
+        }
         tap.onAggregateEvent = { [weak self] _ in self?.livenessWatchdog.accelerate(track: .system) }
-        tapHealer.onEvent = { [weak self] k, s, d in self?.record(k, s, d) }
+        tapHealer.onEvent = { [weak self] k, s, d in
+            if k == .tapRecoveryRung { self?.noteRebuild() }
+            self?.record(k, s, d)
+        }
         tapHealer.onGiveUp = { [weak self] in
             self?.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.")
         }
