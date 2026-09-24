@@ -63,11 +63,14 @@ public struct SummaryMetadata: Sendable {
     /// Periods with nothing recorded (relaunch, sleep) from `metadata.capture.gaps`.
     public let gapCount: Int
     public let gapSeconds: Double
+    /// Segments left out of the summary input because they have no usable time (R2b item 5): the
+    /// summary says so rather than leave their words out silently.
+    public let untimedSegmentCount: Int
 
     public init(sessionName: String, date: Date, durationSeconds: Double, speakers: [String],
                 dualStream: Bool = false, echoSegmentsRemoved: Int = 0,
                 remoteCapture: CaptureSideNote? = nil, localCapture: CaptureSideNote? = nil,
-                coverageNotRecorded: Bool = false, gapCount: Int = 0, gapSeconds: Double = 0) {
+                coverageNotRecorded: Bool = false, gapCount: Int = 0, gapSeconds: Double = 0, untimedSegmentCount: Int = 0) {
         self.sessionName = sessionName
         self.date = date
         self.durationSeconds = durationSeconds
@@ -79,6 +82,7 @@ public struct SummaryMetadata: Sendable {
         self.coverageNotRecorded = coverageNotRecorded
         self.gapCount = gapCount
         self.gapSeconds = gapSeconds
+        self.untimedSegmentCount = untimedSegmentCount
     }
 }
 

@@ -68,30 +68,40 @@ import Testing
         #expect(m.hasSuffix("0 s not recorded."))
     }
 
-    /// C-M13: "N chunks … were transcribed to X" counted chunks whose speech recognition failed. The
-    /// transcript exists, but it does not hold their words — the message says so.
+    /// C-M13 / R2b item 9: "N chunks … were transcribed to X" counted chunks whose speech recognition
+    /// failed. A chunk counts as untranscribed only for the tracks that failed; one side failing is
+    /// worded per side.
     @Test func chunksWhoseRecognitionFailedAreNotCalledTranscribed() {
-        let some = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 5, untranscribedChunkCount: 2))
-        #expect(some.contains("The 5 chunks recorded before it were transcribed to m.json; speech recognition failed on 2 of them."))
-        let all = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3, untranscribedChunkCount: 3))
-        #expect(all.contains("The 3 chunks recorded before it were written to m.json, but speech recognition failed on all of them.")
-                && !all.contains("transcribed to"))
-        let one = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1, untranscribedChunkCount: 1))
-        #expect(one.contains("The 1 chunk recorded before it was written to m.json, but speech recognition failed on it."))
-        let clean = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3))
-        #expect(clean.contains("The 3 chunks recorded before it were transcribed to m.json."))
+        func outcome(_ n: Int, whole: Int = 0, remote: Int = 0, local: Int = 0) -> SalvageOutcome {
+            SalvageOutcome(kind: .transcriptWritten(url), chunkCount: n,
+                           recognitionFailures: .init(wholeChunks: whole, remoteOnly: remote, localOnly: local))
+        }
+        #expect(RecoveryMessages.recordingFailed(after: outcome(5, whole: 2))
+                .contains("The 5 chunks recorded before it were transcribed to m.json; speech recognition failed on 2 of them."))
+        #expect(RecoveryMessages.recordingFailed(after: outcome(3, whole: 3))
+                .contains("The 3 chunks recorded before it were written to m.json, but speech recognition failed on all of them."))
+        #expect(RecoveryMessages.recordingFailed(after: outcome(1, whole: 1))
+                .contains("The 1 chunk recorded before it was written to m.json, but speech recognition failed on it."))
+        #expect(RecoveryMessages.recordingFailed(after: outcome(4, remote: 1))
+                .contains("The 4 chunks recorded before it were transcribed to m.json; the other side's speech could not be recognised in 1 of them."))
+        #expect(RecoveryMessages.recordingFailed(after: outcome(4, whole: 1, local: 2))
+                .contains("were transcribed to m.json; speech recognition failed on 1 of them; your microphone's speech could not be recognised in 2 of them."))
+        #expect(RecoveryMessages.recordingFailed(after: outcome(3))
+                .contains("The 3 chunks recorded before it were transcribed to m.json."))
     }
 
-    /// The count comes from the session's own record: chunks with an `asr_failed` issue.
-    @Test func untranscribedChunksAreCountedFromTheSession() {
-        func chunk(_ i: Int, _ issues: [ChunkIssue]) -> ProcessedChunk {
-            ProcessedChunk(index: i, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-\(i).m4a", segments: [], speakerDatabase: [:], issues: issues)
+    /// Counted from the session's own record, per chunk and per track: a dual-stream chunk whose mic
+    /// failed is not "untranscribed" — its other side was recognised.
+    @Test func recognitionFailuresAreCountedPerTrack() {
+        func chunk(_ i: Int, dual: Bool = true, _ tracks: [String?]) -> ProcessedChunk {
+            ProcessedChunk(index: i, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-\(i).m4a", segments: [], speakerDatabase: [:],
+                           isDualStream: dual, issues: tracks.map { ChunkIssue(code: .asrFailed, track: $0, count: nil) })
         }
-        let chunks = [chunk(0, []), chunk(1, [ChunkIssue(code: .asrFailed, track: "remote", count: nil),
-                                             ChunkIssue(code: .asrFailed, track: "local", count: nil)]),
-                      chunk(2, [ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)]),
-                      chunk(3, [ChunkIssue(code: .asrFailed, track: "local", count: nil)])]
-        #expect(SalvageOutcome.untranscribedChunkCount(in: chunks) == 2)
+        let chunks = [chunk(0, []), chunk(1, ["remote", "local"]), chunk(2, ["remote"]), chunk(3, ["local"]),
+                      chunk(4, dual: false, ["remote"]), chunk(5, [nil]),
+                      ProcessedChunk(index: 6, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-6.m4a", segments: [], speakerDatabase: [:],
+                                     isDualStream: true, issues: [ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)])]
+        #expect(SalvageOutcome.recognitionFailures(in: chunks) == .init(wholeChunks: 3, remoteOnly: 1, localOnly: 1))
     }
 
     /// R2 follow-up 1: a stale-boot salvage (the Mac rebooted or lost power mid-recording) said
@@ -102,9 +112,9 @@ import Testing
         let written = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3))
         #expect(written == "Recording STOPPED at \(clock) — your Mac restarted during the recording. Parley recovered 3 chunks to m.json.")
         #expect(!written.contains("crashed"))
-        let one = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1, untranscribedChunkCount: 1))
+        let one = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1, recognitionFailures: .init(wholeChunks: 1)))
         #expect(one.hasSuffix("your Mac restarted during the recording. Parley recovered 1 chunk to m.json, but speech recognition failed on it."))
-        let some = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 4, untranscribedChunkCount: 1))
+        let some = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 4, recognitionFailures: .init(wholeChunks: 1)))
         #expect(some.hasSuffix("Parley recovered 4 chunks to m.json; speech recognition failed on 1 of them."))
         let kept = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 2))
         #expect(kept == "Recording STOPPED at \(clock) — your Mac restarted during the recording. The 2 chunks recorded before it are kept on disk but could not be transcribed: disk full.")

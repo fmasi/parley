@@ -438,4 +438,43 @@ struct ChunkProcessorTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["meeting-0.m4a", "session.json"],
                 "no scratch audio is left behind")
     }
+
+    // MARK: - R2b item 11
+
+    /// C-M4: a chunk with no mic WAV became remote-only with nothing said. It is recorded — as
+    /// information (a system-only source is legitimate; `capture.local` holds the coverage).
+    @Test func aChunkWithoutAMicWavSaysSo() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = processor(dir: dir)
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.issues.contains(ChunkIssue(code: .micStreamAbsent, track: "local", count: nil)))
+        #expect(!ChunkIssue.Code.micStreamAbsent.affectsContent)
+    }
+
+    /// C-M9: the storage quota may delete this meeting's own earlier chunk archives (its scope is the
+    /// owner's call, #224). The eviction is recorded against the chunk, never silent.
+    @Test func aQuotaEvictionOfThisSessionsAudioIsRecorded() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let earlier = dir.appendingPathComponent("meeting-0.m4a")
+        try Data(count: 4096).write(to: earlier)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: earlier.path)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-1.wav"), seconds: 1)
+        var config = Config.default
+        config.audioArchiveLimitHours = 0
+        let seeded = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "meeting-0.m4a", segments: [], speakerDatabase: [:])
+        let processor = ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio",
+                                       chunkDurationMinutes: 10, chunks: [seeded]),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: 1, systemPath: dir.appendingPathComponent("meeting-1.wav").path,
+                                                                     micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
+                                                                     startTime: Date(timeIntervalSince1970: 600)))
+        #expect(!FileManager.default.fileExists(atPath: earlier.path), "the quota really evicted it")
+        let state = await processor.getSessionState()
+        #expect(state.issues.contains(SessionIssue(chunk: 0, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil))))
+        #expect(SessionState.read(directory: dir, sessionId: "meeting")?.issues.contains(
+            SessionIssue(chunk: 0, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil))) == true, "and persisted")
+    }
 }

@@ -18,11 +18,17 @@ public struct SummaryDisclosure: Equatable, Sendable {
     public let summaryEndpoint: String?
     /// Whether the transcript's contents were (or may have been) sent to a remote endpoint.
     public let transcriptTransmitted: Bool
+    /// Every remote endpoint (host-only label) the contents were sent to, in order, once each — kept
+    /// apart from `summaryEndpoint`, which names only the endpoint that generated the summary
+    /// (R2b item 6: one field could not hold both facts).
+    public let transcriptTransmittedTo: [String]
 
-    public init(summaryGenerated: Bool, summaryEndpoint: String?, transcriptTransmitted: Bool) {
+    public init(summaryGenerated: Bool, summaryEndpoint: String?, transcriptTransmitted: Bool,
+                transcriptTransmittedTo: [String] = []) {
         self.summaryGenerated = summaryGenerated
         self.summaryEndpoint = summaryEndpoint
-        self.transcriptTransmitted = transcriptTransmitted
+        self.transcriptTransmitted = transcriptTransmitted || !transcriptTransmittedTo.isEmpty
+        self.transcriptTransmittedTo = transcriptTransmittedTo
     }
 
     /// The airgapped default stamped into every transcript at assembly: no summary was
@@ -32,11 +38,13 @@ public struct SummaryDisclosure: Equatable, Sendable {
     )
 
     /// Disclosure for a summary attempt that has been dispatched but has not (yet) produced
-    /// a summary. For a remote endpoint this already records `transcript_transmitted: true` —
-    /// once the request is sent, the content has left the machine whether or not a summary
-    /// comes back.
+    /// a summary. For a remote endpoint this already records `transcript_transmitted: true` and the
+    /// host — once the request is sent, the content has left the machine whether or not a summary
+    /// comes back. It names no `summary_endpoint`: nothing has generated a summary.
     public static func attempted(endpoint: String) -> SummaryDisclosure {
-        build(endpoint: endpoint, generated: false)
+        let (label, isRemote) = classify(endpoint: endpoint)
+        return SummaryDisclosure(summaryGenerated: false, summaryEndpoint: nil, transcriptTransmitted: isRemote,
+                                 transcriptTransmittedTo: isRemote ? [label] : [])
     }
 
     /// Disclosure for a successfully generated summary against `endpoint`.
@@ -49,7 +57,8 @@ public struct SummaryDisclosure: Equatable, Sendable {
         return SummaryDisclosure(
             summaryGenerated: generated,
             summaryEndpoint: label,
-            transcriptTransmitted: isRemote
+            transcriptTransmitted: isRemote,
+            transcriptTransmittedTo: isRemote ? [label] : []
         )
     }
 
@@ -90,6 +99,7 @@ public struct SummaryDisclosure: Equatable, Sendable {
         var d: [String: Any] = [
             "summary_generated": summaryGenerated,
             "transcript_transmitted": transcriptTransmitted,
+            "transcript_transmitted_to": transcriptTransmittedTo,
         ]
         if let summaryEndpoint { d["summary_endpoint"] = summaryEndpoint }
         return d

@@ -466,6 +466,10 @@ public struct CaptureDiagnostics: Sendable {
     /// evicting ring, a compromised recording read "Transcription Complete" once its evidence aged
     /// out. Any denial (confirmed or not) counts for `systemAudioUnrecovered`.
     private var qualityAnomalyTally = 0
+    /// Every anomaly and every handled route change (R2b item 8), out of ring for the same reason:
+    /// `anomaly_count` is the superset of `quality_anomaly_count` and must never drop below it.
+    private var anomalyTally = 0
+    private var routeChangeTally = 0
     private var sawSystemAudioUnrecovered = false
     private var lastDenial: Date?
 
@@ -499,6 +503,8 @@ public struct CaptureDiagnostics: Sendable {
         if e.kind == .retry { retryCount += 1 }
         if e.kind == .launchRecovery { launchRecoveries += 1 }
         if CaptureEventKind.qualityCompromising.contains(e.kind) { qualityAnomalyTally += 1 }
+        if e.severity == .anomaly { anomalyTally += 1 }
+        if e.kind == .restartInPlace { routeChangeTally += 1 }
         if e.kind == .systemAudioUnrecovered { sawSystemAudioUnrecovered = true }
         if e.kind == .systemAudioPermissionDenied { lastDenial = max(lastDenial ?? e.timestamp, e.timestamp) }
         if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
@@ -513,7 +519,10 @@ public struct CaptureDiagnostics: Sendable {
         if e.kind == .captureStop {
             for prefix in ["local", "remote"] {
                 if let parsed = TrackAccounting(detail: e.detail, prefix: prefix) {
-                    coverageTallies[prefix, default: TrackAccounting()] += parsed
+                    // The first session is the tally itself: summed onto an empty counter it would
+                    // read as "measured + unmeasured" and be marked a lower bound.
+                    if var tally = coverageTallies[prefix] { tally += parsed; coverageTallies[prefix] = tally }
+                    else { coverageTallies[prefix] = parsed }
                 }
             }
         }
@@ -552,6 +561,8 @@ public struct CaptureDiagnostics: Sendable {
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
         qualityAnomalyTally = 0
+        anomalyTally = 0
+        routeChangeTally = 0
         sawSystemAudioUnrecovered = false
         lastDenial = nil
         countedKeys.removeAll()
@@ -563,6 +574,15 @@ public struct CaptureDiagnostics: Sendable {
     /// idempotent per event (fix round 1), so an event the ring already held or had already evicted
     /// is a safe no-op the second time, and a repeated merge of the same disk log can never
     /// double-count a retry or inflate `droppedCount` (scan B P3.6(2)).
+    /// Merge a helper drain as it came off the wire. Events this build cannot decode (a kind from a
+    /// newer helper) are skipped and counted into `droppedCount`, so `events_dropped` admits them
+    /// (R2b item 8). Callers should prefer this to `merge(events(from:))`, which cannot count them.
+    public mutating func mergeDrained(_ data: Data) {
+        let (events, undecodable) = Self.decodeLossy(data)
+        droppedCount += undecodable
+        if !events.isEmpty { merge(events) }
+    }
+
     public mutating func merge(_ other: [CaptureEvent]) {
         let combined = (events + other).sorted { $0.timestamp < $1.timestamp }
         clear()
@@ -573,9 +593,11 @@ public struct CaptureDiagnostics: Sendable {
     /// Count handled benign route changes via the in-place restart they each trigger. (The pinned
     /// 48kHz/mono system tap never emits `.formatChanged`, so counting that would always read 0 for
     /// the AirPods HFP↔A2DP scenario this exists to surface — council F5.)
-    public var routeChangeCount: Int { events.lazy.filter { $0.kind == .restartInPlace }.count }
+    /// Out-of-ring, once per event (R2b item 8).
+    public var routeChangeCount: Int { routeChangeTally }
     public var didRecover: Bool { launchRecoveries > 0 }
-    public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
+    /// Out-of-ring, once per event (R2b item 8): never below `qualityAnomalyCount`.
+    public var anomalyCount: Int { anomalyTally }
     /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
     /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
     /// Out-of-ring and once per event: correct after eviction, `clear()` and a re-merge (XI bug 2).
@@ -619,12 +641,16 @@ public struct CaptureDiagnostics: Sendable {
     /// One event this build can't decode (a kind from a newer helper) is skipped and logged; it used
     /// to fail the whole drain and lose every event of the session (C-M7).
     public static func events(from data: Data) -> [CaptureEvent] {
-        guard let decoded = try? makeDecoder().decode([Lossy].self, from: data) else { return [] }
+        decodeLossy(data).events
+    }
+
+    private static func decodeLossy(_ data: Data) -> (events: [CaptureEvent], undecodable: Int) {
+        guard let decoded = try? makeDecoder().decode([Lossy].self, from: data) else { return ([], 0) }
         let events = decoded.compactMap(\.event)
         if events.count < decoded.count {
             Logger.state.error("Skipped \(decoded.count - events.count, privacy: .public) capture event(s) this build cannot read")
         }
-        return events
+        return (events, decoded.count - events.count)
     }
 
     /// One array element that may not decode as a `CaptureEvent`.
@@ -680,7 +706,10 @@ public struct CaptureDiagnostics: Sendable {
             systemDeliveredSeconds: remote.map { Int($0.deliveredSeconds.rounded()) } ?? tapTrackSeconds("system_delivered_seconds"),
             // Per-track coverage when there is some — and then only what it measured (SCK measures
             // no exact zeros: nil, never 0, XI bug 1); the legacy key otherwise.
-            systemExactZeroSeconds: remote.map { $0.exactZeroSeconds.map { Int($0.rounded()) } } ?? tapTrackSeconds("system_exact_zero_seconds"),
+            // A lower bound can't be stated by the bare integer: it is left out, and the coverage
+            // carries the value with its mark (R2b item 8).
+            systemExactZeroSeconds: remote.map { r in r.exactZeroIsLowerBound ? nil : r.exactZeroSeconds.map { Int($0.rounded()) } }
+                ?? tapTrackSeconds("system_exact_zero_seconds"),
             localCoverage: local,
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },

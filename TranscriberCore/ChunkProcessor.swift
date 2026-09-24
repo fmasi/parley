@@ -287,6 +287,7 @@ public final class ChunkProcessor {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
         var issues = extraIssues + archiveIssues + systemResult.issues + micResult.issues
+        if !hasDualStream { issues.append(ChunkIssue(code: .micStreamAbsent, track: "local", count: nil)) }
 
         // 3. Merge segments
         var allSegments = systemResult.segments + micResult.segments
@@ -403,12 +404,13 @@ public final class ChunkProcessor {
         // that were already deleted. No archive, no quota pass. Scope stays the day folder (#224).
         if let archivePath {
             do {
-                try StorageManager.enforceQuota(
+                let evicted = try StorageManager.enforceQuota(
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
                     protectedFile: archivePath
                 )
+                await noteEvictions(evicted)
             } catch {
                 Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")
             }
@@ -454,6 +456,16 @@ public final class ChunkProcessor {
         let segments: [LabeledSegment]
         let speakerDatabase: [String: [Float]]
         var issues: [ChunkIssue] = []
+    }
+
+    /// This session's chunk archives the quota just deleted: recorded against their chunks (C-M9).
+    private nonisolated func noteEvictions(_ evicted: [URL]) async {
+        guard !evicted.isEmpty else { return }
+        let names = Set(evicted.map(\.lastPathComponent))
+        for chunk in await stateStore.getSessionState().chunks where names.contains(chunk.audioPath) {
+            Logger.files.error("The storage quota deleted chunk \(chunk.index, privacy: .public)'s audio during this recording — recorded")
+            await stateStore.noteIssue(SessionIssue(chunk: chunk.index, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil)))
+        }
     }
 
     /// The chunk's `.m4a` when it is the only artefact left: neither WAV exists, the archive does.

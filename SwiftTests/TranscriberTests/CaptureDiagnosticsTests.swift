@@ -196,13 +196,16 @@ struct CaptureDiagnosticsTests {
         d.clear()
         d.record(event(.captureStart, .info, at: 10))
         let restarted = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
-        #expect(restarted.routeChanges == 0 && restarted.anomalyCount == 0 && restarted.systemAudioUnrecovered == false)
+        #expect(restarted.systemAudioUnrecovered == false)
         #expect(restarted.retries == 1 && restarted.recovered == true, "the restart is part of this session's story")
+        // R2b item 8: out of ring too, so `anomaly_count` never drops below `quality_anomaly_count`.
+        #expect(restarted.routeChanges == 2 && restarted.anomalyCount == 1, "the route changes and the anomaly still happened")
 
         d.resetSession()
         d.record(event(.captureStart, .info, at: 20))
         let fresh = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(fresh.retries == 0 && fresh.recovered == false && fresh.eventsDropped == 0)
+        #expect(fresh.routeChanges == 0 && fresh.anomalyCount == 0)
     }
 
     @Test func countersSurviveEvictionAndClear() {
@@ -509,5 +512,42 @@ struct CaptureDiagnosticsOutOfRingTests {
         let restored = CaptureDiagnostics.events(from: try JSONSerialization.data(withJSONObject: array))
         #expect(restored.map(\.kind) == [.captureStart, .rateDrift])
         #expect(CaptureDiagnostics.events(from: Data("garbage".utf8)).isEmpty)
+    }
+}
+
+// MARK: - R2b item 8: record consistency
+
+struct CaptureDiagnosticsConsistencyTests {
+    let base = Date(timeIntervalSinceReferenceDate: 3_000_000)
+
+    private func event(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, at offset: TimeInterval) -> CaptureEvent {
+        CaptureEvent(timestamp: base.addingTimeInterval(offset), origin: .helper, kind: kind, severity: severity)
+    }
+
+    /// `anomaly_count` (every anomaly) is the superset of `quality_anomaly_count`; scanned from the
+    /// ring while the subset was out of ring, eviction made the superset the smaller number.
+    @Test func theAnomalySupersetNeverDropsBelowTheSubsetAfterEviction() {
+        var d = CaptureDiagnostics(maxEvents: 2)
+        d.record(event(.rateDrift, .anomaly, at: 1))
+        d.record(event(.restartInPlace, .warning, at: 2))
+        d.record(event(.streamStopError, .anomaly, at: 3))
+        for i in 0..<5 { d.record(event(.tapRecoveryRung, .warning, at: 10 + Double(i))) }
+        d.merge([event(.rateDrift, .anomaly, at: 1)])   // re-presented: not a second anomaly
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.anomalyCount == 2 && p.qualityAnomalyCount == 1 && p.routeChanges == 1)
+    }
+
+    /// An event this build could not decode was skipped silently; it is counted into `events_dropped`.
+    @Test func undecodableDrainedEventsCountAsDropped() throws {
+        var helper = CaptureDiagnostics()
+        helper.record(event(.captureStart, .info, at: 0))
+        helper.record(event(.rateDrift, .anomaly, at: 1))
+        var array = try #require(JSONSerialization.jsonObject(with: helper.snapshotData()) as? [[String: Any]])
+        var future = array[0]; future["kind"] = "fromTheFuture"
+        array.append(future)
+        var app = CaptureDiagnostics()
+        app.mergeDrained(try JSONSerialization.data(withJSONObject: array))
+        #expect(app.events.map(\.kind) == [.captureStart, .rateDrift])
+        #expect(app.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).eventsDropped == 1)
     }
 }

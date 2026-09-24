@@ -276,7 +276,8 @@ When `dualStream = true`, the summary prompt receives source labels ("Local" / "
 ### Courtroom Safety
 
 - The raw WAV files and the AAC archive are **never modified** after writing.
-- Echo removals are tracked in `metadata.echo_segments_removed` (integer count) in the transcript JSON.
+- Echo removals are tracked in `metadata.echo_segments_removed` (integer count) in the transcript JSON. The segments are kept, flagged `echo: true`; the count is of flagged segments.
+- `metadata.dual_stream` is the capture-time flag (a mic stream was captured next to the remote one). It does not say the remote side delivered audio: `metadata.capture.remote.status` is the authority for that.
 - The transcript JSON is the processed record; the `.m4a` is the raw evidence. The two are independent.
 - `AudioArchiverError.verificationFailed` is thrown (and WAVs are preserved) if the output archive is empty or has no audio tracks.
 

@@ -167,7 +167,7 @@ struct SummaryPromptBuilderTests {
     @Test func aMidCallPermissionLossIsPartlyCaptured() {
         let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120,
                                              exactZeroSeconds: 1740, permissionDenied: true, anomalyCount: 1))
-        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence while system audio permission was not granted"
+        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence; system audio permission was not granted for part of the call"
         #expect(SummaryPromptBuilder.captureLine(m) == line)
         #expect(SummaryPromptBuilder.captureBanner(m)?.contains("> \(line)") == true, "the banner shows it")
         #expect(SummaryPromptBuilder.systemMessage(metadata: m).contains("Dual-Stream Audio Context"), "part of the remote side was captured")
@@ -222,7 +222,9 @@ struct SummaryPromptBuilderTests {
 
     @Test func theRuleNamesEveryIncompleteCase() {
         #expect(SummaryPromptBuilder.systemPrompt.contains(
-            "not captured, partly captured (including digital silence while system audio permission was not granted), uncertain, compromised, recorded only digital silence, or partly digital silence"))
+            "If a \"Remote audio\" or \"Your microphone\" line says a side was not captured, partly captured, uncertain, compromised, or partly digital silence — or a \"Your microphone\" line says it recorded only digital silence — state that in the Summary section before anything else."))
+        #expect(!SummaryPromptBuilder.systemPrompt.contains("compromised, recorded only digital silence"),
+                "unqualified, \"recorded only digital silence\" could be read as the neutral remote line")
         // The neutral muted-remote line is information, not a fault the model must report.
         #expect(SummaryPromptBuilder.systemPrompt.contains(
             "A \"Remote audio: only digital silence was received\" line is information, not a fault: never describe it as a capture failure."))

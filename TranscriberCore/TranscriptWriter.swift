@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum TranscriptWriter {
     /// Format seconds as HH:MM:SS,mmm (SRT format).
@@ -65,6 +66,10 @@ public enum TranscriptWriter {
 
         let format = metadata["output_format"] as? String ?? "json"
         guard format != "json" else { return }
+        let untimed = segments.filter { !TranscriptAssembler.hasUsableTime($0) }.count
+        if untimed > 0 {
+            Logger.files.error("\(untimed, privacy: .public) segment(s) have no usable time — left out of the \(format, privacy: .public) (kept in the JSON, flagged)")
+        }
 
         let content: String
         switch format {

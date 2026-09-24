@@ -880,3 +880,25 @@ struct TranscriptRediarizerTimelineTests {
         #expect(TranscriptRediarizer.timelineBound(fileLengths: [nil, 6], cachedDurations: [], gapSeconds: [], offsets: nil) == 12 + 6)
     }
 }
+
+/// R2b item 5.
+@Suite struct TranscriptRediarizerTimelessSegmentTests {
+    private func seg(_ start: Double, _ end: Double, _ speaker: String, _ source: String, _ text: String) -> [String: Any] {
+        ["start": start, "end": end, "speaker": speaker, "source": source, "text": text, "confidence": 0.9]
+    }
+    private func labeled(_ start: Double, _ end: Double, _ speaker: String, _ text: String) -> LabeledSegment {
+        LabeledSegment(start: start, end: end, speaker: speaker, text: text, source: "local", confidence: 0.9)
+    }
+
+    /// R2b item 5: re-detect replaced the channel wholesale and its relabel input skipped a segment
+    /// with no time, so the words were DROPPED. It is kept untouched, after the timed ones (never at 0).
+    @Test("a segment without a time is kept untouched, never dropped or moved to 0")
+    func aTimelessSegmentSurvivesRedetect() {
+        var timeless = seg(0, 0, "Local Speaker 1", "local", "no time")
+        timeless["start"] = NSNull(); timeless["end"] = NSNull(); timeless["time_unknown"] = true
+        let original = [seg(3, 5, "Local Speaker 1", "local", "a"), timeless, seg(5, 10, "Remote Speaker 1", "remote", "b")]
+        let merged = TranscriptRediarizer.mergeRelabeled(into: original, source: "local", relabeled: [labeled(3, 5, "Local Speaker 2", "a")])
+        #expect(merged.map { $0["text"] as? String } == ["a", "b", "no time"])
+        #expect(merged.last?["speaker"] as? String == "Local Speaker 1" && merged.last?["start"] is NSNull)
+    }
+}

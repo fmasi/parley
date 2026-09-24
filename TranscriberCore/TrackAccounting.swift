@@ -15,6 +15,10 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     public var longestGapSeconds: Double = 0
     public var gapCount: Int = 0
     public var rebuilds: Int = 0
+    /// The value sums measured sessions with unmeasured ones (a tap session and an SCK one): it is
+    /// a lower bound, and the record says so (R2b item 8).
+    public var exactZeroIsLowerBound = false
+    public var heartbeatCallbacksIsLowerBound = false
 
     public static let minimumDeficitSeconds: Double = 15
     public static let deficitRatio: Double = 0.10
@@ -23,7 +27,21 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case expectedSeconds, heartbeatCallbacks, deliveredSeconds, exactZeroSeconds, paddedSeconds,
-             longestGapSeconds, gapCount, rebuilds
+             longestGapSeconds, gapCount, rebuilds, exactZeroIsLowerBound, heartbeatCallbacksIsLowerBound
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(expectedSeconds, forKey: .expectedSeconds)
+        try c.encodeIfPresent(heartbeatCallbacks, forKey: .heartbeatCallbacks)
+        try c.encode(deliveredSeconds, forKey: .deliveredSeconds)
+        try c.encodeIfPresent(exactZeroSeconds, forKey: .exactZeroSeconds)
+        try c.encode(paddedSeconds, forKey: .paddedSeconds)
+        try c.encode(longestGapSeconds, forKey: .longestGapSeconds)
+        try c.encode(gapCount, forKey: .gapCount)
+        try c.encode(rebuilds, forKey: .rebuilds)
+        if exactZeroIsLowerBound { try c.encode(true, forKey: .exactZeroIsLowerBound) }
+        if heartbeatCallbacksIsLowerBound { try c.encode(true, forKey: .heartbeatCallbacksIsLowerBound) }
     }
 
     /// Tolerant (C-M7): session.json persists this inside the provenance, and synthesized Decodable
@@ -39,6 +57,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         longestGapSeconds = try c.decodeIfPresent(Double.self, forKey: .longestGapSeconds) ?? 0
         gapCount = try c.decodeIfPresent(Int.self, forKey: .gapCount) ?? 0
         rebuilds = try c.decodeIfPresent(Int.self, forKey: .rebuilds) ?? 0
+        exactZeroIsLowerBound = try c.decodeIfPresent(Bool.self, forKey: .exactZeroIsLowerBound) ?? false
+        heartbeatCallbacksIsLowerBound = try c.decodeIfPresent(Bool.self, forKey: .heartbeatCallbacksIsLowerBound) ?? false
     }
 
     /// `contentAnomalies` is the count of CONTENT-compromising events on this track (rate drift,
@@ -71,11 +91,15 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     }
 
     /// Unmeasured plus unmeasured stays unmeasured; a measured value plus an unmeasured one keeps
-    /// the measurement (a lower bound, never an invented number).
+    /// the measurement, marked as a lower bound (never an invented number, never a claimed total).
     public static func += (lhs: inout TrackAccounting, rhs: TrackAccounting) {
         lhs.expectedSeconds += rhs.expectedSeconds
+        lhs.heartbeatCallbacksIsLowerBound = lhs.heartbeatCallbacksIsLowerBound || rhs.heartbeatCallbacksIsLowerBound
+            || (lhs.heartbeatCallbacks == nil) != (rhs.heartbeatCallbacks == nil)
         lhs.heartbeatCallbacks = sum(lhs.heartbeatCallbacks, rhs.heartbeatCallbacks)
         lhs.deliveredSeconds += rhs.deliveredSeconds
+        lhs.exactZeroIsLowerBound = lhs.exactZeroIsLowerBound || rhs.exactZeroIsLowerBound
+            || (lhs.exactZeroSeconds == nil) != (rhs.exactZeroSeconds == nil)
         lhs.exactZeroSeconds = sum(lhs.exactZeroSeconds, rhs.exactZeroSeconds)
         lhs.paddedSeconds += rhs.paddedSeconds
         lhs.longestGapSeconds = max(lhs.longestGapSeconds, rhs.longestGapSeconds)
@@ -103,6 +127,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
             ("longest_gap_seconds", String(format: "%.1f", longestGapSeconds)),
             ("gap_count", "\(gapCount)"),
             ("rebuilds", "\(rebuilds)"),
+            ("exact_zero_seconds_is_lower_bound", exactZeroIsLowerBound ? "1" : nil),
+            ("heartbeat_callbacks_is_lower_bound", heartbeatCallbacksIsLowerBound ? "1" : nil),
         ]
         return Dictionary(uniqueKeysWithValues: values.compactMap { key, value in value.map { ("\(prefix)_\(key)", $0) } })
     }
@@ -132,6 +158,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         longestGapSeconds = longestGap
 
         heartbeatCallbacks = detail["\(prefix)_heartbeat_callbacks"].flatMap(Int.init)
+        exactZeroIsLowerBound = detail["\(prefix)_exact_zero_seconds_is_lower_bound"] == "1"
+        heartbeatCallbacksIsLowerBound = detail["\(prefix)_heartbeat_callbacks_is_lower_bound"] == "1"
         gapCount = detail["\(prefix)_gap_count"].flatMap(Int.init) ?? 0
         rebuilds = detail["\(prefix)_rebuilds"].flatMap(Int.init) ?? 0
     }
@@ -144,6 +172,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         ]
         if let exactZeroSeconds { d["exact_zero_seconds"] = exactZeroSeconds }
         if let heartbeatCallbacks { d["heartbeat_callbacks"] = heartbeatCallbacks }
+        if exactZeroIsLowerBound { d["exact_zero_seconds_is_lower_bound"] = true }
+        if heartbeatCallbacksIsLowerBound { d["heartbeat_callbacks_is_lower_bound"] = true }
         return d
     }
 }

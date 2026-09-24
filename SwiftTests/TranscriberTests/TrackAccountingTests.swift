@@ -154,4 +154,30 @@ import Testing
         var unmeasured = zeros; unmeasured.exactZeroSeconds = nil
         #expect(unmeasured.status(isTap: true, contentAnomalies: 0) == .healthy)
     }
+
+    /// R2b item 8: a sum of a measured session and an unmeasured one is a lower bound, and says so —
+    /// in the detail, the metadata and the provenance (whose bare integer is then left out).
+    @Test func aMixedSumIsMarkedAsALowerBound() throws {
+        var tap = TrackAccounting(); tap.expectedSeconds = 600; tap.deliveredSeconds = 600; tap.exactZeroSeconds = 42; tap.heartbeatCallbacks = 6
+        var sum = tap
+        sum += try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "300"], prefix: "remote"))
+        #expect(sum.exactZeroSeconds == 42 && sum.exactZeroIsLowerBound && sum.heartbeatCallbacksIsLowerBound)
+        let metadata = sum.asMetadataDictionary(status: .healthy)
+        #expect(metadata["exact_zero_seconds_is_lower_bound"] as? Bool == true && metadata["heartbeat_callbacks_is_lower_bound"] as? Bool == true)
+        let back = try #require(TrackAccounting(detail: sum.asDetail(prefix: "remote"), prefix: "remote"))
+        #expect(back == sum, "the mark survives the helper-to-app wire")
+        var measuredTwice = tap; measuredTwice += tap
+        #expect(!measuredTwice.exactZeroIsLowerBound && measuredTwice.asMetadataDictionary(status: .healthy)["exact_zero_seconds_is_lower_bound"] == nil)
+        let decoded = try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(sum))
+        #expect(decoded.exactZeroIsLowerBound)
+
+        var diagnostics = CaptureDiagnostics()
+        for (i, side) in [tap, try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "300"], prefix: "remote"))].enumerated() {
+            diagnostics.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: Double(i)), origin: .helper, kind: .captureStop, severity: .info,
+                                            detail: side.asDetail(prefix: "remote")))
+        }
+        let p = diagnostics.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.systemExactZeroSeconds == nil, "the bare integer can't carry the mark: left out")
+        #expect((p.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["exact_zero_seconds_is_lower_bound"] as? Bool == true)
+    }
 }

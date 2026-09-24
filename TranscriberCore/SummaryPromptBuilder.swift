@@ -41,7 +41,7 @@ enum SummaryPromptBuilder {
 
     /// The header line(s) about what was captured, newline-joined, or nil when there is nothing to
     /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, "coverage
-    /// not recorded", recording gaps.
+    /// not recorded", segments with no recorded time, recording gaps.
     static func captureLine(_ metadata: SummaryMetadata) -> String? {
         let lines = captureLines(metadata).map(\.text)
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
@@ -133,6 +133,13 @@ enum SummaryPromptBuilder {
         if metadata.coverageNotRecorded {
             lines.append(CaptureHeaderLine(text: "Capture coverage was not recorded", warrantsBanner: false))
         }
+        if metadata.untimedSegmentCount > 0 {
+            let n = metadata.untimedSegmentCount
+            lines.append(CaptureHeaderLine(
+                text: "Transcript: \(n) segment\(n == 1 ? " has" : "s have") no recorded time and \(n == 1 ? "was" : "were") left out of this summary",
+                warrantsBanner: true
+            ))
+        }
         if metadata.gapCount > 0 {
             lines.append(CaptureHeaderLine(
                 text: "Recording gaps: \(metadata.gapCount) (total \(formatGap(metadata.gapSeconds)))",
@@ -167,7 +174,9 @@ enum SummaryPromptBuilder {
             // `notDetermined`) — the two statuses that count as a confirmed denial.
             text = "\(label): not captured — system audio permission was not granted; \(silence) s of digital silence were recorded instead"
         case .permissionDeniedPartialSilence:
-            text = "\(label): partly captured — \(silence) s of \(delivered) s was digital silence while system audio permission was not granted"
+            // Not every silent second is attributed to the denial (R2b item 7, owner-level wording):
+            // some may be the other side being quiet.
+            text = "\(label): partly captured — \(silence) s of \(delivered) s was digital silence; system audio permission was not granted for part of the call"
         case .onlyDigitalSilence:
             return CaptureHeaderLine(text: "\(label): only digital silence was received (the other side may have been muted)", warrantsBanner: false)
         case .uncertainSilence:
@@ -268,7 +277,7 @@ enum SummaryPromptBuilder {
     - Do not include small talk, greetings, or off-topic banter
     - Keep the total summary under 500 words
     - Use professional, concise language
-    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured (including digital silence while system audio permission was not granted), uncertain, compromised, recorded only digital silence, or partly digital silence, state that in the Summary section before anything else.
+    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, compromised, or partly digital silence — or a "Your microphone" line says it recorded only digital silence — state that in the Summary section before anything else.
     - A "Remote audio: only digital silence was received" line is information, not a fault: never describe it as a capture failure.
     """
 

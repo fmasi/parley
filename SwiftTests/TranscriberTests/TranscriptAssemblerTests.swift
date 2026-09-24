@@ -221,6 +221,8 @@ struct TranscriptAssemblerTests {
         let back = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["segments"] as? [[String: Any]])
         #expect(back.count == 2 && back[0]["text"] as? String == "kept words")
         #expect(back[0]["start"] is NSNull && back[0]["end"] is NSNull && back[0]["confidence"] == nil)
+        #expect(back[0]["time_unknown"] as? Bool == true && TranscriptAssembler.isFlagged(back[0]), "flagged: every reader skips it")
+        #expect(back[1]["time_unknown"] == nil && !TranscriptAssembler.isFlagged(back[1]))
         #expect(back[1]["start"] as? Double == 1 && back[1]["confidence"] != nil)
     }
 }

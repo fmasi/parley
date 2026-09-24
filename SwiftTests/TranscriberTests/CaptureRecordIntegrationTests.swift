@@ -315,7 +315,7 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
                           local: H.side(expected: 3120, delivered: 3120, callbacks: 312_000)),
         ])
         #expect(r.provenance.systemPermissionDeniedConfirmed && r.provenance.remoteStatus == "compromised")
-        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence while system audio permission was not granted"
+        let line = "Remote audio: partly captured — 1740 s of 3120 s was digital silence; system audio permission was not granted for part of the call"
         #expect(r.captureLine == line)
         #expect(r.hasBanner && r.summaryMarkdown.contains("> \(line)"))
         #expect(!r.userMessage.contains("Remote audio: not captured"))
@@ -395,6 +395,9 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.remote?["exact_zero_seconds"] == nil, "SCK never measured exact zeros")
         #expect(r.remote?["heartbeat_callbacks"] == nil, "SCK never counted tap callbacks")
         #expect(r.stamp?["system_exact_zero_seconds"] == nil)
+        let stampedRemote = r.stamp?["remote_coverage"] as? [String: Any]
+        #expect(stampedRemote != nil && stampedRemote?["exact_zero_seconds"] == nil && stampedRemote?["heartbeat_callbacks"] == nil,
+                "capture_provenance.remote_coverage omits them too")
         #expect(r.summaryMetadata.remoteCapture?.exactZeroSeconds == nil)
         #expect(r.remote?["delivered_seconds"] as? Double == 600 && r.remote?["status"] as? String == "healthy", "what WAS measured stays")
         #expect(r.local?["exact_zero_seconds"] as? Double == 0 && r.local?["heartbeat_callbacks"] as? Int == 60_000,
@@ -527,7 +530,8 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         let p = log.merged(into: ring).makeProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(p.remoteStatus == "compromised")
         #expect(p.systemAudioUnrecovered, "the ladder gave up on the remote side; eviction does not undo that")
-        #expect(p.qualityAnomalyCount >= 2, "a rate drift and an unrecovered remote stream were recorded")
+        #expect(p.qualityAnomalyCount == 2, "a rate drift and an unrecovered remote stream were recorded — once each")
+        #expect(p.anomalyCount >= p.qualityAnomalyCount, "the superset never drops below the subset")
 
         let url = d.appendingPathComponent("weekly-sync.json")
         try TranscriptAssembler.write(["metadata": assemble(p), "segments": [["start": 0.0, "end": 2.0, "speaker": "Remote Speaker 1", "text": "hello"]]], to: url)

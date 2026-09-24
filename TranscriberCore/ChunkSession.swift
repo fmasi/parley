@@ -56,6 +56,14 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// The chunk's WAVs were gone and its words were recognised from its `.m4a` archive (a crash
         /// between archiving and the session.json write). Informational: the archive is the audio.
         public static let transcribedFromArchive = Code(rawValue: "transcribed_from_archive")
+        /// The chunk had no microphone stream: no mic WAV (or, from an archive, a mic channel with
+        /// no signal), so it was processed remote-only (C-M4). Informational — a system-only source is
+        /// legitimate; `metadata.capture.local` holds the mic's coverage.
+        public static let micStreamAbsent = Code(rawValue: "mic_stream_absent")
+        /// The storage quota deleted this chunk's archive during the recording (C-M9; the quota's
+        /// scope is the owner's call, #224). Informational: the chunk's words are in the record, its
+        /// audio is not on disk any more.
+        public static let chunkAudioEvicted = Code(rawValue: "chunk_audio_evicted")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An

@@ -596,10 +596,12 @@ struct MeetingSummarizerDisclosureTests {
         let probe = Probe(path: path)
         try await MeetingSummarizer.summarize(transcriptPath: path, provider: probe, endpoint: "https://api.example.com/v1")
         #expect(probe.seen?["transcript_transmitted"] as? Bool == true)
+        #expect(probe.seen?["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"])
         #expect(probe.seen?["summary_generated"] as? Bool == false)
-        #expect(probe.seen?["summary_endpoint"] as? String == "remote (api.example.com)")
+        #expect(probe.seen?["summary_endpoint"] == nil, "nothing has generated a summary yet")
         let final = try disclosure(path)
         #expect(final["summary_generated"] as? Bool == true && final["transcript_transmitted"] as? Bool == true)
+        #expect(final["summary_endpoint"] as? String == "remote (api.example.com)")
     }
 
     /// A timeout after sending (the documented -1001 case) must never leave `false`.
@@ -610,12 +612,15 @@ struct MeetingSummarizerDisclosureTests {
         guard case .failed = outcome else { Issue.record("expected a failure, got \(outcome)"); return }
         let d = try disclosure(path)
         #expect(d["transcript_transmitted"] as? Bool == true)
+        #expect(d["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"])
         #expect(d["summary_generated"] as? Bool == false)
-        #expect(d["summary_endpoint"] as? String == "remote (api.example.com)")
+        #expect(d["summary_endpoint"] == nil, "no summary was generated")
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-summary.md").path))
     }
 
-    /// A later summary on this Mac never clears an earlier transmission from the record.
+    /// A later summary on this Mac never clears an earlier transmission from the record — and the two
+    /// facts are recorded apart (R2b item 6): where the transcript was SENT, and which endpoint
+    /// GENERATED the current summary.
     @Test func aLaterLocalSummaryNeverClearsAnEarlierTransmission() async throws {
         let (dir, path) = try transcript(); defer { try? FileManager.default.removeItem(at: dir) }
         try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "https://api.example.com/v1")
@@ -624,8 +629,12 @@ struct MeetingSummarizerDisclosureTests {
         try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "http://127.0.0.1:1234")
         let d = try disclosure(path)
         #expect(d["transcript_transmitted"] as? Bool == true, "it was sent once; that stays on record")
+        #expect(d["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"], "where it was sent")
         #expect(d["summary_generated"] as? Bool == true)
-        #expect(d["summary_endpoint"] as? String == "remote (api.example.com)", "the endpoint it was sent to")
+        #expect(d["summary_endpoint"] as? String == "local (127.0.0.1:1234)", "the endpoint that generated the summary on disk")
+        try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "https://llm.example.org/v1")
+        #expect(try disclosure(path)["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)", "remote (llm.example.org)"],
+                "every host, once each, in order")
     }
 
     /// Local only: attempted, never transmitted, and the endpoint is named.
@@ -635,6 +644,28 @@ struct MeetingSummarizerDisclosureTests {
                                                endpoint: "http://127.0.0.1:1234")
         let d = try disclosure(path)
         #expect(d["transcript_transmitted"] as? Bool == false && d["summary_generated"] as? Bool == false)
-        #expect(d["summary_endpoint"] as? String == "local (127.0.0.1:1234)")
+        #expect(d["transcript_transmitted_to"] as? [String] == [])
+        #expect(d["summary_endpoint"] == nil)
+    }
+}
+
+/// R2b item 5: a segment with no usable time was fed to the model at 00:00:00 (and could make the
+/// meeting 0 s long). It is left out of the summary input, and the summary says so.
+struct MeetingSummarizerTimelessSegmentTests {
+    @Test func aSegmentWithoutATimeIsLeftOutAndSaidSo() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("timeless-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let json: [String: Any] = ["metadata": ["dual_stream": false] as [String: Any], "segments": [
+            ["start": 1.0, "end": 60.0, "speaker": "Alice", "text": "timed"],
+            ["start": NSNull(), "end": NSNull(), "speaker": "Alice", "text": "lost in time", "time_unknown": true],
+        ]]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let (segments, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(segments.map(\.text) == ["timed"])
+        #expect(metadata.untimedSegmentCount == 1)
+        #expect(metadata.durationSeconds == 60, "the last segment has no time: the duration is the latest real end")
+        let line = "Transcript: 1 segment has no recorded time and was left out of this summary"
+        #expect(SummaryPromptBuilder.captureLine(metadata) == line)
+        #expect(SummaryPromptBuilder.captureBanner(metadata)?.contains("> \(line)") == true)
     }
 }
