@@ -49,6 +49,9 @@ struct RenameDialog: View {
     /// per channel. Read once when the dialog appears; a channel's entry is dropped after it is
     /// re-detected, since the user has then stated the count and absorption did not run.
     @State private var absorbedClusters: [String: Int] = [:]
+    /// What the last Re-detect on each channel produced, shown under its row (P5) — so a run that
+    /// found fewer speakers than asked for, or relabeled nothing, says so instead of looking done.
+    @State private var rediarizeOutcomes: [String: TranscriptRediarizer.Outcome] = [:]
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -145,6 +148,11 @@ struct RenameDialog: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let outcome = rediarizeOutcomes[channel] {
+                        Text("\(outcome.speakerCount) speaker\(outcome.speakerCount == 1 ? "" : "s") found · \(outcome.segmentsRelabeled) line\(outcome.segmentsRelabeled == 1 ? "" : "s") relabeled")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -263,6 +271,7 @@ struct RenameDialog: View {
     private func rediarize(channel: String, count: Int) {
         rediarizing = channel
         rediarizeError = nil
+        rediarizeOutcomes[channel] = nil
         rediarizePhase = nil
         rediarizeFraction = nil
         rediarizeStartedAt = Date()
@@ -271,7 +280,7 @@ struct RenameDialog: View {
         let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
         rediarizeTask = Task {
             do {
-                _ = try await TranscriptRediarizer.rediarize(
+                let outcome = try await TranscriptRediarizer.rediarize(
                     transcript: path,
                     source: channel,
                     speakerCount: count,
@@ -324,6 +333,7 @@ struct RenameDialog: View {
                     }
                     cachedChannelNames = namesNow
                     absorbedClusters[channel] = nil
+                    rediarizeOutcomes[channel] = outcome
                     sampleIndices = [:]
                     // Drop the stated count so the stepper falls back to what the diarizer actually
                     // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,

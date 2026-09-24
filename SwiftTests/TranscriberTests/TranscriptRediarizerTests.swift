@@ -475,3 +475,80 @@ struct AudioDecodeTests {
         #expect(abs(samples.count - expected) < 400)
     }
 }
+
+@Suite(.serialized)
+struct TranscriptRediarizerTimelineTests {
+    /// Counts the samples the diarizer received, so timeline padding is observable.
+    final class CountingDiarizer: DiarizationProvider, @unchecked Sendable {
+        private(set) var samplesSeen = 0
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
+            try await FakeDiarizer().diarize(audioPath: audioPath, numSpeakers: numSpeakers)
+        }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+            samplesSeen = audio.count
+            return try await FakeDiarizer().diarize(audio: audio, numSpeakers: numSpeakers, progress: progress)
+        }
+    }
+
+    private func writeSilentWav(at url: URL, seconds: Double) throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let frames = AVAudioFrameCount(seconds * 16000)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        try AVAudioFile(forWriting: url, settings: format.settings).write(from: buffer)
+    }
+
+    /// Chunk 0 = mic-only WAV (`.skip` for the remote channel, 10 s); chunk 1 = system-only WAV (1 s).
+    private func makeTwoChunkRecording(withDurations: Bool = true) throws -> (transcript: URL, chunk1: URL, cleanup: () -> Void) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-timeline-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let mic0 = dir.appendingPathComponent("call-0_mic.wav"), sys1 = dir.appendingPathComponent("call-1.wav")
+        try writeSilentWav(at: mic0, seconds: 10); try writeSilentWav(at: sys1, seconds: 1)
+        var metadata: [String: Any] = ["audio_paths": [mic0.path, sys1.path]]
+        if withDurations { metadata["chunk_durations"] = [10.0, 1.0] }
+        let transcript = dir.appendingPathComponent("t.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": metadata,
+            "segments": [["start": 10.2, "end": 10.8, "text": "hi", "speaker": "Remote Speaker 1", "source": "remote"]],
+        ]).write(to: transcript)
+        return (transcript, sys1, { try? FileManager.default.removeItem(at: dir) })
+    }
+
+    /// P5: a `.skip` chunk contributed nothing and every later chunk's timeline shifted by its length.
+    @Test func skipChunksArePaddedWithTheirDuration() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        let d = CountingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: d)
+        #expect(d.samplesSeen == 11 * 16_000)
+    }
+
+    @Test func aSkipChunkWithUnknownDurationIsRefused() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(withDurations: false); defer { cleanup() }
+        do {
+            _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+            Issue.record("expected chunkDurationUnknown")
+        } catch TranscriptRediarizer.RediarizeError.chunkDurationUnknown(let name) {
+            #expect(name == "call-0_mic.wav")
+        }
+    }
+
+    @Test func aMissingListedChunkIsRefused() async throws {
+        let (t, chunk1, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        try FileManager.default.removeItem(at: chunk1)
+        do {
+            _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+            Issue.record("expected chunkMissing")
+        } catch TranscriptRediarizer.RediarizeError.chunkMissing(let name) {
+            #expect(name == "call-1.wav")
+        }
+    }
+
+    @Test func aBackupIsWrittenBeforeOverwriting() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        let before = try Data(contentsOf: t)
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
+        let backup = t.deletingPathExtension().appendingPathExtension("rediarize-backup.json")
+        #expect(try Data(contentsOf: backup) == before)
+        #expect(try Data(contentsOf: t) != before)
+    }
+}
