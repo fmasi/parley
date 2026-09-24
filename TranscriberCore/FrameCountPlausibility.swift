@@ -52,4 +52,22 @@ public enum FrameCountPlausibility {
             elapsedSeconds: elapsedSeconds, deficitSeconds: deficit
         )
     }
+
+    /// The end-of-recording check for both tracks (H2 council, A-I8). The mic is always expected, so
+    /// it is judged against elapsed time. The system track is judged against the time it was EXPECTED
+    /// to deliver — the gate-open seconds from coverage (§4.3, §7.1) — never elapsed time: nothing pads
+    /// the idle after a call ends, so a user who presses Stop long after hanging up would otherwise get
+    /// a false "capture anomalies" on a healthy recording. A remote never expected (nothing ever played,
+    /// gotcha #66) is never judged: its expected time is under `defaultMinimumElapsedSeconds`.
+    /// `Verdict.elapsedSeconds` is the time the track was judged against.
+    public static func finalizeVerdicts(
+        micFrames: Int64, micRate: Double,
+        systemFrames: Int64, systemRate: Double,
+        elapsedSeconds: Double, systemExpectedSeconds: Double
+    ) -> [Verdict] {
+        [
+            check(track: "mic", framesWritten: micFrames, rate: micRate, elapsedSeconds: elapsedSeconds),
+            check(track: "system", framesWritten: systemFrames, rate: systemRate, elapsedSeconds: systemExpectedSeconds),
+        ].compactMap { $0 }
+    }
 }

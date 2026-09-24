@@ -15,6 +15,8 @@ final class LivenessWatchdogDriver {
     let queue = DispatchQueue(label: "audio-capture.liveness-watchdog")
     private var timer: DispatchSourceTimer?
     private var monitors = LivenessWatchdogDriver.freshMonitors()
+    /// Bounds the sleep pause (H2 council, A-I7): a wake that never comes re-arms after 30 s awake.
+    private var sleepPause = SleepPauseClock()
     private let outputActivity = OutputActivityProbe()
     private let gateOpenLock = OSAllocatedUnfairLock<Bool>(initialState: true)
 
@@ -25,8 +27,12 @@ final class LivenessWatchdogDriver {
     /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
     var onGate: ((Bool, UInt64) -> Void)?
     /// After every tick's verdicts, on `queue`: (nowNanos, gateOpen). The service's counter checks — the
-    /// mic reopen deadline and write progress (H2 council) — ride the same 1 Hz tick, no timer of their own.
+    /// mic reopen deadline and write progress (H2 council) — ride the same 1 Hz tick, no timer of their
+    /// own. Not while paused for sleep: nothing is judged then.
     var onTick: ((UInt64, Bool) -> Void)?
+    /// The sleep pause expired without a wake (A-I7), on `queue`: both monitors are already re-armed;
+    /// the service resumes the healer and the mic as if woken.
+    var onPauseExpired: (() -> Void)?
     /// The last tick's gate reading. Cheap and lock-only, so `trackHealth()` (H6) can read it from
     /// the audio queue; the probe itself is a HAL read and must not run there.
     var lastGateOpen: Bool { gateOpenLock.withLock { $0 } }
@@ -60,12 +66,25 @@ final class LivenessWatchdogDriver {
         queue.async { [weak self] in self?.monitors[track]?.arm(nowNanos: now) }
     }
 
-    /// Sleep: nothing is judged until the next arm. The tick keeps running (an owed
-    /// `.cleared(.gateClosed)` is still delivered), the OS pauses it with the machine.
+    /// Sleep: nothing is judged until the wake, or until 30 s of awake time pass without one (A-I7).
+    /// The tick keeps running (an owed `.cleared(.gateClosed)` is still delivered), the OS pauses it
+    /// with the machine.
     func pause() {
+        let now = DispatchTime.now().uptimeNanoseconds
         queue.async { [weak self] in
             guard let self else { return }
+            self.sleepPause.pause(nowNanos: now)
             for track in CaptureTrack.allCases { self.monitors[track]?.pause() }
+        }
+    }
+
+    /// Wake: the pause ends and both tracks are judged from now (first frames due in 5 s).
+    func wake() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.sleepPause.resume()
+            for track in CaptureTrack.allCases { self.monitors[track]?.arm(nowNanos: now) }
         }
     }
 
@@ -97,10 +116,17 @@ final class LivenessWatchdogDriver {
     private func stopLocked() {
         timer?.cancel(); timer = nil
         monitors = Self.freshMonitors()
+        sleepPause = SleepPauseClock()
     }
 
     private func tick() {
         let now = DispatchTime.now().uptimeNanoseconds
+        // Uptime does not advance while the machine sleeps, so only a lost wake gets here (A-I7).
+        if sleepPause.tick(nowNanos: now) {
+            Logger.audio.info("No wake \(Int(SleepPauseClock.expirySeconds), privacy: .public)s after sleep — resuming liveness as if woken")
+            for track in CaptureTrack.allCases { monitors[track]?.arm(nowNanos: now) }
+            onPauseExpired?()
+        }
         let gateOpen = outputActivity.othersRunningOutput()
         gateOpenLock.withLock { $0 = gateOpen }
         onGate?(gateOpen, now)
@@ -111,6 +137,6 @@ final class LivenessWatchdogDriver {
             monitors[track] = m
             if v != .healthy { onVerdict?(track, v) }
         }
-        onTick?(now, gateOpen)
+        if !sleepPause.isPaused { onTick?(now, gateOpen) }
     }
 }

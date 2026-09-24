@@ -247,7 +247,7 @@ final class SystemTapSession {
         if case .reanchor(let reason) = decision {
             if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
                 Logger.audio.info(
-                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
+                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .private) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .private) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
                 )
                 anchor = fullRate
             } else {
@@ -275,7 +275,7 @@ final class SystemTapSession {
                     // later (a Bluetooth profile flip, or a virtual device's hidden clock member
                     // doing the same). Not an anomaly yet — the watchdog catches it if it happens.
                     Logger.audio.warning(
-                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
+                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .private) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
                     )
                 }
             }

@@ -108,13 +108,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
 
-    /// Whether system audio is coming from the Core Audio tap rather than ScreenCaptureKit. Set by
-    /// the service once the source is resolved in `startCapture`. The tap legitimately delivers
-    /// zero buffers before a call connects (gotcha #66) — `finalizeAll()`'s frame-count-plausibility
-    /// backstop must not mistake "no call ever connected" for a dropped/missing system track.
-    var isUsingSystemTap = false
-    /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1). Set by
-    /// the service; read in `finalizeAll`, on the audio queue (lock-only on the service side).
+    /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1): what
+    /// `finalizeAll` judges the system track against. Set by the service; read on the audio queue
+    /// (lock-only on the service side).
     var systemExpectedSeconds: (() -> Double)?
 
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
@@ -166,34 +162,29 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     func finalizeAll() {
         systemWriter.finalize()
         micWriter.finalize()
-        // Session-wide backstop (#196): compare each track's TOTAL frame count against how long the
-        // session has actually been running. Catches gaps that padding itself skipped (an implausible
-        // timeline delta) and anything else nobody has thought of yet — the same "don't need to know
-        // the mechanism" property that makes PadRatioMonitor useful, at the whole-recording scope.
+        // Session-wide backstop (#196): compare each track's TOTAL frame count against how long it
+        // should hold. Catches gaps that padding itself skipped (an implausible timeline delta) and
+        // anything else nobody has thought of yet — the same "don't need to know the mechanism" property
+        // that makes PadRatioMonitor useful, at the whole-recording scope. The system track is judged
+        // against its EXPECTED (gate-open) time, never elapsed time (H2 council, A-I8): nothing pads the
+        // idle after a call ends, and one never expected (gotcha #66) is not judged at all.
         let elapsedComponents = sessionStartTime.duration(to: .now).components
         let elapsed = Double(elapsedComponents.seconds) + Double(elapsedComponents.attoseconds) / 1e18
-        noteFrameCountMismatch(FrameCountPlausibility.check(
-            track: "mic", framesWritten: totalMicFramesWritten,
-            rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed
-        ))
-        // Skip the system-track check only for a tap recording that was never EXPECTED to deliver
-        // (Q4.5): nothing else played output for the whole session (gotcha #66), so no frames is
-        // correct. A tap that was expected and delivered nothing is exactly what this must catch.
-        if !(isUsingSystemTap && (systemExpectedSeconds?() ?? 0) < 1) {
-            noteFrameCountMismatch(FrameCountPlausibility.check(
-                track: "system", framesWritten: totalSystemFramesWritten,
-                rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
-            ))
-        }
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: totalMicFramesWritten, micRate: AudioConverter.outputSampleRate,
+            systemFrames: totalSystemFramesWritten, systemRate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate,
+            elapsedSeconds: elapsed, systemExpectedSeconds: systemExpectedSeconds?() ?? 0)
+        verdicts.forEach(noteFrameCountMismatch)
     }
 
-    /// Surface a track whose total recorded frames diverge implausibly from session elapsed time.
-    private func noteFrameCountMismatch(_ verdict: FrameCountPlausibility.Verdict?) {
-        guard let verdict else { return }
+    /// Surface a track whose total recorded frames diverge implausibly from the time it should hold
+    /// (elapsed for the mic, expected for the system track).
+    private func noteFrameCountMismatch(_ verdict: FrameCountPlausibility.Verdict) {
+        let basis = verdict.track == "system" ? "expected" : "elapsed"
         Logger.audio.error(
             """
             \(verdict.track, privacy: .public) track holds \(Int(verdict.actualSeconds), privacy: .public)s of audio \
-            after \(Int(verdict.elapsedSeconds), privacy: .public)s of wall-clock recording — \
+            after \(Int(verdict.elapsedSeconds), privacy: .public)s of \(basis, privacy: .public) recording time — \
             \(Int(verdict.deficitSeconds), privacy: .public)s unaccounted for.
             """
         )
@@ -202,6 +193,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             "actual_seconds": "\(Int(verdict.actualSeconds))",
             "elapsed_seconds": "\(Int(verdict.elapsedSeconds))",
             "deficit_seconds": "\(Int(verdict.deficitSeconds))",
+            "basis": basis,
         ])
     }
 

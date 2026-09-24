@@ -231,7 +231,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         stateLock.sync { generation += 1 }
         onGenerationChanged?()
 
-        Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .public) (\(resolvedId ?? "default", privacy: .public))")
+        Logger.audio.info("Mic capture started — device: \(device.localizedName, privacy: .private) (\(resolvedId ?? "default", privacy: .private))")
     }
 
     // MARK: - Device-change monitoring (Core Audio HAL)
@@ -255,6 +255,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// (a device appeared/vanished — drives pinned fallback/re-pin). Both feed one debounced reevaluation.
     /// `runtimeErrorNotification` is kept as a belt-and-suspenders fallback for a session that errors outright.
     private func startDeviceMonitoring() {
+        if stateLock.sync(execute: { isStopping }) { return }
         NotificationCenter.default.removeObserver(self)
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleRuntimeError(_:)),
@@ -266,9 +267,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         }
         // Claim the block under stateLock (a leaf, no call-out) so a concurrent stopDeviceMonitoring can't
         // race the add/remove on `deviceListenerBlock` (council MIC-HAL-RACE-1). The HAL Add calls happen
-        // OUTSIDE the lock so the leaf-lock no-call-out invariant holds.
+        // OUTSIDE the lock so the leaf-lock no-call-out invariant holds. Never once a stop has begun: a
+        // re-registration after a coreaudiod restart can race `stop()` (B-M2, same shape as the tap's B-M3).
         let shouldRegister: Bool = stateLock.sync {
-            guard deviceListenerBlock == nil else { return false }
+            guard deviceListenerBlock == nil, !isStopping else { return false }
             deviceListenerBlock = block
             return true
         }
@@ -286,6 +288,21 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "device monitor unavailable",
                                                   "status": "\(s1)/\(s2)"])
         }
+        // A stop that began between the claim and the adds removed nothing: undo them here with our own
+        // reference, or HAL keeps a dead listener for the helper's life.
+        if stateLock.sync(execute: { isStopping }) {
+            _ = AudioObjectRemovePropertyListenerBlock(system, &devices, monitorQueue, block)
+            _ = AudioObjectRemovePropertyListenerBlock(system, &defaultInput, monitorQueue, block)
+        }
+    }
+
+    /// coreaudiod restarted (`srst`): listener registrations do not survive it — the HAL header says to
+    /// re-establish them — so without this, auto-follow and re-pin are dead for the rest of the session
+    /// (B-M2). A silent mic is still caught by liveness; this restores FOLLOWING. Skipped once stopping.
+    func reregisterDeviceMonitoring() {
+        if stateLock.sync(execute: { isStopping }) { return }
+        stopDeviceMonitoring()
+        startDeviceMonitoring()
     }
 
     /// Detach the HAL listener + the runtime-error observer. Idempotent.
@@ -344,11 +361,11 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         // (e.g. AirPods connected and became the new default) is an intentional follow, captured by the
         // .restartInPlace the recovery records on success — not an anomaly.
         if decision.leavingDeviceGone {
-            Logger.audio.warning("Mic input removed — was \(concrete ?? "none", privacy: .public), following to \(decision.target ?? "default", privacy: .public)")
+            Logger.audio.warning("Mic input removed — was \(concrete ?? "none", privacy: .private), following to \(decision.target ?? "default", privacy: .private)")
             onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "input device removed",
                                                   "from": concrete ?? "none", "to": decision.target ?? "default"])
         } else {
-            Logger.audio.info("Mic following device change — \(concrete ?? "none", privacy: .public) → \(decision.target ?? "default", privacy: .public)")
+            Logger.audio.info("Mic following device change — \(concrete ?? "none", privacy: .private) → \(decision.target ?? "default", privacy: .private)")
         }
         // A device change is fresh information: refresh the recovery budget so a prior exhaustion can't
         // block following the new device (council F3).
@@ -360,7 +377,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     @objc private func handleRuntimeError(_ note: Notification) {
         let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error
-        Logger.audio.error("Mic capture runtime error: \(err?.localizedDescription ?? "unknown", privacy: .public)")
+        Logger.audio.error("Mic capture runtime error: \(err?.localizedDescription ?? "unknown", privacy: .private)")
         onEvent?(.streamStopError, .anomaly, ["source": "mic", "error": err?.localizedDescription ?? "unknown"])
         attemptRecover()
     }
@@ -423,7 +440,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                     restartAttempts = 0
                     return (currentDeviceId, currentConcreteDeviceId)
                 }
-                Logger.audio.info("Mic capture recovered in place — device: \(resolved ?? "default", privacy: .public)")
+                Logger.audio.info("Mic capture recovered in place — device: \(resolved ?? "default", privacy: .private)")
                 // `mic` keeps the nil==default provenance convention; `device` records the CONCRETE physical
                 // mic we actually followed to, so a clean auto-follow (built-in → AirPods, both present) still
                 // leaves the followed-to identity in the forensic trail (council AUTOFOLLOW-CONCRETE-UNRECORDED).
@@ -436,7 +453,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 return
             } catch {
                 stateLock.sync { restartAttempts += 1 }
-                Logger.audio.error("Mic recovery attempt failed: \(error, privacy: .public)")
+                Logger.audio.error("Mic recovery attempt failed: \(error, privacy: .private)")
                 Thread.sleep(forTimeInterval: 0.3)
             }
         }

@@ -299,6 +299,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
         livenessWatchdog.onGate = { [weak self] open, now in self?.accountGate(open: open, nowNanos: now) }
         livenessWatchdog.onTick = { [weak self] now, gateOpen in self?.checkProgress(nowNanos: now, gateOpen: gateOpen) }
+        livenessWatchdog.onPauseExpired = { [weak self] in self?.resumeAfterSleep() }
         writeStuck.withLock { $0 = [] }
         // A new session starts a new mic episode and fresh write checks; on the watchdog queue, like
         // every other use.
@@ -533,7 +534,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return configured
         }
 
-        Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
+        Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .private)")
 
         let sysPath = (outputDirectory as NSString).appendingPathComponent(baseName + ".wav")
         let micFilePath = (outputDirectory as NSString).appendingPathComponent(baseName + "_mic.wav")
@@ -598,9 +599,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
                         "tap_auto_start": "\(options.tapAutoStart)",
                     ])
-                    // So finalizeAll()'s frame-count-plausibility backstop can apply the same
-                    // gotcha-#66 gate the liveness watchdog already applies mid-recording.
-                    outputHandler.isUsingSystemTap = (source == .coreAudioTap)
                     switch source {
                     case .screenCaptureKit:
                         try await self.buildAndStartStream(handler: outputHandler)
@@ -783,16 +781,22 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         case "sleep":
             Logger.audio.info("System sleep: liveness paused")
             livenessWatchdog.pause()
-            tapHealer.cancelAll()   // paired with trigger(.wake) below (C4)
+            tapHealer.cancelAll()   // paired with trigger(.wake) in resumeAfterSleep (C4)
         case "wake":
             Logger.audio.info("System wake: re-arming both tracks, healing the tap and the mic")
-            tapHealer.trigger(.wake)   // forgets the episode; never rebuilds blind — the re-armed monitor decides
-            livenessWatchdog.arm(track: .mic)
-            livenessWatchdog.arm(track: .system)
-            healMic()
+            livenessWatchdog.wake()
+            resumeAfterSleep()
         default:
             Logger.audio.warning("Unknown power event \(kind, privacy: .public)")
         }
+    }
+
+    /// The wake — the app's message, or the sleep pause expiring because it never came (A-I7; the driver
+    /// has re-armed both monitors either way): the healer resumes, running a coreaudiod restart or a
+    /// grant that arrived while asleep (B-M1), and the mic reopens.
+    private func resumeAfterSleep() {
+        tapHealer.trigger(.wake)   // forgets the episode; never rebuilds blind — the re-armed monitor decides
+        healMic()
     }
 
     func updateMicrophone(
@@ -805,7 +809,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
 
-        Logger.audio.info("Switching mic to: \(deviceId ?? "system default", privacy: .public)")
+        Logger.audio.info("Switching mic to: \(deviceId ?? "system default", privacy: .private)")
 
         // Retarget the decoupled mic AVCaptureSession (#96). startRunning can block briefly, so do it
         // off the XPC reply thread.
@@ -816,10 +820,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 // .captureStart (council CONV-1): a switch that fell back to default or failed must not
                 // claim the requested device in mic_device.
                 self.record(.micSwitch, .info, ["mic": micSess.resolvedDeviceId ?? "default"])
-                Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .public)")
+                Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .private)")
                 reply(true, nil)
             } catch {
-                Logger.audio.error("Mic switch failed: \(error, privacy: .public)")
+                Logger.audio.error("Mic switch failed: \(error, privacy: .private)")
                 reply(false, "Mic switch failed: \(error.localizedDescription)")
             }
         }
@@ -964,13 +968,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// Called from `SystemTapSession` after every successful (re)build, on its config queue. The
-    /// grant is decided when the aggregate starts, so this is when to ask.
-    private func tapDidBuild() {
+    /// grant is decided when the aggregate starts, so this is when to ask. `epoch` is the tap session's
+    /// guard epoch: a late build from a previous session can't land in the next session's guard (B-M8).
+    private func tapDidBuild(epoch: Int) {
         // Off the caller's queue: a slow TCC read must not hold up the next rebuild.
         tccQueue.async { [weak self] in
             let status = SystemAudioRecordingPermission.preflight()
             guard let self else { return }
             self.audioQueue.async {
+                guard epoch == self.tapGuardEpoch else { return }
                 self.apply(self.tapGuard.tapBuilt(status: status, now: self.guardNow()))
             }
         }
@@ -1163,9 +1169,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// `remoteRecoveryFailed` alarm, never a teardown.
     /// `options` is the start's own copy (`startCapture` consumes `pendingOptions`, F4 round 1).
     private func startSystemTap(handler: AudioOutputHandler, options: CaptureOptions) throws {
-        audioQueue.sync {
+        let epoch = audioQueue.sync { () -> Int in
             tapGuard = TapPermissionGuard(softAlarmSeconds: options.remoteExactZeroSoftAlarmSeconds.map(Double.init))
             tapGuardEpoch += 1
+            return tapGuardEpoch
         }
         let tap = SystemTapSession(
             deliveryQueue: audioQueue, tapAutoStart: options.tapAutoStart,
@@ -1176,7 +1183,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             guard let self else { return }
             self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
         }
-        tap.onBuilt = { [weak self] in self?.tapDidBuild() }
+        tap.onBuilt = { [weak self] in self?.tapDidBuild(epoch: epoch) }
         tap.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
@@ -1187,7 +1194,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // probe needs nothing — it reads the process list afresh every tick.
         tap.onServiceRestarted = { [weak self] in
             guard let self else { return }
-            self.tapHealer.trigger(.serviceRestarted)
+            self.tapHealer.trigger(.serviceRestarted)   // kept for the wake if it lands while asleep (B-M1)
+            // The mic's HAL listeners died with coreaudiod too: without them auto-follow and re-pin stay
+            // dead for the rest of the session (B-M2).
+            let mic = self.stateLock.sync { self.micSession }
+            mic?.reregisterDeviceMonitoring()
             self.healMic()
         }
         try tap.start()

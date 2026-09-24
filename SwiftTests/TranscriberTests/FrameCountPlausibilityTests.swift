@@ -8,6 +8,45 @@ import Testing
 
     private let rate = 48000.0
 
+    // MARK: - H2 council (A-I8): the remote is judged against the time it was EXPECTED to deliver
+
+    /// The call ends at 5 min and the user presses Stop at 10: the remote went quiet with the call
+    /// (nothing pads a trailing idle), which is not missing audio. Before, elapsed time made this a
+    /// false "capture anomalies" on a healthy recording.
+    @Test func aRemoteThatWentQuietWhenTheCallEndedIsNotAMismatch() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: Int64(300 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 300)
+        #expect(verdicts.isEmpty)
+    }
+
+    @Test func aRemoteThatStoppedWhileItWasExpectedIsStillCaught() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: Int64(300 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 600)
+        #expect(verdicts.map(\.track) == ["system"])
+        #expect(verdicts.first?.elapsedSeconds == 600, "judged against the expected seconds")
+    }
+
+    @Test func theMicIsStillJudgedAgainstElapsedTime() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(300 * rate), micRate: rate,
+            systemFrames: Int64(600 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 600)
+        #expect(verdicts.map(\.track) == ["mic"])
+    }
+
+    /// Nothing ever played (gotcha #66): no expected time, nothing to judge.
+    @Test func aRemoteNeverExpectedIsNotJudged() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: 0, systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 0)
+        #expect(verdicts.isEmpty)
+    }
+
     /// A track that recorded (approximately) the whole session must not fire.
     @Test func matchingFramesIsHealthy() {
         let elapsed = 120.0
