@@ -41,6 +41,9 @@ final class SystemTapSession {
     /// An aggregate listener fired (fourcc: "goin" (value 0 only), "stpd", "diff", "agrp"), on
     /// `monitorQueue`. Accelerators only (§5): the liveness driver checks the heartbeat, never a blind rebuild.
     var onAggregateEvent: ((String) -> Void)?
+    /// coreaudiod restarted (`srst`), on `monitorQueue`: every Core Audio object id this session holds
+    /// is dead. The caller jumps to the top rung (new tap + aggregate + listeners, §5).
+    var onServiceRestarted: (() -> Void)?
     /// Invoked on the config queue after every successful build or rebuild, so the caller can check the
     /// System Audio Recording permission the new aggregate started with (#220).
     var onBuilt: (() -> Void)?
@@ -90,6 +93,8 @@ final class SystemTapSession {
     /// stall is invisible to the rate-drift watchdog, which only runs when buffers arrive. Mirrors
     /// what `MicCaptureSession` has always done (gotcha #55).
     private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Third HAL listener, on the system object's `srst` (coreaudiod restarted). Guarded by `stateLock`.
+    private var serviceRestartListenerBlock: AudioObjectPropertyListenerBlock?
     /// UID of the device currently clocking the aggregate, so a device-list change can tell whether
     /// the one that matters is the one that disappeared. Guarded by `stateLock`.
     private var anchorDeviceUID: String?
@@ -618,6 +623,39 @@ final class SystemTapSession {
                 "source": "system-tap", "reason": "device list monitor unavailable", "status": "\(listSt)",
             ])
         }
+
+        // Third listener: coreaudiod restarted. Nothing we hold survives it — the tap, the aggregate
+        // and every listener registration are gone — so the healer rebuilds from the top rung.
+        let srstBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            Logger.audio.error("System tap: coreaudiod restarted — rebuilding the tap from scratch")
+            self.onEvent?(.serviceRestarted, .warning, ["source": "system-tap"])
+            self.onServiceRestarted?()
+        }
+        stateLock.sync { serviceRestartListenerBlock = srstBlock }
+        var srstAddr = Self.serviceRestartedAddress
+        let srstSt = AudioObjectAddPropertyListenerBlock(system, &srstAddr, monitorQueue, srstBlock)
+        if srstSt != noErr {
+            Logger.audio.error("System tap: service-restart HAL listener registration failed (\(srstSt))")
+            onEvent?(.streamStopError, .anomaly, [
+                "source": "system-tap", "reason": "service restart monitor unavailable", "status": "\(srstSt)",
+            ])
+        }
+    }
+
+    private static let serviceRestartedAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyServiceRestarted,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Client state must be re-established after `srst` (the HAL header says so): drop and re-add the
+    /// system-object listeners. Runs on `configQueue`, inside a `.rebuildTap` rung. Skipped once a stop
+    /// has begun, so a rung racing `stop()` can't re-add listeners the stop just removed.
+    private func reregisterSystemListeners() {
+        if stateLock.sync(execute: { isStopping }) { return }
+        stopDeviceMonitoring()
+        startDeviceMonitoring()
     }
 
     private static let deviceListAddress = AudioObjectPropertyAddress(
@@ -691,6 +729,16 @@ final class SystemTapSession {
             var listAddr = Self.deviceListAddress
             _ = AudioObjectRemovePropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
         }
+        let srstBlock: AudioObjectPropertyListenerBlock? = stateLock.sync {
+            let b = serviceRestartListenerBlock
+            serviceRestartListenerBlock = nil
+            return b
+        }
+        if let srstBlock {
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            var srstAddr = Self.serviceRestartedAddress
+            _ = AudioObjectRemovePropertyListenerBlock(system, &srstAddr, monitorQueue, srstBlock)
+        }
         // Listener removed first (so no new rebuild can be scheduled), then cancel any already-pending
         // debounced rebuild so it doesn't fire after stop() or keep a [weak self] closure alive (#112).
         // reevaluationItem is monitorQueue-confined; the sync also serializes AFTER any in-flight
@@ -727,6 +775,7 @@ final class SystemTapSession {
                 if rung == .rebuildTap {
                     self.destroyTap()
                     try self.createTap()
+                    self.reregisterSystemListeners()
                 }
                 try self.buildAggregateAndStart()
                 Logger.audio.info("System tap \(rung.rawValue, privacy: .public) done (\(reason, privacy: .public))")

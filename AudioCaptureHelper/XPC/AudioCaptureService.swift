@@ -883,6 +883,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self?.record(kind, severity, detail)
         }
         wireTapHealer(to: tap)
+        // srst: the ladder forgets the episode and runs one immediate `rebuildTap` rung, whose rebuild
+        // re-registers the system listeners; the mic's AVCaptureSession is reopened too. The output
+        // probe needs nothing — it reads the process list afresh every tick.
+        tap.onServiceRestarted = { [weak self] in
+            guard let self else { return }
+            self.tapHealer.trigger(.serviceRestarted)
+            self.stateLock.sync { self.micSession }?.heal()
+        }
         try tap.start()
         // Commit-or-abort against a stop that raced in during start (mirrors startMicSession's council-F1
         // guard): if the app began stopping while the tap was coming up, tear it down rather than leak a
