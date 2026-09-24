@@ -510,7 +510,7 @@ public struct SessionState: Codable {
                 try FileManager.default.removeItem(at: url)
                 Logger.state.debug("SessionState deleted: \(url.lastPathComponent, privacy: .sensitive)")
             } catch {
-                Logger.state.warning("SessionState delete failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+                Logger.state.warning("SessionState delete failed: \(error, privacy: .private)")
             }
         }
     }

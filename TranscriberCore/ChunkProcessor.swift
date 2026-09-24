@@ -231,7 +231,7 @@ public final class ChunkProcessor {
             await MainActor.run { self.onSessionWriteSucceeded?() }
             return true
         } catch {
-            Logger.state.error("Failed to write session.json \(context, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.state.error("Failed to write session.json \(context, privacy: .public): \(error, privacy: .private)")
             await stateStore.noteSessionWriteFailure(chunkIndex: chunkIndex)
             await MainActor.run { self.onSessionWriteFailure?(chunkIndex) }
             return false
@@ -393,7 +393,7 @@ public final class ChunkProcessor {
                     micName: micFileExists ? micURL.lastPathComponent : nil,
                     micHasFrames: micFileExists && Self.hasAudioFrames(micURL)
                 )
-                Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed (\(type(of: error), privacy: .public)), keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .private)")
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .private)")
                 issues.append(ChunkIssue(code: .archiveFailed, track: nil, count: nil))
             }
         }
@@ -410,7 +410,7 @@ public final class ChunkProcessor {
                     protectedFile: archivePath
                 )
             } catch {
-                Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+                Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")
             }
         }
 
@@ -484,7 +484,7 @@ public final class ChunkProcessor {
             Logger.transcription.error("Chunk \(chunkIndex, privacy: .public) has no WAVs, only its archive — transcribing it from \(archive.lastPathComponent, privacy: .sensitive)")
             return (directory, split.remote, dual ? split.local : nil)
         } catch {
-            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): its archive could not be read (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): its archive could not be read: \(error, privacy: .private)")
             try? FileManager.default.removeItem(at: directory)
             return nil
         }
@@ -542,7 +542,7 @@ public final class ChunkProcessor {
         do {
             segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
         } catch {
-            Logger.transcription.error("Transcription failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.transcription.error("Transcription failed for \(label, privacy: .public): \(error, privacy: .private)")
             return StreamResult(segments: [], speakerDatabase: [:],
                                 issues: [ChunkIssue(code: .asrFailed, track: source, count: nil)])
         }
@@ -574,7 +574,7 @@ public final class ChunkProcessor {
                         issues.append(ChunkIssue(code: .vadUnavailable, track: source, count: nil))
                     }
                 } catch {
-                    Logger.transcription.error("VAD failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+                    Logger.transcription.error("VAD failed for \(label, privacy: .public): \(error, privacy: .private)")
                     speechMap = nil
                     issues.append(ChunkIssue(code: .vadFailed, track: source, count: nil))
                 }
@@ -596,7 +596,7 @@ public final class ChunkProcessor {
                     issues.append(ChunkIssue(code: .clustersAbsorbed, track: source, count: result.absorbed))
                 }
             } catch {
-                Logger.transcription.error("Diarization failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+                Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .private)")
                 issues.append(ChunkIssue(code: .diarizationFailed, track: source, count: nil))
                 // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
                 // is worse than admitting we don't know: with an empty speakerDatabase the

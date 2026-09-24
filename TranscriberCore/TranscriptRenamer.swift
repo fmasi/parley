@@ -233,7 +233,7 @@ public enum TranscriptRenamer {
             try updatedData.write(to: jsonPath, options: .atomic)
             return true
         } catch {
-            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error.localizedDescription, privacy: .public)")
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
             return false
         }
     }

@@ -302,7 +302,7 @@ public final class TranscriptionRunner {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
 
         // #93: archive EVERY contributing segment to its own stereo AAC (L=mic, R=system),
@@ -327,7 +327,7 @@ public final class TranscriptionRunner {
                     protectedFile: archived.last
                 )
             } catch {
-                Logger.files.error("Quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+                Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
             }
         }
 
@@ -460,7 +460,7 @@ public final class TranscriptionRunner {
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
                 // so on throw the chunk files are still intact. The error can name files: private.
-                Logger.files.error("Audio concatenation failed (\(type(of: error), privacy: .public)), keeping separate files: \(error, privacy: .private)")
+                Logger.files.error("Audio concatenation failed, keeping separate files: \(error, privacy: .private)")
                 audioPaths = chunkAudioPaths
             }
         } else {
@@ -507,7 +507,7 @@ public final class TranscriptionRunner {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
 
         // 9. Storage quota enforcement
@@ -519,7 +519,7 @@ public final class TranscriptionRunner {
                 protectedFile: audioPaths.last
             )
         } catch {
-            Logger.files.error("Quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
         }
 
         // 10. Clean up session.json

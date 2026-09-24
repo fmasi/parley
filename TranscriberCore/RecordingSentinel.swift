@@ -109,7 +109,7 @@ public struct RecordingSentinel: Codable, Equatable {
         } catch CocoaError.fileNoSuchFile {
             // Expected when no crash occurred — not an error.
         } catch {
-            Logger.state.warning("RecordingSentinel delete failed: \(error.localizedDescription, privacy: .public)")
+            Logger.state.warning("RecordingSentinel delete failed: \(error, privacy: .private)")
         }
     }
 

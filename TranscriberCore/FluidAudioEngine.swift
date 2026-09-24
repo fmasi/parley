@@ -67,7 +67,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
                 sdkLabel: Self.sdkLabel
             )
         } catch {
-            Logger.transcription.warning("Manifest record failed: \(error.localizedDescription, privacy: .public)")
+            Logger.transcription.warning("Manifest record failed: \(error, privacy: .private)")
         }
         Logger.transcription.info("FluidAudio model pre-download complete")
     }
