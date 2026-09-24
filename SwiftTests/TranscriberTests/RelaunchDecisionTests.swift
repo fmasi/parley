@@ -48,6 +48,13 @@ import Testing
     @Test func stoppingWinsEvenWhenTheHelperStillReportsCapturing() {
         #expect(decide(alive: 5, stopping: true, helper: true) == .salvageAndStop(reason: .wasStopping))
     }
+    /// Fix round 2, item 4: round 1 put `wasStopping` ahead of `folderReachable` too, so a stopping
+    /// sentinel with an unreachable folder (e.g. an unmounted external drive) salvaged instead of
+    /// waiting — L7 would then delete the sentinel off a folder it couldn't actually reach,
+    /// breaking "never deletes". `folderReachable` must still gate `wasStopping`'s outcome.
+    @Test func stoppingWithAnUnreachableFolderWaitsInsteadOfSalvaging() {
+        #expect(decide(alive: 5, stopping: true, folder: false) == .waitForFolder)
+    }
     @Test func aDifferentBootSessionIsStaleEvenIfRecent() {
         #expect(decide(alive: 30, boot: "B0") == .salvageStale)
     }

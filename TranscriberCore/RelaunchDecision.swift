@@ -26,9 +26,12 @@ public enum RelaunchDecision: Equatable, Sendable {
 
     public static func decide(lastAliveAt: Date?, bootSessionUUID: String?, wasStopping: Bool, now: Date,
                               helperCapturing: Bool, currentBootSessionUUID: String?, folderReachable: Bool) -> RelaunchDecision {
-        // `wasStopping` is checked first, ahead of everything else including `helperCapturing`:
-        // see `Reason.wasStopping` above (fix round 1, item 7).
-        if wasStopping { return .salvageAndStop(reason: .wasStopping) }
+        // `wasStopping` is checked first, ahead of `helperCapturing` (fix round 1, item 7) — but
+        // NOT ahead of `folderReachable`: salvaging off a folder we can't reach (e.g. an unmounted
+        // external drive) would delete the sentinel out from under data we can't currently see,
+        // breaking "never deletes". An unreachable folder still waits, even mid-stop. (Fix round 2,
+        // item 4 — a regression introduced by round 1's fix.)
+        if wasStopping { return folderReachable ? .salvageAndStop(reason: .wasStopping) : .waitForFolder }
         if helperCapturing { return .reattach }
         if !folderReachable { return .waitForFolder }
         if let recorded = bootSessionUUID, let current = currentBootSessionUUID, recorded != current { return .salvageStale }
