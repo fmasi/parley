@@ -11,9 +11,12 @@ import Testing
         let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3))
         #expect(m.contains("m.json") && m.contains("3 chunks"))
     }
+    /// Review fix 6 [Important]: the old wording ("nothing had been recorded yet") claimed a cause
+    /// the type can't know — callers map "no processor" and "salvage returned nil" to
+    /// `.nothingToSalvage` even when audio exists.
     @Test func nothingWrittenSaysSo() {
         let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
-        #expect(m.contains("No transcript could be written") && !m.contains("has been transcribed"))
+        #expect(m.contains("No transcript could be written: no recorded audio was found to salvage.") && !m.contains("has been transcribed"))
     }
     @Test func finalizeFailureKeepsTheAudioAndSaysWhy() {
         let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 2))
@@ -36,5 +39,32 @@ import Testing
     @Test func singularChunkGrammar() {
         let m = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1))
         #expect(m.contains("1 chunk ") || m.contains("1 chunk)"))
+    }
+
+    // MARK: - Fix round 1
+
+    /// Review fix 7: subject-verb agreement — a single chunk "was transcribed" / "is kept", never
+    /// "were"/"are".
+    @Test func singularVerbAgreement() {
+        let written = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1))
+        #expect(written.contains("The 1 chunk recorded before it was transcribed to m.json."))
+        let failed = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 1))
+        #expect(failed.contains("The 1 chunk recorded before it is kept on disk but could not be transcribed: disk full."))
+    }
+
+    /// Review fix 8: a zero chunk count must not read "The 0 chunks …".
+    @Test func zeroChunksDoesNotSayZeroChunks() {
+        let written = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 0))
+        #expect(!written.contains("0 chunks"))
+        let failed = RecoveryMessages.recordingFailed(after: SalvageOutcome(kind: .finalizeFailed("disk full"), chunkCount: 0))
+        #expect(!failed.contains("0 chunks"))
+    }
+
+    /// Review fix 9: the wall clock can step back across a crash/resume pair; the reported gap is
+    /// clamped to ≥ 0 rather than printing a negative duration.
+    @Test func negativeGapClampsToZero() {
+        let crashed = Date(timeIntervalSince1970: 104), resumed = Date(timeIntervalSince1970: 100)
+        let m = RecoveryMessages.resumedAfterCrash(crashedAt: crashed, resumedAt: resumed)
+        #expect(m.hasSuffix("0 s not recorded."))
     }
 }

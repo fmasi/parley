@@ -15,16 +15,30 @@ public enum RecoveryMessages {
 
     public static func clock(_ date: Date) -> String { clockFormatter.string(from: date) }
 
-    private static func chunks(_ n: Int) -> String { n == 1 ? "1 chunk" : "\(n) chunks" }
+    /// Noun phrase plus subject-verb agreement for a chunk count (review fix 7): "1 chunk"/"was"/"is"
+    /// vs "N chunks"/"were"/"are". Only called for a count ≥ 1 — `describe` handles 0 itself (fix 8).
+    private static func chunkPhrase(_ n: Int) -> (noun: String, wasWere: String, isAre: String) {
+        n == 1 ? ("1 chunk", "was", "is") : ("\(n) chunks", "were", "are")
+    }
 
     private static func describe(_ outcome: SalvageOutcome) -> String {
         switch outcome.kind {
         case .transcriptWritten(let url):
-            return "The \(chunks(outcome.chunkCount)) recorded before it were transcribed to \(url.lastPathComponent)."
+            guard outcome.chunkCount > 0 else {
+                return "No chunks were recorded, but a transcript was written to \(url.lastPathComponent)."
+            }
+            let (noun, wasWere, _) = chunkPhrase(outcome.chunkCount)
+            return "The \(noun) recorded before it \(wasWere) transcribed to \(url.lastPathComponent)."
         case .nothingToSalvage:
-            return "No transcript could be written: nothing had been recorded yet."
+            // Review fix 6: callers map both "no processor" and "salvage returned nil" to this case
+            // even when audio exists — never claim a specific cause the type can't know.
+            return "No transcript could be written: no recorded audio was found to salvage."
         case .finalizeFailed(let why):
-            return "The \(chunks(outcome.chunkCount)) recorded before it are kept on disk but could not be transcribed: \(why)."
+            guard outcome.chunkCount > 0 else {
+                return "No chunks were recorded, and finalizing failed: \(why)."
+            }
+            let (noun, _, isAre) = chunkPhrase(outcome.chunkCount)
+            return "The \(noun) recorded before it \(isAre) kept on disk but could not be transcribed: \(why)."
         }
     }
 
@@ -40,8 +54,10 @@ public enum RecoveryMessages {
         "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. " + describe(outcome)
     }
 
+    /// Review fix 9: the wall clock can step back across a crash/resume pair; the reported gap is
+    /// clamped to ≥ 0 rather than printing a negative duration.
     public static func resumedAfterCrash(crashedAt: Date, resumedAt: Date) -> String {
-        let gap = Int(resumedAt.timeIntervalSince(crashedAt).rounded())
+        let gap = max(0, Int(resumedAt.timeIntervalSince(crashedAt).rounded()))
         return "Parley crashed at \(clock(crashedAt)) and resumed at \(clock(resumedAt)) — \(gap) s not recorded."
     }
 }
