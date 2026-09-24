@@ -15,8 +15,8 @@ struct ConfigTests {
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
         #expect(config.engine == .resolvedDefault)
-        // SCK is the shipped default — the #103 Core Audio tap is opt-in during phase-2 rollout.
-        #expect(config.systemAudioSource == .screenCaptureKit)
+        // §11.1 (owner decision 2026-09-24): new installs record with the Core Audio tap.
+        #expect(config.systemAudioSource == .coreAudioTap)
     }
 
     @Test func newFieldsRoundTrip() throws {
@@ -458,6 +458,16 @@ struct ConfigTests {
         #expect(json["remote_exact_zero_soft_alarm_seconds"] as? Int == 300)
         #expect(json["debug_drop_tap_frames"] as? Bool == true)
         #expect(try JSONDecoder().decode(Config.self, from: data) == c)
+    }
+
+    /// §11.1 (owner decision 2026-09-24): new installs use the Core Audio tap; an existing config.json
+    /// without the key was written by an SCK-era build and stays SCK (no silent change of a live setup).
+    @Test func newInstallsDefaultToTheCoreAudioTapAndOldConfigsKeepSCK() throws {
+        #expect(Config.default.systemAudioSource == .coreAudioTap)
+        let legacy = Data(#"{"recording_directory":"/tmp/r","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false}"#.utf8)
+        #expect(try JSONDecoder().decode(Config.self, from: legacy).systemAudioSource == .screenCaptureKit)
+        let explicit = Data(#"{"recording_directory":"/tmp/r","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false,"system_audio_source":"sck"}"#.utf8)
+        #expect(try JSONDecoder().decode(Config.self, from: explicit).systemAudioSource == .screenCaptureKit)
     }
 
 }

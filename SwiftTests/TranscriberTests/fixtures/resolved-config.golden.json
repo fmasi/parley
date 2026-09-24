@@ -14,7 +14,7 @@
     "silence_detection_enabled": true,
     "silence_timeout_minutes": 5,
     "suppress_capture_warning": false,
-    "system_audio_source": "sck"
+    "system_audio_source": "core_audio_tap"
   },
   "fluidaudio_offline_diarizer": {
     "clustering": {

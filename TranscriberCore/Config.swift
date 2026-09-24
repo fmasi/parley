@@ -192,7 +192,8 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
-        systemAudioSource: .screenCaptureKit,
+        // §11.1: new installs record with the tap; the decode fallback below stays SCK for pre-existing configs.
+        systemAudioSource: .coreAudioTap,
         vadSpeechThreshold: nil,
         diarizationClusteringThreshold: nil,
         diarizationMaxSpeakers: nil,

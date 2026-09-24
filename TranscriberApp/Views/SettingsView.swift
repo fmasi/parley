@@ -270,8 +270,8 @@ struct SettingsView: View {
 
         Section("System Audio") {
             Picker("Capture Method", selection: $config.systemAudioSource) {
-                Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
-                Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Core Audio Tap (default — captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Screen Recording (legacy, until #221)").tag(SystemAudioSource.screenCaptureKit)
             }
             if config.systemAudioSource == .coreAudioTap {
                 Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Needs System Audio Recording permission — Parley asks for it when you save. Applies to the next recording.")
