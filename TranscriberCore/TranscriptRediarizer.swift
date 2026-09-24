@@ -155,7 +155,8 @@ public enum TranscriptRediarizer {
         /// its timeline cannot be rebuilt without shifting every chunk after a gap.
         case timelineUnknown
         /// The chunks' recorded wall-clock offsets are not ones this recording could have (non-finite,
-        /// negative, or beyond its audio plus its gaps) — the timing WAS recorded, but is corrupt.
+        /// negative, or beyond its audio plus its gaps) — the timing WAS recorded, but looks
+        /// inconsistent.
         case chunkTimingImplausible
 
         public var errorDescription: String? {
@@ -215,13 +216,10 @@ public enum TranscriptRediarizer {
         let chunkDurations = metadata["chunk_durations"] as? [Double] ?? []
         let chunkOffsets = metadata["chunk_offsets"] as? [Double]
         let hasCaptureGaps = !((metadata["capture"] as? [String: Any])?["gaps"] as? [Any] ?? []).isEmpty
-        // Recorded periods with no capture: part of the timeline the offsets may legitimately span.
-        // Each must be a real gap (finite, ≥ 0, at most a day) to count — a corrupt value must not
-        // widen the bound below.
+        // Recorded periods with no capture: part of the timeline the offsets may legitimately span
+        // (validated and capped in `timelineBound`).
         let gapSeconds = ((metadata["capture"] as? [String: Any])?["gaps"] as? [[String: Any]] ?? [])
             .compactMap { $0["seconds"] as? Double }
-            .filter { $0.isFinite && $0 >= 0 && $0 <= 86_400 }
-            .reduce(0, +)
 
         // Decode ONCE, at the target format (16 kHz mono Float), and hand that buffer to the
         // diarizer (#204) — the old path decoded the channel's audio up to four separate times
@@ -358,6 +356,37 @@ public enum TranscriptRediarizer {
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)
     }
 
+    /// The longest a single chunk can plausibly be, and the most recorded-gap time the bound will
+    /// ever allow — a cap that still honours a real multi-day gap, but keeps a corrupt value from
+    /// turning into gigabytes of padding.
+    static let maxChunkSeconds: Double = 86_400
+    static let maxGapTotalSeconds: Double = 7 * 86_400
+
+    /// The latest wall-clock offset this recording's timeline can reach: every chunk's length, plus
+    /// its recorded gaps, plus one chunk of slack.
+    ///
+    /// - A chunk whose file cannot be read counts with its cached length (when that is a real one),
+    ///   else as one chunk — an unreadable file must not shrink the bound.
+    /// - The recorded gaps count in full (a real overnight gap can exceed a day) but their TOTAL is
+    ///   capped at the recording's wall-clock span (latest offset + that chunk's length), and at
+    ///   `maxGapTotalSeconds` — a pile of corrupt gaps cannot widen the bound without limit.
+    static func timelineBound(fileLengths: [TimeInterval?], cachedDurations: [Double], gapSeconds: [Double], offsets: [Double]?) -> Double {
+        func real(_ value: Double?) -> Double? {
+            guard let value, value.isFinite, value > 0, value <= maxChunkSeconds else { return nil }
+            return value
+        }
+        let cached = cachedDurations.count == fileLengths.count ? cachedDurations : []
+        let known = fileLengths.indices.map { real(fileLengths[$0]) ?? real(cached.indices.contains($0) ? cached[$0] : nil) }
+        let oneChunk = known.compactMap { $0 }.max() ?? 0
+        let lengths = known.map { $0 ?? oneChunk }
+        let gapTotal = gapSeconds.filter { $0.isFinite && $0 >= 0 }.reduce(0, +)
+        var gapCap = maxGapTotalSeconds
+        if let offsets, offsets.count == lengths.count, !offsets.isEmpty, offsets.allSatisfy(\.isFinite) {
+            gapCap = min(gapCap, zip(offsets, lengths).map { $0 + $1 }.max() ?? gapCap)
+        }
+        return lengths.reduce(0, +) + min(gapTotal, max(0, gapCap)) + oneChunk
+    }
+
     /// `<transcript>.json.bak` next to the transcript: the transcript before its first re-detect.
     /// Deliberately not `.json`, so a folder scan never reads it as a second meeting (#152).
     static func backupURL(for transcript: URL) -> URL {
@@ -428,7 +457,7 @@ public enum TranscriptRediarizer {
         chunkDurations: [Double],
         chunkOffsets: [Double]?,
         hasCaptureGaps: Bool,
-        gapSeconds: Double,
+        gapSeconds: [Double],
         scratchDirectory: URL,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
@@ -461,8 +490,9 @@ public enum TranscriptRediarizer {
             // words: a recording can run long after the last one (nobody pressed Stop). A corrupted
             // value would otherwise trap (`Int(1e300)`) or allocate gigabytes of silence.
             let fileLengths = SpeakerSampleLocator.durations(of: chunks)
-            let knownLengths = fileLengths.compactMap { $0 }
-            let bound = knownLengths.reduce(0, +) + gapSeconds + (knownLengths.max() ?? 0)
+            let bound = timelineBound(
+                fileLengths: fileLengths, cachedDurations: chunkDurations, gapSeconds: gapSeconds,
+                offsets: chunkOffsets.flatMap { $0.count == chunks.count ? $0 : nil })
             func plausible(_ value: Double) -> Bool { value.isFinite && value >= 0 && value <= bound }
             // Each chunk goes at the wall-clock offset the transcript used for it, so labels land on
             // the right words across a relaunch or sleep gap — in OFFSET order, not list order (a

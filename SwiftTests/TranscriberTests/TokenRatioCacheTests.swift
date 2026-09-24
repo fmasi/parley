@@ -157,4 +157,15 @@ struct TokenRatioCacheTests {
         #expect(await cache.ratio(for: "fine") == 3.5)
         #expect(await cache.estimateTokens(String(repeating: "a", count: 300), model: "zero") == 100, "falls back to the default ratio")
     }
+
+    /// Round 7: implausible ratios are dropped from the file the first time they are found.
+    @Test func implausibleRatiosAreDroppedFromDisk() async throws {
+        let url = tempCacheURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entries: [String: TokenRatioCache.Entry] = ["zero": .init(ratio: 0, isSeed: false), "fine": .init(ratio: 3.5, isSeed: false)]
+        try JSONEncoder().encode(entries).write(to: url, options: .atomic)
+        _ = await TokenRatioCache(cacheURL: url).ratio(for: "fine")
+        let onDisk = try JSONDecoder().decode([String: TokenRatioCache.Entry].self, from: Data(contentsOf: url))
+        #expect(Set(onDisk.keys) == ["fine"])
+    }
 }

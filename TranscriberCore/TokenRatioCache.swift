@@ -170,7 +170,10 @@ public actor TokenRatioCache {
 
         // Try new format first (with isSeed)
         if let entries = try? JSONDecoder().decode([String: Entry].self, from: data) {
-            return Self.plausible(entries)
+            let kept = Self.plausible(entries)
+            // Drop the bad ones from disk the first time, so they are reported once, not per load.
+            if kept.count < entries.count { saveEntries(kept) }
+            return kept
         }
 
         // Migrate from old format (plain [String: Double]) — treat as seeds

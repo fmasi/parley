@@ -78,7 +78,7 @@ enum SummaryPromptBuilder {
         case nil: return .unknown
         case .compromised:
             if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
-            if let zeros = note.exactZeroSeconds, isSignificant(zeros, of: note.deliveredSeconds) {
+            if let zeros = clampedZeros(note), isSignificant(zeros, of: note.deliveredSeconds) {
                 if isRemote { return note.permissionDenied == true ? .permissionDeniedSilence : .uncertainSilence }
                 // "Only digital silence" only when under a second of non-zero audio remains — a mic
                 // that died 5 minutes into an hour DID record the user for those 5 minutes.
@@ -86,6 +86,12 @@ enum SummaryPromptBuilder {
             }
             return .compromised
         }
+    }
+
+    /// Exact-zero seconds, never more than what was delivered (corrupt counts can say otherwise).
+    private static func clampedZeros(_ note: CaptureSideNote) -> Double? {
+        guard let zeros = note.exactZeroSeconds else { return nil }
+        return note.deliveredSeconds.isFinite ? min(zeros, note.deliveredSeconds) : zeros
     }
 
     /// The same bar `TrackAccounting` uses for a coverage deficit: ≥ 15 s AND ≥ 10 % of the whole.
@@ -119,20 +125,22 @@ enum SummaryPromptBuilder {
     private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> CaptureHeaderLine? {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
         let amounts = "(\(delivered) s delivered of \(expected) s expected)"
-        let silence = note.exactZeroSeconds.map(seconds) ?? "?"
+        let zeros = clampedZeros(note)
+        let silence = zeros.map(seconds) ?? "?"
         // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
         // not hide how much.
-        let silenceSuffix = (note.exactZeroSeconds ?? 0).rounded() >= 1 && (note.exactZeroSeconds ?? 0).isFinite
+        let silenceSuffix = (zeros ?? 0).rounded() >= 1 && (zeros ?? 0).isFinite
             ? "; \(silence) s of it was digital silence" : ""
+        // A confirmed denial on a side that was still (partly) captured is part of why.
+        let permission = isRemote && note.permissionDenied == true
+            ? "; system audio permission was not granted for part of the call" : ""
+        let anomalies = note.anomalyCount.map { "\($0) capture \($0 == 1 ? "anomaly" : "anomalies") recorded" }
         let text: String
         switch verdict(note, isRemote: isRemote) {
         case .healthy: return nil
         case .idle: return CaptureHeaderLine(text: "\(label): nothing was playing on this Mac (no remote side)", warrantsBanner: false)
         case .notCaptured: text = "\(label): not captured \(amounts)"
         case .partlyCaptured:
-            // A confirmed denial on a side that was only partly captured is part of why.
-            let permission = isRemote && note.permissionDenied == true
-                ? "; system audio permission was not granted for part of the call" : ""
             text = "\(label): partly captured \(amounts)\(silenceSuffix)\(permission)"
         case .permissionDeniedSilence:
             // "not granted" is true for both a denial and a permission never answered (TCC
@@ -141,11 +149,11 @@ enum SummaryPromptBuilder {
         case .uncertainSilence:
             text = "\(label): uncertain — \(silence) s were exact digital silence and Parley could not confirm the permission; the other side may have been muted, or not captured"
         case .localSilence: text = "\(label): recorded only digital silence (\(silence) s)"
-        case .localPartialSilence: text = "\(label): captured, but \(silence) s of \(delivered) s was digital silence"
+        case .localPartialSilence:
+            let count = (note.anomalyCount ?? 0) > 0 ? " (\(anomalies!))" : ""
+            text = "\(label): captured, but \(silence) s of \(delivered) s was digital silence\(count)"
         case .compromised:
-            let detail = note.anomalyCount.map { "\($0) capture \($0 == 1 ? "anomaly" : "anomalies") recorded" }
-                ?? "anomaly count not recorded"
-            text = "\(label): captured, but compromised (\(detail))\(silenceSuffix)"
+            text = "\(label): captured, but compromised (\(anomalies ?? "anomaly count not recorded"))\(silenceSuffix)\(permission)"
         case .unknown: text = "\(label): capture status unknown (\(delivered) s of \(expected) s)"
         }
         return CaptureHeaderLine(text: text, warrantsBanner: true)
@@ -236,7 +244,7 @@ enum SummaryPromptBuilder {
     - Do not include small talk, greetings, or off-topic banter
     - Keep the total summary under 500 words
     - Use professional, concise language
-    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, compromised, or recorded only digital silence, state that in the Summary section before anything else.
+    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, compromised, recorded only digital silence, or partly digital silence, state that in the Summary section before anything else.
     """
 
     static let dualStreamHint = """

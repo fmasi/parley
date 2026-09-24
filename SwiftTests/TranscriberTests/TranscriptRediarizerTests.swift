@@ -860,4 +860,23 @@ struct TranscriptRediarizerTimelineTests {
         let blip = try #require(segs.first { $0["text"] as? String == "blip" })
         #expect(!TranscriptAssembler.isFlagged(blip))
     }
+
+    // MARK: - The timeline bound (round 7)
+
+    /// A real overnight gap (> 1 day) is honoured; the gap TOTAL is capped at the recording's
+    /// wall-clock span, so a pile of corrupt gaps cannot widen the bound without limit.
+    @Test func theBoundHonoursLongGapsButCapsTheirTotal() {
+        let overnight = TranscriptRediarizer.timelineBound(fileLengths: [6, 6], cachedDurations: [], gapSeconds: [89_994], offsets: [0, 90_000])
+        #expect(overnight >= 90_000)
+        let piled = TranscriptRediarizer.timelineBound(fileLengths: [6, 6], cachedDurations: [], gapSeconds: [1e6, 1e6, .infinity, -3], offsets: [0, 100])
+        #expect(piled == 12 + 106 + 6)
+        let noOffsets = TranscriptRediarizer.timelineBound(fileLengths: [6, 6], cachedDurations: [], gapSeconds: [1e9], offsets: nil)
+        #expect(noOffsets == 12 + 7 * 86_400 + 6)
+    }
+
+    /// An unreadable chunk file does not shrink the bound: its cached length counts, else one chunk.
+    @Test func unreadableChunksStillCountTowardTheBound() {
+        #expect(TranscriptRediarizer.timelineBound(fileLengths: [nil, 6], cachedDurations: [10, 6], gapSeconds: [], offsets: nil) == 16 + 10)
+        #expect(TranscriptRediarizer.timelineBound(fileLengths: [nil, 6], cachedDurations: [], gapSeconds: [], offsets: nil) == 12 + 6)
+    }
 }

@@ -190,7 +190,8 @@ struct SummaryPromptBuilderTests {
     }
 
     @Test func theRuleNamesEveryIncompleteCase() {
-        #expect(SummaryPromptBuilder.systemPrompt.contains("not captured, partly captured, uncertain, compromised, or recorded only digital silence"))
+        #expect(SummaryPromptBuilder.systemPrompt.contains(
+            "not captured, partly captured, uncertain, compromised, recorded only digital silence, or partly digital silence"))
     }
 
     // MARK: - Round 4 wording
@@ -234,5 +235,28 @@ struct SummaryPromptBuilderTests {
                                              permissionDenied: true))
         #expect(SummaryPromptBuilder.captureLine(m)
                 == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence; system audio permission was not granted for part of the call")
+    }
+
+    // MARK: - Round 7
+
+    /// The partial-silence line keeps the side's anomaly count when it has one.
+    @Test func partialSilenceKeepsTheAnomalyCount() {
+        let m = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 3600, expectedSeconds: 3600, exactZeroSeconds: 3300, anomalyCount: 2))
+        #expect(SummaryPromptBuilder.captureLine(m) == "Your microphone: captured, but 3300 s of 3600 s was digital silence (2 capture anomalies recorded)")
+    }
+
+    /// A compromised remote side with a confirmed denial names the permission even without a
+    /// shortfall or silence.
+    @Test func aCompromisedRemoteWithAConfirmedDenialNamesThePermission() {
+        let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736, exactZeroSeconds: 0,
+                                             permissionDenied: true, anomalyCount: 1))
+        #expect(SummaryPromptBuilder.captureLine(m)
+                == "Remote audio: captured, but compromised (1 capture anomaly recorded); system audio permission was not granted for part of the call")
+    }
+
+    /// Corrupt counts (more zeros than delivered audio) are clamped before the wording is chosen.
+    @Test func moreZerosThanDeliveredIsClamped() {
+        let m = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 600, expectedSeconds: 600, exactZeroSeconds: 900))
+        #expect(SummaryPromptBuilder.captureLine(m) == "Your microphone: recorded only digital silence (600 s)")
     }
 }
