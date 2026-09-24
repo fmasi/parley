@@ -81,6 +81,9 @@ public final class RecordingCoordinator {
     /// and the recovery handler honors it once capture is back up.
     var recoveryInFlight = false
     var stopRequestedDuringRecovery = false
+    /// A crash reported while a recovery was in flight (L1 fix round 1): queued, never a second
+    /// concurrent recovery. Run after a successful restart; dropped when the recording ends.
+    private var pendingCrash = false
     /// True while stopRecording() is running (it suspends on the helper's stop). A second Stop in that
     /// window — a double-tap, or a future programmatic caller — is ignored rather than reaching the
     /// helper and the transcription pipeline twice. Internal for tests.
@@ -767,7 +770,24 @@ public final class RecordingCoordinator {
     // MARK: - Crash recovery
 
     /// Internal (not private) so the crash-recovery decision paths are reachable from unit tests.
+    /// Serialized (L1 fix round 1): a crash reported while a recovery is in flight — the restarted
+    /// helper dying during its own `start()` — is queued and handled after that recovery restarts
+    /// successfully (counting toward the cap), or dropped when it gives up. Two concurrent recoveries
+    /// ended with a capturing helper, an idle app and detection off.
     func handleXPCCrash() async {
+        guard !recoveryInFlight else {
+            Logger.state.warning("Crash reported while a recovery is in flight — queued")
+            pendingCrash = true
+            return
+        }
+        repeat {
+            pendingCrash = false
+            await recoverFromCrash()
+        } while pendingCrash && appState.isRecording
+        pendingCrash = false
+    }
+
+    private func recoverFromCrash() async {
         // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
         // flags on every exit so a deferred stop never leaks into the next recovery.
         recoveryInFlight = true
@@ -802,6 +822,9 @@ public final class RecordingCoordinator {
         }
 
         if decision.shouldGiveUp {
+            // FIRST, before any await: disarm crash detection, so the dying helper's next interruption
+            // is never read as a new crash while the salvage runs (L1 fix round 1).
+            captureClient.captureEnded()
             Logger.state.error("All retries exhausted after \(self.xpcRetryCount) interruptions within the decay window")
             // council F3: salvage the live chunked session (re-ingesting the in-progress orphan,
             // since this branch returns before the normal re-ingestion below) so chunks already
@@ -810,7 +833,6 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — capture crashed repeatedly. " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            captureClient.captureEnded()
             RecordingSentinel.delete(directory: sentinelDirectory)
             // §7.4 P6: says what the salvage actually wrote — never "has been transcribed" when nothing was.
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
@@ -879,6 +901,8 @@ public final class RecordingCoordinator {
             // evidence on that track clears each one (§6.2).
             if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
         } catch {
+            // FIRST, before any await: disarm crash detection (as the give-up branch does).
+            captureClient.captureEnded()
             Logger.state.error("Restart failed: \(error, privacy: .public)")
             awaitingRecoveryFrames = false
             // council F3: the orphan was already re-ingested above, so just finalize what's been
@@ -887,7 +911,6 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            captureClient.captureEnded()
             RecordingSentinel.delete(directory: sentinelDirectory)
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
         }
@@ -914,13 +937,15 @@ public final class RecordingCoordinator {
             return
         }
 
-        // Flow A: Is XPC service still alive and capturing?
+        // Flow A: Is XPC service still alive and capturing? Crash detection is armed BEFORE the ping
+        // (no start() in this process, C1): an interruption between the two is this capture's. Every
+        // path below that ends without a capture disarms it again (`captureEnded`).
+        captureClient.captureReattached()
         if await captureClient.isCapturing() {
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
             captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
-            captureClient.captureReattached()   // no start() in this process: arm crash detection (C1)
             wireCaptureCallbacks()
             startStatusPoll()
             // Restore the helper's alarm state now: the pull on connect ran before anything listened.

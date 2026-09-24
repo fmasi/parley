@@ -32,6 +32,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var startError: Error?
     /// Runs inside start(), i.e. at the moment the helper would be opening the mic.
     var onStart: (() -> Void)?
+    /// Awaited inside start(): lets a test suspend the caller mid-start (a crash arriving then).
+    var onStartAsync: (() async -> Void)?
     /// Runs inside stop(), i.e. while the helper still holds the mic (and the coordinator is suspended).
     var onStop: (() async -> Void)?
     var micUpdates: [String?] = []
@@ -68,6 +70,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
             sessionId: sessionId
         ))
         onStart?()
+        await onStartAsync?()
         if let startError { throw startError }
     }
 
@@ -75,7 +78,12 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     func captureStatus() async -> CaptureStatusSnapshot? { statusSnapshot }
 
     var isCapturingResult = false
-    func isCapturing() async -> Bool { isCapturingResult }
+    /// Whether crash detection was armed (`captureReattached`) when the Flow-A ping ran.
+    var armedAtPing: Bool?
+    func isCapturing() async -> Bool {
+        armedAtPing = captureReattachedCalls > 0
+        return isCapturingResult
+    }
 
     var launchRecoveries: [[String: String]] = []
     func recordLaunchRecovery(_ detail: [String: String]) { launchRecoveries.append(detail) }
@@ -111,7 +119,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     /// Recordings that ended without `stop()` (C1: crash detection disarmed).
     var captureEndedCalls = 0
-    func captureEnded() { captureEndedCalls += 1 }
+    var onCaptureEnded: (() -> Void)?
+    func captureEnded() { captureEndedCalls += 1; onCaptureEnded?() }
 
     /// Captures the app re-attached to without starting them (C1: crash detection armed).
     var captureReattachedCalls = 0
@@ -815,6 +824,60 @@ private struct Harness {
         try Data(count: 4096).write(to: URL(fileURLWithPath: sentinel.systemAudioPath))
     }
 
+    // MARK: - L1 fix round 1: serialized crash recovery
+
+    /// CRITICAL: the restarted helper dies during `start()` (a crash reported while recovery #1 is
+    /// suspended) and the start then fails. The second crash must be queued, not run concurrently:
+    /// one restart, one retry event, one "Recording Failed", and a consistent idle end state.
+    @Test func aCrashDuringTheRestartIsQueuedNotRunConcurrently() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let client = h.client, runner = h.runner
+        client.onStart = { client.onServiceCrash?() }   // the restarted helper dies during start()…
+        client.startError = FakeCaptureError()          // …and the start fails
+        let pipelineAliveAtCaptureEnded = Harness.Box<Bool?>(nil)
+        client.onCaptureEnded = { pipelineAliveAtCaptureEnded.value = runner.chunkProcessor != nil }
+
+        await h.coordinator.handleXPCCrash()
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
+        #expect(client.startCalls.count == 2, "the recording's start + exactly one restart")
+        #expect(client.retryEvents.count == 1)
+        #expect(h.appState.isIdle && client.captureEndedCalls == 1)
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+        // (b): detection disarmed FIRST, before the salvage's awaits (the pipeline is still up then).
+        #expect(pipelineAliveAtCaptureEnded.value == true)
+    }
+
+    /// A crash queued while a restart SUCCEEDS runs next, and counts toward the cap.
+    @Test func aCrashQueuedDuringASuccessfulRestartRunsNext() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        let coordinator = h.coordinator
+        let fired = Harness.Box(false)
+        h.client.onStartAsync = {
+            guard !fired.value else { return }
+            fired.value = true
+            await coordinator.handleXPCCrash()   // reported while recovery #1 is still in flight
+        }
+
+        await h.coordinator.handleXPCCrash()
+
+        #expect(h.client.startCalls.count == 2, "the queued crash restarted once more")
+        #expect(h.client.retryEvents.count == 2 && h.coordinator.xpcRetryCount == 2)
+        #expect(h.appState.isRecording && h.criticals.value.isEmpty)
+    }
+
     @Test func firstFramesOutsideARecoveryDoNotAnnounceResumed() async throws {
         let h = try Harness()
         h.appState.phase = .recording(since: Date())
@@ -835,6 +898,8 @@ private struct Harness {
         #expect(h.client.launchRecoveries.first?["flow"] == "A")
         // No start() ran in this process, so crash detection must be armed explicitly (C1).
         #expect(h.client.captureReattachedCalls == 1 && h.client.captureEndedCalls == 0)
+        // L1 fix round 1, item 2: armed BEFORE the ping — an interruption between the two is not lost.
+        #expect(h.client.armedAtPing == true)
         #expect(h.appState.activeAlarms[.micDigitalSilence] != nil)
         #expect(RecordingSentinel.read(directory: h.tmp) != nil)
     }

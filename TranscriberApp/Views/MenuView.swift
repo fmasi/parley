@@ -37,6 +37,22 @@ func quitAfterUninstallingLaunchAgent() {
     }
 }
 
+/// Post-recording work a crash-protection hand-over (an exit) must not cut short — today, the
+/// auto-summary, which runs detached after the rename dialog (L3 fix round 1). Posts `finished` when
+/// the last one ends: the hand-over's transition-to-idle signal.
+@MainActor
+enum PostRecordingWork {
+    static let finished = Notification.Name("eu.fmasi.parley.postRecordingWorkFinished")
+    private(set) static var inFlight = 0
+
+    static func begin() { inFlight += 1 }
+
+    static func end() {
+        inFlight = max(0, inFlight - 1)
+        if inFlight == 0 { NotificationCenter.default.post(name: finished, object: nil) }
+    }
+}
+
 struct MenuView: View {
     @Bindable var appState: AppState
     /// Owns the recording lifecycle + crash recovery (#139 PR-6). Built once by `TranscriberApp` (it
@@ -421,11 +437,13 @@ struct MenuView: View {
     /// notification instead of failing silently (#134). Static + self-free so it is safe to
     /// fire from a rename-dialog completion without capturing the view.
     static func autoSummarize(jsonPath: URL, config: Config) {
+        PostRecordingWork.begin()
         Task.detached(priority: .utility) {
             if case .failed(let message) = await MeetingSummarizer.summarizeIfConfigured(
                 transcriptPath: jsonPath, config: config) {
                 postNotification(title: "Summary Failed", body: message)
             }
+            await MainActor.run { PostRecordingWork.end() }
         }
     }
 

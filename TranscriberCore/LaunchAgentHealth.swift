@@ -76,21 +76,70 @@ public enum LaunchAgentHealth {
     /// default, like `verifyAndRepair`): whether this process holds the single-instance lock, which
     /// decides whether it can ever hand over and so what it may honestly promise.
     public static func userMessage(for state: State, holdsInstanceLock: Bool) -> String? {
+        if case .healthy = state { return nil }
+        // Without the lock nothing is repaired or handed over (C2 round 5), so the lock IS the problem,
+        // whatever the state (L3 fix round 1, item 7).
+        guard holdsInstanceLock else { return noLockMessage }
         switch state {
         case .healthy: return nil
         case .missing, .notLoaded, .stalePath:
             return "Crash protection is off — if Parley crashes mid-recording it will not relaunch. Quit and reopen Parley to repair it."
         case .loadedButNotThisProcess:
-            guard holdsInstanceLock else {
-                // No lock, no hand-over (`shouldAttemptHandOver`): nothing will re-enable it on its
-                // own. A fresh launch can take the lock and hand over (L3, C2 final wiring 5).
-                return "Crash protection is off. Quit Parley and open it again to turn it back on."
-            }
             // "Quit and reopen" is not honest here (fix round 2, item 3): reopening from Finder
             // just recreates this same state, since it still isn't the process launchd's KeepAlive
             // tracks. The hand-over (`LaunchAgentManager.handOverToJob`, gated by
             // `shouldAttemptHandOver`) re-enables protection on its own once not recording.
             return "Crash protection is off — Parley will re-enable it automatically the next time you're not recording."
+        }
+    }
+
+    /// No single-instance lock (`SingleInstanceGuard.LockOutcome.unavailable`): often persistent — the
+    /// data folder can't be opened or locked — so reopening is not promised. Says what is wrong.
+    public static let noLockMessage = "Crash protection is off: Parley couldn’t lock its data folder, so it can’t turn crash relaunch on. Check that ~/Library/Application Support/Parley is on a local disk you can write to."
+
+    /// The hand-over can't happen (this is launchd's own job, or kickstart failed `maxHandOverAttempts`
+    /// times): nothing will re-enable it on its own.
+    public static let handOverImpossibleMessage = "Crash protection is off — Parley couldn’t hand over to its crash-relaunch job. Quit and reopen Parley to turn it back on."
+
+    /// Kickstart attempts per process before giving up on the hand-over (L3 fix round 1, item 5).
+    public static let maxHandOverAttempts = 3
+
+    /// What the app does with a crash-protection verdict (L3 fix round 1, item 6). No case schedules a
+    /// timer in a steady state: `.deferUntilIdle` waits for the transition to idle, `.retryAfter`
+    /// re-checks once, `.alarm` never retries.
+    public enum CrashProtectionAction: Equatable, Sendable {
+        /// Clear the `crashProtectionOff` alarm.
+        case healthy
+        /// Post-recording work or a Parley panel is in flight: no row; re-check on the transition to idle.
+        case deferUntilIdle
+        /// Persist `lastHandOverAt`, `kickstart -k`, re-check "idle" after it returns, then `exit(0)`.
+        case handOver
+        /// The hand-over cooldown is running: re-check ONCE when it expires. `message`: the row to show
+        /// meanwhile (only once a hand-over has actually failed).
+        case retryAfter(seconds: TimeInterval, message: String?)
+        /// The sticky row; no automatic retry.
+        case alarm(String)
+    }
+
+    public static func crashProtectionAction(state: State, holdsInstanceLock: Bool, isLaunchdJob: Bool, isBusy: Bool,
+                                             lastHandOverAt: Date?, now: Date, failedHandOvers: Int) -> CrashProtectionAction {
+        switch state {
+        case .healthy:
+            return .healthy
+        case .loadedButNotThisProcess:
+            guard holdsInstanceLock else { return .alarm(noLockMessage) }
+            guard !isLaunchdJob, failedHandOvers < maxHandOverAttempts else { return .alarm(handOverImpossibleMessage) }
+            if isBusy { return .deferUntilIdle }
+            if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown {
+                let remaining = handOverCooldown - now.timeIntervalSince(lastHandOverAt)
+                return .retryAfter(seconds: remaining,
+                                   message: failedHandOvers > 0 ? userMessage(for: state, holdsInstanceLock: true) : nil)
+            }
+            return .handOver
+        case .missing, .notLoaded, .stalePath:
+            // verifyAndRepair returns the state AFTER repair: this means repair failed (or was skipped
+            // without the lock).
+            return .alarm(userMessage(for: state, holdsInstanceLock: holdsInstanceLock) ?? handOverImpossibleMessage)
         }
     }
 

@@ -269,75 +269,96 @@ struct TranscriberApp: App {
     /// Persisted, not in memory: a process that hands over successfully exits, so an in-memory
     /// `lastHandOverAt` could never enforce the cooldown (C2 round 2).
     private static let lastHandOverKey = "LaunchAgent.lastHandOverAt"
+    /// Kickstarts that failed in this process; capped by `LaunchAgentHealth.maxHandOverAttempts`.
+    private static var failedHandOvers = 0
+    /// One check at a time: the idle watch and the cooldown retry can both fire.
+    private static var crashProtectionCheckRunning = false
+    /// Waits for the transition to idle before re-checking (never a blind timer).
+    private static var idleWatch: IdleWatch?
+
+    /// Whether Parley is doing anything a hand-over (an exit) would cut short: a recording or its
+    /// transcription, post-recording work (the auto-summary), or any Parley panel (L3 fix round 1).
+    @MainActor
+    static func isBusy(_ appState: AppState) -> Bool {
+        !appState.isIdle || PostRecordingWork.inFlight > 0
+            || RenameWindowController.shared.isShowing || SessionNameWindowController.shared.isShowing
+            || MicSwitchWindowController.shared.isShowing || SetupWindowController.shared.isShowing
+            || PermissionRepairWindowController.shared.isPanelOpen || CaptureAlarmWindowController.shared.isShowing
+    }
 
     @MainActor
     static func verifyCrashProtection(appState: AppState) async {
+        guard !crashProtectionCheckRunning else { return }
+        crashProtectionCheckRunning = true
+        defer { crashProtectionCheckRunning = false }
+
         let health = await LaunchAgentManager.verifyAndRepair(holdsInstanceLock: holdsInstanceLock)
-        switch health {
+        let defaults = UserDefaults.standard
+        let action = LaunchAgentHealth.crashProtectionAction(
+            state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: isBusy(appState),
+            lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: Date(), failedHandOvers: failedHandOvers
+        )
+        switch action {
         case .healthy:
             appState.clearAppAlarm(.crashProtectionOff)
-        case .loadedButNotThisProcess:
-            // Normal after a Finder/Sparkle launch, and right after a first install (the bootstrap in
-            // verifyAndRepair already spawned launchd's copy, which is waiting for our lock).
-            guard holdsInstanceLock else {
-                // No lock, no hand-over: `kickstart -k` could kill a recording instance (C2 round 5).
-                Logger.state.error("LaunchAgent hand-over impossible without the single-instance lock — crash protection stays off")
-                raiseCrashProtectionOff(appState, LaunchAgentHealth.userMessage(for: health, holdsInstanceLock: false))
-                return
+        case .deferUntilIdle:
+            // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling).
+            appState.clearAppAlarm(.crashProtectionOff)
+            recheckCrashProtectionWhenIdle(appState: appState)
+        case .retryAfter(let seconds, let message):
+            if let message { raiseCrashProtectionOff(appState, message) }
+            Logger.state.info("LaunchAgent hand-over cooldown — one re-check in \(Int(seconds.rounded(.up)), privacy: .public) s")
+            Task(priority: .utility) { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                await verifyCrashProtection(appState: appState)
             }
-            // Busy (recording, or finishing a transcript): the message promises automatic re-enable,
-            // so re-check once it is over. No row meanwhile (C2 ruling: this is the normal state).
-            if !appState.isIdle {
-                appState.clearAppAlarm(.crashProtectionOff)
-                scheduleCrashProtectionRecheck(appState: appState)
-                return
-            }
-            let defaults = UserDefaults.standard
-            let last = defaults.object(forKey: lastHandOverKey) as? Date
-            guard LaunchAgentHealth.shouldAttemptHandOver(
-                isRecording: !appState.isIdle, isCLI: false, isLaunchdJob: isLaunchdJob,
-                holdsInstanceLock: holdsInstanceLock, lastHandOverAt: last, now: Date()
-            ) else {
-                Logger.state.error("LaunchAgent hand-over not attempted now (cooldown, or this is the launchd job) — crash protection stays off")
-                raiseCrashProtectionOff(appState, LaunchAgentHealth.userMessage(for: health, holdsInstanceLock: true))
-                scheduleCrashProtectionRecheck(appState: appState)
-                return
-            }
+        case .alarm(let message):
+            Logger.state.error("Crash protection is off (\(LaunchAgentHealth.logName(for: health), privacy: .public)) — no automatic retry")
+            raiseCrashProtectionOff(appState, message)
+        case .handOver:
             defaults.set(Date(), forKey: lastHandOverKey)   // BEFORE the kickstart: the cooldown must outlive this process
-            if await LaunchAgentManager.handOverToJob() {
-                // `kickstart -k` gave launchd's copy a fresh 10 s window to take the lock: release it
-                // and exit NOW (no NSApp.terminate, nothing awaited) — lingering past that window
-                // would leave no instance at all (C2 round 5, item 4).
-                Logger.state.info("Handed over to launchd's own job — this process exits now")
-                releaseInstanceLock()
-                exit(0)
+            guard await LaunchAgentManager.handOverToJob() else {
+                failedHandOvers += 1
+                Logger.state.error("LaunchAgent hand-over failed (\(failedHandOvers, privacy: .public) of \(LaunchAgentHealth.maxHandOverAttempts, privacy: .public))")
+                crashProtectionCheckRunning = false
+                await verifyCrashProtection(appState: appState)   // decides: one retry after the cooldown, or the capped row
+                return
             }
-            Logger.state.error("LaunchAgent hand-over failed — crash protection stays off")
-            raiseCrashProtectionOff(appState, LaunchAgentHealth.userMessage(for: health, holdsInstanceLock: true))
-            scheduleCrashProtectionRecheck(appState: appState)
-        default:
-            // verifyAndRepair returns the state AFTER repair: anything else here means repair failed
-            // (or was skipped without the lock) (scan A18).
-            raiseCrashProtectionOff(appState, LaunchAgentHealth.userMessage(for: health, holdsInstanceLock: holdsInstanceLock))
+            // Re-checked AFTER the kickstart returned: a recording, a transcript or a panel may have
+            // started meanwhile. Busy → do NOT exit: launchd's copy times out and exits 0 by itself
+            // (`SingleInstancePolicy`), and this process re-checks on the transition to idle.
+            guard !isBusy(appState) else {
+                Logger.state.info("Became busy during the hand-over — staying; launchd's copy will exit 0")
+                recheckCrashProtectionWhenIdle(appState: appState)
+                return
+            }
+            // `kickstart -k` gave launchd's copy a fresh 10 s window to take the lock: release it and
+            // exit NOW (no NSApp.terminate, nothing awaited) — lingering past that window would leave
+            // no instance at all (C2 round 5, item 4).
+            Logger.state.info("Handed over to launchd's own job — this process exits now")
+            releaseInstanceLock()
+            exit(0)
         }
     }
 
     @MainActor
-    private static func raiseCrashProtectionOff(_ appState: AppState, _ message: String?) {
-        let text = message ?? "Crash protection is off — if Parley crashes mid-recording it will not relaunch."
-        if appState.raiseAppAlarm(.crashProtectionOff, message: text) {
-            MenuView.postNotification(title: "Crash protection is off", body: text)
+    private static func raiseCrashProtectionOff(_ appState: AppState, _ message: String) {
+        if appState.raiseAppAlarm(.crashProtectionOff, message: message) {
+            MenuView.postNotification(title: "Crash protection is off", body: message)
         }
     }
 
-    /// Bounded, not a loop: one re-check in 5 minutes, which re-schedules itself only while the
-    /// state is still `.loadedButNotThisProcess` (healthy → nothing; handed over → this process is gone).
+    /// Re-check on the TRANSITION to idle: a Parley window closing, post-recording work finishing, or
+    /// the phase changing — not a timer. One watch at a time.
     @MainActor
-    private static func scheduleCrashProtectionRecheck(appState: AppState) {
-        Task(priority: .utility) { @MainActor in
-            try? await Task.sleep(for: .seconds(300))
-            await verifyCrashProtection(appState: appState)
+    private static func recheckCrashProtectionWhenIdle(appState: AppState) {
+        guard idleWatch == nil else { return }
+        let watch = IdleWatch(isBusy: { isBusy(appState) }) {
+            idleWatch = nil
+            Task { @MainActor in await verifyCrashProtection(appState: appState) }
         }
+        idleWatch = watch
+        watch.start(observing: appState)
     }
 
     /// Holds the single-instance lock fd for the whole process lifetime. It must stay open (closing
@@ -483,5 +504,51 @@ private struct SetupRequiredPanel: View {
         }
         .padding(12)
         .frame(width: 320)
+    }
+}
+
+/// Fires `onIdle` once, on the first transition to "not busy": a window closing, post-recording work
+/// finishing, or the recording phase changing (L3 fix round 1). Observers only — no timer.
+@MainActor
+private final class IdleWatch {
+    private let isBusy: @MainActor () -> Bool
+    private let onIdle: @MainActor () -> Void
+    private var tokens: [NSObjectProtocol] = []
+    private var done = false
+
+    init(isBusy: @escaping @MainActor () -> Bool, onIdle: @escaping @MainActor () -> Void) {
+        self.isBusy = isBusy
+        self.onIdle = onIdle
+    }
+
+    func start(observing appState: AppState) {
+        let center = NotificationCenter.default
+        for name in [NSWindow.willCloseNotification, PostRecordingWork.finished] {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // willClose fires while the window is still up: look again on the next turn.
+                Task { @MainActor in self?.evaluate() }
+            })
+        }
+        observePhase(of: appState)
+    }
+
+    private func observePhase(of appState: AppState) {
+        withObservationTracking {
+            _ = appState.phase
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, !self.done else { return }
+                self.evaluate()
+                if !self.done { self.observePhase(of: appState) }
+            }
+        }
+    }
+
+    private func evaluate() {
+        guard !done, !isBusy() else { return }
+        done = true
+        tokens.forEach(NotificationCenter.default.removeObserver)
+        tokens = []
+        onIdle()
     }
 }

@@ -107,13 +107,18 @@ import Testing
         #expect(message?.contains("automatically") == true)
     }
 
-    /// L3 (C2 final, wiring 5): without the single-instance lock this process never hands over, so
-    /// "re-enables automatically" would be a false promise. Quitting and reopening is the fix: the
-    /// next launch can take the lock.
-    @Test func loadedButNotThisProcessWithoutTheLockDoesNotPromiseAutoRepair() {
-        let message = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: false)
-        #expect(message?.contains("automatically") == false)
-        #expect(message?.contains("Quit Parley and open it again") == true)
+    /// L3 (C2 final, wiring 5; L3 fix round 1, item 7): without the single-instance lock this process
+    /// never hands over or repairs, so "re-enables automatically" would be a false promise — and the
+    /// lock failure is often persistent, so reopening is not promised either. Say what is wrong.
+    @Test func withoutTheLockTheMessageSaysWhatIsWrongAndPromisesNothing() {
+        for state: LaunchAgentHealth.State in [.loadedButNotThisProcess, .notLoaded, .missing(staleLoadedJob: false), .stalePath(found: "/x")] {
+            let message = LaunchAgentHealth.userMessage(for: state, holdsInstanceLock: false) ?? ""
+            #expect(message == LaunchAgentHealth.noLockMessage)
+        }
+        #expect(!LaunchAgentHealth.noLockMessage.contains("automatically"))
+        #expect(!LaunchAgentHealth.noLockMessage.localizedCaseInsensitiveContains("reopen")
+                && !LaunchAgentHealth.noLockMessage.contains("open it again"))
+        #expect(LaunchAgentHealth.noLockMessage.contains("data folder"))
     }
 
     @Test func onlyUnhealthyStatesHaveAUserMessage() {
@@ -125,6 +130,38 @@ import Testing
             #expect(LaunchAgentHealth.userMessage(for: .stalePath(found: "/x"), holdsInstanceLock: lock)?.contains("Crash protection") == true)
             #expect(LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: lock)?.contains("Crash protection") == true)
         }
+    }
+
+    // MARK: - L3 fix round 1: the crash-protection decision (items 3-6)
+
+    @Test func crashProtectionDecisionTable() {
+        let now = Date(timeIntervalSince1970: 1000)
+        func act(_ state: LaunchAgentHealth.State, lock: Bool = true, job: Bool = false, busy: Bool = false,
+                 last: Date? = nil, failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
+            LaunchAgentHealth.crashProtectionAction(state: state, holdsInstanceLock: lock, isLaunchdJob: job, isBusy: busy,
+                                                    lastHandOverAt: last, now: now, failedHandOvers: failed)
+        }
+        let auto = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: true)
+        #expect(act(.healthy) == .healthy)
+        #expect(act(.healthy, lock: false, busy: true) == .healthy)
+        #expect(act(.loadedButNotThisProcess) == .handOver)
+        // Any post-recording work or panel: no row, re-check on the transition to idle.
+        #expect(act(.loadedButNotThisProcess, busy: true) == .deferUntilIdle)
+        // Cooldown: ONE re-check when it expires; no row until a hand-over has actually failed.
+        #expect(act(.loadedButNotThisProcess, last: now - 10) == .retryAfter(seconds: 20, message: nil))
+        #expect(act(.loadedButNotThisProcess, last: now - 10, failed: 1) == .retryAfter(seconds: 20, message: auto))
+        #expect(act(.loadedButNotThisProcess, last: now - 30, failed: 2) == .handOver)
+        // Capped: after 3 failed kickstarts, the permanent copy and no more retries.
+        #expect(act(.loadedButNotThisProcess, failed: LaunchAgentHealth.maxHandOverAttempts) == .alarm(LaunchAgentHealth.handOverImpossibleMessage))
+        // The launchd job never hands over to itself: permanent, never "re-enables automatically".
+        #expect(act(.loadedButNotThisProcess, job: true) == .alarm(LaunchAgentHealth.handOverImpossibleMessage))
+        #expect(!LaunchAgentHealth.handOverImpossibleMessage.contains("automatically"))
+        // No lock: say so; nothing is retried.
+        #expect(act(.loadedButNotThisProcess, lock: false) == .alarm(LaunchAgentHealth.noLockMessage))
+        #expect(act(.loadedButNotThisProcess, lock: false, busy: true) == .alarm(LaunchAgentHealth.noLockMessage))
+        // Repair failed (or skipped without the lock).
+        #expect(act(.notLoaded) == .alarm(LaunchAgentHealth.userMessage(for: .notLoaded, holdsInstanceLock: true)!))
+        #expect(act(.stalePath(found: "/x"), lock: false) == .alarm(LaunchAgentHealth.noLockMessage))
     }
 
     // MARK: - Quit (L3, C2 final wiring 4)
