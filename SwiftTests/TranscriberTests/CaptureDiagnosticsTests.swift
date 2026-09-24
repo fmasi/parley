@@ -169,7 +169,9 @@ struct CaptureDiagnosticsTests {
         #expect(p.engine == "fluid_audio")
     }
 
-    @Test func clearResetsRing() {
+    // Fix round 1 item 4: renamed from `clearResetsRing` — clear() empties the EVENTS but keeps the
+    // out-of-ring counters (droppedCount included); only resetSession() zeroes them.
+    @Test func clearEmptiesEventsButKeepsDroppedCount() {
         var d = CaptureDiagnostics(maxEvents: 2)
         for i in 0..<5 { d.record(event(.captureStart, .info, at: TimeInterval(i))) }
         d.clear()
@@ -213,6 +215,9 @@ struct CaptureDiagnosticsTests {
         d.clear()
         #expect(d.retryCount == 3 && d.droppedCount == 1)
         #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).eventsDropped == 1)
+        // Fix round 1 item 4: this assertion was previously untestable (nothing exercised it failing).
+        d.resetSession()
+        #expect(d.droppedCount == 0)
     }
 
     /// Scan B P3.6(2): `merge()` re-records the ring's own events; that must not count them twice.
@@ -331,6 +336,46 @@ struct CaptureDiagnosticsTests {
         d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .rateDrift, severity: .anomaly, detail: ["source": "system-tap"]))
         d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "remote")))
         #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).remoteStatus == "neverDelivered")
+    }
+
+    /// Fix round 1 item 5: the same precedence pinned for the tap side must hold for the mic side too.
+    @Test func micSideNeverDeliveredBeatsAContentAnomalyToo() {
+        var d = CaptureDiagnostics()
+        var a = TrackAccounting(); a.expectedSeconds = 60; a.deliveredSeconds = 0
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .exactZeroMic, severity: .anomaly))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "local")))
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).localStatus == "neverDelivered")
+    }
+
+    /// Fix round 1 item 2: the status inputs (content-anomaly tallies, per-prefix coverage sums) must
+    /// be out-of-ring, like the counters — a side's verdict cannot change just because ITS OWN evidence
+    /// aged out of the bounded ring.
+    @Test func statusTalliesSurviveEvictionOfTheirEvidence() {
+        var d = CaptureDiagnostics(maxEvents: 2)
+        var a = TrackAccounting(); a.expectedSeconds = 100; a.deliveredSeconds = 100
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .rateDrift, severity: .anomaly, detail: ["source": "system-tap"]))
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info, detail: a.asDetail(prefix: "remote")))
+        // Two more events push both the rateDrift and the captureStop out of the bounded ring.
+        d.record(event(.captureStart, .info, at: 2))
+        d.record(event(.captureStart, .info, at: 3))
+        #expect(d.events.count == 2)
+        #expect(!d.events.contains { $0.kind == .rateDrift || $0.kind == .captureStop }, "the evidence itself aged out of the ring")
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.remoteStatus == "compromised", "the content-anomaly tally must survive eviction of the rateDrift event")
+        #expect(p.remoteCoverage?.expectedSeconds == 100, "the coverage tally must survive eviction of the captureStop event")
+    }
+
+    /// Fix round 1 item 3: a missing or unparseable status must never silently read as "healthy" —
+    /// it is recomputed from the coverage that is actually present.
+    @Test func metadataNeverDefaultsAnUnknownStatusToHealthy() {
+        var a = TrackAccounting(); a.expectedSeconds = 100; a.deliveredSeconds = 0  // unambiguously neverDelivered
+        let missing = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                        recovered: false, anomalyCount: 0, remoteCoverage: a, remoteStatus: nil)
+        #expect((missing.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["status"] as? String == "neverDelivered")
+
+        let garbage = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                        recovered: false, anomalyCount: 0, remoteCoverage: a, remoteStatus: "not_a_real_status")
+        #expect((garbage.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["status"] as? String == "neverDelivered")
     }
 }
 

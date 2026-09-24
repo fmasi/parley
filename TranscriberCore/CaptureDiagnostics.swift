@@ -208,6 +208,17 @@ public struct CaptureEvent: Codable, Equatable, Sendable {
         self.severity = severity
         self.detail = detail
     }
+
+    /// Identifies "the same event" seen from two sources: the in-memory ring and the on-disk live
+    /// log at finalize (`LiveDiagnosticsLog.merged(into:)`), or a ring re-presenting its own
+    /// already-evicted events to itself at merge (E2 fix round 1). Millisecond-rounded because a
+    /// disk round-trip through `LiveDiagnosticsLog`'s formatter drops sub-millisecond precision
+    /// while the in-memory `Date` keeps full `Double` precision — rounding both sides the same way
+    /// makes the key match regardless of which side introduced the float noise.
+    static func dedupKey(_ e: CaptureEvent) -> String {
+        let ms = (e.timestamp.timeIntervalSinceReferenceDate * 1000).rounded()
+        return "\(ms)|\(e.origin.rawValue)|\(e.kind.rawValue)|\(e.detail.sorted { $0.key < $1.key })"
+    }
 }
 
 // MARK: - Provenance stamp
@@ -352,11 +363,18 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         if let micDevice { d["mic_device"] = micDevice }
         if let systemDeliveredSeconds { d["system_delivered_seconds"] = systemDeliveredSeconds }
         if let systemExactZeroSeconds { d["system_exact_zero_seconds"] = systemExactZeroSeconds }
+        // Fail closed (fix round 1 item 3): a missing or unparseable status string must never read
+        // as "healthy" by default — recompute a real verdict from the coverage that's actually here.
+        // `contentAnomalies: 0` is the best available at this layer (the stamp doesn't carry the raw
+        // count), which only matters when the stored status disagreed on a live content anomaly with
+        // no coverage deficit; the coverage-only verdict is still never a silent "healthy" default.
         if let remoteCoverage {
-            d["remote_coverage"] = remoteCoverage.asMetadataDictionary(status: TrackAccounting.Status(rawValue: remoteStatus ?? "healthy") ?? .healthy)
+            let status = remoteStatus.flatMap(TrackAccounting.Status.init(rawValue:)) ?? remoteCoverage.status(isTap: true, contentAnomalies: 0)
+            d["remote_coverage"] = remoteCoverage.asMetadataDictionary(status: status)
         }
         if let localCoverage {
-            d["local_coverage"] = localCoverage.asMetadataDictionary(status: TrackAccounting.Status(rawValue: localStatus ?? "healthy") ?? .healthy)
+            let status = localStatus.flatMap(TrackAccounting.Status.init(rawValue:)) ?? localCoverage.status(isTap: false, contentAnomalies: 0)
+            d["local_coverage"] = localCoverage.asMetadataDictionary(status: status)
         }
         return d
     }
@@ -398,12 +416,28 @@ public struct CaptureDiagnostics: Sendable {
         (try? makeEncoder().encode(event)) ?? Data()
     }
 
-    /// Counters that live OUTSIDE the evicting ring (#101, L4/L14): unlike `retryCount`/`didRecover`
-    /// derived from `events`, these must survive both eviction (an evicted retry still happened) and
+    /// Counters that live OUTSIDE the evicting ring (#101, L4/L14): unlike derived properties that
+    /// scan `events`, these must survive both eviction (an evicted retry still happened) and
     /// `clear()` (an in-session restart does not erase the session's own story) — only
     /// `resetSession()`, the new-session reset, zeroes them.
     public private(set) var retryCount = 0
     public private(set) var launchRecoveries = 0
+    /// Per-side content-anomaly tallies and per-prefix coverage sums (§7.1, fix round 1) — fed by
+    /// `count()`, same out-of-ring lifetime as the counters above. Without this, a track's
+    /// `compromised`/`neverDelivered` verdict would flip back to `healthy` the moment its own
+    /// evidence (the `rateDrift`, the `captureStop`) aged out of the bounded ring.
+    private var contentAnomalyTallies: [String: Int] = [:]
+    private var coverageTallies: [String: TrackAccounting] = [:]
+
+    /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
+    /// events the ring already evicted (read back from the live log) alongside events the ring
+    /// still holds, and `merge()` rebuilds the whole ring from that combined list — so both
+    /// `count()` and `evict()` see the SAME event more than once across the ring's lifetime.
+    /// Without a per-event identity, every retry/anomaly/coverage tally and `droppedCount` would
+    /// double on every finalize merge. Keyed by `CaptureEvent.dedupKey`, same as the live log's own
+    /// disk/ring dedup. Out-of-ring: survive `clear()`, zeroed only by `resetSession()`.
+    private var countedKeys: Set<String> = []
+    private var droppedKeys: Set<String> = []
 
     public mutating func record(_ event: CaptureEvent) {
         store(event)
@@ -418,44 +452,67 @@ public struct CaptureDiagnostics: Sendable {
         evict()
     }
 
+    /// Idempotent per event (fix round 1): the first time a given event is seen, tally it into every
+    /// out-of-ring counter it contributes to; a repeat sighting (same key) is a no-op.
     private mutating func count(_ e: CaptureEvent) {
+        guard countedKeys.insert(CaptureEvent.dedupKey(e)).inserted else { return }
         if e.kind == .retry { retryCount += 1 }
         if e.kind == .launchRecovery { launchRecoveries += 1 }
+        if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
+            contentAnomalyTallies[track, default: 0] += 1
+        }
+        if e.kind == .captureStop {
+            for prefix in ["local", "remote"] {
+                if let parsed = TrackAccounting(detail: e.detail, prefix: prefix) {
+                    coverageTallies[prefix, default: TrackAccounting()] += parsed
+                }
+            }
+        }
     }
 
     private mutating func evict() {
         while events.count > maxEvents || (totalBytes > maxBytes && events.count > 1) {
             totalBytes -= byteCosts.removeFirst()
-            events.removeFirst()
-            droppedCount += 1
+            let removed = events.removeFirst()
+            // Idempotent per event (fix round 1): re-evicting the SAME event on a later merge (it
+            // comes back from the live log, gets re-stored, then gets re-evicted) must not inflate
+            // `droppedCount` a second time.
+            if droppedKeys.insert(CaptureEvent.dedupKey(removed)).inserted {
+                droppedCount += 1
+            }
         }
     }
 
-    /// Empty the ring (an IN-SESSION restart, e.g. after a drain to the app side). Keeps
-    /// `droppedCount`/`retryCount`/`launchRecoveries` — they are this session's story, not the
-    /// ring's contents.
+    /// Empty the ring (an IN-SESSION restart, e.g. after a drain to the app side). Keeps every
+    /// out-of-ring counter and tally — they are this session's story, not the ring's contents.
     public mutating func clear() {
         events.removeAll()
         byteCosts.removeAll()
         totalBytes = 0
     }
 
-    /// Reset for a NEW session (a new session id): `clear()` plus zeroing the out-of-ring counters.
+    /// Reset for a NEW session (a new session id): `clear()` plus zeroing every out-of-ring counter,
+    /// tally and idempotency guard.
     public mutating func resetSession() {
         clear()
         droppedCount = 0
         retryCount = 0
         launchRecoveries = 0
+        contentAnomalyTallies.removeAll()
+        coverageTallies.removeAll()
+        countedKeys.removeAll()
+        droppedKeys.removeAll()
     }
 
     /// Merge events drained from another ring (e.g. the helper), keeping the result time-sorted.
-    /// `events` are the ring's own — already counted when first recorded — so only `other` is
-    /// counted here, or a re-merge of the same ring would double-count every retry (scan B P3.6(2)).
+    /// Re-`record`s the WHOLE combined list rather than just `other`: `count()`/`evict()` are now
+    /// idempotent per event (fix round 1), so an event the ring already held or had already evicted
+    /// is a safe no-op the second time, and a repeated merge of the same disk log can never
+    /// double-count a retry or inflate `droppedCount` (scan B P3.6(2)).
     public mutating func merge(_ other: [CaptureEvent]) {
         let combined = (events + other).sorted { $0.timestamp < $1.timestamp }
         clear()
-        for event in combined { store(event) }
-        for event in other { count(event) }
+        for event in combined { record(event) }
     }
 
     public var isAnomalous: Bool { events.contains { $0.severity == .anomaly } }
@@ -516,15 +573,16 @@ public struct CaptureDiagnostics: Sendable {
         }
     }
 
+    /// Reads the out-of-ring tally (fix round 1) — correct even after the content-anomaly events
+    /// themselves have been evicted from `events`.
     public func contentAnomalyCount(track: String) -> Int {
-        events.filter { CaptureEventKind.contentCompromising.contains($0.kind) && Self.side(of: $0) == track }.count
+        contentAnomalyTallies[track] ?? 0
     }
 
+    /// Reads the out-of-ring tally (fix round 1) — correct even after the contributing `captureStop`
+    /// events themselves have been evicted from `events`.
     private func coverage(prefix: String) -> TrackAccounting? {
-        let parts = events.filter { $0.kind == .captureStop }.compactMap { TrackAccounting(detail: $0.detail, prefix: prefix) }
-        guard var total = parts.first else { return nil }
-        for p in parts.dropFirst() { total += p }
-        return total
+        coverageTallies[prefix]
     }
 
     public func makeProvenance(
@@ -579,8 +637,11 @@ public final class LockedDiagnostics: @unchecked Sendable {
         lock.withLock { $0.record(event) }
     }
 
-    /// Empty the ring (per-session reset at the start of capture, #101) so a skipped finalize (crash)
-    /// can't carry the previous session's events into the next one.
+    /// Empty the ring's EVENTS (an in-session restart, same as `CaptureDiagnostics.clear()` — see
+    /// its doc) so a skipped finalize (crash) can't carry the previous session's events into the
+    /// next one. The helper never reads `makeProvenance()`/`retryCount`/`droppedCount` from its own
+    /// ring — only the app does, after draining — so there is no `resetSession()` wrapper here: the
+    /// helper's out-of-ring counters are recorded but never consumed on this side.
     public func clear() {
         lock.withLock { $0.clear() }
     }

@@ -62,18 +62,13 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
     }
 
     public func merged(into ring: CaptureDiagnostics) -> CaptureDiagnostics {
+        // Same identity `CaptureDiagnostics` uses internally to make its own counting idempotent
+        // (E2 fix round 1) — one definition, so the two can never drift apart.
         var seen = Set<String>()
-        // Round to whole milliseconds on BOTH sides (ring events keep full Double precision; disk
-        // events come back through the millisecond-precision formatter above) so the key matches
-        // regardless of which side introduced float noise.
-        func key(_ e: CaptureEvent) -> String {
-            let ms = (e.timestamp.timeIntervalSinceReferenceDate * 1000).rounded()
-            return "\(ms)|\(e.origin.rawValue)|\(e.kind.rawValue)|\(e.detail.sorted { $0.key < $1.key })"
-        }
         var result = ring
         var extra: [CaptureEvent] = []
-        for e in ring.events { seen.insert(key(e)) }
-        for e in events() where seen.insert(key(e)).inserted { extra.append(e) }
+        for e in ring.events { seen.insert(CaptureEvent.dedupKey(e)) }
+        for e in events() where seen.insert(CaptureEvent.dedupKey(e)).inserted { extra.append(e) }
         result.merge(extra)
         return result
     }

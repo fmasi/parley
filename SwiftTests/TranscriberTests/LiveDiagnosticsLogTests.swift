@@ -64,4 +64,27 @@ import Testing
         log.delete()
         #expect(!FileManager.default.fileExists(atPath: log.url.path))
     }
+
+    /// E2 fix round 1 item 1: an event evicted from the bounded ring is still on disk, so a naive
+    /// merge at finalize re-presents it as "extra" and double-counts it (retries) and re-evicts it
+    /// (events_dropped). Counting must be idempotent per event, not per merge.
+    @Test func mergeAfterEvictionDoesNotDoubleCountRetriesOrDrops() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        var ring = CaptureDiagnostics(maxEvents: 3)
+        let r = retry(at: 0)
+        ring.record(r)
+        log.append(r)
+        for i in 1...5 {
+            let e = CaptureEvent(timestamp: Date(timeIntervalSince1970: TimeInterval(i)), origin: .app, kind: .restartInPlace, severity: .warning)
+            ring.record(e)
+            log.append(e)
+        }
+        #expect(ring.events.count == 3 && ring.droppedCount == 3 && ring.retryCount == 1)
+
+        let merged = log.merged(into: ring)
+        #expect(merged.retryCount == 1, "the retry evicted from the ring must not be recounted from disk")
+        let p = merged.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.eventsDropped == 3, "re-evicting the same events at merge must not inflate the drop count")
+    }
 }
