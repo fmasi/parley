@@ -686,8 +686,9 @@ struct TranscriptRediarizerTimelineTests {
 
     /// Finalize a session whose chunks fell back to WAV, the way the pipeline writes it.
     @MainActor
-    private func finalizedTranscript(in dir: URL, chunks: [ProcessedChunk], meetingStart: Date) async throws -> URL {
-        let state = SessionState(sessionId: "call", meetingStart: meetingStart, engine: "fluid_audio", chunkDurationMinutes: 10, chunks: chunks)
+    private func finalizedTranscript(in dir: URL, chunks: [ProcessedChunk], meetingStart: Date, gaps: [CaptureGap] = []) async throws -> URL {
+        let state = SessionState(sessionId: "call", meetingStart: meetingStart, engine: "fluid_audio", chunkDurationMinutes: 10,
+                                 chunks: chunks, gaps: gaps)
         return try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default).jsonPath
     }
 
@@ -731,7 +732,9 @@ struct TranscriptRediarizerTimelineTests {
             ProcessedChunk(index: 1, startTime: t0.addingTimeInterval(62), audioPath: "call-1.wav",
                            segments: [.init(start: 0.5, end: 1.5, text: "second", speaker: "Speaker 1", source: "remote")],
                            speakerDatabase: ["Speaker 1": [0, 1, 0]]),
-        ], meetingStart: t0)
+        ], meetingStart: t0,
+           // The relaunch records the hole it leaves (L7), which is what makes 62 s a plausible offset.
+           gaps: [CaptureGap(start: t0.addingTimeInterval(2), end: t0.addingTimeInterval(62), reason: "app relaunch")])
         _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 2, diarizer: EnergyDiarizer())
         let segs = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any])?["segments"] as? [[String: Any]])
         let first = try #require(segs.first { $0["text"] as? String == "first" })
@@ -785,18 +788,55 @@ struct TranscriptRediarizerTimelineTests {
     }
 
     /// A corrupted offset or length must be refused, never trap or allocate gigabytes.
-    @Test func outOfRangeOffsetsAndDurationsAreRefused() async throws {
-        for bad: (offsets: [Double]?, durations: [Double]) in [([0, 1e300], [10, 1]), ([0, -5], [10, 1]), (nil, [1e12, 1])] {
+    /// Round 6: implausible offsets get their OWN error — the timing WAS recorded, it is corrupt.
+    @Test func outOfRangeOffsetsAreRefusedAsImplausible() async throws {
+        for bad: [Double] in [[0, 1e300], [0, -5], [0, 1e6]] {
             let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
-            try setMetadata(t) { m in
-                m["chunk_durations"] = bad.durations
-                if let offsets = bad.offsets { m["chunk_offsets"] = offsets }
-            }
+            try setMetadata(t) { m in m["chunk_offsets"] = bad }
             do {
                 _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
-                Issue.record("expected timelineUnknown for \(bad)")
-            } catch TranscriptRediarizer.RediarizeError.timelineUnknown {
+                Issue.record("expected chunkTimingImplausible for \(bad)")
+            } catch TranscriptRediarizer.RediarizeError.chunkTimingImplausible {
             }
+        }
+        #expect(TranscriptRediarizer.RediarizeError.chunkTimingImplausible.errorDescription
+                == "The recording's chunk timing looks corrupted, so re-detect can't place the audio safely.")
+    }
+
+    /// A corrupt cached length is not trusted: the file's real length is used instead.
+    @Test func anImplausibleCachedLengthFallsBackToTheFile() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        try setMetadata(t) { m in m["chunk_durations"] = [1e12, 1] }
+        let d = CountingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: d)
+        #expect(d.samplesSeen == 11 * 16_000)
+    }
+
+    /// Round 6 N1: a recording that kept running well past the last word (the user forgot to stop)
+    /// is valid — the bound comes from the AUDIO, not from where the words end.
+    @Test func chunksFarPastTheLastWordAreAccepted() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-late-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let files = (0..<3).map { dir.appendingPathComponent("call-\($0).wav") }
+        for f in files { try writeToneWav(at: f, seconds: 6) }
+        let t = dir.appendingPathComponent("t.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["audio_paths": files.map(\.path), "chunk_durations": [6.0, 6.0, 6.0], "chunk_offsets": [0.0, 6.0, 12.0]],
+            "segments": [["start": 0.2, "end": 1.0, "text": "only words", "speaker": "Remote Speaker 1", "source": "remote"]],
+        ]).write(to: t)
+        let d = CountingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: d)
+        #expect(d.samplesSeen == 18 * 16_000)
+    }
+
+    /// Round 6 N1: a huge (corrupt) segment end no longer widens the bound — no trap.
+    @Test func aHugeSegmentEndWithACorruptOffsetDoesNotTrap() async throws {
+        let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
+        try setMetadata(t, { m in m["chunk_offsets"] = [0.0, 1e200] },
+                        segments: [["start": 1e300, "end": 1e300, "text": "corrupt", "speaker": "Remote Speaker 1", "source": "remote"]])
+        await #expect(throws: TranscriptRediarizer.RediarizeError.self) {
+            _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
         }
     }
 

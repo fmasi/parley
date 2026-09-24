@@ -154,6 +154,9 @@ public enum TranscriptRediarizer {
         /// The recording has capture gaps and the chunks' wall-clock offsets were not recorded, so
         /// its timeline cannot be rebuilt without shifting every chunk after a gap.
         case timelineUnknown
+        /// The chunks' recorded wall-clock offsets are not ones this recording could have (non-finite,
+        /// negative, or beyond its audio plus its gaps) — the timing WAS recorded, but is corrupt.
+        case chunkTimingImplausible
 
         public var errorDescription: String? {
             switch self {
@@ -161,6 +164,8 @@ public enum TranscriptRediarizer {
                 return "Chunk \(chunk) of \(total) is missing — re-detect cannot rebuild the timeline without it."
             case .chunkDurationUnknown(let chunk, let total):
                 return "The length of chunk \(chunk) of \(total) is unknown — re-detect cannot rebuild the timeline without it."
+            case .chunkTimingImplausible:
+                return "The recording's chunk timing looks corrupted, so re-detect can't place the audio safely."
             case .timelineUnknown:
                 return "This recording has capture gaps and its chunk timing was not recorded — re-detect cannot rebuild the timeline."
             case .unreadableTranscript: return "Could not read the transcript."
@@ -210,8 +215,13 @@ public enum TranscriptRediarizer {
         let chunkDurations = metadata["chunk_durations"] as? [Double] ?? []
         let chunkOffsets = metadata["chunk_offsets"] as? [Double]
         let hasCaptureGaps = !((metadata["capture"] as? [String: Any])?["gaps"] as? [Any] ?? []).isEmpty
-        // The latest moment the transcript speaks about — the bound for any offset or chunk length.
-        let timelineEnd = rawSegments.compactMap { $0["end"] as? Double }.filter { $0.isFinite && $0 >= 0 }.max() ?? 0
+        // Recorded periods with no capture: part of the timeline the offsets may legitimately span.
+        // Each must be a real gap (finite, ≥ 0, at most a day) to count — a corrupt value must not
+        // widen the bound below.
+        let gapSeconds = ((metadata["capture"] as? [String: Any])?["gaps"] as? [[String: Any]] ?? [])
+            .compactMap { $0["seconds"] as? Double }
+            .filter { $0.isFinite && $0 >= 0 && $0 <= 86_400 }
+            .reduce(0, +)
 
         // Decode ONCE, at the target format (16 kHz mono Float), and hand that buffer to the
         // diarizer (#204) — the old path decoded the channel's audio up to four separate times
@@ -228,7 +238,7 @@ public enum TranscriptRediarizer {
         onProgress?(Progress(phase: .decodingAudio))
         let decoded = try await decodeChannelAudio(
             layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
-            hasCaptureGaps: hasCaptureGaps, timelineEnd: timelineEnd, scratchDirectory: scratchDirectory,
+            hasCaptureGaps: hasCaptureGaps, gapSeconds: gapSeconds, scratchDirectory: scratchDirectory,
             onProgress: onProgress)
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
@@ -418,7 +428,7 @@ public enum TranscriptRediarizer {
         chunkDurations: [Double],
         chunkOffsets: [Double]?,
         hasCaptureGaps: Bool,
-        timelineEnd: Double,
+        gapSeconds: Double,
         scratchDirectory: URL,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
@@ -446,11 +456,13 @@ public enum TranscriptRediarizer {
             guard chunks.contains(where: { channelRole(of: $0, wantsLocal: wantsLocal) != .skip }) else {
                 throw RediarizeError.noAudioForChannel(source)
             }
-            // Every offset and chunk length must be a real one: finite, ≥ 0, and no later than the
-            // transcript's last moment plus one chunk (the longest file). A corrupted value would
-            // otherwise trap (`Int(1e300)`) or allocate gigabytes of silence.
+            // Every offset must be one this recording could have: finite, ≥ 0, and within its AUDIO —
+            // the chunk files' real lengths, plus its recorded gaps, plus one chunk of slack. Not the
+            // words: a recording can run long after the last one (nobody pressed Stop). A corrupted
+            // value would otherwise trap (`Int(1e300)`) or allocate gigabytes of silence.
             let fileLengths = SpeakerSampleLocator.durations(of: chunks)
-            let bound = timelineEnd + (fileLengths.compactMap { $0 }.max() ?? 0)
+            let knownLengths = fileLengths.compactMap { $0 }
+            let bound = knownLengths.reduce(0, +) + gapSeconds + (knownLengths.max() ?? 0)
             func plausible(_ value: Double) -> Bool { value.isFinite && value >= 0 && value <= bound }
             // Each chunk goes at the wall-clock offset the transcript used for it, so labels land on
             // the right words across a relaunch or sleep gap — in OFFSET order, not list order (a
@@ -458,7 +470,7 @@ public enum TranscriptRediarizer {
             // never decrease. Without recorded offsets the chunks are laid end to end — correct only
             // when nothing is missing between them.
             let offsets = chunkOffsets.flatMap { $0.count == chunks.count ? $0 : nil }
-            if let offsets, !offsets.allSatisfy(plausible) { throw RediarizeError.timelineUnknown }
+            if let offsets, !offsets.allSatisfy(plausible) { throw RediarizeError.chunkTimingImplausible }
             if offsets == nil, hasCaptureGaps, chunks.count > 1 { throw RediarizeError.timelineUnknown }
             let order = offsets.map { o in chunks.indices.sorted { (o[$0], $0) < (o[$1], $1) } } ?? Array(chunks.indices)
             // Cached lengths are trusted only when they line up one-to-one with the chunks.
@@ -492,9 +504,10 @@ public enum TranscriptRediarizer {
                     // This chunk holds only the other channel. With offsets the next chunk's offset
                     // re-aligns the timeline; without, it contributes silence of its own length.
                     if offsets != nil { continue }
-                    let duration = try skippedChunkDuration(index: index, of: chunks.count, cached: cachedDurations,
+                    // A cached length beyond the audio is corrupt: the file's own length wins.
+                    let duration = try skippedChunkDuration(index: index, of: chunks.count,
+                                                            cached: cachedDurations.map { plausible($0) ? $0 : 0 },
                                                             fileLength: fileLengths[index])
-                    guard plausible(duration) else { throw RediarizeError.timelineUnknown }
                     decodedChunk = [Float](repeating: 0, count: Int(duration * AudioDecode.targetSampleRate))
                 case .useDirectly:
                     decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: chunk)

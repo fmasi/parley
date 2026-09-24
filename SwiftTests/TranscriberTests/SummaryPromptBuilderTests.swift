@@ -190,7 +190,7 @@ struct SummaryPromptBuilderTests {
     }
 
     @Test func theRuleNamesEveryIncompleteCase() {
-        #expect(SummaryPromptBuilder.systemPrompt.contains("not captured, partly captured, uncertain, or compromised"))
+        #expect(SummaryPromptBuilder.systemPrompt.contains("not captured, partly captured, uncertain, compromised, or recorded only digital silence"))
     }
 
     // MARK: - Round 4 wording
@@ -216,5 +216,23 @@ struct SummaryPromptBuilderTests {
         ])
         #expect(msg.contains("[--:--:--] A: hi") && msg.contains("[--:--:--] A: neg"))
         #expect(msg.contains("Duration: ?"))
+    }
+
+    // MARK: - Round 6 wording
+
+    /// N2: a mic that died 5 minutes into a 60-minute call did record the user for 5 minutes.
+    @Test func aMicThatDiedPartWayIsNotOnlySilence() {
+        let m = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 3600, expectedSeconds: 3600, exactZeroSeconds: 3300))
+        #expect(SummaryPromptBuilder.captureLine(m) == "Your microphone: captured, but 3300 s of 3600 s was digital silence")
+        let allButHalfASecond = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 600, expectedSeconds: 600, exactZeroSeconds: 599.5))
+        #expect(SummaryPromptBuilder.captureLine(allButHalfASecond) == "Your microphone: recorded only digital silence (600 s)")
+    }
+
+    /// Item 4: a partly captured remote side whose permission was confirmed not granted says so.
+    @Test func aPartialCaptureWithAConfirmedDenialNamesThePermission() {
+        let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400,
+                                             permissionDenied: true))
+        #expect(SummaryPromptBuilder.captureLine(m)
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence; system audio permission was not granted for part of the call")
     }
 }

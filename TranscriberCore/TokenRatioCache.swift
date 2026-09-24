@@ -161,22 +161,34 @@ public actor TokenRatioCache {
 
     // MARK: - Persistence
 
+    /// A chars-per-token ratio any real model could have. A value outside it on disk (0 from a
+    /// corrupted file divides by zero, and `Int(inf)` traps) is ignored as if never measured.
+    static let plausibleRatios: ClosedRange<Double> = 0.5...20
+
     private func loadEntries() -> [String: Entry] {
         guard let data = try? Data(contentsOf: cacheURL) else { return [:] }
 
         // Try new format first (with isSeed)
         if let entries = try? JSONDecoder().decode([String: Entry].self, from: data) {
-            return entries
+            return Self.plausible(entries)
         }
 
         // Migrate from old format (plain [String: Double]) — treat as seeds
         if let legacy = try? JSONDecoder().decode([String: Double].self, from: data) {
-            let entries = legacy.mapValues { Entry(ratio: $0, isSeed: true) }
+            let entries = Self.plausible(legacy.mapValues { Entry(ratio: $0, isSeed: true) })
             saveEntries(entries) // migrate in place
             return entries
         }
 
         return [:]
+    }
+
+    private static func plausible(_ entries: [String: Entry]) -> [String: Entry] {
+        let kept = entries.filter { $0.value.ratio.isFinite && plausibleRatios.contains($0.value.ratio) }
+        if kept.count < entries.count {
+            Logger.transcription.warning("Token ratio cache: ignoring \(entries.count - kept.count, privacy: .public) implausible ratio(s)")
+        }
+        return kept
     }
 
     private func saveEntries(_ entries: [String: Entry]) {

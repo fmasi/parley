@@ -140,4 +140,21 @@ struct TokenRatioCacheTests {
         #expect(await cache.ratio(for: "old-model") == 2.5)
         #expect(await cache.isSeed(for: "old-model") == true) // legacy treated as seed
     }
+
+    /// Round 6 item 5: a corrupt ratio on disk (0 → divide by zero → `Int(inf)` traps) is ignored.
+    @Test func corruptRatiosOnDiskAreIgnored() async throws {
+        let url = tempCacheURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entries: [String: TokenRatioCache.Entry] = [
+            "zero": .init(ratio: 0, isSeed: false),
+            "huge": .init(ratio: 1e300, isSeed: false),
+            "fine": .init(ratio: 3.5, isSeed: false),
+        ]
+        try JSONEncoder().encode(entries).write(to: url, options: .atomic)
+        let cache = TokenRatioCache(cacheURL: url)
+        #expect(await cache.ratio(for: "zero") == nil)
+        #expect(await cache.ratio(for: "huge") == nil)
+        #expect(await cache.ratio(for: "fine") == 3.5)
+        #expect(await cache.estimateTokens(String(repeating: "a", count: 300), model: "zero") == 100, "falls back to the default ratio")
+    }
 }
