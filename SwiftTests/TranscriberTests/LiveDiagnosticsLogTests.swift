@@ -26,6 +26,20 @@ import Testing
         #expect(merged.events.count == 2, "the event both on disk and in the ring is one event")
     }
 
+    @Test func aSubSecondTimestampDedupsAcrossDiskAndRing() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        let event = CaptureEvent(
+            timestamp: Date(timeIntervalSinceReferenceDate: 811_968_756.916193),
+            origin: .app, kind: .retry, severity: .warning, detail: ["attempt": "1"]
+        )
+        log.append(event)
+        var ring = CaptureDiagnostics()
+        ring.record(event)
+        let merged = log.merged(into: ring)
+        #expect(merged.events.count == 1, "the same sub-second anomaly recorded to both the ring and disk is one event, not two")
+    }
+
     @Test func informationalEventsAreNotWritten() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")

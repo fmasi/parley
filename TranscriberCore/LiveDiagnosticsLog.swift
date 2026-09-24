@@ -6,8 +6,36 @@ import os
 public final class LiveDiagnosticsLog: @unchecked Sendable {
     public let url: URL
     private let lock = NSLock()
-    private static let encoder: JSONEncoder = { let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; e.outputFormatting = [.sortedKeys]; return e }()
-    private static let decoder: JSONDecoder = { let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d }()
+
+    // `.iso8601` (JSONEncoder's built-in strategy) drops sub-second precision, so a disk round-trip
+    // and an in-memory ring event for the SAME anomaly would decode to different timestamps and
+    // dedup would never match. Encode/decode with millisecond precision instead.
+    private static let dateFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .custom { date, encoder in
+            var c = encoder.singleValueContainer()
+            try c.encode(LiveDiagnosticsLog.dateFormatter.string(from: date))
+        }
+        e.outputFormatting = [.sortedKeys]
+        return e
+    }()
+    private static let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .custom { decoder in
+            let c = try decoder.singleValueContainer()
+            let s = try c.decode(String.self)
+            guard let date = LiveDiagnosticsLog.dateFormatter.date(from: s) else {
+                throw DecodingError.dataCorruptedError(in: c, debugDescription: "Invalid ISO8601 date with fractional seconds: \(s)")
+            }
+            return date
+        }
+        return d
+    }()
 
     public init(directory: URL, sessionId: String) {
         url = directory.appendingPathComponent("\(sessionId).diag.live.jsonl")
@@ -35,8 +63,12 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
 
     public func merged(into ring: CaptureDiagnostics) -> CaptureDiagnostics {
         var seen = Set<String>()
+        // Round to whole milliseconds on BOTH sides (ring events keep full Double precision; disk
+        // events come back through the millisecond-precision formatter above) so the key matches
+        // regardless of which side introduced float noise.
         func key(_ e: CaptureEvent) -> String {
-            "\(e.timestamp.timeIntervalSinceReferenceDate)|\(e.origin.rawValue)|\(e.kind.rawValue)|\(e.detail.sorted { $0.key < $1.key })"
+            let ms = (e.timestamp.timeIntervalSinceReferenceDate * 1000).rounded()
+            return "\(ms)|\(e.origin.rawValue)|\(e.kind.rawValue)|\(e.detail.sorted { $0.key < $1.key })"
         }
         var result = ring
         var extra: [CaptureEvent] = []
