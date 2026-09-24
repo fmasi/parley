@@ -150,4 +150,23 @@ import Testing
         #expect(merged.events.contains { $0.kind == .xpcInterruption })
         #expect(provenance(merged).remoteCoverage?.deliveredSeconds == 20)
     }
+
+    /// L9 review 52: a helper call is tagged with the session it was made for. Its timeout, landing after
+    /// that session ended and the next one began, is dropped — never another recording's anomaly.
+    @Test func aLateTimeoutIsRecordedOnlyIntoItsOwnSession() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let timeout = CaptureEvent(timestamp: Date(timeIntervalSince1970: 50), origin: .app, kind: .xpcTimeout, severity: .anomaly,
+                                   detail: ["call": "stop"])
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "first", directory: d)
+        let firstTag = evidence.epoch
+        _ = evidence.finalize(sessionId: "first", directory: d)
+        evidence.beginCapture(sessionId: "second", directory: d)
+        evidence.record(timeout, madeIn: firstTag)
+        #expect(!evidence.finalize(sessionId: "second", directory: d).events.contains { $0.kind == .xpcTimeout })
+
+        evidence.beginCapture(sessionId: "third", directory: d)
+        evidence.record(timeout, madeIn: evidence.epoch)
+        #expect(evidence.finalize(sessionId: "third", directory: d).events.contains { $0.kind == .xpcTimeout })
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The app's capture evidence for the recording session in progress (§8.11): the diagnostic ring, the
 /// live log beside the recording, and the latest coverage of every helper session. The XPC client owns
@@ -17,6 +18,9 @@ public final class SessionEvidence {
     public private(set) var diagnostics = CaptureDiagnostics()
     public private(set) var sessionId: String?
     private var liveLog: LiveDiagnosticsLog?
+    /// Which session the evidence is bound to, as a tag: bumped whenever a NEW session binds. A helper call
+    /// is tagged with it when made; what it records later for another binding is dropped (L9 review 52).
+    public private(set) var epoch = 0
 
     public init() {}
 
@@ -25,6 +29,7 @@ public final class SessionEvidence {
         if sessionId != self.sessionId {
             diagnostics.resetSession()
             liveLog = nil
+            epoch += 1
         }
         // The same session resumed by a relaunch finds the earlier process's live log and appends to it.
         if liveLog == nil { liveLog = LiveDiagnosticsLog(directory: directory, sessionId: sessionId) }
@@ -35,6 +40,16 @@ public final class SessionEvidence {
     public func record(_ event: CaptureEvent) {
         diagnostics.record(event)
         liveLog?.append(event)
+    }
+
+    /// An event of the call made in `epoch`: recorded only if that session is still the one bound — a late
+    /// timeout of an earlier session's call never lands in the next recording's record (L9 review 52).
+    public func record(_ event: CaptureEvent, madeIn epoch: Int) {
+        guard epoch == self.epoch else {
+            Logger.state.info("A \(event.kind.rawValue, privacy: .public) of an earlier session arrived late — not recorded")
+            return
+        }
+        record(event)
     }
 
     /// Events drained from the helper: merged into the ring, and written to the live log so an app crash

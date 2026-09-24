@@ -26,6 +26,14 @@ public struct CaptureCallTimeout: Error, LocalizedError, Equatable, Sendable {
     }
 }
 
+/// What a status ping learned (L9 review 49). A ping the helper did not answer within its deadline is
+/// `unknown` — never "not capturing": a helper that is merely slow may still be writing the recording.
+public enum HelperCaptureState: Sendable, Equatable {
+    case capturing
+    case notCapturing
+    case unknown
+}
+
 /// The capabilities `RecordingCoordinator` needs from the XPC audio-capture client. Defined in
 /// Core so the recording-lifecycle + crash-recovery orchestration can live in Core (and be
 /// unit-tested with a fake) while the concrete NSXPC client stays in the app target — the same
@@ -76,8 +84,12 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
 
     /// The helper's alarm state + per-track health, or `nil` when the helper is unreachable (§6.2).
     func captureStatus() async -> CaptureStatusSnapshot?
-    /// Whether the helper reports an active capture session (`false` when unreachable).
-    func isCapturing() async -> Bool
+    /// Whether the helper reports an active capture session: `.unknown` when it did not answer in time.
+    func captureState() async -> HelperCaptureState
+    /// A helper call timed out and the helper may still be capturing (L9 review 45): drop the XPC
+    /// connection. The helper's invalidation handler stops and finalizes its capture (§8.3); the next call
+    /// reconnects.
+    func dropConnection()
     /// Record that the app re-attached to or relaunched a recording on launch (crash recovery) (#95).
     func recordLaunchRecovery(_ detail: [String: String])
     /// A relaunch continues session `sessionId` (a re-attach or a resume): its evidence is this session's

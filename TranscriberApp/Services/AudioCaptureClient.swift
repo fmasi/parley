@@ -107,7 +107,8 @@ final class AudioCaptureClient {
                     self.record(.xpcInterruption, .warning, ["classification": "blip"])
                     let generation = self.interruptionPolicy.captureGeneration
                     Logger.audio.warning("XPC interrupted — no crash report; verifying capture is alive")
-                    let stillCapturing = await self.isCapturing()
+                    // A ping the helper does not answer counts as not capturing here: escalate (L round 5).
+                    let stillCapturing = await self.captureState() == .capturing
                     // If a concurrent invalidation/recovery already replaced the connection while we
                     // awaited, that path owns this teardown — don't double-fire onServiceCrash (F7).
                     guard self.connection === boundConnection else { return }
@@ -123,9 +124,13 @@ final class AudioCaptureClient {
                 }
             }
         }
+        let connectionId = ObjectIdentifier(conn)
         conn.invalidationHandler = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
+                // An older connection's invalidation (one `dropConnection` already replaced) is not this
+                // connection's news: it must not clear a newer connection, nor count as its crash.
+                if let current = self.connection, ObjectIdentifier(current) != connectionId { return }
                 self.connection = nil
                 switch self.interruptionPolicy.onInvalidation() {
                 case .crash:
@@ -203,24 +208,20 @@ final class AudioCaptureClient {
 
     // MARK: - Deadlines (§8.8)
 
-    /// One helper call, bounded: the reply, the XPC error handler and the deadline race through
-    /// `ResumeOnce`, so whichever comes first wins and a late reply is ignored (never a second resume, never
-    /// a leaked continuation). A timeout is recorded as an `xpcTimeout` anomaly and thrown as
+    /// One helper call, bounded (Core's `boundedReply`, on awake time): the reply, the XPC error handler and
+    /// the deadline race, and a late reply is ignored. A timeout is recorded as an `xpcTimeout` anomaly —
+    /// into the session the call was made for, never a later one (L9 review 52) — and thrown as
     /// `CaptureCallTimeout`, a Core type the coordinator recognizes.
     private func bounded<T: Sendable>(
         _ call: String, seconds: Double,
         _ send: (@escaping @Sendable (Result<T, Error>) -> Void) -> Void
     ) async throws -> T {
-        let result: Result<T, Error> = await withCheckedContinuation { cont in
-            let once = ResumeOnce(cont)
-            send { once.resume($0) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
-                once.resume(.failure(CaptureCallTimeout(call: call, seconds: seconds)))
-            }
-        }
+        let madeIn = evidence.epoch
+        let result: Result<T, Error> = await boundedReply(call, seconds: seconds, send)
         if case .failure(let error as CaptureCallTimeout) = result {
             Logger.audio.error("The capture helper did not answer \(call, privacy: .public) within \(seconds, privacy: .public) s")
-            record(.xpcTimeout, .anomaly, ["call": call])
+            evidence.record(CaptureEvent(timestamp: Date(), origin: .app, kind: .xpcTimeout, severity: .anomaly, detail: ["call": call]),
+                            madeIn: madeIn)
             throw error
         }
         return try result.get()
@@ -282,8 +283,8 @@ final class AudioCaptureClient {
         )
     }
 
-    /// Bounded: `configureCapture` (3 s, best effort) runs first, then the `startCapture` call itself
-    /// (15 s) — worst case 18 s to a start failure (§8.8).
+    /// Bounded: the drain of the previous helper's events (3 s) and `configureCapture` (3 s, best effort) run
+    /// first, then the `startCapture` call itself (15 s) — worst case 21 s to a start failure (§8.8).
     func start(
         outputDirectory: URL,
         baseName: String,
@@ -320,12 +321,11 @@ final class AudioCaptureClient {
 
     /// Best effort, 3 s: a helper that does not answer records with its defaults, which are today's behaviour.
     private func configureCapture(_ options: CaptureOptions, on conn: NSXPCConnection) async {
-        let acknowledged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            let once = ResumeOnce(cont)
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(false) } as! AudioCaptureProtocol
-            proxy.configureCapture(optionsJSON: options.encoded()) { once.resume($0) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(false) }
+        let reply: Result<Bool, Error> = await boundedReply("configureCapture", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(false)) } as! AudioCaptureProtocol
+            proxy.configureCapture(optionsJSON: options.encoded()) { done(.success($0)) }
         }
+        let acknowledged = (try? reply.get()) ?? false
         if !acknowledged { Logger.audio.warning("configureCapture not acknowledged — the helper records with default capture options") }
     }
 
@@ -395,14 +395,11 @@ final class AudioCaptureClient {
     /// stuck (it fails open to `nil` — unverifiable — after 3 s).
     func systemAudioPermissionStatus() async -> PermissionStatus? {
         guard let conn = try? getConnection() else { return nil }
-        return await withCheckedContinuation { (cont: CheckedContinuation<PermissionStatus?, Never>) in
-            let once = ResumeOnce(cont)
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                once.resume(nil)
-            } as! AudioCaptureProtocol
-            proxy.systemAudioPermissionStatus { once.resume(SystemAudioRecordingPermission.status(fromWire: $0)) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
+        let reply: Result<PermissionStatus?, Error> = await boundedReply("systemAudioPermissionStatus", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
+            proxy.systemAudioPermissionStatus { done(.success(SystemAudioRecordingPermission.status(fromWire: $0))) }
         }
+        return (try? reply.get()) ?? nil
     }
 
     /// The helper's alarm state + per-track health (§6.2), or `nil` if the helper is unreachable or
@@ -410,12 +407,11 @@ final class AudioCaptureClient {
     /// crash can no longer erase it.
     func captureStatus() async -> CaptureStatusSnapshot? {
         guard let conn = try? getConnection() else { return nil }
-        let snapshot = await withCheckedContinuation { (cont: CheckedContinuation<CaptureStatusSnapshot?, Never>) in
-            let once = ResumeOnce(cont)
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(nil) } as! AudioCaptureProtocol
-            proxy.captureStatus { once.resume($0.flatMap(CaptureStatusSnapshot.decode)) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
+        let reply: Result<CaptureStatusSnapshot?, Error> = await boundedReply("captureStatus", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
+            proxy.captureStatus { done(.success($0.flatMap(CaptureStatusSnapshot.decode))) }
         }
+        let snapshot = (try? reply.get()) ?? nil
         if let snapshot { evidence.noteCoverage(snapshot) }
         return snapshot
     }
@@ -423,11 +419,9 @@ final class AudioCaptureClient {
     /// Forward an `NSWorkspace` sleep / wake to the helper (§8.10). Bounded at 3 s.
     func systemPowerEvent(_ kind: String) async {
         guard let conn = try? getConnection() else { return }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            let once = ResumeOnce(cont)
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(()) } as! AudioCaptureProtocol
-            proxy.systemPowerEvent(kind: kind) { once.resume(()) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(()) }
+        _ = await boundedReply("systemPowerEvent", seconds: 3) { (done: @escaping @Sendable (Result<Void, Error>) -> Void) in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(())) } as! AudioCaptureProtocol
+            proxy.systemPowerEvent(kind: kind) { done(.success(())) }
         }
     }
 
@@ -436,42 +430,45 @@ final class AudioCaptureClient {
     @discardableResult
     func restartSystemAudio() async -> Bool {
         guard let conn = try? getConnection() else { return false }
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            let once = ResumeOnce(cont)
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-                once.resume(false)
-            } as! AudioCaptureProtocol
+        // The helper replies from its audio queue; a stalled queue must not hang the caller.
+        let reply: Result<Bool, Error> = await boundedReply("restartSystemAudio", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(false)) } as! AudioCaptureProtocol
             proxy.restartSystemAudio { success, error in
                 if let error { Logger.audio.info("System audio restart skipped: \(error, privacy: .public)") }
-                once.resume(success)
+                done(.success(success))
             }
-            // The helper replies from its audio queue; a stalled queue must not hang the caller.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(false) }
         }
+        return (try? reply.get()) ?? false
     }
 
-    /// Pings the XPC service to check whether a capture session is currently active.
-    /// Attempts to reconnect if the connection is nil. Returns false if the service
-    /// is unreachable (used for crash-recovery Flow A re-attach on launch).
-    func isCapturing() async -> Bool {
-        guard let conn = connection else {
-            connect()
-            guard let conn = connection else { return false }
-            let result = await pingStatus(conn)
-            Logger.audio.debug("XPC status ping: \(result)")
-            return result
+    /// Pings the XPC service: is a capture session active? Reconnects if the connection is nil. `.unknown`
+    /// when the helper did not answer within 3 s (§8.8) — a slow helper may still be capturing (L9 review 49);
+    /// `.notCapturing` when it answered no, or is unreachable.
+    func captureState() async -> HelperCaptureState {
+        if connection == nil { connect() }
+        guard let conn = connection else { return .notCapturing }
+        let state: HelperCaptureState
+        do {
+            state = try await bounded("status", seconds: 3) { done in
+                let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(.notCapturing)) } as! AudioCaptureProtocol
+                proxy.status { isCapturing, _ in done(.success(isCapturing ? .capturing : .notCapturing)) }
+            }
+        } catch {
+            state = .unknown
         }
-        let result = await pingStatus(conn)
-        Logger.audio.debug("XPC status ping: \(result)")
-        return result
+        Logger.audio.debug("XPC status ping: \(String(describing: state), privacy: .public)")
+        return state
     }
 
-    /// Bounded at 3 s (§8.8): a helper that does not answer counts as not capturing.
-    private func pingStatus(_ conn: NSXPCConnection) async -> Bool {
-        (try? await bounded("status", seconds: 3) { done in
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(false)) } as! AudioCaptureProtocol
-            proxy.status { isCapturing, _ in done(.success(isCapturing)) }
-        }) ?? false
+    /// Drop the connection after a helper call timed out (L9 review 45): the helper's invalidation handler
+    /// stops and finalizes its capture (main.swift), and `getConnection()` reconnects lazily. Replaced first,
+    /// so this deliberate invalidation never reads as a crash of whatever capture comes next.
+    func dropConnection() {
+        guard let conn = connection else { return }
+        Logger.audio.error("Dropping the XPC connection: a helper call timed out and the helper may still be capturing")
+        record(.xpcInvalidation, .warning, ["cause": "app dropped the connection after a timeout"])
+        connection = nil
+        conn.invalidate()
     }
 
     private func getConnection() throws -> NSXPCConnection {

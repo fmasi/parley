@@ -69,8 +69,11 @@ public final class RecordingCoordinator {
     // MARK: - Deadlines (§8.8)
 
     /// One deadline for the WHOLE start (addendum): the pre-flight lookup, then the helper's start (the
-    /// client's own bound is configure 3 s + start 15 s). A stalled audio system can never hold
-    /// `isStartInFlight` — the hand-over, the Record control, every later Start. Tests shorten it.
+    /// client's own bounds are drain 3 s + configure 3 s + start 15 s, 21 s at worst). At the deadline the user
+    /// is told at once; `isStartInFlight` is then held through the bounded stop that follows
+    /// (`helperStopDeadline`), so at worst it is held for this plus that — never by a stalled audio system
+    /// indefinitely (L9 review 47). Every §8.8 deadline counts awake time (`SuspendingClock`, L10 review 56).
+    /// Tests shorten it.
     var startDeadline: Duration = .seconds(30)
     /// The user's Stop, a margin above the client's own 20 s: on timeout the session is salvaged from disk
     /// and the user told so, never left on "Finishing…" (council B-I1). Tests shorten it.
@@ -335,8 +338,8 @@ public final class RecordingCoordinator {
         }
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
-        // Every await below takes what is left of this one deadline (§8.8, addendum).
-        let startBy = ContinuousClock.now + startDeadline
+        // Every await below takes what is left of this one deadline (§8.8, addendum), in awake time.
+        let startBy = SuspendingClock.now + startDeadline
 
         // Pre-flight (#193): the built-in mic stays the default input device — and keeps delivering
         // full-rate buffers of exact digital zero — while the lid is closed. Warn BEFORE capture
@@ -459,14 +462,19 @@ public final class RecordingCoordinator {
             }
         } catch {
             crashDuringStart = false   // moot: this failure path ends the recording
-            let timedOut = error is CaptureCallTimeout
+            // Said first, at the deadline — not after the stop below, which may take its own bound (L9 review
+            // 47). The start stays in flight until that stop returns: no new Start races it.
+            if error is CaptureCallTimeout {
+                reportUnresponsiveStart()
+            } else {
+                appState.errorMessage = error.localizedDescription
+                notify("Recording Failed", error.localizedDescription)
+            }
             // The helper is capturing (a later step failed), or its start timed out and may still commit:
             // stop it — bounded — BEFORE the mic marker is released, so no meter opens the mic the helper
             // still holds (#192, §8.6). A stop during a start aborts it (H2): no helper is left capturing.
-            var helperLetGo = true
-            if captureStarted || (helperStartIssued && timedOut) {
-                helperLetGo = await boundedHelperStop("stop after failed start")
-            }
+            let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: helperStartIssued,
+                                                         error: error, label: "stop after failed start")
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
             if helperLetGo {
                 clearHelperMic()
@@ -475,12 +483,6 @@ public final class RecordingCoordinator {
                 // The helper may still be capturing, and hold the mic: keep the mic marked and the sentinel,
                 // so the next launch sees the capturing helper and re-attaches or salvages it (L follow-up 27).
                 Logger.state.error("A failed start left the capture helper unanswered — keeping the recovery file")
-            }
-            if timedOut {
-                reportUnresponsiveStart()
-            } else {
-                appState.errorMessage = error.localizedDescription
-                notify("Recording Failed", error.localizedDescription)
             }
         }
     }
@@ -499,8 +501,8 @@ public final class RecordingCoordinator {
         notify("Recording Failed", message)
     }
 
-    /// What is left until `deadline`, in seconds (never zero: a spent deadline still times out at once).
-    private static func seconds(until deadline: ContinuousClock.Instant) -> Double {
+    /// What is left until `deadline`, in awake seconds (never zero: a spent deadline still times out at once).
+    private static func seconds(until deadline: SuspendingClock.Instant) -> Double {
         max(0.001, seconds(deadline - .now))
     }
 
@@ -735,11 +737,18 @@ public final class RecordingCoordinator {
             RecordingSentinel.delete(directory: sentinelDirectory)
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
-            // Either the helper's stop failed, or (stop succeeded) finishing the transcript did. A failed
-            // stop has no "helper has let go" moment to wait for: release the marker best-effort. The
-            // realistic causes (XPC crash, fatal failure) mean the helper is already gone.
-            clearHelperMic()
+            // Either the helper's stop failed, or (stop succeeded) finishing the transcript did.
             let stopSucceeded = stoppedPaths != nil
+            // A stop that TIMED OUT may have left the helper capturing: drop the connection BEFORE the salvage
+            // — the helper's invalidation handler stops and finalizes its capture — and only then release the
+            // mic (L9 review 45). The sentinel stays marked `stopping` until the salvage below has run, so a
+            // crash meanwhile is salvaged at relaunch. Any other stop failure (an XPC crash, a fatal failure)
+            // means the helper has already gone.
+            if !stopSucceeded, error is CaptureCallTimeout {
+                Logger.state.error("The capture helper did not answer the stop — dropping the connection so it stops")
+                captureClient.dropConnection()
+            }
+            clearHelperMic()
             // council FV2 defense-in-depth: if a live chunked pipeline still holds transcribed chunks,
             // salvage them into a transcript instead of discarding the session with a blind teardown.
             // A failed stop left the in-progress chunk unprocessed: re-ingest it (inside the first
@@ -1139,13 +1148,13 @@ public final class RecordingCoordinator {
             // A queued event may be a duplicate or stale report of the death just handled (an
             // interruption plus an invalidation, or a blip scored against the old `.ips`). Re-running
             // recovery on a capturing helper would fail its `start()` and end a healthy recording as
-            // "Failed" (L round 5). Bounded: a helper that does not answer in 3 s is treated as dead.
-            // `recoveryInFlight` is held across the check: a Stop pressed meanwhile takes the deferred
+            // "Failed" (L round 5). Bounded: a helper that does not answer in 3 s (`.unknown`) is treated as
+            // dead. `recoveryInFlight` is held across the check: a Stop pressed meanwhile takes the deferred
             // path instead of racing a restart (L round 7).
             recoveryInFlight = true
-            let capturing = (try? await withDeadline(seconds: 3, label: "queued crash: isCapturing") {
-                await self.helperIsCapturing()
-            }) ?? false
+            let capturing = (try? await withDeadline(seconds: 3, label: "queued crash: captureState") {
+                await self.helperCaptureState()
+            }) == .capturing
             recoveryInFlight = false
             if stopRequestedDuringRecovery {
                 stopRequestedDuringRecovery = false
@@ -1162,7 +1171,7 @@ public final class RecordingCoordinator {
         }
     }
 
-    private func helperIsCapturing() async -> Bool { await captureClient.isCapturing() }
+    private func helperCaptureState() async -> HelperCaptureState { await captureClient.captureState() }
     /// The helper's stop, its paths discarded, for the bounded stops that only need the helper gone.
     private func stopHelper() async throws { _ = try await helperStop() }
     /// The helper calls a bounded (`@Sendable`) body makes: main-actor methods, so the body never touches
@@ -1179,12 +1188,16 @@ public final class RecordingCoordinator {
     /// stopped, or it answered that nothing was capturing. False when it did not stop — it timed out, or
     /// failed otherwise — and it may still be capturing and hold the mic. Never swallowed (L follow-up 27):
     /// every failure is logged `.error` and recorded (a timeout as `xpcTimeout`, by `bounded`).
+    ///
+    /// A timeout pulls the last lever (L9 review 45): the XPC connection is dropped, so the helper's
+    /// invalidation handler stops and finalizes its capture. Still false — nothing confirmed it let go.
     private func boundedHelperStop(_ label: String) async -> Bool {
         do {
             try await bounded(label, seconds: Self.seconds(helperStopDeadline)) { try await self.stopHelper() }
             return true
         } catch is CaptureCallTimeout {
-            Logger.state.error("The capture helper did not stop (\(label, privacy: .public)) — it may still be capturing")
+            Logger.state.error("The capture helper did not stop (\(label, privacy: .public)) — it may still be capturing; dropping the connection")
+            captureClient.dropConnection()
             return false
         } catch {
             if Self.rotateFailure(error.localizedDescription) == .captureDead { return true }   // "No capture in progress"
@@ -1194,15 +1207,26 @@ public final class RecordingCoordinator {
         }
     }
 
+    /// A start site failed (§8.6) — the recording's start, the crash restart, the relaunch's resume: the one
+    /// rule for all three (L9 review 44). The helper's capture is running (a later step failed), or its start
+    /// timed out and may still commit: stop it, bounded. True once the helper let go, or when it was never
+    /// started; false when it may still be capturing.
+    private func stopAfterFailedStart(captureStarted: Bool, startIssued: Bool, error: Error, label: String) async -> Bool {
+        guard captureStarted || (startIssued && error is CaptureCallTimeout) else { return true }
+        return await boundedHelperStop(label)
+    }
+
     private func recoverFromCrash() async {
         // council FV2: serialize against a user Stop pressed mid-recovery. The defer clears both
         // flags on every exit so a deferred stop never leaks into the next recovery.
         recoveryInFlight = true
+        // A restart whose helper would not stop may still hold the mic: it stays marked (L9 review 44).
+        var keepMicMarked = false
         defer {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
             // Every give-up path ends the recording without stopRecording(); release the mic record.
-            if appState.isIdle { clearHelperMic() }
+            if appState.isIdle, !keepMicMarked { clearHelperMic() }
         }
         // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
         // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
@@ -1280,6 +1304,7 @@ public final class RecordingCoordinator {
             newSentinel = restart.newSentinel
         }
 
+        var startIssued = false, captureStarted = false
         do {
             // The restart resumes on this mic: mark it before the helper opens it (#192). If the restart
             // fails, the defer above releases it once the phase has gone idle.
@@ -1293,6 +1318,7 @@ public final class RecordingCoordinator {
             awaitingRecoveryFrames = true
             recoveryFramesAt = nil
             restartLostAudio = false
+            startIssued = true
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
@@ -1301,6 +1327,7 @@ public final class RecordingCoordinator {
                 options: CaptureOptions(config: configManager.config),
                 sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
             )
+            captureStarted = true
             newSentinel.lastAliveAt = Date()
             // A Stop deferred during this restart already marked the sentinel; the rewrite keeps the mark.
             newSentinel.stopping = newSentinel.stopping || stopRequestedDuringRecovery
@@ -1334,13 +1361,29 @@ public final class RecordingCoordinator {
             captureClient.captureEnded()
             Logger.state.error("Restart failed: \(error, privacy: .public)")
             awaitingRecoveryFrames = false
-            // council F3: the orphan was already re-ingested above, so just finalize what's been
-            // processed rather than abandoning the whole session.
-            let outcome = await finalizeAbandonedSession(at: Self.location(of: sentinel), reingestOrphan: false)
+            // Never a capturing helper behind an idle app (L9 review 44): a restart that captured, or whose
+            // start timed out and may still commit, is stopped (bounded) before the salvage.
+            let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued,
+                                                         error: error, label: "stop after failed restart")
+            // council F3: the orphan was already re-ingested above, so just finalize what's been processed
+            // rather than abandoning the whole session. The restart's own file (the rotator's current chunk
+            // now) holds audio only if the restart captured: sealed by the stop, it joins the salvage — never
+            // while the helper may still be writing it.
+            let restartFile = transcriptionRunner.chunkRotator.map { outputDir.appendingPathComponent($0.currentBaseName + ".wav").path }
+            let reingest = helperLetGo && restartFile.map { FileManager.default.fileExists(atPath: $0) } == true
+            let outcome = await finalizeAbandonedSession(at: Self.location(of: sentinel), reingestOrphan: reingest)
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            RecordingSentinel.delete(directory: sentinelDirectory)
+            if helperLetGo {
+                RecordingSentinel.delete(directory: sentinelDirectory)
+            } else {
+                // It may still be capturing, and hold the mic: the sentinel is kept, marked stopping, so the
+                // next launch stops the helper and salvages — never resumes (L follow-up 27, L9 review 44).
+                keepMicMarked = true
+                markSentinelStopping()
+                Logger.state.error("A failed restart left the capture helper unanswered — keeping the recovery file")
+            }
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
         }
     }
@@ -1355,13 +1398,17 @@ public final class RecordingCoordinator {
     /// `TranscriberApp.recoverIfNeeded`; here so every crash path is owned — and testable — in one place.
     public func recoverAtLaunch() async {
         if let sentinel = RecordingSentinel.read(directory: sentinelDirectory) {
-            await recover(sentinel)
+            // The helper just refused to let go: asking it again now would only wait out another bound. The
+            // next event (a mount, a wake, a recording's end) retries.
+            guard await recover(sentinel) != .heldForHelper else { return }
         }
         // Sessions an earlier launch could not finish (their folder away, or the helper not letting go).
         await retryPendingSessions()
     }
 
-    private func recover(_ sentinel: RecordingSentinel) async {
+    private enum RelaunchOutcome { case handled, heldForHelper }
+
+    private func recover(_ sentinel: RecordingSentinel) async -> RelaunchOutcome {
         Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         let folderReachable = Self.folderReachable(outputDir)
@@ -1371,14 +1418,21 @@ public final class RecordingCoordinator {
         // capture disarms it again (`captureEnded`).
         wireCaptureCallbacks()
         captureClient.captureReattached()
-        let helperCapturing = await captureClient.isCapturing()
+        let helperState = await captureClient.captureState()
         // A Start pressed during the ping owns the app now (L follow-up 38): this session waits for the
         // next idle, and nothing here touches that start (not even its crash detection).
         guard appState.isIdle, !isStartInFlight else {
             Logger.state.info("A recording start is in flight — the relaunch session waits")
             keepPending(sentinel)
-            return
+            return .handled
         }
+        // A helper that did not answer may still be capturing (L9 review 49): never re-attached to, and
+        // stopped — bounded — before any salvage or resume. One that will not stop keeps the session.
+        if helperState == .unknown, !(await boundedHelperStop("stop an unanswering helper at relaunch")) {
+            holdForHelper(sentinel)
+            return .heldForHelper
+        }
+        let helperCapturing = helperState == .capturing
         let decision = RelaunchDecision.decide(
             lastAliveAt: sentinel.lastAliveAt, bootSessionUUID: sentinel.bootSessionUUID, wasStopping: sentinel.stopping,
             now: Date(), helperCapturing: helperCapturing, currentBootSessionUUID: BootSession.currentUUID(),
@@ -1401,8 +1455,8 @@ public final class RecordingCoordinator {
             // Restore the helper's alarm state now: the pull on connect ran before anything listened.
             Task { await pollHelperStatus() }
         case .resumeSameSession(let lastAlive):
-            await resumeSameSession(sentinel: sentinel, outputDir: outputDir,
-                                    gapStart: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive))
+            return await resumeSameSession(sentinel: sentinel, outputDir: outputDir,
+                                           gapStart: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive))
         case .salvageAndStop(let reason):
             // A stop-in-flight race: the helper may still be capturing (C7 round 1 — the decision only says
             // "never resume"; stopping the helper is ours), bounded, BEFORE the salvage, so the salvage sees
@@ -1410,7 +1464,7 @@ public final class RecordingCoordinator {
             // is never salvaged (L follow-up 40).
             if reason == .wasStopping, helperCapturing, !(await boundedHelperStop("stop after relaunch")) {
                 holdForHelper(sentinel)
-                return
+                return .heldForHelper
             }
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
         case .salvageStale:
@@ -1421,6 +1475,7 @@ public final class RecordingCoordinator {
             keepPending(sentinel)
             updateFolderAlarm()
         }
+        return .handled
     }
 
     /// Flow A (L follow-up 30): the helper kept capturing, so the recording goes on — with its chunk
@@ -1532,13 +1587,14 @@ public final class RecordingCoordinator {
         let ready = pending.filter { Self.folderReachable(URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent()) }
         if !ready.isEmpty {
             // While idle, a capturing helper is a previous recording's that did not stop: stop it first.
-            let capturing = await captureClient.isCapturing()
+            // `.unknown` (no answer in time) may still be capturing too (L9 review 49).
+            let helperState = await captureClient.captureState()
             // Re-checked after the ping (L follow-up 38): a start pressed meanwhile owns the app.
             guard appState.isIdle, !isStartInFlight else {
                 retryPendingWhenIdle = true
                 return
             }
-            if capturing, !(await boundedHelperStop("stop a pending session")) {
+            if helperState != .notCapturing, !(await boundedHelperStop("stop a pending session")) {
                 updateFolderAlarm()
                 return   // still not letting go: the next event tries again
             }
@@ -1599,7 +1655,7 @@ public final class RecordingCoordinator {
     /// live processor, and the gap recorded — in the session, in the record, and as the
     /// `recordingResumedWithGap` alarm. If the capture cannot restart, the session is salvaged instead and
     /// the recording is said STOPPED.
-    private func resumeSameSession(sentinel: RecordingSentinel, outputDir: URL, gapStart: Date) async {
+    private func resumeSameSession(sentinel: RecordingSentinel, outputDir: URL, gapStart: Date) async -> RelaunchOutcome {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)   // the R5 session-id gate refuses any other
         let config = configManager.config
         // Both BEFORE the start (ledger, L7): the helper then creates the plan's file, which must be neither
@@ -1619,7 +1675,7 @@ public final class RecordingCoordinator {
         // A user Start already running owns the helper: never race it, never clear its flag (L follow-up 38).
         guard !startRunning else {
             keepPending(sentinel)
-            return
+            return .handled
         }
         // A start in flight: the phase stays `.idle` until the capture is up, so the Record control is
         // disabled, a user Start is ignored, and a crash reported meanwhile is handled once it is up (L5).
@@ -1636,8 +1692,9 @@ public final class RecordingCoordinator {
         setHelperMic(sentinel.micDeviceUID)   // before the helper opens it (#192)
         // The evidence is this session's before the start could reset it (L follow-up 43).
         await captureClient.adoptSession(sessionId: sessionId, directory: outputDir)
-        var captureStarted = false
+        var startIssued = false, captureStarted = false
         do {
+            startIssued = true
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: plan.baseName,
@@ -1664,15 +1721,17 @@ public final class RecordingCoordinator {
             transcriptionRunner.teardownChunkedPipeline()
             resetRecoveryConfirmation()
             crashDuringStart = false
-            // Never a capturing helper behind an idle app; its sealed file joins the salvage below. A helper
-            // that will not stop keeps the session: a file still being written is never salvaged (27, 40).
-            if captureStarted, !(await boundedHelperStop("stop after failed resume")) {
+            // Never a capturing helper behind an idle app — a start that timed out may still commit (L9 review
+            // 44); its sealed file joins the salvage below. A helper that will not stop keeps the session: a file
+            // still being written is never salvaged (27, 40).
+            if !(await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued, error: error,
+                                            label: "stop after failed resume")) {
                 holdForHelper(sentinel)
-                return
+                return .heldForHelper
             }
             clearHelperMic()
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
-            return
+            return .handled
         }
         transcriptionRunner.startChunkRotation()
         wirePipelineHooks()
@@ -1713,6 +1772,7 @@ public final class RecordingCoordinator {
                 await self.handleXPCCrash()
             }
         }
+        return .handled
     }
 
     /// The resume's capture name: `CrashRecoveryPlanner.planRestart`'s index (the shared collision guard,
@@ -1858,8 +1918,8 @@ public final class RecordingCoordinator {
     /// Before the process ends: let a start in flight resolve (it is bounded by `startDeadline`), then
     /// stop whatever recording there is, bounded.
     private func stopForExit(label: String) async {
-        let startBy = ContinuousClock.now + startDeadline + .seconds(5)
-        while isStartInFlight, ContinuousClock.now < startBy {
+        let startBy = SuspendingClock.now + startDeadline + .seconds(5)
+        while isStartInFlight, SuspendingClock.now < startBy {
             try? await Task.sleep(for: .milliseconds(20))
         }
         guard appState.isRecording else { return }

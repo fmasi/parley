@@ -81,20 +81,27 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     func captureStatus() async -> CaptureStatusSnapshot? { statusProvider?() ?? statusSnapshot }
 
     var isCapturingResult = false
+    /// Overrides `isCapturingResult`: `.unknown` is a ping the helper did not answer (L9 review 49).
+    var captureStateResult: HelperCaptureState?
     /// Whether crash detection was armed (`captureReattached`) when the Flow-A ping ran.
     var armedAtPing: Bool?
     /// Whether the crash callbacks were wired when the Flow-A ping ran (L round 5, item 12).
     var wiredAtPing: Bool?
     var isCapturingCalls = 0
-    /// Awaited inside isCapturing(): lets a test act while the ping is outstanding (L round 7).
+    /// Awaited inside captureState(): lets a test act while the ping is outstanding (L round 7).
     var onIsCapturing: (() async -> Void)?
-    func isCapturing() async -> Bool {
+    func captureState() async -> HelperCaptureState {
         isCapturingCalls += 1
         await onIsCapturing?()
         armedAtPing = captureReattachedCalls > 0
         wiredAtPing = onServiceCrash != nil
-        return isCapturingResult
+        return captureStateResult ?? (isCapturingResult ? .capturing : .notCapturing)
     }
+
+    /// The XPC connection dropped after a helper call timed out (L9 review 45).
+    var droppedConnections = 0
+    var onDropConnection: (() -> Void)?
+    func dropConnection() { droppedConnections += 1; onDropConnection?() }
 
     var launchRecoveries: [[String: String]] = []
     func recordLaunchRecovery(_ detail: [String: String]) { launchRecoveries.append(detail) }
@@ -2449,6 +2456,47 @@ private struct Harness {
         #expect(h.presented.value == [outDir(s).appendingPathComponent("sess.json")], "salvaged, not deleted")
     }
 
+    /// L9 review 44: the resume's start timed out — it may still commit — so the helper is stopped, bounded,
+    /// before the session is salvaged.
+    @Test func aResumeWhoseStartTimesOutStopsTheHelper() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        _ = try writeSentinel(h, alive: 30)
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("x.wav"), micAudio: h.tmp.appendingPathComponent("x_mic.wav"))
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.startCalls.count == 1 && h.client.stopCalls == 1)
+        #expect(h.appState.isIdle && h.appState.activeAlarms[.recordingStopped] != nil)
+    }
+
+    /// L9 review 49: a relaunch ping the helper does not answer is "unknown", never "not capturing": the helper
+    /// is stopped (bounded) before any salvage.
+    @Test func anUnansweredPingAtRelaunchStopsTheHelperBeforeTheSalvage() async throws {
+        let h = try Harness()
+        _ = try writeSentinel(h, alive: 600)
+        h.client.captureStateResult = .unknown
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("x.wav"), micAudio: h.tmp.appendingPathComponent("x_mic.wav"))
+        let phaseAtStop = Harness.Box<AppState.Phase?>(nil)
+        let state = h.appState
+        h.client.onStop = { phaseAtStop.value = state.phase }
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.stopCalls == 1 && phaseAtStop.value == .idle, "stopped before the salvage began")
+        #expect(h.appState.activeAlarms[.recordingStopped] != nil)
+    }
+
+    /// L9 review 49: … and a helper that answers neither the ping nor the stop keeps its session: never
+    /// salvaged while it may still be writing.
+    @Test func anUnansweredHelperThatWillNotStopKeepsItsSession() async throws {
+        let h = try Harness()
+        let s = try writeSentinel(h, alive: 600)
+        h.client.captureStateResult = .unknown
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        await h.coordinator.recoverAtLaunch()
+        #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [s.sessionKey])
+        #expect(h.presented.value.isEmpty && h.client.droppedConnections == 1)
+    }
+
     @Test func stopMarksTheSentinelStoppingBeforeAskingTheHelper() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
@@ -2953,7 +3001,9 @@ private struct Harness {
         h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
         let stalled = Harness.Box(true)
         h.client.onStartAsync = { if stalled.value { try? await Task.sleep(for: .seconds(2)) } }
+        let began = ContinuousClock.now
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s (L9 review 50)")
         #expect(!h.coordinator.isStartInFlight, "cleared on the timeout path")
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.last?.title == "Recording Failed")
@@ -2973,7 +3023,9 @@ private struct Harness {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.coordinator.startDeadline = .milliseconds(150)
         h.coordinator.preflight = { _ in Thread.sleep(forTimeInterval: 0.6); return (false, false) }
+        let began = ContinuousClock.now
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(ContinuousClock.now - began < .milliseconds(450), "bounded by the 150 ms deadline, never the 600 ms lookup")
         #expect(!h.coordinator.isStartInFlight && h.appState.isIdle)
         #expect(h.client.startCalls.isEmpty && h.client.stopCalls == 0, "the helper was never involved")
         #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
@@ -2989,12 +3041,102 @@ private struct Harness {
         h.coordinator.stopDeadline = .milliseconds(200)
         h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
         h.client.stopResult = AudioPaths(systemAudio: URL(fileURLWithPath: "/nonexistent/a.wav"), micAudio: URL(fileURLWithPath: "/nonexistent/a_mic.wav"))
+        let began = ContinuousClock.now
         await h.coordinator.stopRecording()
+        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s")
         #expect(h.appState.isIdle, "never left on Finishing…")
         let critical = try #require(h.criticals.value.first)
         // The title follows what the salvage wrote (L6); the body says why the stop failed.
         #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+    }
+
+    /// L9 review 45: a stop that times out may leave the helper capturing. The XPC connection is dropped
+    /// BEFORE the salvage — the helper's invalidation handler stops and finalizes its capture — and the
+    /// sentinel stays marked `stopping` meanwhile, so a crash mid-salvage is still salvaged at relaunch.
+    @Test func aStopTimeoutDropsTheConnectionBeforeTheSalvage() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        h.coordinator.stopDeadline = .milliseconds(150)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let runner = h.runner, tmp = h.tmp, mic = h.recordingMic
+        let atDrop = Harness.Box<(stopping: Bool?, pipelineUp: Bool, micMarked: Bool)?>(nil)
+        h.client.onDropConnection = {
+            atDrop.value = (RecordingSentinel.read(directory: tmp)?.stopping, runner.chunkProcessor != nil, mic.current != nil)
+        }
+        await h.coordinator.stopRecording()
+        #expect(h.client.droppedConnections == 1)
+        #expect(atDrop.value?.stopping == true, "the sentinel is still there, marked stopping")
+        #expect(atDrop.value?.pipelineUp == true, "dropped before the salvage tore the pipeline down")
+        #expect(atDrop.value?.micMarked == true, "the mic is released only once the helper was told to let go")
+        #expect(h.appState.isIdle)
+    }
+
+    /// L9 review 47: the honest message is shown at the start's deadline, BEFORE the post-timeout stop — and
+    /// the start stays in flight (no new Start) until that stop returns.
+    @Test func theStartTimeoutMessageComesBeforeItsStop() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.startDeadline = .milliseconds(150)
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
+        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
+        let appState = h.appState, coordinator = h.coordinator
+        let atStop = Harness.Box<(message: String?, inFlight: Bool)?>(nil)
+        h.client.onStop = { atStop.value = (appState.errorMessage, coordinator.isStartInFlight) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(atStop.value?.message == "Parley couldn’t start recording — the audio system didn’t respond.")
+        #expect(atStop.value?.inFlight == true, "held until the stop returns")
+        #expect(!h.coordinator.isStartInFlight)
+    }
+
+    /// L9 review 45: a start that timed out AND whose bounded stop timed out too — the last lever is the
+    /// connection: dropped, so the helper's invalidation handler stops it. The sentinel and the mic stay.
+    @Test func aStartWhoseStopAlsoTimesOutDropsTheConnection() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.startDeadline = .milliseconds(150)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil && h.recordingMic.current == .some("mic-1"))
+    }
+
+    /// L9 review 44: the crash restart's start timed out — it may still commit, so the helper is stopped
+    /// (bounded) before the app goes idle, exactly as at the recording's own start.
+    @Test func aCrashRestartWhoseStartTimesOutStopsTheHelper() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.stopCalls == 1, "never a helper left capturing behind an idle app")
+        #expect(h.appState.isIdle && h.criticals.value.map(\.title) == ["Recording Failed"])
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.recordingMic.current == .none)
+    }
+
+    /// L9 review 44 + 45: the crash restart's start timed out and the helper will not stop either: the
+    /// connection is dropped, and the sentinel (marked stopping) and the mic are kept for the next launch.
+    @Test func aCrashRestartWhoseHelperWillNotStopKeepsTheSentinel() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
+        #expect(h.appState.isIdle)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true, "kept, and never resumed: salvaged at the next launch")
+        #expect(h.recordingMic.current == .some("mic-1"))
     }
 }
 
