@@ -258,10 +258,15 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// admission that it does not hold the session's whole story. Always emitted (default 0).
     public let eventsDropped: Int
     /// True only when the helper CONFIRMED the System Audio Recording permission was not granted
-    /// (a `systemAudioPermissionDenied` whose status is `denied`/`notDetermined`, not
-    /// `unconfirmed`) and it was not restored afterwards. `systemAudioUnrecovered` cannot answer
+    /// (denied or not determined: a `systemAudioPermissionDenied` whose status is
+    /// `denied`/`notDetermined`, not `unconfirmed`) and it was not restored afterwards. `systemAudioUnrecovered` cannot answer
     /// this: a failed stream restart sets it too, and "permission denied" is a claim to confirm.
     public let systemPermissionDeniedConfirmed: Bool
+    /// Each side's CONTENT-compromising anomaly count (`contentAnomalyCount(track:)`), stamped into
+    /// that side's coverage as `content_anomaly_count`. nil exactly when the side's coverage is
+    /// (and in provenance written before this field).
+    public let localContentAnomalyCount: Int?
+    public let remoteContentAnomalyCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -282,6 +287,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case remoteStatus = "remote_status"
         case eventsDropped = "events_dropped"
         case systemPermissionDeniedConfirmed = "system_permission_denied_confirmed"
+        case localContentAnomalyCount = "local_content_anomaly_count"
+        case remoteContentAnomalyCount = "remote_content_anomaly_count"
     }
 
     public init(
@@ -302,7 +309,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         localStatus: String? = nil,
         remoteStatus: String? = nil,
         eventsDropped: Int = 0,
-        systemPermissionDeniedConfirmed: Bool = false
+        systemPermissionDeniedConfirmed: Bool = false,
+        localContentAnomalyCount: Int? = nil,
+        remoteContentAnomalyCount: Int? = nil
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -322,6 +331,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.remoteStatus = remoteStatus
         self.eventsDropped = eventsDropped
         self.systemPermissionDeniedConfirmed = systemPermissionDeniedConfirmed
+        self.localContentAnomalyCount = localContentAnomalyCount
+        self.remoteContentAnomalyCount = remoteContentAnomalyCount
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -353,6 +364,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         remoteStatus = try c.decodeIfPresent(String.self, forKey: .remoteStatus)
         eventsDropped = try c.decodeIfPresent(Int.self, forKey: .eventsDropped) ?? 0
         systemPermissionDeniedConfirmed = try c.decodeIfPresent(Bool.self, forKey: .systemPermissionDeniedConfirmed) ?? false
+        localContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .localContentAnomalyCount)
+        remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -379,12 +392,18 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         // count), which only matters when the stored status disagreed on a live content anomaly with
         // no coverage deficit; the coverage-only verdict is still never a silent "healthy" default.
         if let remoteCoverage {
-            let status = remoteStatus.flatMap(TrackAccounting.Status.init(rawValue:)) ?? remoteCoverage.status(isTap: true, contentAnomalies: 0)
-            d["remote_coverage"] = remoteCoverage.asMetadataDictionary(status: status)
+            let status = remoteStatus.flatMap(TrackAccounting.Status.init(rawValue:))
+                ?? remoteCoverage.status(isTap: true, contentAnomalies: remoteContentAnomalyCount ?? 0)
+            var side = remoteCoverage.asMetadataDictionary(status: status)
+            if let remoteContentAnomalyCount { side["content_anomaly_count"] = remoteContentAnomalyCount }
+            d["remote_coverage"] = side
         }
         if let localCoverage {
-            let status = localStatus.flatMap(TrackAccounting.Status.init(rawValue:)) ?? localCoverage.status(isTap: false, contentAnomalies: 0)
-            d["local_coverage"] = localCoverage.asMetadataDictionary(status: status)
+            let status = localStatus.flatMap(TrackAccounting.Status.init(rawValue:))
+                ?? localCoverage.status(isTap: false, contentAnomalies: localContentAnomalyCount ?? 0)
+            var side = localCoverage.asMetadataDictionary(status: status)
+            if let localContentAnomalyCount { side["content_anomaly_count"] = localContentAnomalyCount }
+            d["local_coverage"] = side
         }
         return d
     }
@@ -644,7 +663,9 @@ public struct CaptureDiagnostics: Sendable {
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
             remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue },
             eventsDropped: droppedCount,
-            systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed
+            systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed,
+            localContentAnomalyCount: local.map { _ in contentAnomalyCount(track: "mic") },
+            remoteContentAnomalyCount: remote.map { _ in contentAnomalyCount(track: "system") }
         )
     }
 

@@ -36,6 +36,10 @@ public enum TranscriptRediarizer {
             ]
             if let confidence = seg.confidence { dict["confidence"] = confidence }
             if let language = seg.language { dict["language"] = language }
+            // Same rule as TranscriptAssembler: a flag is written when set, never silently dropped.
+            if seg.filtered { dict["filtered"] = true }
+            if seg.echo { dict["echo"] = true }
+            if seg.duplicate { dict["duplicate"] = true }
             return dict
         })
         return kept.sorted { ($0["start"] as? Double ?? 0) < ($1["start"] as? Double ?? 0) }
@@ -206,6 +210,8 @@ public enum TranscriptRediarizer {
         let chunkDurations = metadata["chunk_durations"] as? [Double] ?? []
         let chunkOffsets = metadata["chunk_offsets"] as? [Double]
         let hasCaptureGaps = !((metadata["capture"] as? [String: Any])?["gaps"] as? [Any] ?? []).isEmpty
+        // The latest moment the transcript speaks about — the bound for any offset or chunk length.
+        let timelineEnd = rawSegments.compactMap { $0["end"] as? Double }.filter { $0.isFinite && $0 >= 0 }.max() ?? 0
 
         // Decode ONCE, at the target format (16 kHz mono Float), and hand that buffer to the
         // diarizer (#204) — the old path decoded the channel's audio up to four separate times
@@ -222,7 +228,8 @@ public enum TranscriptRediarizer {
         onProgress?(Progress(phase: .decodingAudio))
         let decoded = try await decodeChannelAudio(
             layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
-            hasCaptureGaps: hasCaptureGaps, scratchDirectory: scratchDirectory, onProgress: onProgress)
+            hasCaptureGaps: hasCaptureGaps, timelineEnd: timelineEnd, scratchDirectory: scratchDirectory,
+            onProgress: onProgress)
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
@@ -273,7 +280,9 @@ public enum TranscriptRediarizer {
             segments: transcriptSegments,
             diarizationResult: diarization,
             speechMap: [SpeechRegion(start: 0, end: horizon, probability: 1)],
-            vadSpeechThreshold: 0.5,
+            // Gate off, quality on: with a threshold of 0 the map never filters anything — a
+            // zero-length segment included — while low diarizer quality still reads "Unknown".
+            vadSpeechThreshold: 0,
             // nil, not the config value: `speakerCountIsUserStated: true` disables absorption
             // outright, so passing a share would imply a knob that has no effect on this path.
             minSpeakerShare: nil,
@@ -381,9 +390,9 @@ public enum TranscriptRediarizer {
     /// A skipped chunk's length: the cached `chunk_durations` entry when it is usable (> 0 — 0 is the
     /// "unreadable at archive time" sentinel), else read from the file itself. Refused only when
     /// neither can say.
-    private static func skippedChunkDuration(_ chunk: URL, index: Int, of total: Int, cached: [Double]) throws -> Double {
+    private static func skippedChunkDuration(index: Int, of total: Int, cached: [Double], fileLength: TimeInterval?) throws -> Double {
         if index < cached.count, cached[index].isFinite, cached[index] > 0 { return cached[index] }
-        if let read = SpeakerSampleLocator.durations(of: [chunk]).first ?? nil, read > 0 { return read }
+        if let fileLength, fileLength > 0 { return fileLength }
         throw RediarizeError.chunkDurationUnknown(chunk: index + 1, of: total)
     }
 
@@ -409,6 +418,7 @@ public enum TranscriptRediarizer {
         chunkDurations: [Double],
         chunkOffsets: [Double]?,
         hasCaptureGaps: Bool,
+        timelineEnd: Double,
         scratchDirectory: URL,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
@@ -436,15 +446,26 @@ public enum TranscriptRediarizer {
             guard chunks.contains(where: { channelRole(of: $0, wantsLocal: wantsLocal) != .skip }) else {
                 throw RediarizeError.noAudioForChannel(source)
             }
+            // Every offset and chunk length must be a real one: finite, ≥ 0, and no later than the
+            // transcript's last moment plus one chunk (the longest file). A corrupted value would
+            // otherwise trap (`Int(1e300)`) or allocate gigabytes of silence.
+            let fileLengths = SpeakerSampleLocator.durations(of: chunks)
+            let bound = timelineEnd + (fileLengths.compactMap { $0 }.max() ?? 0)
+            func plausible(_ value: Double) -> Bool { value.isFinite && value >= 0 && value <= bound }
             // Each chunk goes at the wall-clock offset the transcript used for it, so labels land on
-            // the right words across a relaunch or sleep gap. Without recorded offsets the chunks
-            // are laid end to end — correct only when nothing is missing between them.
-            let offsets = chunkOffsets.flatMap { $0.count == chunks.count && $0.allSatisfy(\.isFinite) ? $0 : nil }
+            // the right words across a relaunch or sleep gap — in OFFSET order, not list order (a
+            // chunk re-indexed after a collision can be listed out of time order), so the offsets
+            // never decrease. Without recorded offsets the chunks are laid end to end — correct only
+            // when nothing is missing between them.
+            let offsets = chunkOffsets.flatMap { $0.count == chunks.count ? $0 : nil }
+            if let offsets, !offsets.allSatisfy(plausible) { throw RediarizeError.timelineUnknown }
             if offsets == nil, hasCaptureGaps, chunks.count > 1 { throw RediarizeError.timelineUnknown }
+            let order = offsets.map { o in chunks.indices.sorted { (o[$0], $0) < (o[$1], $1) } } ?? Array(chunks.indices)
             // Cached lengths are trusted only when they line up one-to-one with the chunks.
             let cachedDurations = chunkDurations.count == chunks.count ? chunkDurations : []
             var combined: [Float] = []
-            for (index, chunk) in chunks.enumerated() {
+            for (position, index) in order.enumerated() {
+                let chunk = chunks[index]
                 // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
                 // 10 should not wait for the remaining eight.
                 try Task.checkCancellation()
@@ -456,11 +477,11 @@ public enum TranscriptRediarizer {
                 // Not reported for a `.skip` chunk: padding it with silence is not decode work.
                 defer {
                     if role != .skip {
-                        onProgress?(Progress(phase: .decodingAudio, fraction: Double(index + 1) / Double(chunks.count)))
+                        onProgress?(Progress(phase: .decodingAudio, fraction: Double(position + 1) / Double(chunks.count)))
                     }
                 }
                 if let offsets {
-                    let target = Int((max(0, offsets[index]) * AudioDecode.targetSampleRate).rounded())
+                    let target = Int((offsets[index] * AudioDecode.targetSampleRate).rounded())
                     if combined.count < target {
                         combined.append(contentsOf: [Float](repeating: 0, count: target - combined.count))
                     }
@@ -471,7 +492,9 @@ public enum TranscriptRediarizer {
                     // This chunk holds only the other channel. With offsets the next chunk's offset
                     // re-aligns the timeline; without, it contributes silence of its own length.
                     if offsets != nil { continue }
-                    let duration = try skippedChunkDuration(chunk, index: index, of: chunks.count, cached: cachedDurations)
+                    let duration = try skippedChunkDuration(index: index, of: chunks.count, cached: cachedDurations,
+                                                            fileLength: fileLengths[index])
+                    guard plausible(duration) else { throw RediarizeError.timelineUnknown }
                     decodedChunk = [Float](repeating: 0, count: Int(duration * AudioDecode.targetSampleRate))
                 case .useDirectly:
                     decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: chunk)

@@ -271,4 +271,10 @@ import Testing
                                               chunkDurations: [2, 2], chunkOffsets: [0, 62])
         #expect(hit?.url == b && hit?.start == 0.5)
     }
+
+    /// Round 4: offsets out of list order (a re-indexed chunk) still pick the chunk that holds the time.
+    @Test func unsortedOffsetsPickTheChunkThatHoldsTheTime() {
+        #expect(ChunkLocator.locate(start: 0.5, end: 1, chunkDurations: [2, 2], chunkOffsets: [62, 0]) == ChunkLocator.Location(index: 1, start: 0.5, end: 1))
+        #expect(ChunkLocator.locate(start: 62.5, end: 63, chunkDurations: [2, 2], chunkOffsets: [62, 0])?.index == 0)
+    }
 }

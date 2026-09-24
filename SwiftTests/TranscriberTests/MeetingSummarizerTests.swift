@@ -482,10 +482,12 @@ struct MeetingSummarizerTests {
         try JSONSerialization.data(withJSONObject: [
             "metadata": [
                 "capture": [
-                    "remote": ["status": "compromised", "delivered_seconds": 2736.0, "expected_seconds": 2736.0, "exact_zero_seconds": 2736.0],
+                    "remote": ["status": "compromised", "delivered_seconds": 2736.0, "expected_seconds": 2736.0, "exact_zero_seconds": 2736.0,
+                               "content_anomaly_count": 1],
                     "gaps": [["seconds": 120.0, "reason": "sleep"], ["seconds": 70.0, "reason": "app relaunch"]],
                 ] as [String: Any],
-                "capture_provenance": ["system_permission_denied_confirmed": true, "system_audio_unrecovered": true, "quality_anomaly_count": 1],
+                // The session-wide count is NOT the side's: round 4 reads the per-side one.
+                "capture_provenance": ["system_permission_denied_confirmed": true, "system_audio_unrecovered": true, "quality_anomaly_count": 7],
             ],
             "segments": [] as [Any],
         ]).write(to: url)
@@ -517,7 +519,7 @@ struct MeetingSummarizerTests {
         try TranscriptAssembler.write(json, to: url)
         let (_, meta) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
         let line = try #require(SummaryPromptBuilder.captureLine(meta))
-        #expect(line.contains("Remote audio: not captured — system audio permission was denied; 2736 s of digital silence were recorded instead"))
+        #expect(line.contains("Remote audio: not captured — system audio permission was not granted; 2736 s of digital silence were recorded instead"))
         #expect(line.contains("Recording gaps: 1 (total 2 min 0 s)"))
     }
 

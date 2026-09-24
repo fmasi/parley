@@ -426,7 +426,18 @@ public final class TranscriptionRunner {
         // meeting start, as TranscriptMerger does) — re-detect rebuilds the same timeline from it.
         let perChunkOffsets = sortedChunks.map { $0.startTime.timeIntervalSince(sessionState.meetingStart) }
         var chunkOffsets = perChunkOffsets
-        if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
+        // A finalize RE-RUN after the first run merged the chunks and deleted them: the surviving
+        // `<session>.m4a` is the recording's audio — list it, say so, and let the quota protect it.
+        let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
+        let sourcesGone = !chunkAudioPaths.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
+        if chunkAudioPaths.count > 1, sourcesGone, TranscriptAssembler.duration(of: mergedURL) > 0 {
+            Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it")
+            audioPaths = [mergedURL]
+            chunkOffsets = [perChunkOffsets.min() ?? 0]
+            var previous = Self.previousMergedAudio(transcriptAt: outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")) ?? [:]
+            previous["reused_existing"] = true
+            mergedAudio = previous
+        } else if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
             do {
                 let concatResult = try await AudioConcatenator.concatenate(
                     chunks: sortedChunks.map {
@@ -518,6 +529,14 @@ public final class TranscriptionRunner {
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// The `merged_audio` block of a transcript an earlier finalize wrote, if any.
+    private static func previousMergedAudio(transcriptAt url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return (json["metadata"] as? [String: Any])?["merged_audio"] as? [String: Any]
     }
 
     /// Flatten per-chunk issues and session-level issues into the `metadata.processing_issues`

@@ -407,4 +407,27 @@ struct AudioConcatenatorTests {
         #expect(merged["passthrough"] as? Bool == false)
         #expect(abs((merged["gaps_inserted_seconds"] as? Double ?? 0) - 2) < 0.1)
     }
+
+    /// Round 4 item 6: a finalize RE-RUN after the first run merged and deleted the chunk files —
+    /// the surviving `<session>.m4a` is the recording's audio: listed, stamped and protected.
+    @MainActor
+    @Test func aFinalizeReRunUsesTheSurvivingMergedAudio() async throws {
+        let dir = try tempDir("rerun"); defer { try? FileManager.default.removeItem(at: dir) }
+        let merged = dir.appendingPathComponent("m.m4a")
+        try await Self.createTestM4a(at: merged, durationSeconds: 2)
+        let t0 = Date(timeIntervalSince1970: 0)
+        let chunks = (0..<2).map { i in
+            ProcessedChunk(index: i, startTime: t0.addingTimeInterval(Double(i)), audioPath: "m-\(i).m4a",   // both deleted
+                           segments: [.init(start: 0, end: 1, text: "hi", speaker: "Speaker 1", source: "remote")],
+                           speakerDatabase: ["Speaker 1": [1, 0, 0]])
+        }
+        var config = Config.default
+        config.audioArchiveLimitHours = 0   // any unprotected archive would be deleted by the quota
+        let state = SessionState(sessionId: "m", meetingStart: t0, engine: "fluid_audio", chunkDurationMinutes: 10, chunks: chunks)
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: config)
+        let meta = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect(meta["audio_paths"] as? [String] == [merged.path])
+        #expect((meta["merged_audio"] as? [String: Any])?["reused_existing"] as? Bool == true)
+        #expect(FileManager.default.fileExists(atPath: merged.path), "the merged file is protected from the quota")
+    }
 }

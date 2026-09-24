@@ -255,7 +255,9 @@ public enum MeetingSummarizer {
             // The CONFIRMED-denial field only: `system_audio_unrecovered` is also set by a failed
             // stream restart, and "permission denied" is a claim Parley must be able to back.
             permissionDenied: isRemote ? provenance?["system_permission_denied_confirmed"] as? Bool : nil,
-            anomalyCount: provenance?["quality_anomaly_count"] as? Int
+            // This side's own content anomalies — the session-wide `quality_anomaly_count` would
+            // blame one side for the other's faults.
+            anomalyCount: side["content_anomaly_count"] as? Int
         )
     }
 

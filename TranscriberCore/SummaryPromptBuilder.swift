@@ -60,7 +60,7 @@ enum SummaryPromptBuilder {
 
     /// How one side's capture reads, from its recorded status and facts.
     enum SideVerdict: Hashable {
-        case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, uncertainSilence, compromised, unknown
+        case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, uncertainSilence, localSilence, compromised, unknown
     }
 
     /// `compromised` is split by WHY, because one word cannot cover them honestly: a shortfall is
@@ -77,8 +77,10 @@ enum SummaryPromptBuilder {
         case nil: return .unknown
         case .compromised:
             if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
-            if let zeros = note.exactZeroSeconds, isSignificant(zeros, of: note.deliveredSeconds), isRemote {
-                return note.permissionDenied == true ? .permissionDeniedSilence : .uncertainSilence
+            if let zeros = note.exactZeroSeconds, isSignificant(zeros, of: note.deliveredSeconds) {
+                if isRemote { return note.permissionDenied == true ? .permissionDeniedSilence : .uncertainSilence }
+                // A microphone that recorded (nearly) nothing but digital zeros held no voice at all.
+                if zeros >= 0.9 * note.deliveredSeconds { return .localSilence }
             }
             return .compromised
         }
@@ -116,20 +118,27 @@ enum SummaryPromptBuilder {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
         let amounts = "(\(delivered) s delivered of \(expected) s expected)"
         let silence = note.exactZeroSeconds.map(seconds) ?? "?"
+        // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
+        // not hide how much.
+        let silenceSuffix = (note.exactZeroSeconds ?? 0).rounded() >= 1 && (note.exactZeroSeconds ?? 0).isFinite
+            ? "; \(silence) s of it was digital silence" : ""
         let text: String
         switch verdict(note, isRemote: isRemote) {
         case .healthy: return nil
         case .idle: return CaptureHeaderLine(text: "\(label): nothing was playing on this Mac (no remote side)", warrantsBanner: false)
         case .notCaptured: text = "\(label): not captured \(amounts)"
-        case .partlyCaptured: text = "\(label): partly captured \(amounts)"
+        case .partlyCaptured: text = "\(label): partly captured \(amounts)\(silenceSuffix)"
         case .permissionDeniedSilence:
-            text = "\(label): not captured — system audio permission was denied; \(silence) s of digital silence were recorded instead"
+            // "not granted" is true for both a denial and a permission never answered (TCC
+            // `notDetermined`) — the two statuses that count as a confirmed denial.
+            text = "\(label): not captured — system audio permission was not granted; \(silence) s of digital silence were recorded instead"
         case .uncertainSilence:
             text = "\(label): uncertain — \(silence) s were exact digital silence and Parley could not confirm the permission; the other side may have been muted, or not captured"
+        case .localSilence: text = "\(label): recorded only digital silence (\(silence) s)"
         case .compromised:
             let detail = note.anomalyCount.map { "\($0) capture \($0 == 1 ? "anomaly" : "anomalies") recorded" }
                 ?? "anomaly count not recorded"
-            text = "\(label): captured, but compromised (\(detail))"
+            text = "\(label): captured, but compromised (\(detail))\(silenceSuffix)"
         case .unknown: text = "\(label): capture status unknown (\(delivered) s of \(expected) s)"
         }
         return CaptureHeaderLine(text: text, warrantsBanner: true)
@@ -154,10 +163,14 @@ enum SummaryPromptBuilder {
 
     static func formatTranscript(_ segments: [SummarySegment], includeSource: Bool = false) -> String {
         segments.map { seg in
-            let h = Int(seg.start) / 3600
-            let m = (Int(seg.start) % 3600) / 60
-            let s = Int(seg.start) % 60
-            let ts = String(format: "[%02d:%02d:%02d]", h, m, s)
+            // A corrupted time (non-finite, negative, absurd) prints as unknown: `Int(1e300)` traps.
+            let ts: String
+            if seg.start.isFinite, seg.start >= 0, seg.start < 3_153_600_000 {
+                let total = Int(seg.start)
+                ts = String(format: "[%02d:%02d:%02d]", total / 3600, (total % 3600) / 60, total % 60)
+            } else {
+                ts = "[--:--:--]"
+            }
             let sourceTag = includeSource && !seg.source.isEmpty ? " (\(seg.source))" : ""
             return "\(ts) \(seg.speaker)\(sourceTag): \(seg.text)"
         }.joined(separator: "\n")
@@ -171,6 +184,7 @@ enum SummaryPromptBuilder {
     }
 
     static func formatDuration(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0, seconds < 3_153_600_000 else { return "?" }
         let h = Int(seconds) / 3600
         let m = (Int(seconds) % 3600) / 60
         if h > 0 { return "\(h)h \(m)m" }

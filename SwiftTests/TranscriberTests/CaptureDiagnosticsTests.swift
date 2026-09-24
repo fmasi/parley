@@ -438,4 +438,16 @@ struct CaptureProvenanceTests {
         let legacy = Data(#"{"engine":"e","route_changes":0,"retries":0,"recovered":false,"anomaly_count":0}"#.utf8)
         #expect(try !JSONDecoder().decode(CaptureProvenance.self, from: legacy).systemPermissionDeniedConfirmed)
     }
+
+    /// Round 4: each side's coverage carries ITS content-anomaly count, not the session's.
+    @Test func coverageCarriesThePerSideContentAnomalyCount() throws {
+        var d = CaptureDiagnostics()
+        let t0 = Date(timeIntervalSinceReferenceDate: 3_000_000)
+        d.record(CaptureEvent(timestamp: t0, origin: .helper, kind: .rateDrift, severity: .anomaly, detail: ["track": "system"]))
+        d.record(CaptureEvent(timestamp: t0.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info,
+                              detail: TrackAccounting().asDetail(prefix: "remote").merging(TrackAccounting().asDetail(prefix: "local")) { a, _ in a }))
+        let dict = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).asMetadataDictionary()
+        #expect((dict["remote_coverage"] as? [String: Any])?["content_anomaly_count"] as? Int == 1)
+        #expect((dict["local_coverage"] as? [String: Any])?["content_anomaly_count"] as? Int == 0)
+    }
 }

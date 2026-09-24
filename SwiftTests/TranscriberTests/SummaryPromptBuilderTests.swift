@@ -104,7 +104,7 @@ struct SummaryPromptBuilderTests {
         let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736,
                                              exactZeroSeconds: 2736, permissionDenied: true))
         #expect(SummaryPromptBuilder.captureLine(m)
-                == "Remote audio: not captured — system audio permission was denied; 2736 s of digital silence were recorded instead")
+                == "Remote audio: not captured — system audio permission was not granted; 2736 s of digital silence were recorded instead")
     }
 
     /// Never claim a fault it can't confirm, never claim health either.
@@ -186,10 +186,35 @@ struct SummaryPromptBuilderTests {
         let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736,
                                              exactZeroSeconds: 2736, permissionDenied: false))
         let line = SummaryPromptBuilder.captureLine(m) ?? ""
-        #expect(!line.contains("permission was denied") && line.contains("uncertain"))
+        #expect(!line.contains("permission was not granted") && line.contains("uncertain"))
     }
 
     @Test func theRuleNamesEveryIncompleteCase() {
         #expect(SummaryPromptBuilder.systemPrompt.contains("not captured, partly captured, uncertain, or compromised"))
+    }
+
+    // MARK: - Round 4 wording
+
+    @Test func anAllSilentMicrophoneIsSaidPlainly() {
+        let m = meta(local: CaptureSideNote(status: "compromised", deliveredSeconds: 600, expectedSeconds: 600, exactZeroSeconds: 600, anomalyCount: 1))
+        #expect(SummaryPromptBuilder.captureLine(m) == "Your microphone: recorded only digital silence (600 s)")
+    }
+
+    /// "partly captured" must not hide that much of what WAS delivered was digital silence.
+    @Test func aShortfallWithSilenceSaysHowMuch() {
+        let m = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400))
+        #expect(SummaryPromptBuilder.captureLine(m)
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence")
+    }
+
+    /// A corrupted transcript's segment times must not crash summarizing (`Int(1e300)` traps).
+    @Test func hugeSegmentTimesDoNotTrap() {
+        let m = SummaryMetadata(sessionName: "s", date: Date(timeIntervalSince1970: 0), durationSeconds: 1e300, speakers: ["A"])
+        let msg = SummaryPromptBuilder.userMessage(metadata: m, segments: [
+            SummarySegment(start: 1e300, end: .infinity, speaker: "A", text: "hi"),
+            SummarySegment(start: -5, end: 1, speaker: "A", text: "neg"),
+        ])
+        #expect(msg.contains("[--:--:--] A: hi") && msg.contains("[--:--:--] A: neg"))
+        #expect(msg.contains("Duration: ?"))
     }
 }

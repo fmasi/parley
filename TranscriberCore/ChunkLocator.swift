@@ -54,8 +54,9 @@ public enum ChunkLocator {
         guard start >= 0, end > start, !chunkDurations.isEmpty else { return nil }
 
         if let offsets = chunkOffsets, offsets.count == chunkDurations.count, offsets.allSatisfy(\.isFinite) {
-            // The last chunk that starts at or before `start`.
-            guard let index = offsets.indices.last(where: { offsets[$0] <= start }),
+            // The chunk with the latest offset at or before `start` (offsets may be out of list
+            // order: a chunk re-indexed after a collision).
+            guard let index = offsets.indices.filter({ offsets[$0] <= start }).max(by: { offsets[$0] < offsets[$1] }),
                   let duration = chunkDurations[index], duration > 0
             else { return nil }
             let localStart = start - offsets[index]
