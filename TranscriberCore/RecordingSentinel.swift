@@ -11,6 +11,15 @@ public struct RecordingSentinel: Codable, Equatable {
     public var micDeviceUID: String?
     public var segment: Int
     public var chunkIndex: Int
+    /// When the recording app was last known alive: refreshed every 60 s and at every rotation (§8.3).
+    /// A relaunch within `RelaunchDecision.resumeWindow` of it resumes the same session. nil = written
+    /// before this field existed (no liveness: salvaged, never resumed).
+    public var lastAliveAt: Date?
+    /// `kern.bootsessionuuid` when the recording started (§8.9): a sentinel from another boot is stale.
+    public var bootSessionUUID: String?
+    /// Stop marked it before asking the helper (§8.8): a crash during the stop or its finalize is
+    /// salvaged at relaunch, never resumed — the user stopped that recording.
+    public var stopping: Bool
 
     public init(
         startedAt: Date,
@@ -19,7 +28,10 @@ public struct RecordingSentinel: Codable, Equatable {
         micAudioPath: String,
         micDeviceUID: String? = nil,
         segment: Int = 0,
-        chunkIndex: Int = 0
+        chunkIndex: Int = 0,
+        lastAliveAt: Date? = nil,
+        bootSessionUUID: String? = nil,
+        stopping: Bool = false
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -28,9 +40,12 @@ public struct RecordingSentinel: Codable, Equatable {
         self.micDeviceUID = micDeviceUID
         self.segment = segment
         self.chunkIndex = chunkIndex
+        self.lastAliveAt = lastAliveAt
+        self.bootSessionUUID = bootSessionUUID
+        self.stopping = stopping
     }
 
-    // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0 if missing)
+    // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -41,6 +56,9 @@ public struct RecordingSentinel: Codable, Equatable {
         micDeviceUID = try container.decodeIfPresent(String.self, forKey: .micDeviceUID)
         segment = try container.decode(Int.self, forKey: .segment)
         chunkIndex = try container.decodeIfPresent(Int.self, forKey: .chunkIndex) ?? 0
+        lastAliveAt = try container.decodeIfPresent(Date.self, forKey: .lastAliveAt)
+        bootSessionUUID = try container.decodeIfPresent(String.self, forKey: .bootSessionUUID)
+        stopping = try container.decodeIfPresent(Bool.self, forKey: .stopping) ?? false
     }
 
     // MARK: - File location
@@ -115,7 +133,8 @@ public struct RecordingSentinel: Codable, Equatable {
 
     // MARK: - Instance helpers
 
-    /// Returns a copy with segment incremented by 1 and updated audio paths.
+    /// Returns a copy with segment incremented by 1 and updated audio paths. Everything else carries
+    /// over, the liveness, boot session and stop mark included.
     public func incrementedSegment(systemAudioPath: String, micAudioPath: String) -> RecordingSentinel {
         RecordingSentinel(
             startedAt: startedAt,
@@ -124,7 +143,10 @@ public struct RecordingSentinel: Codable, Equatable {
             micAudioPath: micAudioPath,
             micDeviceUID: micDeviceUID,
             segment: segment + 1,
-            chunkIndex: chunkIndex
+            chunkIndex: chunkIndex,
+            lastAliveAt: lastAliveAt,
+            bootSessionUUID: bootSessionUUID,
+            stopping: stopping
         )
     }
 }

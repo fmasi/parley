@@ -25,6 +25,9 @@ public final class ChunkRotator {
     private var currentChunkIndex: Int
     private var currentChunkStartTime: Date
     private let onChunkFinalized: @MainActor (FinalizedChunk) -> Void
+    /// After every successful rotation, once the finalized chunk was handed over: the coordinator
+    /// refreshes the sentinel's liveness there (§8.3).
+    public var onRotated: (@MainActor () -> Void)?
 
     /// - Parameter startIndex: the index of the chunk being recorded now. A resumed session starts
     ///   past its settled chunks; restarting at 0 made the last chunk collide with the seeded
@@ -136,6 +139,7 @@ public final class ChunkRotator {
                 startTime: oldStartTime
             )
             self.onChunkFinalized(finalized)
+            self.onRotated?()
         } catch {
             Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
         }

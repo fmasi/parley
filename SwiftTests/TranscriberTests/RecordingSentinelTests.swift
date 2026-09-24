@@ -244,4 +244,42 @@ struct RecordingSentinelTests {
         #expect(next.startedAt == original.startedAt)
         #expect(next.micDeviceUID == original.micDeviceUID)
     }
+
+    // MARK: - Liveness, boot session, stopping (L7, §8.3/§8.9)
+
+    @Test func livenessBootSessionAndStoppingRoundTripAndDefault() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        try RecordingSentinel.write(s, directory: dir)
+        let bare = try #require(RecordingSentinel.read(directory: dir))
+        #expect(bare.lastAliveAt == nil && bare.bootSessionUUID == nil && bare.stopping == false)
+        s.lastAliveAt = Date(timeIntervalSinceReferenceDate: 800_000_060)
+        s.bootSessionUUID = "B1"
+        s.stopping = true
+        try RecordingSentinel.write(s, directory: dir)
+        let full = try #require(RecordingSentinel.read(directory: dir))
+        #expect(full.lastAliveAt?.timeIntervalSinceReferenceDate == 800_000_060 && full.bootSessionUUID == "B1" && full.stopping)
+    }
+
+    /// A sentinel written before these fields existed still reads (no `stopping` key → not stopping).
+    @Test func aSentinelWithoutTheNewFieldsReads() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let json = """
+        {"startedAt":"2026-09-24T10:00:00Z","sessionName":"S","systemAudioPath":"/tmp/s-0.wav",
+         "micAudioPath":"/tmp/s-0_mic.wav","segment":1,"chunkIndex":0}
+        """
+        try json.data(using: .utf8)!.write(to: dir.appendingPathComponent("recording.json"))
+        let s = try #require(RecordingSentinel.read(directory: dir))
+        #expect(s.lastAliveAt == nil && s.bootSessionUUID == nil && !s.stopping)
+    }
+
+    /// A crash restart advances the segment: the liveness, the boot session and the stop mark carry over.
+    @Test func incrementedSegmentKeepsLivenessBootSessionAndStopping() {
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        s.lastAliveAt = Date(timeIntervalSinceReferenceDate: 800_000_060)
+        s.bootSessionUUID = "B1"
+        s.stopping = true
+        let next = s.incrementedSegment(systemAudioPath: "/tmp/system-1.wav", micAudioPath: "/tmp/mic-1.wav")
+        #expect(next.lastAliveAt == s.lastAliveAt && next.bootSessionUUID == "B1" && next.stopping)
+    }
 }

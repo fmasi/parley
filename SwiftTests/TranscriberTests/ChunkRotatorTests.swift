@@ -14,6 +14,9 @@ private final class FakeChunkRotationClient: ChunkRotationClient {
     }
 }
 
+/// A mutable cell a test's closures can write to.
+private final class Box<T> { var value: T; init(_ v: T) { value = v } }
+
 @MainActor
 struct ChunkRotatorTests {
 
@@ -118,5 +121,20 @@ struct ChunkRotatorTests {
         #expect(client.requested == ["meeting-4"])
         #expect(rotator.currentChunkInfo.index == 4)
         #expect(sink.finalized == [0])
+    }
+
+    // MARK: - onRotated (L7: every rotation refreshes the sentinel's liveness)
+
+    @Test func onRotatedFiresAfterEverySuccessfulRotation() async throws {
+        let fired = Box(0)
+        let rotator = ChunkRotator(captureClient: FakeChunkRotationClient(), outputDirectory: "/tmp/out", sessionBaseName: "meeting",
+                                   chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0), onChunkFinalized: { _ in })
+        rotator.onRotated = { fired.value += 1 }
+        rotator.start()
+        let timer = try #require(rotator.activeTimerForTesting)
+        timer.fire()                                    // one rotation, synchronously scheduled
+        for _ in 0..<50 { await Task.yield() }
+        rotator.stop()
+        #expect(fired.value == 1 && rotator.currentChunkInfo.index == 1)
     }
 }
