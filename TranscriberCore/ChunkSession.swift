@@ -39,6 +39,10 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// A chunk arrived under an index already held by a different recording file; it was
         /// processed under a fresh index. `count` carries the index it collided with.
         public static let chunkIndexCollision = Code(rawValue: "chunk_index_collision")
+        /// A file already processed under one index arrived again under ANOTHER (a re-indexed
+        /// collided chunk, re-ingested by a relaunch orphan scan) and was skipped. Recorded on the
+        /// session against the known index; `count` carries the incoming index. Nothing was lost.
+        public static let duplicateSourceOtherIndex = Code(rawValue: "duplicate_source_other_index")
         /// A resumed session was seeded with a session.json of another session id (a problem).
         public static let seedMismatch = Code(rawValue: "seed_mismatch")
         /// A resumed session's seed was transcribed with another engine (informational: the

@@ -277,4 +277,11 @@ import Testing
         #expect(ChunkLocator.locate(start: 0.5, end: 1, chunkDurations: [2, 2], chunkOffsets: [62, 0]) == ChunkLocator.Location(index: 1, start: 0.5, end: 1))
         #expect(ChunkLocator.locate(start: 62.5, end: 63, chunkDurations: [2, 2], chunkOffsets: [62, 0])?.index == 0)
     }
+
+    /// Round 5: the greatest offset ≤ start wins, whatever the list order — `last(where:)` in list
+    /// order would pick the chunk at 10 s for a time at 62.5 s here.
+    @Test func theGreatestOffsetAtOrBeforeTheTimeWins() {
+        #expect(ChunkLocator.locate(start: 62.5, end: 63, chunkDurations: [2, 2, 2], chunkOffsets: [62, 0, 10])
+                == ChunkLocator.Location(index: 0, start: 0.5, end: 1))
+    }
 }

@@ -187,6 +187,7 @@ struct ChunkProcessorTests {
         await processor.processLastChunk(chunk0(in: dir))
         #expect(await processor.getSessionState().chunks.count == 1)
         #expect(FileManager.default.fileExists(atPath: sys.path), "a skipped duplicate is not archived")
+        #expect(await processor.getSessionState().issues.isEmpty, "a same-index duplicate is not an issue")
     }
 
     /// Review round 1 item 4: a duplicate `processLastChunk` waits for the original rather than
@@ -301,5 +302,9 @@ struct ChunkProcessorTests {
             startTime: Date(timeIntervalSince1970: 600)))
         #expect(await processor.getSessionState().chunks.map(\.index) == [5])
         #expect(FileManager.default.fileExists(atPath: sys.path), "a skipped duplicate is not archived")
+        // Round 5: a duplicate arriving under ANOTHER index is recorded (count = the incoming index).
+        #expect(await processor.getSessionState().issues
+                == [SessionIssue(chunk: 5, issue: ChunkIssue(code: .duplicateSourceOtherIndex, track: nil, count: 1))])
+        #expect(!ChunkIssue.Code.duplicateSourceOtherIndex.affectsContent)
     }
 }

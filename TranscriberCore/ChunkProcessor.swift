@@ -30,6 +30,8 @@ public final class ChunkProcessor {
     /// The task processing each chunk scheduled here, so a duplicate can await the original and
     /// `awaitAllProcessed` covers every chunk, the last one included.
     private var tasksByIndex: [Int: Task<Void, Never>] = [:]
+    /// Bookkeeping tasks (a duplicate's issue being recorded) that `awaitAllProcessed` also awaits.
+    private var bookkeepingTasks: [Task<Void, Never>] = []
 
     /// Called on the main actor when session.json could not be written: with the chunk index after
     /// a chunk, nil after a session-level change (a capture gap). The coordinator raises
@@ -48,6 +50,10 @@ public final class ChunkProcessor {
         func appendChunk(_ chunk: ProcessedChunk) -> SessionState {
             sessionState.chunks.append(chunk)
             return sessionState
+        }
+
+        func noteIssue(_ issue: SessionIssue) {
+            sessionState.issues.append(issue)
         }
 
         func noteSessionWriteFailure(chunkIndex: Int?) -> SessionState {
@@ -109,7 +115,7 @@ public final class ChunkProcessor {
 
     /// Wait for all chunk processing to complete before merging.
     public func awaitAllProcessed() async {
-        for task in Array(tasksByIndex.values) {
+        for task in Array(tasksByIndex.values) + bookkeepingTasks {
             await task.value
         }
     }
@@ -124,8 +130,24 @@ public final class ChunkProcessor {
         // The same file again — under its own index, or under another one (a collided chunk that was
         // re-indexed, then re-ingested by a relaunch orphan scan) — is a duplicate.
         if let knownIndex = sourceByIndex.first(where: { $0.value == source })?.key {
-            Logger.transcription.info("Chunk \(chunk.index, privacy: .public) is a file already processed or in flight as chunk \(knownIndex, privacy: .public) — skipping the duplicate")
-            return tasksByIndex[knownIndex]
+            guard knownIndex != chunk.index else {
+                Logger.transcription.info("Chunk \(chunk.index, privacy: .public) already processed or in flight — skipping the duplicate")
+                return tasksByIndex[knownIndex]
+            }
+            // The same file under ANOTHER index means something upstream re-named it: skipped (the
+            // audio is already in), but never quietly — logged and recorded on the session.
+            Logger.transcription.error(
+                "Chunk \(chunk.index, privacy: .public) is \(source, privacy: .private), already processed or in flight as chunk \(knownIndex, privacy: .public) — skipping the duplicate"
+            )
+            let issue = SessionIssue(chunk: knownIndex, issue: ChunkIssue(code: .duplicateSourceOtherIndex, track: nil, count: chunk.index))
+            let original = tasksByIndex[knownIndex]
+            let store = stateStore
+            let noted = Task {
+                await store.noteIssue(issue)
+                await original?.value
+            }
+            bookkeepingTasks.append(noted)
+            return noted
         }
         if let known = sourceByIndex[chunk.index] {
             // Never skip audio because its index is taken: that silently dropped every word
