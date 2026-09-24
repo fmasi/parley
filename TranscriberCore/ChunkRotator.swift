@@ -132,7 +132,7 @@ public final class ChunkRotator {
             )
             self.onChunkFinalized(finalized)
         } catch {
-            Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
+            Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
         }
     }
 

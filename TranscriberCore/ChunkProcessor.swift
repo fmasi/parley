@@ -542,7 +542,7 @@ public final class ChunkProcessor {
         do {
             segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
         } catch {
-            Logger.transcription.error("Transcription failed for \(label, privacy: .public): \(error, privacy: .public)")
+            Logger.transcription.error("Transcription failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
             return StreamResult(segments: [], speakerDatabase: [:],
                                 issues: [ChunkIssue(code: .asrFailed, track: source, count: nil)])
         }
@@ -574,7 +574,7 @@ public final class ChunkProcessor {
                         issues.append(ChunkIssue(code: .vadUnavailable, track: source, count: nil))
                     }
                 } catch {
-                    Logger.transcription.error("VAD failed for \(label, privacy: .public): \(error, privacy: .public)")
+                    Logger.transcription.error("VAD failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
                     speechMap = nil
                     issues.append(ChunkIssue(code: .vadFailed, track: source, count: nil))
                 }
@@ -596,7 +596,7 @@ public final class ChunkProcessor {
                     issues.append(ChunkIssue(code: .clustersAbsorbed, track: source, count: result.absorbed))
                 }
             } catch {
-                Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
+                Logger.transcription.error("Diarization failed for \(label, privacy: .public) (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
                 issues.append(ChunkIssue(code: .diarizationFailed, track: source, count: nil))
                 // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
                 // is worse than admitting we don't know: with an empty speakerDatabase the

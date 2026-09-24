@@ -59,21 +59,6 @@ public enum AudioConcatenator {
     /// differences are rotation jitter, not a hole in the recording.
     static let gapThresholdSeconds: Double = 1
 
-    /// Concatenate `sources` into a single .m4a, deleting the sources on success. Kept for callers
-    /// without chunk start times: no gaps are inserted.
-    public static func concatenate(
-        sources: [URL],
-        outputDirectory: URL,
-        outputName: String
-    ) async throws -> AudioConcatenationResult {
-        try await concatenate(
-            chunks: sources.map { ChunkAudio(url: $0, startTime: nil) },
-            outputDirectory: outputDirectory,
-            outputName: outputName,
-            deleteSources: true
-        )
-    }
-
     /// Concatenate `chunks` into a single .m4a at `outputDirectory/<outputName>.m4a`.
     ///
     /// Refuses anything but `.m4a` sources (`mixedSources`) and never deletes a source unless the

@@ -302,7 +302,7 @@ public final class TranscriptionRunner {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
         }
 
         // #93: archive EVERY contributing segment to its own stereo AAC (L=mic, R=system),
@@ -327,7 +327,7 @@ public final class TranscriptionRunner {
                     protectedFile: archived.last
                 )
             } catch {
-                Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+                Logger.files.error("Quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
             }
         }
 
@@ -507,7 +507,7 @@ public final class TranscriptionRunner {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
         }
 
         // 9. Storage quota enforcement
@@ -519,7 +519,7 @@ public final class TranscriptionRunner {
                 protectedFile: audioPaths.last
             )
         } catch {
-            Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+            Logger.files.error("Quota enforcement failed (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
         }
 
         // 10. Clean up session.json

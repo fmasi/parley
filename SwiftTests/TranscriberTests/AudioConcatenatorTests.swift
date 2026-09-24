@@ -1,3 +1,4 @@
+// RED-FIRST-EXEMPT: R2c (C-M19) removed the dead AudioConcatenator.concatenate(sources:), which deleted its sources unconditionally; its five callers here were converted to concatenate(chunks:deleteSources: true), a pure refactor of existing tests
 import Testing
 import Foundation
 import AVFoundation
@@ -160,9 +161,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source, durationSeconds: 1.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source],
+            chunks: [source].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "output"
+            outputName: "output",
+            deleteSources: true
         )
 
         #expect(result.outputPath == source)
@@ -190,9 +192,10 @@ struct AudioConcatenatorTests {
         }
 
         let result = try await AudioConcatenator.concatenate(
-            sources: sources,
+            chunks: sources.map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         #expect(result.outputPath.lastPathComponent == "merged.m4a")
@@ -216,9 +219,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source2, durationSeconds: 1.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source1, source2],
+            chunks: [source1, source2].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         #expect(!FileManager.default.fileExists(atPath: source1.path))
@@ -238,9 +242,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source2, durationSeconds: 3.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source1, source2],
+            chunks: [source1, source2].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         let asset = AVURLAsset(url: result.outputPath)
@@ -259,9 +264,10 @@ struct AudioConcatenatorTests {
 
         do {
             _ = try await AudioConcatenator.concatenate(
-                sources: [],
+                chunks: [],
                 outputDirectory: dir,
-                outputName: "output"
+                outputName: "output",
+                deleteSources: true
             )
             Issue.record("Expected concatenate to throw on empty sources")
         } catch AudioConcatenatorError.noSources {

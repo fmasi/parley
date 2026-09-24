@@ -5,7 +5,19 @@ public struct SalvageOutcome: Equatable, Sendable {
     public enum Kind: Equatable, Sendable { case transcriptWritten(URL), nothingToSalvage, finalizeFailed(String) }
     public let kind: Kind
     public let chunkCount: Int
-    public init(kind: Kind, chunkCount: Int) { self.kind = kind; self.chunkCount = chunkCount }
+    /// Chunks among `chunkCount` whose speech recognition failed (C-M13): the transcript holds no
+    /// words for them, so they must not be called "transcribed".
+    public let untranscribedChunkCount: Int
+    public init(kind: Kind, chunkCount: Int, untranscribedChunkCount: Int = 0) {
+        self.kind = kind
+        self.chunkCount = chunkCount
+        self.untranscribedChunkCount = untranscribedChunkCount
+    }
+
+    /// The chunks whose speech recognition failed on any track (an `asr_failed` issue).
+    public static func untranscribedChunkCount(in chunks: [ProcessedChunk]) -> Int {
+        chunks.filter { $0.issues.contains { $0.code == .asrFailed } }.count
+    }
 }
 
 public enum RecoveryMessages {
@@ -28,7 +40,13 @@ public enum RecoveryMessages {
                 return "No chunks were recorded, but a transcript was written to \(url.lastPathComponent)."
             }
             let (noun, wasWere, _) = chunkPhrase(outcome.chunkCount)
-            return "The \(noun) recorded before it \(wasWere) transcribed to \(url.lastPathComponent)."
+            let failed = min(outcome.untranscribedChunkCount, outcome.chunkCount)
+            if failed == outcome.chunkCount {
+                let which = outcome.chunkCount == 1 ? "it" : "all of them"
+                return "The \(noun) recorded before it \(wasWere) written to \(url.lastPathComponent), but speech recognition failed on \(which)."
+            }
+            let recognitionFailed = failed > 0 ? "; speech recognition failed on \(failed) of them" : ""
+            return "The \(noun) recorded before it \(wasWere) transcribed to \(url.lastPathComponent)\(recognitionFailed)."
         case .nothingToSalvage:
             // Review fix 6: callers map both "no processor" and "salvage returned nil" to this case
             // even when audio exists — never claim a specific cause the type can't know.

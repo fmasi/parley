@@ -359,7 +359,7 @@ public enum AudioArchiver {
                 }
                 results.append(archived.archivePath)
             } catch {
-                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .sensitive)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")
+                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .sensitive)' failed, keeping WAV (\(type(of: error), privacy: .public)): \(error, privacy: .private)")
                 results.append(pair.system)
             }
         }
