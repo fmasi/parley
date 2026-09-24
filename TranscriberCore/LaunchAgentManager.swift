@@ -47,6 +47,55 @@ public enum LaunchAgentManager {
         """
     }
 
+    // MARK: - Health
+
+    /// `ProgramArguments[0]` of a plist string, or nil if absent. Regex on the generated shape:
+    /// this manager writes the only plist it ever reads.
+    public static func programPath(inPlist xml: String) -> String? {
+        let pattern = #"<key>ProgramArguments</key>\s*<array>\s*<string>([^<]+)</string>"#
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
+              let r = Range(m.range(at: 1), in: xml) else { return nil }
+        return String(xml[r])
+    }
+
+    /// Whether launchd currently has the job (`launchctl print gui/<uid>/<label>` exits 0).
+    public static func isLoaded(uid: uid_t = getuid()) async -> Bool {
+        await runLaunchctl(args: ["print", "gui/\(uid)/\(label)"]) == 0
+    }
+
+    /// Judge, repair, and re-judge. Returns the state AFTER repair, so the caller shows the
+    /// "crash protection is off" row only when repair failed.
+    public static func verifyAndRepair(
+        executablePath: String? = nil, launchAgentsDir: URL? = nil, uid: uid_t = getuid()
+    ) async -> LaunchAgentHealth.State {
+        let exePath = executablePath ?? Bundle.main.executablePath ?? Bundle.main.bundlePath
+        let agentsDir = launchAgentsDir ?? defaultLaunchAgentsDir()
+        let plistURL = agentsDir.appendingPathComponent(plistName)
+        func currentPlistPath() -> String? {
+            (try? String(contentsOf: plistURL, encoding: .utf8)).flatMap(programPath(inPlist:))
+        }
+        let state = LaunchAgentHealth.assess(plistProgramPath: currentPlistPath(), executablePath: exePath, loaded: await isLoaded(uid: uid))
+        switch LaunchAgentHealth.action(for: state) {
+        case .none:
+            return state
+        case .installAndBootstrap, .rewriteAndBootstrap:
+            // A stale job must be booted out first or bootstrap fails with "already loaded".
+            _ = await runLaunchctl(args: ["bootout", "gui/\(uid)/\(label)"])
+            try? await install(executablePath: exePath, launchAgentsDir: agentsDir, loadAgent: false)
+            _ = await runLaunchctl(args: ["bootstrap", "gui/\(uid)", plistURL.path])
+        case .bootstrap:
+            _ = await runLaunchctl(args: ["bootstrap", "gui/\(uid)", plistURL.path])
+        }
+        let after = LaunchAgentHealth.assess(plistProgramPath: currentPlistPath(), executablePath: exePath, loaded: await isLoaded(uid: uid))
+        // `stalePath` carries a path: never `.public` (Global Constraints).
+        Logger.config.info("LaunchAgentManager: health \(LaunchAgentHealth.logName(for: state), privacy: .public) → \(LaunchAgentHealth.logName(for: after), privacy: .public)")
+        if case .stalePath(let found) = state {
+            Logger.config.info("LaunchAgentManager: plist pointed at \(found, privacy: .private)")
+        }
+        return after
+    }
+
     // MARK: - Install
 
     /// Installs the LaunchAgent plist and optionally loads it with `launchctl`.
@@ -76,41 +125,44 @@ public enum LaunchAgentManager {
         Logger.config.info("LaunchAgentManager: wrote plist to \(plistURL.path)")
 
         if loadAgent {
-            _ = await runLaunchctl(args: ["load", "-w", plistURL.path])
+            _ = await runLaunchctl(args: ["bootstrap", "gui/\(getuid())", plistURL.path])
         }
     }
 
     // MARK: - Uninstall
 
-    /// Unloads the LaunchAgent and removes the plist file.
+    /// Removes the plist file and unloads the LaunchAgent.
+    ///
+    /// Order matters (gotcha #75): on a launchd-spawned instance (post-crash relaunch),
+    /// `launchctl unload`/`bootout` SIGTERMs this very process — the default action terminates it
+    /// immediately, wherever execution currently is, so nothing after that point in the caller
+    /// runs. The plist removal used to come after the unload/bootout call and so never ran on that
+    /// path, leaving the file behind. Removing the file FIRST means it is gone even if the bootout
+    /// call ends the process before returning.
     ///
     /// Async (#197): see `install` above — the same subprocess-wait concern applies here, called
-    /// on Quit. CAUTION: on a launchd-spawned instance (post-crash relaunch), `launchctl unload`
-    /// sends this very process SIGTERM — the default action terminates it immediately, wherever
-    /// execution currently is, so nothing after that point in the caller (including the removal
-    /// below, or a subsequent `NSApplication.terminate(nil)`) runs. That was already true when the
-    /// wait was synchronous on main, and stays true here: the signal is process-wide, not
-    /// thread-specific, so moving the wait off main does not change which lines execute.
+    /// on Quit.
     ///
     /// - Parameters:
     ///   - launchAgentsDir: Directory containing the plist. Defaults to `~/Library/LaunchAgents`.
-    ///   - unloadAgent: When `true`, calls `launchctl unload` before removing the plist. Pass `false` in tests.
+    ///   - unloadAgent: When `true`, calls `launchctl bootout` after removing the plist. Pass `false` in tests.
     public static func uninstall(
         launchAgentsDir: URL? = nil,
         unloadAgent: Bool = true
     ) async {
         let agentsDir = launchAgentsDir ?? defaultLaunchAgentsDir()
         let plistURL = agentsDir.appendingPathComponent(plistName)
-
-        if unloadAgent && FileManager.default.fileExists(atPath: plistURL.path) {
-            _ = await runLaunchctl(args: ["unload", "-w", plistURL.path])
-        }
+        let existed = FileManager.default.fileExists(atPath: plistURL.path)
 
         do {
             try FileManager.default.removeItem(at: plistURL)
             Logger.config.info("LaunchAgentManager: removed plist at \(plistURL.path)")
         } catch {
             Logger.config.warning("LaunchAgentManager: could not remove plist: \(error.localizedDescription)")
+        }
+
+        if unloadAgent && existed {
+            _ = await runLaunchctl(args: ["bootout", "gui/\(getuid())/\(label)"])
         }
     }
 

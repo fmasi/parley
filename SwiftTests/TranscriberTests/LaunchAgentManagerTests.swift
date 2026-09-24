@@ -106,4 +106,12 @@ struct LaunchAgentManagerTests {
 
         #expect(LaunchAgentManager.isInstalled(launchAgentsDir: dir))
     }
+
+    // MARK: - programPath(inPlist:)
+
+    @Test func programPathIsParsedFromTheGeneratedPlist() {
+        let plist = LaunchAgentManager.generatePlist(executablePath: "/Applications/Parley.app/Contents/MacOS/Parley")
+        #expect(LaunchAgentManager.programPath(inPlist: plist) == "/Applications/Parley.app/Contents/MacOS/Parley")
+        #expect(LaunchAgentManager.programPath(inPlist: "<plist><dict></dict></plist>") == nil)
+    }
 }
