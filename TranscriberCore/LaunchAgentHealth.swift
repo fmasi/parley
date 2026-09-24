@@ -72,13 +72,20 @@ public enum LaunchAgentHealth {
         }
     }
 
-    /// The sticky row's text; nil when there is nothing to say.
-    public static func userMessage(for state: State) -> String? {
+    /// The sticky row's text; nil when there is nothing to say. `holdsInstanceLock` (deliberately no
+    /// default, like `verifyAndRepair`): whether this process holds the single-instance lock, which
+    /// decides whether it can ever hand over and so what it may honestly promise.
+    public static func userMessage(for state: State, holdsInstanceLock: Bool) -> String? {
         switch state {
         case .healthy: return nil
         case .missing, .notLoaded, .stalePath:
             return "Crash protection is off — if Parley crashes mid-recording it will not relaunch. Quit and reopen Parley to repair it."
         case .loadedButNotThisProcess:
+            guard holdsInstanceLock else {
+                // No lock, no hand-over (`shouldAttemptHandOver`): nothing will re-enable it on its
+                // own. A fresh launch can take the lock and hand over (L3, C2 final wiring 5).
+                return "Crash protection is off. Quit Parley and open it again to turn it back on."
+            }
             // "Quit and reopen" is not honest here (fix round 2, item 3): reopening from Finder
             // just recreates this same state, since it still isn't the process launchd's KeepAlive
             // tracks. The hand-over (`LaunchAgentManager.handOverToJob`, gated by
@@ -86,6 +93,11 @@ public enum LaunchAgentHealth {
             return "Crash protection is off — Parley will re-enable it automatically the next time you're not recording."
         }
     }
+
+    /// Whether Quit may remove the LaunchAgent (`LaunchAgentManager.uninstall`, whose `bootout`
+    /// SIGTERMs whichever process launchd runs as the job). Only with the single-instance lock: without
+    /// it another live instance may be that job, and may be recording (L3, C2 final wiring 4).
+    public static func shouldUninstallOnQuit(holdsInstanceLock: Bool) -> Bool { holdsInstanceLock }
 
     /// Log-safe name: `stalePath` carries a filesystem path, which is never logged `.public`.
     public static func logName(for state: State) -> String {

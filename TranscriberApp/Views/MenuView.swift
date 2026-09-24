@@ -16,6 +16,13 @@ import os
 /// in-progress graceful-shutdown answer for the safety net to cut short.
 @MainActor
 func quitAfterUninstallingLaunchAgent() {
+    // L3 (C2 final): without the single-instance lock another live instance may be launchd's job —
+    // possibly recording — and `uninstall()`'s bootout would SIGTERM it. Just quit.
+    guard LaunchAgentHealth.shouldUninstallOnQuit(holdsInstanceLock: TranscriberApp.holdsInstanceLock) else {
+        Logger.state.info("Quit without the single-instance lock — leaving the LaunchAgent in place")
+        NSApplication.shared.terminate(nil)
+        return
+    }
     // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never blocks on it.
     // (On a launchd-spawned instance, `unload` SIGTERMs this process before these lines finish —
     // expected, see LaunchAgentManager.)

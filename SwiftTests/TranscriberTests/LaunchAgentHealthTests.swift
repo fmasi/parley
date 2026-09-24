@@ -102,18 +102,38 @@ import Testing
     /// still not the launchd job) — "Quit and reopen" is not honest advice here. Parley re-enables
     /// crash protection on its own via the hand-over, the next time it isn't recording.
     @Test func loadedButNotThisProcessMessageDoesNotSayQuitAndReopen() {
-        let message = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess)
+        let message = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: true)
         #expect(message?.contains("Quit and reopen") == false)
         #expect(message?.contains("automatically") == true)
     }
 
+    /// L3 (C2 final, wiring 5): without the single-instance lock this process never hands over, so
+    /// "re-enables automatically" would be a false promise. Quitting and reopening is the fix: the
+    /// next launch can take the lock.
+    @Test func loadedButNotThisProcessWithoutTheLockDoesNotPromiseAutoRepair() {
+        let message = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: false)
+        #expect(message?.contains("automatically") == false)
+        #expect(message?.contains("Quit Parley and open it again") == true)
+    }
+
     @Test func onlyUnhealthyStatesHaveAUserMessage() {
-        #expect(LaunchAgentHealth.userMessage(for: .healthy) == nil)
-        #expect(LaunchAgentHealth.userMessage(for: .missing(staleLoadedJob: false))?.contains("Crash protection") == true)
-        #expect(LaunchAgentHealth.userMessage(for: .missing(staleLoadedJob: true))?.contains("Crash protection") == true)
-        #expect(LaunchAgentHealth.userMessage(for: .notLoaded)?.contains("Crash protection") == true)
-        #expect(LaunchAgentHealth.userMessage(for: .stalePath(found: "/x"))?.contains("Crash protection") == true)
-        #expect(LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess)?.contains("Crash protection") == true)
+        for lock in [true, false] {
+            #expect(LaunchAgentHealth.userMessage(for: .healthy, holdsInstanceLock: lock) == nil)
+            #expect(LaunchAgentHealth.userMessage(for: .missing(staleLoadedJob: false), holdsInstanceLock: lock)?.contains("Crash protection") == true)
+            #expect(LaunchAgentHealth.userMessage(for: .missing(staleLoadedJob: true), holdsInstanceLock: lock)?.contains("Crash protection") == true)
+            #expect(LaunchAgentHealth.userMessage(for: .notLoaded, holdsInstanceLock: lock)?.contains("Crash protection") == true)
+            #expect(LaunchAgentHealth.userMessage(for: .stalePath(found: "/x"), holdsInstanceLock: lock)?.contains("Crash protection") == true)
+            #expect(LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: lock)?.contains("Crash protection") == true)
+        }
+    }
+
+    // MARK: - Quit (L3, C2 final wiring 4)
+
+    /// `uninstall()` boots the job out, which SIGTERMs whichever process launchd runs as the job.
+    /// Without the single-instance lock that may be another live instance, possibly recording.
+    @Test func quitUninstallsTheAgentOnlyWithTheSingleInstanceLock() {
+        #expect(LaunchAgentHealth.shouldUninstallOnQuit(holdsInstanceLock: true))
+        #expect(!LaunchAgentHealth.shouldUninstallOnQuit(holdsInstanceLock: false))
     }
 
     // MARK: - shouldAttemptHandOver (fix round 1, item 4 guards)
