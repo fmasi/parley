@@ -19,6 +19,47 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case xpcInvalidation
     case retry
     case launchRecovery
+    /// launchd idle-exited the helper while nothing was being captured (L-N1). Recorded into the
+    /// app ring while idle — the next `resetSession()` wipes it, so it lives in the unified log and
+    /// the live log, never in a later session's `.diag.jsonl`. Severity `.info`.
+    case helperIdleExit
+    /// A track that was EXPECTED to deliver (mic: always; tap: another process running output)
+    /// produced no heartbeat within the first-frame threshold after capture start, a rebuild or a
+    /// wake — Incident B's exact shape (46 min, 0 callbacks). Severity `.anomaly`.
+    case neverDelivered
+    /// A reported `neverDelivered`/`livenessGap` episode ended: the heartbeat is back. `.info`.
+    case livenessRecovered
+    /// First heartbeat of a generation (start / rebuild / wake). `.info`; drives the honest "Resumed".
+    case firstFrames
+    /// A sticky alarm was raised / cleared (§6). `alarmRaised` is `.anomaly` for the ring but NOT
+    /// quality-compromising: the condition that raised it already is.
+    case alarmRaised
+    case alarmCleared
+    /// An aggregate-device listener fired (`goin`→0, `stpd`, `diff`, `agrp`); detail `selector`. `.warning`.
+    case aggregateIOStopped
+    /// The healing ladder ran a rung; detail `rung`, `delay`, `total`. `.warning`.
+    case tapRecoveryRung
+    /// The ladder's fast budget is spent; the slow retry owns it now. `.anomaly`.
+    case tapRecoveryGivenUp
+    /// A rung has not returned within the stuck deadline (a HAL call blocking on a paused context). `.anomaly`.
+    case recoveryStuck
+    /// coreaudiod restarted (`srst`): every audio object id is dead. `.warning`.
+    case serviceRestarted
+    /// Per-track coverage counters at a rotation / at stop (§7.1). `.info`.
+    case trackCoverage
+    /// Time during which nothing was recorded although the recording was running (relaunch, sleep). `.anomaly`.
+    case captureGap
+    /// A chunk rotation threw. `.anomaly`.
+    case rotationFailed
+    /// `session.json` could not be written after a chunk. `.anomaly` (the audio is intact).
+    case sessionWriteFailed
+    /// Free space fell below one chunk at a rotation. `.warning`.
+    case diskLow
+    /// A helper call hit its deadline. `.anomaly`.
+    case xpcTimeout
+    /// `NSWorkspace.willSleep` / `didWake` while recording. `.info`; the interval becomes a `captureGap`.
+    case systemSleep
+    case systemWake
     /// The MID-RECORDING system (remote) stream could not be restarted within budget — the remote side
     /// stopped being captured even though the mic kept recording (#86). Severity `.anomaly`.
     case systemAudioUnrecovered
@@ -37,10 +78,6 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// frames genuinely went missing, whatever the cause. This is the mechanism-independent backstop
     /// for the whole silent-divergence class (#58). Severity `.anomaly`.
     case excessivePadding
-    /// The track never delivered a single real frame — the capture never started. Distinct from
-    /// `excessivePadding` ("delivered, then fell behind") because reading a `.diag.jsonl` should not
-    /// require inferring which fault occurred from an attribute.
-    case trackNeverDelivered
 
     /// A sustained run of system buffers rejected by the sticky format gate — the system track has
     /// stopped being written while the stream still appears to run. Distinct from the transient
@@ -57,15 +94,14 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// A real microphone always has a noise floor, so exact-zero is a sharp, false-positive-free
     /// signal that the input is being hardware-muted (the canonical case: a MacBook's built-in mic
     /// with the lid closed, which stays the default input device and keeps delivering full-rate
-    /// buffers of digital silence — no padding, no `trackNeverDelivered`, nothing else fires).
+    /// buffers of digital silence — no padding, no `neverDelivered`, nothing else fires).
     /// Severity `.anomaly`.
     case exactZeroMic
 
     /// A track that was delivering stopped delivering for longer than the liveness watchdog's gap
     /// threshold, caught by a 1 Hz off-audio-queue timer rather than waiting for the next buffer
-    /// that may never arrive (#196). Distinct from `trackNeverDelivered` (which judges only at
-    /// finalize, for a track that NEVER started) — this fires mid-recording, while there is still
-    /// time to react. Severity `.anomaly`.
+    /// that may never arrive (#196). Distinct from `neverDelivered` (a track that NEVER started
+    /// after a start, rebuild or wake) — this one had delivered, then stopped. Severity `.anomaly`.
     case livenessGap
 
     /// `AVAudioConverter` (or the tap's format conversion) failed on a buffer. Previously only
@@ -122,15 +158,12 @@ extension CaptureEventKind {
     /// So the user-facing quality signal counts only the kinds that survive recovery.
     public static let qualityCompromising: Set<CaptureEventKind> = [
         .excessivePadding,
-        // A track that never started is unambiguously compromising — the file holds nothing but
-        // fabricated silence.
-        .trackNeverDelivered,
         .rateDrift,
         .sustainedFormatDrop,
         .systemAudioUnrecovered,
         .restartFailed,
         .captureSourceFallback,
-        // A track full of exact-zero samples holds nothing usable, same as trackNeverDelivered.
+        // A track full of exact-zero samples holds nothing usable, same as `neverDelivered`.
         .exactZeroMic,
         // A liveness gap means a stretch of the recording is missing or was recovered late.
         .livenessGap,
@@ -140,6 +173,7 @@ extension CaptureEventKind {
         .finalizeFrameCountMismatch,
         // A permission-denied tap records nothing but exact zeros for as long as the denial lasts.
         .systemAudioPermissionDenied,
+        .neverDelivered, .tapRecoveryGivenUp, .recoveryStuck, .captureGap, .rotationFailed,
     ]
 }
 

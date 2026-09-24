@@ -222,6 +222,24 @@ struct CaptureDiagnosticsTests {
         let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(p.asMetadataDictionary()["system_audio_unrecovered"] as? Bool == false)
     }
+
+    /// v2 F1: the overhaul's event vocabulary lands first so every stream compiles against it.
+    /// The severity CLASS is the contract: a kind in `qualityCompromising` changes the completion
+    /// notice and the per-track status; the others are evidence only.
+    @Test func overhaulEventKindsCarryTheirSeverityClass() {
+        let compromising: [CaptureEventKind] = [.neverDelivered, .tapRecoveryGivenUp, .recoveryStuck, .captureGap, .rotationFailed]
+        for k in compromising {
+            #expect(CaptureEventKind.qualityCompromising.contains(k), "\(k.rawValue) must count against the record")
+        }
+        let evidenceOnly: [CaptureEventKind] = [
+            .helperIdleExit, .livenessRecovered, .firstFrames, .alarmRaised, .alarmCleared, .aggregateIOStopped,
+            .tapRecoveryRung, .serviceRestarted, .trackCoverage, .sessionWriteFailed, .diskLow, .xpcTimeout,
+            .systemSleep, .systemWake,
+        ]
+        for k in evidenceOnly {
+            #expect(!CaptureEventKind.qualityCompromising.contains(k), "\(k.rawValue) must not taint the record")
+        }
+    }
 }
 
 struct CaptureProvenanceTests {
