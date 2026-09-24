@@ -81,7 +81,9 @@ final class LivenessWatchdogDriver {
             guard heartbeat <= eventNanos, expected else { return }
             guard var m = self.monitors[track], m.openEpisodeExternally(stamp: heartbeat) else { return }
             self.monitors[track] = m
-            self.onVerdict?(track, .stalled(seconds: 1))
+            // The silence so far, from the heartbeat judged: the gap record starts there.
+            let now = DispatchTime.now().uptimeNanoseconds
+            self.onVerdict?(track, .stalled(seconds: now > heartbeat ? Double(now - heartbeat) / 1e9 : 1))
         }
     }
 

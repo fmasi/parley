@@ -110,13 +110,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private let tapHealer = TapHealer(scheduler: DispatchHealerScheduler(label: "audio-capture.tap-healer"))
     /// Mic side of "heal, then alarm" (§6.1). Touched on the watchdog queue only.
     private var micHealPolicy = MicHealPolicy()
-    /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, gaps from
-    /// the liveness verdicts, rebuilds from the healer. Delivered / padded / zero / heartbeat counts
+    /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, rebuilds
+    /// from the healer (gaps live in `gaps`). Delivered / padded / zero / heartbeat counts
     /// are merged in when read (`coverageFacts`). Lock-only, so the audio queue may read it too.
     private let coverage = OSAllocatedUnfairLock<[CaptureTrack: TrackAccounting]>(
         initialState: [.mic: TrackAccounting(), .system: TrackAccounting()])
     /// The previous gate observation, for elapsed-time accounting (0 = none yet this session).
     private let lastGateTickNanos = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    /// Real gap durations per track, from the liveness verdicts (review round 1: not the detection threshold).
+    private let gaps = OSAllocatedUnfairLock<GapTracker>(initialState: GapTracker())
 
     /// Keeps the tap honest about its System Audio Recording permission (#220): see
     /// `TapPermissionGuard`. Confined to `audioQueue`, like the samples that feed it.
@@ -210,13 +212,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
-    private func noteGap(track: CaptureTrack, seconds: Double) {
-        coverage.withLock { c in
-            c[track, default: TrackAccounting()].gapCount += 1
-            c[track, default: TrackAccounting()].longestGapSeconds = max(c[track, default: TrackAccounting()].longestGapSeconds, seconds)
-        }
-    }
-
     private func noteRebuild() {
         coverage.withLock { $0[.system, default: TrackAccounting()].rebuilds += 1 }
     }
@@ -230,6 +225,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // The guard only sees tap samples; on SCK (or a stale guard from an earlier tap session) it says nothing.
         let zeros: Int64 = tap == nil ? 0 : audioQueue.sync { tapGuard.exactZeroFrames }
         var (remote, local) = coverage.withLock { c in (c[.system] ?? TrackAccounting(), c[.mic] ?? TrackAccounting()) }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let gapTracker = gaps.withLock { $0 }
+        local.gapCount = gapTracker.gapCount(.mic)
+        local.longestGapSeconds = gapTracker.longestGapSeconds(.mic, nowNanos: now)   // a gap still open counts
+        remote.gapCount = gapTracker.gapCount(.system)
+        remote.longestGapSeconds = gapTracker.longestGapSeconds(.system, nowNanos: now)
         let rate = AudioConverter.outputSampleRate   // both WAVs are 48 kHz mono
         if let totals {
             local.deliveredSeconds = Double(totals.micDelivered) / rate
@@ -241,7 +242,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         remote.exactZeroSeconds = Double(zeros) / rate
         local.heartbeatCallbacks = mic?.heartbeatCount() ?? 0
         remote.heartbeatCallbacks = tap?.heartbeatCount() ?? 0
-        return remote.asDetail(prefix: "remote").merging(local.asDetail(prefix: "local")) { a, _ in a }
+        var remoteDetail = remote.asDetail(prefix: "remote")
+        if tap == nil {
+            // SCK: neither is measured (no tap guard, no callback count) — say nothing rather than 0.
+            remoteDetail["remote_exact_zero_seconds"] = nil
+            remoteDetail["remote_heartbeat_callbacks"] = nil
+        }
+        return remoteDetail.merging(local.asDetail(prefix: "local")) { a, _ in a }
     }
 
     /// Both may be called from the audio queue (write failure, exact zeros, permission verdicts) and
@@ -303,16 +310,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             onFirstFrames?(track, helperSessionId)
         case .neverDelivered(let s):
             record(.neverDelivered, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            noteGap(track: track, seconds: s)
         case .stalled(let s):
-            // An accelerator's early stall opens the monitor's episode, so each gap is counted once.
             record(.livenessGap, .anomaly, ["track": t, "seconds": "\(Int(s))"])
-            noteGap(track: track, seconds: s)
         case .cleared(let reason):
             record(.livenessRecovered, .info, ["track": t, "reason": "\(reason)"])
         case .healthy:
             return
         }
+        let now = DispatchTime.now().uptimeNanoseconds
+        gaps.withLock { $0.note(verdict, track: track, nowNanos: now) }
         switch track {
         case .mic:
             handleMicLiveness(verdict)
@@ -339,7 +345,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private func handleMicLiveness(_ verdict: TrackLivenessMonitor.Verdict) {
         if let (kind, message) = livenessBanner(track: .mic, verdict: verdict) { onQualityAnomaly?(kind.rawValue, message) }
         let alarmMessage = "The microphone isn’t delivering any audio. Try another microphone from the menu."
-        switch micHealPolicy.onVerdict(verdict) {
+        switch micHealPolicy.onVerdict(verdict, now: Double(DispatchTime.now().uptimeNanoseconds) / 1e9) {
         case .heal:
             stateLock.sync { micSession }?.heal()
         case .healAndAlarm:
@@ -432,6 +438,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         diagnostics.clear()
         coverage.withLock { $0 = [.mic: TrackAccounting(), .system: TrackAccounting()] }
         lastGateTickNanos.withLock { $0 = 0 }
+        gaps.withLock { $0 = GapTracker() }
         let options: CaptureOptions = stateLock.sync {
             let configured = pendingOptions
             pendingOptions = CaptureOptions()
