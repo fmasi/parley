@@ -445,4 +445,19 @@ struct ConfigTests {
         #expect(decoded.calendarLookaheadMinutes == 5)
     }
 
+    /// v2 F3: the three capture knobs are optional, snake_case, and absent by default.
+    @Test func captureKnobsRoundTripAndDefaultToNil() throws {
+        var c = Config.default
+        #expect(c.tapAutoStart == nil && c.remoteExactZeroSoftAlarmSeconds == nil && c.debugDropTapFrames == nil)
+        c.tapAutoStart = false
+        c.remoteExactZeroSoftAlarmSeconds = 300
+        c.debugDropTapFrames = true
+        let data = try JSONEncoder().encode(c)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["tap_auto_start"] as? Bool == false)
+        #expect(json["remote_exact_zero_soft_alarm_seconds"] as? Int == 300)
+        #expect(json["debug_drop_tap_frames"] as? Bool == true)
+        #expect(try JSONDecoder().decode(Config.self, from: data) == c)
+    }
+
 }

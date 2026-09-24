@@ -144,6 +144,12 @@ public struct Config: Codable, Equatable, Sendable {
     /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
     /// speaker embeddings are far more sensitive to that than speech intelligibility is.
     public var preserveSourceWAV: Bool?
+    /// Capture knobs handed to the helper as `CaptureOptions` before each start (§5, §10). `nil` =
+    /// the shipped behaviour: tap auto-start on, the exact-zero remote soft alarm off, no frame drop.
+    public var tapAutoStart: Bool?
+    public var remoteExactZeroSoftAlarmSeconds: Int?
+    /// DIAGNOSTIC ONLY (device item D-04): the helper drops every tap buffer before the heartbeat.
+    public var debugDropTapFrames: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -193,6 +199,9 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare: nil,
         diarizationExcludeOverlap: nil,
         preserveSourceWAV: nil,
+        tapAutoStart: nil,
+        remoteExactZeroSoftAlarmSeconds: nil,
+        debugDropTapFrames: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -222,6 +231,9 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare: Double? = nil,
         diarizationExcludeOverlap: Bool? = nil,
         preserveSourceWAV: Bool? = nil,
+        tapAutoStart: Bool? = nil,
+        remoteExactZeroSoftAlarmSeconds: Int? = nil,
+        debugDropTapFrames: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -249,6 +261,9 @@ public struct Config: Codable, Equatable, Sendable {
         self.diarizationMinSpeakerShare = diarizationMinSpeakerShare
         self.diarizationExcludeOverlap = diarizationExcludeOverlap
         self.preserveSourceWAV = preserveSourceWAV
+        self.tapAutoStart = tapAutoStart
+        self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
+        self.debugDropTapFrames = debugDropTapFrames
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -278,6 +293,9 @@ public struct Config: Codable, Equatable, Sendable {
         case diarizationMinSpeakerShare = "diarization_min_speaker_share"
         case diarizationExcludeOverlap = "diarization_exclude_overlap"
         case preserveSourceWAV = "preserve_source_wav"
+        case tapAutoStart = "tap_auto_start"
+        case remoteExactZeroSoftAlarmSeconds = "remote_exact_zero_soft_alarm_seconds"
+        case debugDropTapFrames = "debug_drop_tap_frames"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -308,6 +326,9 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare = try c.decodeIfPresent(Double.self, forKey: .diarizationMinSpeakerShare)
         diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
         preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
+        tapAutoStart = try c.decodeIfPresent(Bool.self, forKey: .tapAutoStart)
+        remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
+        debugDropTapFrames = try c.decodeIfPresent(Bool.self, forKey: .debugDropTapFrames)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
