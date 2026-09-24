@@ -83,13 +83,16 @@ import Testing
         #expect(later == nil)
     }
 
-    /// A duplicate "sleep" (the app's and IOKit's) must not push a started expiry back.
-    @Test func aRepeatedSleepKeepsTheFirstStamp() {
+    /// Round 4 (N1): each sleep is its own cycle — a second sleep restarts the clock, so every wake is
+    /// bounded on its own and no clock carries over from an earlier Power Nap.
+    @Test func aSecondSleepStartsANewCycle() {
         var c = SleepPauseClock()
         c.pause(nowNanos: 100 * s, expiryStartsNow: true)
         c.pause(nowNanos: 120 * s, expiryStartsNow: true)
-        let due = c.tick(nowNanos: 130 * s, fullWake: nil)
-        #expect(due != nil)
+        let oldBound = c.tick(nowNanos: 130 * s, fullWake: nil)
+        let newBound = c.tick(nowNanos: 150 * s, fullWake: nil)
+        #expect(oldBound == nil, "the first sleep's clock is gone")
+        #expect(newBound != nil, "the second sleep's own bound")
     }
 
     @Test func notPausedNeverExpires() {
@@ -195,5 +198,57 @@ import Testing
             #expect(second == nil, "step \(i)")
             #expect(!c.isPaused, "step \(i)")
         }
+    }
+
+    // MARK: - Round 4
+
+    /// N1: over a night, Power Naps must not add up to the 5 min DarkWake bound — that would end the
+    /// pause inside a later DarkWake, with the devices off (item 11's false alarm).
+    @Test func darkTimeDoesNotAccumulateAcrossPowerNaps() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 0)
+        _ = c.poweredOn(fullWake: false, nowNanos: 1_000 * s)        // Power Nap 1
+        let nap1 = c.tick(nowNanos: 1_200 * s, fullWake: false)      // 200 s of it
+        c.pause(nowNanos: 1_201 * s)                                 // back to sleep (IOKit will-sleep)
+        _ = c.poweredOn(fullWake: false, nowNanos: 5_000 * s)        // Power Nap 2
+        let nap2 = c.tick(nowNanos: 5_200 * s, fullWake: false)      // 200 s: 400 s in total
+        #expect(nap1 == nil)
+        #expect(nap2 == nil, "each nap is bounded on its own: 200 s < 300 s")
+        #expect(c.isPaused)
+    }
+
+    /// A new cycle keeps the mic work that waited for the wake (a coreaudiod restart in an earlier nap).
+    @Test func aNewCycleKeepsDeferredMicWork() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 0)
+        _ = c.deferMicWork(.serviceRestart)
+        c.pause(nowNanos: 10 * s)
+        let resumed = c.wake()
+        #expect(resumed == [.serviceRestart])
+    }
+
+    /// M3: the log (and the X1 check) tells a promotion from an expiry.
+    @Test func eachWakeSaysWhatEndedThePause() {
+        var promoted = SleepPauseClock()
+        promoted.pause(nowNanos: 0)
+        _ = promoted.tick(nowNanos: 1 * s, fullWake: false)
+        _ = promoted.tick(nowNanos: 2 * s, fullWake: true)
+        #expect(promoted.lastWakeReason == .promotedToFullWake)
+
+        var expired = SleepPauseClock()
+        expired.pause(nowNanos: 0)
+        _ = expired.poweredOn(fullWake: false, nowNanos: 1 * s)
+        _ = expired.tick(nowNanos: 301 * s, fullWake: false)
+        #expect(expired.lastWakeReason == .expired)
+
+        var implicit = SleepPauseClock()
+        implicit.pause(nowNanos: 0)
+        _ = implicit.poweredOn(fullWake: true, nowNanos: 1 * s)
+        #expect(implicit.lastWakeReason == .fullWakePowerOn)
+
+        var app = SleepPauseClock()
+        app.pause(nowNanos: 0)
+        _ = app.wake()
+        #expect(app.lastWakeReason == .appWake)
     }
 }

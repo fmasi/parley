@@ -268,6 +268,34 @@ import Testing
         #expect(waited < 1.5, "bounded")
     }
 
+    /// Round 4 (N2): Stop reads its coverage INSIDE the bounded seal, on the audio queue, never with an
+    /// unbounded `audioQueue.sync` of its own. A stalled audio queue: Stop still ends within the bound,
+    /// and says the reading is missing (the caller falls back to the last cached one).
+    @Test func aStalledAudioQueueNeverHoldsTheStopPastItsBound() {
+        let audio = DispatchQueue(label: "stalled-audio")
+        let release = DispatchSemaphore(value: 0)
+        audio.async { release.wait() }   // a disk stall on the audio queue
+        defer { release.signal() }
+        let log = Log()
+        let start = DispatchTime.now()
+        let (outcome, read) = StopSequence.run(
+            sealing: { audio.sync { 42 } }, stopMic: nil, stopTap: nil,
+            timeout: 0.2, end: { log.add("end") })
+        let waited = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+        #expect(outcome.sealAbandoned)
+        #expect(read == nil)
+        #expect(log.entries == ["end"])
+        #expect(waited < 1.5)
+    }
+
+    @Test func aSealHandsBackWhatItReadOnTheAudioQueue() {
+        let audio = DispatchQueue(label: "free-audio")
+        let (outcome, read) = StopSequence.run(
+            sealing: { audio.sync { 42 } }, stopMic: nil, stopTap: nil, timeout: 1, end: {})
+        #expect(!outcome.sealAbandoned)
+        #expect(read == 42)
+    }
+
     @Test func aSealThatReturnsIsNotAbandoned() {
         let outcome = StopSequence.run(seal: {}, stopMic: nil, stopTap: nil, timeout: 1, end: {})
         #expect(!outcome.sealAbandoned)

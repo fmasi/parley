@@ -6,7 +6,9 @@ import Foundation
 ///
 /// | event                          | effect                                                          |
 /// |--------------------------------|-----------------------------------------------------------------|
-/// | `pause`                        | asleep, `sawDark = false`, `poweredOn = false`, no clock        |
+/// | `pause`                        | a NEW cycle: `sawDark = false`, `poweredOn = false`, no clock — |
+/// |                                | also when already paused: each sleep is bounded on its own, so  |
+/// |                                | Power Naps never add up (round 4 N1); deferred mic work stays   |
 /// | tick reading full wake         | wake ONLY IF `sawDark || poweredOn` since the pause (a real     |
 /// |                                | dark-to-full promotion); else ignored — the ~5 s "darkwakelinger"|
 /// |                                | before a clamshell sleep reads full-wake while going TO sleep   |
@@ -28,6 +30,14 @@ public struct SleepPauseClock: Equatable, Sendable {
         case serviceRestart
     }
 
+    /// What ended the last pause — for the log, and the X1 check (round 4 M3).
+    public enum WakeReason: String, Equatable, Sendable {
+        case appWake = "the app's wake"
+        case fullWakePowerOn = "a full-wake power-on"
+        case promotedToFullWake = "a promotion to full wake"
+        case expired = "the bound expired"
+    }
+
     /// After an unclassified power-on (or the pause, without power notifications).
     public static let expirySeconds: Double = 30
     /// After a power-on that read DarkWake: a Power Nap stays paused this long, then the pause ends
@@ -40,28 +50,35 @@ public struct SleepPauseClock: Equatable, Sendable {
     /// When the pause ends by expiry, in uptime nanoseconds; `nil` = no clock running.
     private var expiresAtNanos: UInt64?
     private var pendingMicWork: Set<MicWork> = []
+    public private(set) var lastWakeReason: WakeReason?
 
     public init() {}
 
     public var isPaused: Bool { paused }
 
-    /// Sleep (the app's, or IOKit's will-sleep). A repeat keeps the first state. `expiryStartsNow`:
-    /// power notifications are unavailable, so the only bound is uptime from here.
+    /// Sleep (the app's, or IOKit's will-sleep). Always a NEW cycle (round 4 N1): a will-sleep while
+    /// already paused — the machine going back to sleep after a Power Nap — resets the cycle's state and
+    /// clock, so every wake is bounded on its own. Mic work deferred in an earlier nap still waits for
+    /// the wake. `expiryStartsNow`: power notifications are unavailable, so the only bound is uptime
+    /// from here.
     public mutating func pause(nowNanos: UInt64, expiryStartsNow: Bool = false) {
-        if !paused {
-            paused = true
-            sawDark = false
-            poweredOn = false
-            expiresAtNanos = nil
-            pendingMicWork = []
-        }
+        if !paused { pendingMicWork = [] }
+        paused = true
+        sawDark = false
+        poweredOn = false
+        expiresAtNanos = nil
         if expiryStartsNow { startClock(seconds: Self.expirySeconds, nowNanos: nowNanos) }
     }
 
     /// The app's wake. nil when not paused — a second wake (implicit, then the app's) does nothing.
     /// Otherwise the pause ends, and the mic work that waited for it is returned.
     public mutating func wake() -> Set<MicWork>? {
+        end(.appWake)
+    }
+
+    private mutating func end(_ reason: WakeReason) -> Set<MicWork>? {
         guard paused else { return nil }
+        lastWakeReason = reason
         paused = false
         expiresAtNanos = nil
         defer { pendingMicWork = [] }
@@ -74,7 +91,7 @@ public struct SleepPauseClock: Equatable, Sendable {
         guard paused else { return nil }
         switch fullWake {
         case true?:
-            return wake()
+            return end(.fullWakePowerOn)
         case false?:
             poweredOn = true
             startClock(seconds: Self.darkPowerOnExpirySeconds, nowNanos: nowNanos)
@@ -90,12 +107,12 @@ public struct SleepPauseClock: Equatable, Sendable {
     public mutating func tick(nowNanos: UInt64, fullWake: Bool?) -> Set<MicWork>? {
         guard paused else { return nil }
         switch fullWake {
-        case true? where sawDark || poweredOn: return wake()   // a real dark-to-full promotion
+        case true? where sawDark || poweredOn: return end(.promotedToFullWake)   // a real dark-to-full promotion
         case false?: sawDark = true
         default: break                                         // darkwakelinger, or unreadable
         }
         guard let at = expiresAtNanos, nowNanos >= at else { return nil }
-        return wake()
+        return end(.expired)
     }
 
     /// Mic work that must not run while paused. True = kept for the wake; false = awake, run it now.
@@ -105,7 +122,7 @@ public struct SleepPauseClock: Equatable, Sendable {
         return true
     }
 
-    /// A clock only ever gets SHORTER: a later, longer one never pushes a running expiry back.
+    /// Within a cycle a clock only ever gets SHORTER: a later, longer one never pushes it back.
     private mutating func startClock(seconds: Double, nowNanos: UInt64) {
         let at = nowNanos + UInt64(seconds * 1e9)
         expiresAtNanos = min(expiresAtNanos ?? at, at)

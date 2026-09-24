@@ -169,12 +169,27 @@ public enum StopSequence {
         timeout: Double,
         end: () -> Void
     ) -> Outcome {
+        run(sealing: seal, stopMic: stopMic, stopTap: stopTap, timeout: timeout, end: end).outcome
+    }
+
+    /// As `run(seal:…)`, and the seal hands back what it read in the same audio-queue block — Stop's
+    /// coverage (round 4 N2), so Stop never needs an `audioQueue.sync` of its own. `read` is nil when the
+    /// seal did not return within its bound: the caller falls back to a cached reading.
+    public static func run<Read>(
+        sealing seal: @escaping () -> Read,
+        stopMic: (() -> Void)?,
+        stopTap: (() -> Void)?,
+        timeout: Double,
+        end: () -> Void
+    ) -> (outcome: Outcome, read: Read?) {
         let sealed = DispatchSemaphore(value: 0)
+        let box = ReadBox<Read>()
         DispatchQueue.global(qos: .userInitiated).async {
-            seal()
+            box.value = seal()
             sealed.signal()
         }
         let sealAbandoned = sealed.wait(timeout: .now() + timeout) == .timedOut
+        let read = sealAbandoned ? nil : box.value
         let group = DispatchGroup()
         let finished = OSAllocatedUnfairLock(initialState: (mic: stopMic == nil, tap: stopTap == nil))
         if let stopMic {
@@ -196,7 +211,13 @@ public enum StopSequence {
         _ = group.wait(timeout: .now() + timeout)
         let done = finished.withLock { $0 }
         end()
-        return Outcome(sealAbandoned: sealAbandoned, micAbandoned: !done.mic, tapAbandoned: !done.tap)
+        return (Outcome(sealAbandoned: sealAbandoned, micAbandoned: !done.mic, tapAbandoned: !done.tap), read)
+    }
+
+    /// The seal's result, written on the seal's thread before the semaphore signals and read after the
+    /// wait succeeds (happens-before via the semaphore); never read when the seal was abandoned.
+    private final class ReadBox<Read>: @unchecked Sendable {
+        var value: Read?
     }
 }
 

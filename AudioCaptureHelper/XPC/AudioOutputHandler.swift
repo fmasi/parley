@@ -180,8 +180,19 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func finalizeAll() {
         sealed = true
+        // A seal that runs late, after Stop gave up on it and ended the session (round 4 M1): the headers
+        // are still written, but nothing reports into whichever session is current now — no write-failure
+        // or write-success callback, no end-of-recording backstop.
+        let late = abandoned.withLock { $0 }
+        if late {
+            for writer in [systemWriter, micWriter] {
+                writer.onWriteFailure = nil
+                writer.onWriteSucceeded = nil
+            }
+        }
         systemWriter.finalize()
         micWriter.finalize()
+        guard !late else { return }
         // Session-wide backstop (#196): compare each track's TOTAL frame count against how long it
         // should hold. Catches gaps that padding itself skipped (an implausible timeline delta) and
         // anything else nobody has thought of yet — the same "don't need to know the mechanism" property

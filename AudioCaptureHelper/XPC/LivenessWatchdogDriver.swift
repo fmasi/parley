@@ -100,7 +100,7 @@ final class LivenessWatchdogDriver {
         queue.async { [weak self] in
             guard let self else { return }
             if let work = self.sleepPause.poweredOn(fullWake: fullWake, nowNanos: now) {
-                self.resume(work, reason: "full wake (IOKit)")
+                self.resume(work, reason: "implicit wake: \(self.sleepPause.lastWakeReason?.rawValue ?? "full wake")")
             } else if self.sleepPause.isPaused {
                 Logger.audio.info("Power-on while paused for sleep (\(fullWake == false ? "DarkWake" : "unclassified", privacy: .public)) — pause kept")
             }
@@ -166,8 +166,10 @@ final class LivenessWatchdogDriver {
         // While paused: a DarkWake promoted to a full wake, or the expiry after an unclassified power-on
         // (uptime does not advance in sleep), ends the pause (A-I7, item 18). The probe runs only here.
         if sleepPause.isPaused, let work = sleepPause.tick(nowNanos: now, fullWake: fullWakeProbe?()) {
-            Logger.audio.info("No wake message — resuming liveness as if woken (full wake seen, or \(Int(SleepPauseClock.expirySeconds), privacy: .public)s awake)")
-            resume(work, reason: "implicit wake")
+            // "promoted" vs "expired" — the X1 check compares these against `pmset -g log` (round 4 M3).
+            let reason = sleepPause.lastWakeReason?.rawValue ?? "unknown"
+            Logger.audio.info("Implicit wake — \(reason, privacy: .public) — resuming liveness")
+            resume(work, reason: "implicit wake: \(reason)")
         }
         let gateOpen = outputActivity.othersRunningOutput()
         gateOpenLock.withLock { $0 = gateOpen }
