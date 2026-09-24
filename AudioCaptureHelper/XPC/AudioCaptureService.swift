@@ -568,7 +568,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // under a second) are not in these facts: the delivered/zero seconds can understate by that margin.
         record(.captureStop, .info, coverageFacts())
         livenessWatchdog.stop()
-        tapHealer.cancelAll()
+        tapHealer.endSession()
         stopTapGuardTimer()
         // Stop mic + tap delivery before finalize so no buffer lands on the audio queue after the WAV
         // headers are sealed (a late buffer would be a no-op anyway — finalize is idempotent).
@@ -856,7 +856,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // of each side was captured (and, on the tap, how much of it was exact zeros, #220).
         record(.captureStop, .info, coverageFacts())
         livenessWatchdog.stop()
-        tapHealer.cancelAll()
+        tapHealer.endSession()
         stopTapGuardTimer()
 
         // Stop mic + tap delivery, then finalize synchronously on the persistent audio queue so WAV
@@ -893,7 +893,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     private func cleanupAfterFailure() {
         livenessWatchdog.stop()
-        tapHealer.cancelAll()
+        tapHealer.endSession()
         stopTapGuardTimer()
         // Snapshot and clear state under the lock, then run the blocking teardown (mic stopRunning,
         // writer finalize, file deletes) OUTSIDE the lock so we never hold stateLock across a blocking

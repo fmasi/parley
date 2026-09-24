@@ -1,9 +1,10 @@
 import Testing
 @testable import TranscriberCore
 
-/// H review round 1 (A): the healer's timers and tokens, on virtual time. `cancelAll()` (stop,
-/// sleep) must truly stop it — no rung, no deadline, no callback — or a stopped session raises a
-/// false sticky alarm into the next recording.
+/// H review round 1 (A): the healer's timers and tokens, on virtual time. `endSession()` (stop) and
+/// `cancelAll()` (sleep) must truly stop it — no rung, no deadline, no callback — or a stopped session
+/// raises a false sticky alarm into the next recording. Round 2: a verdict while asleep is an
+/// implicit wake (a lost wake must not silence the tap); a verdict after a stop is not.
 @Suite struct TapHealerTests {
     /// Virtual time: `async` runs inline (the tests ARE the serial context), `after` waits for `advance`.
     final class ManualScheduler: HealerScheduler {
@@ -91,7 +92,7 @@ import Testing
         r.healer.trigger(.neverDelivered)
         answerNextRung(r, succeeded: false)   // the next rung is now waiting out its backoff
         #expect(r.tap.rebuilds.count == 1)
-        r.healer.cancelAll()                  // stop
+        r.healer.endSession()                  // stop
         #expect(r.clock.pending == 0)
         r.healer.rebuildResult(rung: .rebuildAggregate, token: 2, succeeded: true)   // late, from the stopped session
         r.healer.trigger(.stalled)
@@ -120,7 +121,7 @@ import Testing
         r.healer.trigger(.neverDelivered)
         r.clock.advance(by: 0)
         let token = r.tap.rebuilds[0].token
-        r.healer.cancelAll()
+        r.healer.endSession()
         r.healer.rebuildResult(rung: .rebuildAggregate, token: token, succeeded: true)
         #expect(r.calls.succeeded == 0)
         #expect(r.clock.pending == 0, "no heartbeat deadline armed by a stale result")
@@ -148,7 +149,7 @@ import Testing
         let r = rig()
         r.healer.trigger(.neverDelivered)
         answerNextRung(r, succeeded: false)   // next rung waiting out its backoff
-        r.healer.cancelAll()
+        r.healer.endSession()
         let next = FakeTap()
         r.healer.startSession(tap: next)
         r.clock.advance(by: 5)
@@ -228,5 +229,57 @@ import Testing
         r.clock.advance(by: 2)
         #expect(r.tap.rebuilds.count == 1)
         #expect(r.calls.rungEvents == 1)
+    }
+
+    // MARK: - Round 2
+
+    /// A successful slow retry clears the "a rebuild threw" flag: the give-up after it says
+    /// "not delivering", never a stale "could not restart".
+    @Test func aSuccessfulRetryAfterAGiveUpClearsTheRebuildFailedFlag() {
+        let r = rig()
+        exhaust(r)
+        #expect(r.calls.giveUps == [true])
+        r.clock.advance(by: 60.01)            // the slow retry runs…
+        #expect(r.tap.rebuilds.count == 5)
+        let retry = r.tap.rebuilds[4]         // …and succeeds, but no heartbeat follows
+        r.healer.rebuildResult(rung: retry.rung, token: retry.token, succeeded: true)
+        r.clock.advance(by: 3.5)
+        #expect(r.calls.giveUps == [true, false])
+    }
+
+    /// A failure for a token no longer in flight is not this episode's failure.
+    @Test func aStaleFailedResultDoesNotSetTheRebuildFailedFlag() {
+        let r = rig()
+        r.healer.trigger(.neverDelivered)
+        r.clock.advance(by: 0)
+        let stale = r.tap.rebuilds[0].token
+        r.healer.gateClosed()                 // the gate closes over a dead tap…
+        r.healer.trigger(.neverDelivered)     // …reopens: one last-chance tap rung
+        r.clock.advance(by: 0)
+        r.healer.gateClosed()                 // closes again before its verdict: the next reopen gives up
+        r.healer.rebuildResult(rung: .rebuildAggregate, token: stale, succeeded: false)
+        r.healer.trigger(.neverDelivered)
+        #expect(r.calls.giveUps == [false])
+    }
+
+    /// Monitors are paused during sleep and only armed monitors give verdicts, so a stall while the
+    /// healer sleeps proves the wake message was lost: heal, don't drop it.
+    @Test func aVerdictAfterAMissedWakeIsHealed() {
+        let r = rig()
+        r.healer.cancelAll()                  // sleep; the wake never arrives
+        r.healer.trigger(.stalled)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.count == 1)
+        #expect(r.tap.rebuilds.last?.rung == .rebuildAggregate, "a fresh episode")
+    }
+
+    @Test func aVerdictAfterAStopIsStillIgnored() {
+        let r = rig()
+        r.healer.endSession()
+        r.healer.trigger(.stalled)
+        r.healer.heartbeatObserved()
+        r.clock.advance(by: 10)
+        #expect(r.tap.rebuilds.isEmpty)
+        #expect(r.clock.pending == 0)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Where `TapHealer` runs: one serial context, a monotonic clock, and cancellable delayed work. The
 /// helper uses `DispatchHealerScheduler`; the tests drive a manual one with virtual time.
@@ -50,10 +51,13 @@ extension DispatchWorkItem: HealerTimer {}
 /// scheduler's serial context; no decisions of its own beyond the timers.
 ///
 /// ONE timer of each kind (pending rung, heartbeat deadline, stuck watchdog, slow retry): a new one
-/// replaces the previous one, never stacked (C4 note). `cancelAll()` (stop, sleep) forgets the ladder
-/// and SUSPENDS the healer: no rung runs and no callback fires until `startSession(tap:)` or
-/// `trigger(.wake)` — so nothing from a stopped session can raise an alarm into the next one, and no
-/// rung runs while the machine sleeps with the monitors paused (H review round 1).
+/// replaces the previous one, never stacked (C4 note). `endSession()` (stop) and `cancelAll()` (sleep)
+/// forget the ladder and SUSPEND the healer: no rung runs and no callback fires — so nothing from a
+/// stopped session can raise an alarm into the next one, and no rung runs while the machine sleeps
+/// with the monitors paused (H review round 1). A stopped healer resumes only at `startSession(tap:)`.
+/// A sleeping one resumes at `trigger(.wake)`, or at the first liveness verdict: monitors are paused
+/// during sleep and only armed monitors give verdicts, so a verdict proves the machine is awake and
+/// the wake message was lost — dropping it would silence the tap for the rest of the session (round 2).
 public final class TapHealer {
     public static let stuckSeconds: Double = 5
 
@@ -98,15 +102,15 @@ public final class TapHealer {
     }
 
     /// `.wake` is the pair of `cancelAll()` (sleep): the ladder forgets its episode, the healer
-    /// resumes, and the re-armed monitor is the heartbeat check (C4 ruling 3). Every other trigger
-    /// runs the ladder as is.
+    /// resumes (if a session is running), and the re-armed monitor is the heartbeat check (C4 ruling 3).
+    /// Every other trigger runs the ladder as is; a liveness verdict while asleep wakes it first.
     public func trigger(_ t: TapRecoveryLadder.Trigger) {
         scheduler.async {
             if t == .wake {
-                self.reset()
-                self.suspended = false
+                self.wake()
                 return
             }
+            if t == .stalled || t == .neverDelivered { self.wakeIfAsleep(on: "\(t)") }
             guard !self.suspended else { return }
             self.apply(self.ladder.trigger(t, now: self.scheduler.now))
         }
@@ -116,6 +120,7 @@ public final class TapHealer {
     /// episode: the ladder refunds its budget only after 30 s of sustained health (C4 round 1).
     public func heartbeatObserved() {
         scheduler.async {
+            self.wakeIfAsleep(on: "heartbeat")
             guard !self.suspended else { return }
             let wasHealing = self.ladder.inFlight != nil || self.ladder.awaitingHeartbeat || self.ladder.exhausted
             self.cancel(&self.pendingRun)
@@ -128,6 +133,7 @@ public final class TapHealer {
     }
 
     /// The track is no longer expected: the ladder ends (or remembers) the episode; the slow retry stops (§5).
+    /// Not a wake signal: a paused monitor still delivers the `.cleared(.gateClosed)` it owes.
     public func gateClosed() {
         scheduler.async {
             guard !self.suspended else { return }
@@ -142,7 +148,15 @@ public final class TapHealer {
     public func rebuildResult(rung: TapRecoveryLadder.Rung, token: Int, succeeded: Bool) {
         scheduler.async {
             guard !self.suspended else { return }
-            if succeeded { self.onRungSucceeded?() } else { self.rebuildFailedSinceHeartbeat = true }
+            if succeeded {
+                // Any rebuild that worked: a later give-up means "not delivering", not "could not
+                // restart" (round 2: a successful slow retry no longer leaves a stale flag behind).
+                self.rebuildFailedSinceHeartbeat = false
+                self.onRungSucceeded?()
+            } else if token == 0 || self.ladder.inFlightToken == token {
+                // Only the rung in flight (or an external rebuild) is this episode's failure.
+                self.rebuildFailedSinceHeartbeat = true
+            }
             if token == 0 {
                 self.apply(self.ladder.noteExternalRebuild(now: self.scheduler.now))
                 return
@@ -157,13 +171,35 @@ public final class TapHealer {
         }
     }
 
-    /// Stop or sleep: every timer goes, the ladder forgets its episode (so no token in flight or
-    /// awaited survives), and the healer is suspended until `startSession(tap:)` or `trigger(.wake)`.
+    /// Sleep: every timer goes, the ladder forgets its episode (so no token in flight or awaited
+    /// survives), and the healer is suspended until `trigger(.wake)` or the next liveness verdict.
     public func cancelAll() {
         scheduler.async {
             self.reset()
             self.suspended = true
         }
+    }
+
+    /// Stop: as `cancelAll()`, and the tap is forgotten, so nothing but `startSession(tap:)` resumes
+    /// the healer — not even a verdict still in flight from the stopped session.
+    public func endSession() {
+        scheduler.async {
+            self.reset()
+            self.suspended = true
+            self.tap = nil
+        }
+    }
+
+    private func wake() {
+        reset()
+        suspended = tap == nil
+    }
+
+    /// Asleep with a session running, and a verdict arrived: the wake was missed. Resume first.
+    private func wakeIfAsleep(on verdict: String) {
+        guard suspended, tap != nil else { return }
+        Logger.audio.info("Tap healer: liveness verdict (\(verdict, privacy: .public)) while asleep — the wake was missed; resuming")
+        wake()
     }
 
     private func reset() {
