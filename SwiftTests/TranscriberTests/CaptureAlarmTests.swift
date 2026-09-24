@@ -333,6 +333,8 @@ import Testing
         #expect(AlarmKind.recordingStopped.outlivesRecording)
         #expect(AlarmKind.crashProtectionOff.outlivesRecording)
         #expect(AlarmKind.diskLow.outlivesRecording == false)
+        #expect(AlarmKind.unknownHelperAlarm.isHelperOwned == false)
+        #expect(AlarmKind.unknownHelperAlarm.track == nil && AlarmKind.unknownHelperAlarm.outlivesRecording == false)
     }
 
     // MARK: - F2 fix round 2: ordered helper ids, snapshot sequence, one-off events

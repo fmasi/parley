@@ -479,11 +479,12 @@ struct TranscriberApp: App {
             }
         }
         // #86: the helper could not restart the mid-recording system (remote) stream within budget.
-        // The local mic keeps recording on its own AVCaptureSession — warn, never stop.
+        // The local mic keeps recording on its own AVCaptureSession — warn, never stop. A transient
+        // notice: the sticky state is the helper's `remoteRecoveryFailed` alarm.
         captureClient.onSystemAudioUnrecoverable = { _ in
             Task { @MainActor in
                 guard appState.isRecording else { return }
-                appState.noteSystemAudioLost(message: "Remote audio couldn’t be recovered — only your microphone is recording.")
+                appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
             }
         }
         // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a

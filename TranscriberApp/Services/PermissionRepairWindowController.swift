@@ -38,6 +38,9 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
     /// Settings change must not be silently ignored.
     private var pendingTrigger: Trigger?
 
+    /// Whether the repair window is on screen: the alarm window then leaves the permission rows to it.
+    var isPanelOpen: Bool { panel?.isVisible ?? false }
+
     private weak var permissionManager: PermissionManager?
     private weak var appState: AppState?
     private var captureClient: AudioCaptureClient?

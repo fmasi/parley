@@ -42,6 +42,12 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     var onFirstFrames: (@Sendable (CaptureTrack, String) -> Void)? { get set }
     /// Fired when the helper pushes a changed alarm set (§6.2).
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)? { get set }
+    /// The helper's real-audio evidence (§6.2): the first non-zero sample on a track, as
+    /// (track, helperSessionId) — feeds `CaptureAlarmRegistry.noteRealAudio`.
+    var onRealAudio: (@Sendable (CaptureTrack, String) -> Void)? { get set }
+    /// The helper's write-succeeded evidence (§6.2): a successful write, as (helperSessionId) — feeds
+    /// `CaptureAlarmRegistry.noteWriteSucceeded`.
+    var onWriteSucceeded: (@Sendable (String) -> Void)? { get set }
 
     /// `sessionId` is the chunk session id (`SessionState.sessionId`: the chunk base name without its
     /// index, e.g. `143400-weekly-sync`), stable across in-session restarts whose base names change.

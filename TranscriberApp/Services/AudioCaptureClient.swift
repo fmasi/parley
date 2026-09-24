@@ -55,6 +55,14 @@ final class AudioCaptureClient {
     /// Invoked (reverse channel) when the helper pushes a changed alarm set (§6.2).
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
 
+    /// Invoked (reverse channel) on the first non-zero sample on a track: (track, helper session id).
+    /// The helper's real-audio evidence (§6.2) — clears the stale CONTENT alarms a replaced helper left.
+    var onRealAudio: (@Sendable (CaptureTrack, String) -> Void)?
+
+    /// Invoked (reverse channel) on a successful write: (helper session id). The helper's
+    /// write-succeeded evidence (§6.2) — clears a stale `diskWriteFailure` a replaced helper left.
+    var onWriteSucceeded: (@Sendable (String) -> Void)?
+
     /// The chunk session id of the most recent `start` (L11 resets the diagnostics ring only when it changes).
     private(set) var currentSessionId: String?
 
@@ -118,6 +126,14 @@ final class AudioCaptureClient {
         conn.resume()
         Logger.audio.debug("XPC connection established")
         connection = conn
+        // Pull the helper's alarm state on every connect (§6.2): a re-attached or restarted helper's
+        // state reaches the app without waiting for its next push. The body runs after `connect()`
+        // has returned; a connection already replaced by then (an instant invalidation) is skipped,
+        // so this can never become a reconnect loop.
+        Task { @MainActor [weak self] in
+            guard let self, self.connection === conn, let s = await self.captureStatus() else { return }
+            self.onAlarmsChanged?(s)
+        }
     }
 
     func record(
@@ -484,6 +500,20 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
             return
         }
         Task { @MainActor [weak client] in client?.onAlarmsChanged?(decoded) }
+    }
+
+    // Explicitly `@objc`: they compile before the protocol declares them and satisfy its
+    // `@objc optional` requirements by selector once it does.
+    @objc func captureDidDeliverRealAudio(track: String, helperSessionId: String) {
+        guard let captureTrack = CaptureTrack(rawValue: track) else {
+            Logger.audio.warning("Helper reported real audio on an unknown track — ignored")
+            return
+        }
+        Task { @MainActor [weak client] in client?.onRealAudio?(captureTrack, helperSessionId) }
+    }
+
+    @objc func captureDidWriteSuccessfully(helperSessionId: String) {
+        Task { @MainActor [weak client] in client?.onWriteSucceeded?(helperSessionId) }
     }
 }
 

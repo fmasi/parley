@@ -56,6 +56,9 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     case diskWriteFailure
     case diskLow, rotationFailed, sessionWriteFailed, helperUnresponsive, crashProtectionOff
     case recordingResumedWithGap, recordingStopped, recordingFolderUnavailable
+    /// App-owned: the helper reported alarm kinds this build does not know (a newer helper). One
+    /// generic alarm, so they are never silently dropped; cleared when a snapshot no longer has any.
+    case unknownHelperAlarm
 
     public var isHelperOwned: Bool { disprovedBy != nil }
 

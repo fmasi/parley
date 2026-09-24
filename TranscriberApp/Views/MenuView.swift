@@ -84,6 +84,9 @@ struct MenuView: View {
             },
             onSystemAudioPermissionDenied: {
                 Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
+            },
+            presentAlarmsUI: { alarms, new in
+                CaptureAlarmWindowController.shared.present(alarms, newlyRaised: new, appState: appState)
             }
         ))
     }
@@ -232,15 +235,17 @@ struct MenuView: View {
 
     @ViewBuilder
     private var alertBanners: some View {
-        // Sticky (#220): can't be dismissed or overwritten while the other side isn't being captured.
-        if appState.isRecording && appState.remoteAudioNotCaptured {
-            MenuActionRow(
-                icon: "speaker.slash.fill",
-                title: "The other side may not be recorded",
-                subtitle: appState.remoteAudioProblem ?? "Click to check System Audio Recording"
-            ) {
+        // Sticky alarm rows (§6.3, #220): one per active alarm, never dismissible here — they clear only
+        // when the condition does (past events are acknowledged in the alarm window).
+        ForEach(appState.alarms.sorted, id: \.kind) { alarm in
+            MenuActionRow(icon: alarm.kind.symbolName, title: alarm.kind.headline, subtitle: alarm.message) {
                 dismissPanel()
-                Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }
+                if alarm.kind.track == .system {
+                    Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }
+                } else {
+                    CaptureAlarmWindowController.shared.present(
+                        appState.alarms.sorted, newlyRaised: [], appState: appState, userRequest: true)
+                }
             }
         }
         if let critical = appState.criticalError {

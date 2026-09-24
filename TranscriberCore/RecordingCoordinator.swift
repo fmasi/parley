@@ -29,6 +29,19 @@ public final class RecordingCoordinator {
     /// The helper found the tap running without its System Audio Recording permission (#220): the
     /// app opens its repair window. Injected because Core can't present AppKit windows.
     private let onSystemAudioPermissionDenied: @MainActor () -> Void
+    /// Present the alarm UI (floating window + notification): (every active alarm, the kinds that are
+    /// new since the last presentation). Called only when something is due (the per-kind notify floor).
+    private let presentAlarmsUI: @MainActor ([ActiveAlarm], [AlarmKind]) -> Void
+
+    // MARK: - Alarm state (§6)
+
+    /// How often the helper's alarm state is pulled while recording (§6.2). Tests shorten it.
+    var statusPollInterval: Duration = .seconds(5)
+    private var statusPoll: Task<Void, Never>?
+    /// Consecutive `captureStatus` polls that got no answer; 3 raise `helperUnresponsive` (§8.13).
+    private var missedPolls = 0
+    /// The kinds the last `presentAlarms` saw, so a kind is "new" only once per appearance.
+    private var presentedKinds: Set<AlarmKind> = []
 
     // MARK: - Lifecycle state (previously `@State` in MenuView)
 
@@ -75,9 +88,11 @@ public final class RecordingCoordinator {
         notifyCritical: @escaping @MainActor (String, String) -> Void,
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
         onSystemAudioPermissionDenied: @escaping @MainActor () -> Void = {},
+        presentAlarmsUI: @escaping @MainActor ([ActiveAlarm], [AlarmKind]) -> Void = { _, _ in },
         recordingMicrophone: RecordingMicrophone = .shared
     ) {
         self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
+        self.presentAlarmsUI = presentAlarmsUI
         self.recordingMicrophone = recordingMicrophone
         self.appState = appState
         self.captureClient = captureClient
@@ -215,56 +230,8 @@ public final class RecordingCoordinator {
         let outputDir = URL(fileURLWithPath: config.recordingDirectory)
             .appendingPathComponent(naming.dayDir)
 
-        // `[weak self]` replaces MenuView's old strong struct-copy capture: the coordinator retains
-        // the capture client, so a strong capture here would cycle coordinator → captureClient →
-        // closure → coordinator. If the coordinator were ever gone when one fires, the on-disk
-        // sentinel launch recovery (TranscriberApp.recoverIfNeeded) is the backstop.
-        captureClient.onServiceCrash = { [weak self] in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                await self.handleXPCCrash()
-            }
-        }
-        // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
-        // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
-        // — both keep recording silently. Only a fatal give-up escalates.
-        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
-        // This supersedes any `mirrorMicSwitches` handler left by a re-attached recording (Flow A/B):
-        // the coordinator owns the handler for the recordings it starts.
-        captureClient.onMicDeviceChanged = { [weak self] deviceId in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                self.setHelperMic(deviceId)
-            }
-        }
-        captureClient.onFatalFailure = { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                await self.handleXPCCrash()
-            }
-        }
-        // This was previously only wired by TranscriberApp's `setupCrashHandler`, which runs solely
-        // on the launch-time crash-recovery re-attach paths (Flow A/B) — a fresh recording started
-        // here never received it, so the exact-zero-mic, liveness-gap, and write-failure banners
-        // this PR adds could never appear during a normal recording. The recording is never stopped
-        // by this. Also set by TranscriberApp's setupCrashHandler for the re-attach paths above —
-        // keep both in sync if this wiring changes.
-        // Previously wired only on the relaunch re-attach paths (TranscriberApp.setupCrashHandler), so a
-        // normal recording whose tap rebuild failed showed nothing at all (#220 council round 2).
-        captureClient.onSystemAudioUnrecoverable = { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                self.appState.noteSystemAudioLost(message: "Remote audio couldn’t be recovered — only your microphone is recording.")
-            }
-        }
-        captureClient.onQualityAnomaly = { [weak self] kind, message in
-            Task { @MainActor in
-                guard let self, self.appState.isRecording else { return }
-                if self.appState.noteQualityAnomaly(kind: kind, message: message) {
-                    self.onSystemAudioPermissionDenied()
-                }
-            }
-        }
+        // Wired before the helper starts, so nothing it reports in its first seconds is lost.
+        wireCaptureCallbacks()
 
         do {
             let sentinel = RecordingSentinel(
@@ -298,6 +265,7 @@ public final class RecordingCoordinator {
             transcriptionRunner.startChunkRotation()
 
             appState.phase = .recording(since: Date())
+            startStatusPoll()
             xpcRetryCount = 0
             lastCrashAt = nil
             recoveryInFlight = false
@@ -425,6 +393,7 @@ public final class RecordingCoordinator {
         }
         stopInFlight = true
         defer { stopInFlight = false }
+        stopStatusPoll()
         Logger.state.info("Recording stopped")
         do {
             let sentinel = RecordingSentinel.read(directory: sentinelDirectory)
@@ -560,6 +529,144 @@ public final class RecordingCoordinator {
         }
     }
 
+    // MARK: - Capture callbacks + alarms (§6)
+
+    /// Every `captureClient` closure, in one place: set by `startRecording` before the helper starts
+    /// and again by `handleXPCCrash` before the restart, so a restarted helper reports into the same
+    /// closures. `[weak self]`: the coordinator retains the capture client, so a strong capture would
+    /// cycle coordinator → captureClient → closure → coordinator.
+    private func wireCaptureCallbacks() {
+        captureClient.onServiceCrash = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                await self.handleXPCCrash()
+            }
+        }
+        // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
+        // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
+        // — both keep recording silently. Only a fatal give-up escalates.
+        // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner).
+        // This supersedes any `mirrorMicSwitches` handler left by a re-attached recording (Flow A/B):
+        // the coordinator owns the handler for the recordings it starts.
+        captureClient.onMicDeviceChanged = { [weak self] deviceId in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.setHelperMic(deviceId)
+            }
+        }
+        captureClient.onFatalFailure = { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                await self.handleXPCCrash()
+            }
+        }
+        // A transient notice only: the sticky state is the helper's `remoteRecoveryFailed` alarm.
+        captureClient.onSystemAudioUnrecoverable = { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
+            }
+        }
+        // #193/#196: a live capture-quality anomaly, surfaced while there is still time to react. A
+        // transient notice: the repair window opens from `presentAlarms`, on the helper's alarm.
+        captureClient.onQualityAnomaly = { [weak self] kind, message in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.noteQualityAnomaly(kind: kind, message: message)
+            }
+        }
+        captureClient.onAlarmsChanged = { [weak self] snapshot in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.applyHelperSnapshot(snapshot)
+                self.presentAlarms()
+            }
+        }
+        captureClient.onFirstFrames = { [weak self] track, helperSessionId in
+            Task { @MainActor in self?.noteFirstFrames(track: track, helperSessionId: helperSessionId) }
+        }
+        captureClient.onRealAudio = { [weak self] track, helperSessionId in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.noteRealAudio(track: track, helperSessionId: helperSessionId)
+                self.presentAlarms()
+            }
+        }
+        captureClient.onWriteSucceeded = { [weak self] helperSessionId in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                self.appState.noteWriteSucceeded(helperSessionId: helperSessionId)
+                self.presentAlarms()
+            }
+        }
+    }
+
+    /// Pull the helper's alarm state every `statusPollInterval` while recording (§6.2). Holds the
+    /// coordinator only while polling, never across the sleep.
+    private func startStatusPoll() {
+        statusPoll?.cancel()
+        missedPolls = 0
+        // The previous recording's alarms went with it, unpresented: the same kind in this one is new.
+        presentedKinds.formIntersection(appState.activeAlarms.keys)
+        statusPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let interval = self?.statusPollInterval else { return }
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self, self.appState.isRecording else { return }
+                await self.pollHelperStatus()
+            }
+        }
+    }
+
+    private func stopStatusPoll() {
+        statusPoll?.cancel()
+        statusPoll = nil
+        missedPolls = 0
+    }
+
+    /// One pull. Three unanswered in a row raise `helperUnresponsive`; any answer clears it (§8.13).
+    func pollHelperStatus() async {
+        let snapshot = await captureClient.captureStatus()
+        // The recording may have ended during the (up to 3 s) wait: its alarms went with it.
+        guard appState.isRecording else { return }
+        if let snapshot {
+            missedPolls = 0
+            appState.clearAppAlarm(.helperUnresponsive)
+            appState.applyHelperSnapshot(snapshot)
+        } else {
+            missedPolls += 1
+            if missedPolls >= 3 {
+                appState.raiseAppAlarm(.helperUnresponsive, message: "The capture helper stopped answering. The recording may have stopped — check the audio files after you stop.")
+            }
+        }
+        presentAlarms()
+    }
+
+    /// Rows are immediate; the UI (window + notification) follows the per-kind notify floor (F2):
+    /// a kind is presented only when `AlarmRealarmPolicy.shouldRenotify` says so — at once if it has
+    /// not notified within 2 min, otherwise at the next 2-minute mark. Acknowledgeable kinds are
+    /// raised with no floor and present at once. The permission kinds open the repair window when
+    /// they are new (it has its own snooze).
+    func presentAlarms(now: Date = Date()) {
+        let active = appState.alarms.sorted
+        let newKinds = active.map(\.kind).filter { !presentedKinds.contains($0) }
+        presentedKinds = Set(active.map(\.kind))
+        if newKinds.contains(.remotePermissionDenied) || newKinds.contains(.remoteCantConfirm) { onSystemAudioPermissionDenied() }
+        let due = active.filter { AlarmRealarmPolicy.shouldRenotify($0, now: now) }
+        guard !due.isEmpty else { return }
+        for alarm in due { appState.markNotified(alarm.kind, now: now) }
+        let dueKinds = Set(due.map(\.kind))
+        presentAlarmsUI(active, newKinds.filter { dueKinds.contains($0) })
+    }
+
+    /// L2: the new helper's frames clear the previous helper's DELIVERY alarms on that track. L4 extends
+    /// this same method with the recovery confirmation ("Recording Resumed").
+    func noteFirstFrames(track: CaptureTrack, helperSessionId: String) {
+        guard appState.isRecording else { return }
+        appState.noteFirstFrames(track: track, helperSessionId: helperSessionId)
+        presentAlarms()
+    }
+
     // MARK: - Crash recovery
 
     /// Internal (not private) so the crash-recovery decision paths are reachable from unit tests.
@@ -588,6 +695,7 @@ public final class RecordingCoordinator {
             Logger.state.error("No sentinel found during crash recovery")
             appState.criticalError = "Recording failed — no recovery data available."
             appState.phase = .idle
+            stopStatusPoll()
             notifyCritical(
                 "Recording Failed",
                 "Microphone capture crashed. No recovery data found."
@@ -603,6 +711,7 @@ public final class RecordingCoordinator {
             await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: true)
             appState.criticalError = "Recording failed — microphone capture crashed repeatedly. Audio recorded before the failure has been saved."
             appState.phase = .idle
+            stopStatusPoll()
             RecordingSentinel.delete(directory: sentinelDirectory)
             notifyCritical(
                 "Recording Failed",
@@ -641,6 +750,8 @@ public final class RecordingCoordinator {
             // The restart resumes on this mic: mark it before the helper opens it (#192). If the restart
             // fails, the defer above releases it once the phase has gone idle.
             setHelperMic(sentinel.micDeviceUID)
+            // The restarted helper must report into the same closures (scan B P0.4(5)).
+            wireCaptureCallbacks()
             try await captureClient.start(
                 outputDirectory: outputDir,
                 baseName: baseName,
@@ -660,9 +771,8 @@ public final class RecordingCoordinator {
                 return
             }
             xpcRetryCount = 0
-            // A fresh helper starts with a fresh permission guard: it re-reports within seconds if the
-            // other side still isn't being captured, but it can never "restore" the old helper's alarm.
-            appState.clearRemoteAudioProblem()
+            // The old helper's alarms stay: the new helper's snapshot turns them stale, and only its
+            // evidence on that track clears each one (§6.2).
             appState.interruptionWarning = "Recording briefly interrupted. Resuming."
             notify(
                 "Recording Resumed",
@@ -675,6 +785,7 @@ public final class RecordingCoordinator {
             await finalizeAbandonedSession(sentinel: sentinel, reingestOrphan: false)
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Audio recorded before the failure has been saved."
             appState.phase = .idle
+            stopStatusPoll()
             RecordingSentinel.delete(directory: sentinelDirectory)
             notifyCritical(
                 "Recording Failed",

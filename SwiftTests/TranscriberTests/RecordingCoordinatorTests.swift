@@ -16,6 +16,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var onRestartInPlace: (@Sendable () -> Void)?
     var onFirstFrames: (@Sendable (CaptureTrack, String) -> Void)?
     var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
+    var onRealAudio: (@Sendable (CaptureTrack, String) -> Void)?
+    var onWriteSucceeded: (@Sendable (String) -> Void)?
 
     struct StartCall: Equatable {
         let outputDirectory: URL
@@ -373,82 +375,153 @@ private struct Harness {
         #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
     }
 
-    // MARK: - #220: remote audio not captured (PR #222 review)
+    // MARK: - Alarms (§6)
 
-    /// The tap running without its permission: sticky state, the banner text, and the repair window.
-    @Test func permissionDeniedAnomalySetsStickyStateAndOpensRepair() async throws {
+    private func snapshot(_ id: String, _ sequence: UInt64, _ kinds: [AlarmKind]) -> CaptureStatusSnapshot {
+        CaptureStatusSnapshot(helperSessionId: id, sequence: sequence, isCapturing: true,
+                              alarms: kinds.map { ActiveAlarm(kind: $0, raisedAt: Date(), lastNotifiedAt: nil, message: $0.rawValue, episode: 1) }, tracks: [])
+    }
+
+    /// The tap running without its permission: the helper's alarm reaches the app, sticks, and opens repair.
+    @Test func helperPermissionAlarmSticksAndOpensRepair() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
-
-        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
         for _ in 0..<50 { await Task.yield() }
-
+        #expect(h.appState.activeAlarms[.remotePermissionDenied] != nil)
         #expect(h.appState.remoteAudioNotCaptured)
-        #expect(h.appState.remoteAudioProblem == "denied")
+        #expect(h.repairRequests.value == 1)
+        h.client.onAlarmsChanged?(snapshot("1000-0", 2, [.remotePermissionDenied]))   // the next poll: no second repair window
+        for _ in 0..<50 { await Task.yield() }
         #expect(h.repairRequests.value == 1)
     }
 
-    @Test func unrelatedAnomalyDoesNotOpenRepair() async throws {
+    /// The end of a recording clears its alarms without a presentation; the same kind in the NEXT
+    /// recording is new again and reopens repair.
+    @Test func aPermissionAlarmInTheNextRecordingOpensRepairAgain() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.repairRequests.value == 1)
 
+        h.appState.phase = .idle
+        await h.coordinator.startRecording(sessionName: "Second", microphoneDeviceId: "mic-1")
+        #expect(h.appState.isRecording)
+        h.client.onAlarmsChanged?(snapshot("1000-1", 1, [.remotePermissionDenied]))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.repairRequests.value == 2)
+    }
+
+    @Test func unrelatedAnomalyIsATransientNoticeOnly() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onQualityAnomaly?("exactZeroMic", "mic silent")
         for _ in 0..<50 { await Task.yield() }
-
-        #expect(!h.appState.remoteAudioNotCaptured)
-        #expect(h.repairRequests.value == 0)
+        #expect(h.appState.interruptionWarning == "mic silent")
+        #expect(!h.appState.remoteAudioNotCaptured && h.repairRequests.value == 0)
     }
 
-    @Test func restoredAnomalyClearsTheStickyState() async throws {
+    @Test func aNewerSnapshotWithoutTheKindClearsTheAlarm() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
-        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
         for _ in 0..<50 { await Task.yield() }
-
-        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionRestored.rawValue, "back")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 2, []))
         for _ in 0..<50 { await Task.yield() }
-
         #expect(!h.appState.remoteAudioNotCaptured)
-        #expect(h.appState.interruptionWarning == "back")
     }
 
-    /// A failed tap rebuild used to be wired only on the relaunch re-attach paths, so a normal
-    /// recording showed nothing at all.
-    @Test func systemAudioUnrecoverableSetsStickyStateInANormalRecording() async throws {
+    /// The SCK give-up used to be `noteSystemAudioLost`; the sticky part is now the helper's alarm
+    /// (`remoteRecoveryFailed`, H2) and the app keeps only the transient notice (scan D2).
+    @Test func systemAudioUnrecoverableIsATransientNoticeAndTheHelperAlarmIsSticky() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
-
         h.client.onSystemAudioUnrecoverable?("tap rebuild failed")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remoteRecoveryFailed]))
         for _ in 0..<50 { await Task.yield() }
-
-        #expect(h.appState.remoteAudioNotCaptured)
         #expect(h.appState.interruptionWarning?.contains("only your microphone") == true)
+        #expect(h.appState.remoteAudioNotCaptured)
     }
 
-    @Test func staleReportAfterTheRecordingEndedIsIgnored() async throws {
+    @Test func staleSnapshotAfterTheRecordingEndedIsIgnored() async throws {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.appState.phase = .idle
-
-        h.client.onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, "denied")
+        h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
         for _ in 0..<50 { await Task.yield() }
-
-        #expect(!h.appState.remoteAudioNotCaptured)
-        #expect(h.repairRequests.value == 0)
+        #expect(h.appState.activeAlarms.isEmpty && h.repairRequests.value == 0)
     }
 
-    /// A crash-restarted helper starts with a fresh permission guard, so it can never "restore" the old
-    /// helper's alarm; the restart clears it and the new helper re-reports if the problem persists.
-    @Test func crashRestartClearsTheStickyState() async throws {
+    /// §6.2 (scan C6, F2 ruling): a crash-restarted helper starts with an empty registry; the app keeps
+    /// the old helper's alarms until the new helper's EVIDENCE disproves them — and a permission alarm
+    /// is a content kind, so first frames are not enough. The restart re-wires the callbacks (scan B P0.4(5)).
+    @Test func crashRestartKeepsTheStickyStateUntilEvidenceArrives() async throws {
         let h = try Harness()
         _ = try h.writeSentinel()
         h.appState.phase = .recording(since: Date())
-        h.appState.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        h.appState.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
 
         await h.coordinator.handleXPCCrash()
-
         #expect(h.client.startCalls.count == 1)
+        #expect(h.appState.remoteAudioNotCaptured, "still true after the restart")
+
+        h.client.onAlarmsChanged?(snapshot("2000-0", 1, []))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.appState.remoteAudioNotCaptured, "the new helper's empty registry proves nothing yet")
+
+        h.client.onFirstFrames?(.system, "2000-0")
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.appState.remoteAudioNotCaptured, "frames on time prove nothing about a denied tap: they are zeros")
+
+        h.client.onRealAudio?(.system, "2000-0")
+        for _ in 0..<50 { await Task.yield() }
         #expect(!h.appState.remoteAudioNotCaptured)
+    }
+
+    @Test func threeMissedPollsRaiseHelperUnresponsiveAndAnAnswerClearsIt() async throws {
+        let h = try Harness()
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        h.client.statusSnapshot = nil
+        await h.coordinator.pollHelperStatus(); await h.coordinator.pollHelperStatus()
+        #expect(h.appState.activeAlarms[.helperUnresponsive] == nil)
+        await h.coordinator.pollHelperStatus()
+        #expect(h.appState.activeAlarms[.helperUnresponsive] != nil)
+        h.client.statusSnapshot = snapshot("1000-0", 1, [])
+        await h.coordinator.pollHelperStatus()
+        #expect(h.appState.activeAlarms[.helperUnresponsive] == nil)
+    }
+
+    /// The presenter follows the per-kind notify floor (F2 rounds 1–2): a kind notifies at once only
+    /// if it has not notified within 2 min — across episodes and clears; the row itself is immediate.
+    @Test func presentAlarmsHonoursThePerKindNotifyFloor() async throws {
+        let h = try Harness()
+        let shown = Harness.Box<[(alarms: [ActiveAlarm], new: [AlarmKind])]>([])
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { alarms, new in shown.value.append((alarms, new)) }, recordingMicrophone: h.recordingMic)
+        h.appState.phase = .recording(since: Date())
+        let t0 = Date()
+        h.appState.raiseAppAlarm(.diskLow, message: "low", now: t0)
+        coordinator.presentAlarms(now: t0)
+        #expect(shown.value.count == 1 && shown.value[0].new == [.diskLow])
+        coordinator.presentAlarms(now: t0 + 60)
+        #expect(shown.value.count == 1, "nothing new, not due")
+        coordinator.presentAlarms(now: t0 + 121)
+        #expect(shown.value.count == 2 && shown.value[1].new.isEmpty, "re-notify: same alarm, no new kinds")
+
+        h.appState.clearAppAlarm(.diskLow)
+        h.appState.raiseAppAlarm(.diskLow, message: "low again", now: t0 + 150)
+        coordinator.presentAlarms(now: t0 + 150)
+        #expect(shown.value.count == 2, "a new episode inside the floor: the row is up, nothing notifies")
+        #expect(h.appState.activeAlarms[.diskLow] != nil)
+        coordinator.presentAlarms(now: t0 + 241)
+        #expect(shown.value.count == 3)
+
+        h.appState.raiseAppAlarm(.recordingStopped, message: "stopped", now: t0 + 242)
+        coordinator.presentAlarms(now: t0 + 242)
+        #expect(shown.value.count == 4 && shown.value[3].new == [.recordingStopped], "acknowledgeable kinds are exempt from the floor")
     }
 
     @Test func failedStartReleasesTheRecordingMic() async throws {

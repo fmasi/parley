@@ -236,76 +236,114 @@ struct AppStateTests {
         #expect(state.criticalError == nil)
     }
 
-    // MARK: - #220: remote audio not captured is sticky
+    // MARK: - Alarms (§6)
 
-    @Test func permissionDenialSetsStickyStateAndAsksForRepair() {
+    /// Ordered helper ids ("<ms>-<resets>") and increasing sequences: anything else is ignored by the registry.
+    private func snapshot(_ id: String, _ sequence: UInt64, _ kinds: [AlarmKind]) -> CaptureStatusSnapshot {
+        CaptureStatusSnapshot(helperSessionId: id, sequence: sequence, isCapturing: true,
+                              alarms: kinds.map { ActiveAlarm(kind: $0, raisedAt: Date(), lastNotifiedAt: nil, message: $0.rawValue, episode: 1) }, tracks: [])
+    }
+
+    @Test func helperSnapshotPopulatesActiveAlarmsAndTheStickyRemoteFlag() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
+        #expect(state.activeAlarms[.remotePermissionDenied] != nil)
+        #expect(state.remoteAudioNotCaptured)
+        #expect(state.hasMenuAlerts)
+        #expect(state.menuBarIcon == "exclamationmark.bubble")
+    }
+
+    @Test func aNewerSnapshotWithoutTheKindClearsIt() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
+        state.applyHelperSnapshot(snapshot("1000-0", 2, []))
+        #expect(!state.remoteAudioNotCaptured && state.activeAlarms.isEmpty)
+    }
+
+    /// The single-slot banner can be dismissed or overwritten by any later notice; the alarm cannot.
+    @Test func benignNoticeNeverTouchesAnAlarm() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.raiseAppAlarm(.rotationFailed, message: "rotation failed")
+        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.livenessGap.rawValue, message: "mic gap"))
+        state.interruptionWarning = nil   // user dismissed the banner
+        #expect(state.activeAlarms[.rotationFailed] != nil)
+        #expect(state.hasMenuAlerts)
+    }
+
+    @Test func onlyPermissionKindsAskForRepair() {
         let state = AppState()
         state.phase = .recording(since: Date())
         #expect(state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied"))
-        #expect(state.remoteAudioNotCaptured)
-        #expect(state.menuBarIcon == "exclamationmark.bubble")
-    }
-
-    /// The single-slot banner can be dismissed or overwritten by any later anomaly; the sticky state can't.
-    @Test func unrelatedAnomalyDoesNotClearStickyState() {
-        let state = AppState()
-        state.phase = .recording(since: Date())
-        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
-        #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.livenessGap.rawValue, message: "mic gap"))
-        state.interruptionWarning = nil   // user dismissed the banner
-        #expect(state.remoteAudioNotCaptured)
-        #expect(state.menuBarIcon == "exclamationmark.bubble")
-    }
-
-    @Test func restoredAudioClearsStickyState() {
-        let state = AppState()
-        state.phase = .recording(since: Date())
-        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        #expect(state.interruptionWarning == "denied")
         #expect(!state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionRestored.rawValue, message: "back"))
-        #expect(!state.remoteAudioNotCaptured)
-        // The user is told it's fixed, not just silently returned to normal.
         #expect(state.interruptionWarning == "back")
     }
 
-    @Test func stickyStateEndsWithTheRecording() {
+    @Test func recordingEndClearsPerRecordingAlarmsButNotCrashProtection() {
         let state = AppState()
+        state.raiseAppAlarm(.crashProtectionOff, message: "off")
         state.phase = .recording(since: Date())
-        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
-        state.phase = .transcribing(progress: "")
-        #expect(!state.remoteAudioNotCaptured)
+        state.raiseAppAlarm(.diskLow, message: "low")
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.micDigitalSilence]))
+        state.phase = .idle
+        #expect(state.activeAlarms[.diskLow] == nil && state.activeAlarms[.micDigitalSilence] == nil)
+        #expect(state.activeAlarms[.crashProtectionOff] != nil)
+        #expect(state.crashProtectionOff && state.hasMenuAlerts)
+        #expect(state.menuBarIcon == "exclamationmark.triangle")
     }
 
-    /// A failed tap rebuild loses the other side just as surely as a denial.
-    @Test func systemAudioLostIsStickyWithItsMessage() {
+    @Test func acknowledgeClearsOnlyAcknowledgeableKinds() {
         let state = AppState()
         state.phase = .recording(since: Date())
-        state.noteSystemAudioLost(message: "lost")
-        state.interruptionWarning = nil
+        state.raiseAppAlarm(.recordingResumedWithGap, message: "gap")
+        state.raiseAppAlarm(.diskLow, message: "low")
+        state.acknowledge(.recordingResumedWithGap)
+        state.acknowledge(.diskLow)
+        #expect(state.activeAlarms[.recordingResumedWithGap] == nil)
+        #expect(state.activeAlarms[.diskLow] != nil)
+    }
+
+    /// §6.2 (F2 ruling): a restarted helper's empty snapshot keeps the old alarms until ITS evidence
+    /// disproves each one — first frames for a delivery kind, real audio for a content kind.
+    @Test func aNewHelperKeepsAlarmsUntilItsEvidenceOnThatTrack() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.remoteRecoveryFailed, .micDigitalSilence]))
+        state.applyHelperSnapshot(snapshot("2000-0", 1, []))
         #expect(state.remoteAudioNotCaptured)
-        #expect(state.remoteAudioProblem == "lost")
+        state.noteFirstFrames(track: .system, helperSessionId: "2000-0")
+        #expect(!state.remoteAudioNotCaptured && state.activeAlarms[.micDigitalSilence] != nil)
+        state.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
+        #expect(state.activeAlarms[.micDigitalSilence] != nil, "first frames cannot disprove digital silence")
+        state.noteRealAudio(track: .mic, helperSessionId: "2000-0")
+        #expect(state.activeAlarms[.micDigitalSilence] == nil)
     }
 
-    /// A crash-restarted helper can't "restore" the old helper's alarm, so the restart clears it.
-    @Test func clearingRemovesStickyStateAndMessage() {
+    @Test func aStaleDiskWriteFailureClearsOnTheNewHelpersFirstWrite() {
         let state = AppState()
         state.phase = .recording(since: Date())
-        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
-        state.clearRemoteAudioProblem()
-        #expect(!state.remoteAudioNotCaptured)
-        #expect(state.remoteAudioProblem == nil)
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.diskWriteFailure]))
+        state.applyHelperSnapshot(snapshot("2000-0", 1, []))
+        #expect(state.activeAlarms[.diskWriteFailure] != nil)
+        state.noteWriteSucceeded(helperSessionId: "2000-0")
+        #expect(state.activeAlarms[.diskWriteFailure] == nil)
     }
 
-    // MARK: - #222 review: the menu must keep showing the sticky row
-
-    /// The menu renders its alert area only while `hasMenuAlerts`. The sticky row lives in that area,
-    /// so dismissing the dismissible banner must not hide it.
-    @Test func stickyRowSurvivesDismissingTheBanner() {
+    /// A helper newer than this app: its unknown kinds are not silently dropped (F2 round 1 decode).
+    @Test func unknownHelperKindsRaiseAGenericAlarmUntilTheyAreGone() throws {
         let state = AppState()
         state.phase = .recording(since: Date())
-        state.noteQualityAnomaly(kind: CaptureEventKind.systemAudioPermissionDenied.rawValue, message: "denied")
+        let json = #"{"helperSessionId":"1000-0","sequence":1,"isCapturing":true,"tracks":[],"alarms":[{"kind":"somethingNew","raisedAt":"2026-09-24T10:00:00.000Z","message":"m","episode":1}]}"#
+        let decoded = try #require(CaptureStatusSnapshot.decode(Data(json.utf8)))
+        #expect(decoded.unknownAlarmKinds == ["somethingNew"])
+        state.applyHelperSnapshot(decoded)
+        #expect(state.activeAlarms[.unknownHelperAlarm]?.message.contains("somethingNew") == true)
         #expect(state.hasMenuAlerts)
-        state.interruptionWarning = nil   // user taps × on the yellow banner
-        #expect(state.hasMenuAlerts)
+        state.applyHelperSnapshot(snapshot("1000-0", 2, []))
+        #expect(state.activeAlarms[.unknownHelperAlarm] == nil)
     }
 
     @Test func noAlertsWhenNothingIsWrong() {
@@ -316,11 +354,5 @@ struct AppStateTests {
         let state = AppState()
         state.interruptionWarning = "device changed"
         #expect(state.hasMenuAlerts)
-    }
-
-    @Test func stickyStateOutsideARecordingShowsNoRow() {
-        let state = AppState()
-        state.remoteAudioNotCaptured = true   // stale flag after the recording ended
-        #expect(!state.hasMenuAlerts)
     }
 }
