@@ -21,8 +21,20 @@ public enum DiskSpaceCheck {
     }
 
     public static func freeBytes(at url: URL) -> Int? {
-        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return values?.volumeAvailableCapacityForImportantUsage.map { Int($0) }
+        freeBytes(at: url) { url in
+            let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+            return (important: values?.volumeAvailableCapacityForImportantUsage.map { Int($0) }, plain: values?.volumeAvailableCapacity)
+        }
+    }
+
+    /// Review fix 5: `volumeAvailableCapacityForImportantUsage` reads 0 on non-APFS volumes (exFAT,
+    /// HFS+) — a 0 there is not "no space", it's "this key isn't meaningful here". Falls back to
+    /// `.volumeAvailableCapacityKey`; nil only when neither is available. The `resolve` seam makes
+    /// the fallback testable without a real non-APFS volume.
+    static func freeBytes(at url: URL, resolve: (URL) -> (important: Int?, plain: Int?)) -> Int? {
+        let (important, plain) = resolve(url)
+        if let important, important > 0 { return important }
+        return plain
     }
 
     public static func message(freeBytes: Int, chunkMinutes: Int) -> String {
