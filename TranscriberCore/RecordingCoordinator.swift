@@ -293,6 +293,7 @@ public final class RecordingCoordinator {
             lastMicAlarmAt = nil
         } catch {
             clearHelperMic()
+            captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
             RecordingSentinel.delete(directory: sentinelDirectory)
             appState.errorMessage = error.localizedDescription
             notify("Recording Failed", error.localizedDescription)
@@ -714,6 +715,7 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — no recovery data available."
             appState.phase = .idle
             stopStatusPoll()
+            captureClient.captureEnded()
             notifyCritical(
                 "Recording Failed",
                 "Microphone capture crashed. No recovery data found."
@@ -730,6 +732,7 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — microphone capture crashed repeatedly. Audio recorded before the failure has been saved."
             appState.phase = .idle
             stopStatusPoll()
+            captureClient.captureEnded()
             RecordingSentinel.delete(directory: sentinelDirectory)
             notifyCritical(
                 "Recording Failed",
@@ -804,6 +807,7 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Audio recorded before the failure has been saved."
             appState.phase = .idle
             stopStatusPoll()
+            captureClient.captureEnded()
             RecordingSentinel.delete(directory: sentinelDirectory)
             notifyCritical(
                 "Recording Failed",
@@ -829,6 +833,7 @@ public final class RecordingCoordinator {
         if sentinel.startedAt < bootDate {
             Logger.state.info("Stale sentinel from before last boot — cleaning up")
             RecordingSentinel.delete(directory: sentinelDirectory)
+            captureClient.captureEnded()
             return
         }
 
@@ -838,6 +843,7 @@ public final class RecordingCoordinator {
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
             captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
+            captureClient.captureReattached()   // no start() in this process: arm crash detection (C1)
             wireCaptureCallbacks()
             startStatusPoll()
             // Restore the helper's alarm state now: the pull on connect ran before anything listened.
@@ -884,6 +890,7 @@ public final class RecordingCoordinator {
                 }
                 RecordingSentinel.delete(directory: sentinelDirectory)
                 appState.phase = .idle
+                captureClient.captureEnded()
                 if let jsonPath = recoveredJsonPath {
                     presentTranscript(jsonPath, config)
                 }
@@ -892,6 +899,7 @@ public final class RecordingCoordinator {
                 appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
                 RecordingSentinel.delete(directory: sentinelDirectory)
                 appState.phase = .idle
+                captureClient.captureEnded()
                 notifyCritical(
                     "Recovery Failed",
                     "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
@@ -908,6 +916,7 @@ public final class RecordingCoordinator {
         guard sysSize > 44 else {
             Logger.state.info("No usable audio files — cleaning up sentinel")
             RecordingSentinel.delete(directory: sentinelDirectory)
+            captureClient.captureEnded()
             return
         }
 
@@ -940,6 +949,7 @@ public final class RecordingCoordinator {
             Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
             appState.criticalError = "Recording failed — could not restart after crash recovery."
             RecordingSentinel.delete(directory: sentinelDirectory)
+            captureClient.captureEnded()
             notifyCritical(
                 "Recording Failed",
                 "Crash recovery attempted but could not restart recording."

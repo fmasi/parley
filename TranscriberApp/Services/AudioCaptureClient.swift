@@ -9,7 +9,9 @@ import os
 @MainActor
 final class AudioCaptureClient {
     private var connection: NSXPCConnection?
-    private var crashHandlerFired = false
+    /// Crash detection, armed per capture generation (C1, L-N1): an idle-exit of the helper between
+    /// recordings is not a crash, and each capture escalates at most once.
+    private var interruptionPolicy = XPCInterruptionPolicy()
     private var reverseChannel: ReverseChannel?
 
     /// Anomaly-gated diagnostic ring (app side). Merges helper-origin events drained over XPC with
@@ -67,7 +69,6 @@ final class AudioCaptureClient {
     private(set) var currentSessionId: String?
 
     func connect() {
-        crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
         conn.remoteObjectInterface = NSXPCInterface(
             with: AudioCaptureProtocol.self
@@ -80,46 +81,62 @@ final class AudioCaptureClient {
 
         conn.interruptionHandler = { [weak self] in
             Task { @MainActor in
-                guard let self, !self.crashHandlerFired else { return }
+                guard let self else { return }
                 // Bind the connection identity so we can detect a concurrent invalidation/recovery
                 // cycle that swaps the connection out from under us while we await below (council F7).
                 let boundConnection = self.connection
                 // An XPC interruption is only a "crash" if a fresh crash report names the helper.
                 // A benign route-change blip writes no .ips — classify before tearing down (#86).
                 let classification = CrashReportScanner.classifyLive()
-                self.record(.xpcInterruption,
-                    classification == .likelyCrash ? .anomaly : .warning,
-                    ["classification": classification == .likelyCrash ? "crash" : "blip"])
-                if classification == .likelyCrash {
-                    self.crashHandlerFired = true
+                switch self.interruptionPolicy.onInterruption(classification: classification) {
+                case .ignoreIdle:
+                    if self.interruptionPolicy.expectingCapture {
+                        // This generation already escalated once (its crash is being handled): a second
+                        // interruption is the same event, not a new one. Nothing to record.
+                        Logger.audio.info("XPC interrupted — already handled for this capture generation")
+                    } else {
+                        // Not capturing: launchd idle-exited the helper. No ping (a ping would spawn a
+                        // throwaway helper), no latch. Lands in the unified log and the live log only;
+                        // the next resetSession() wipes it from the app ring (it belongs to no session).
+                        self.record(.helperIdleExit, .info)
+                        Logger.audio.info("XPC interrupted while idle — helper idle-exit, ignored")
+                    }
+                case .crash:
+                    self.record(.xpcInterruption, .anomaly, ["classification": "crash"])
                     Logger.audio.warning("XPC interrupted — crash report present, treating as crash")
                     self.onServiceCrash?()
-                    return
-                }
-                // No crash report: verify the helper is still capturing before trusting the blip.
-                Logger.audio.warning("XPC interrupted — no crash report; verifying capture is alive")
-                let stillCapturing = await self.isCapturing()
-                // If a concurrent invalidation/recovery already replaced the connection while we
-                // awaited, that path owns this teardown — don't double-fire onServiceCrash (F7).
-                guard self.connection === boundConnection else { return }
-                if stillCapturing {
-                    self.onBriefInterruption?()
-                } else if !self.crashHandlerFired {
-                    self.crashHandlerFired = true
-                    Logger.audio.warning("XPC interrupted — helper not capturing, escalating to crash recovery")
-                    self.onServiceCrash?()
+                case .verifyCapture:
+                    self.record(.xpcInterruption, .warning, ["classification": "blip"])
+                    let generation = self.interruptionPolicy.captureGeneration
+                    Logger.audio.warning("XPC interrupted — no crash report; verifying capture is alive")
+                    let stillCapturing = await self.isCapturing()
+                    // If a concurrent invalidation/recovery already replaced the connection while we
+                    // awaited, that path owns this teardown — don't double-fire onServiceCrash (F7).
+                    guard self.connection === boundConnection else { return }
+                    switch self.interruptionPolicy.onVerified(stillCapturing: stillCapturing, generation: generation) {
+                    case .briefInterruption: self.onBriefInterruption?()
+                    case .crash:
+                        Logger.audio.warning("XPC interrupted — helper not capturing, escalating to crash recovery")
+                        self.onServiceCrash?()
+                    case .ignoreIdle, .verifyCapture: break
+                    }
+                case .briefInterruption:
+                    break   // onInterruption never returns this; onVerified does
                 }
             }
         }
         conn.invalidationHandler = { [weak self] in
             Task { @MainActor in
-                Logger.audio.warning("XPC connection invalidated")
                 guard let self else { return }
                 self.connection = nil
-                self.record(.xpcInvalidation, .anomaly)
-                if !self.crashHandlerFired {
-                    self.crashHandlerFired = true
+                switch self.interruptionPolicy.onInvalidation() {
+                case .crash:
+                    Logger.audio.warning("XPC connection invalidated during capture")
+                    self.record(.xpcInvalidation, .anomaly)
                     self.onServiceCrash?()
+                default:
+                    Logger.audio.info("XPC connection invalidated while idle")
+                    self.record(.xpcInvalidation, .info)
                 }
             }
         }
@@ -150,6 +167,12 @@ final class AudioCaptureClient {
     func recordRetry(_ detail: [String: String] = [:]) {
         record(.retry, .warning, detail)
     }
+
+    /// The recording ended without `stop()` (recovery gave up, or nothing was restarted): disarm (C1).
+    func captureEnded() { interruptionPolicy.captureStopped() }
+
+    /// A launch re-attach to a capture this process did not start: arm, as `start` does (C1).
+    func captureReattached() { interruptionPolicy.captureStarted() }
 
     /// Record that the app re-attached to or relaunched a recording on launch (crash recovery) (#95).
     func recordLaunchRecovery(_ detail: [String: String] = [:]) {
@@ -240,10 +263,9 @@ final class AudioCaptureClient {
         // Per-session reset (#101): the app ring accumulates across ALL sessions, so a clean session
         // would otherwise report the prior session's tallies. Clear it at the very top of start.
         diagnostics.clear()
+        // Armed BEFORE the XPC start (C1): a crash during configure/start is this capture's crash.
+        interruptionPolicy.captureStarted()
         currentSessionId = sessionId
-        // crashHandlerFired is reset only in connect() — its sole reset point (#54). Resetting it
-        // here would re-arm the dedup latch on a restart that reuses an about-to-be-invalidated
-        // connection, letting the trailing invalidation re-fire onServiceCrash (a spurious retry).
         let conn = try getConnection()
         await configureCapture(options, on: conn)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -282,6 +304,8 @@ final class AudioCaptureClient {
     }
 
     func stop() async throws -> AudioPaths {
+        // Disarmed first: the helper exiting after a stop is expected, not a crash (C1).
+        interruptionPolicy.captureStopped()
         let conn = try getConnection()
         return try await withCheckedThrowingContinuation { cont in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in

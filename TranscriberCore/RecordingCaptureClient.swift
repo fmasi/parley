@@ -86,4 +86,12 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
 
     /// Record an XPC-retry event (a relaunch/reconnect attempt after a crash) (#95).
     func recordRetry(_ detail: [String: String])
+
+    /// The recording ended WITHOUT `stop()` — crash recovery gave up, or a relaunch salvaged instead
+    /// of resuming. Disarms crash detection so the next helper idle-exit is not mistaken for a crash
+    /// of a recording that no longer exists (C1).
+    func captureEnded()
+    /// The app re-attached at launch to a capture it did not `start()` (Flow A): arms crash detection
+    /// for it, as `start` does — otherwise a crash of the re-attached recording reads as an idle-exit (C1).
+    func captureReattached()
 }

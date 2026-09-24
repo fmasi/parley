@@ -109,6 +109,14 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         retryEvents.append(detail)
     }
 
+    /// Recordings that ended without `stop()` (C1: crash detection disarmed).
+    var captureEndedCalls = 0
+    func captureEnded() { captureEndedCalls += 1 }
+
+    /// Captures the app re-attached to without starting them (C1: crash detection armed).
+    var captureReattachedCalls = 0
+    func captureReattached() { captureReattachedCalls += 1 }
+
     func rotateChunk(outputDirectory: String, newBaseName: String) async throws
         -> (systemPath: String, micPath: String) {
         (outputDirectory + "/" + newBaseName + ".wav",
@@ -326,6 +334,7 @@ private struct Harness {
         #expect(h.appState.isIdle)
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.map { $0.title } == ["Recording Failed"])
+        #expect(h.client.captureEndedCalls == 1, "a start that failed must disarm crash detection (C1)")
         // The crash/fatal/mic-change/quality-anomaly callbacks are wired before start is attempted.
         #expect(h.client.onServiceCrash != nil)
         #expect(h.client.onFatalFailure != nil)
@@ -609,8 +618,40 @@ private struct Harness {
         for _ in 0..<50 { await Task.yield() }
         #expect(h.appState.isRecording && h.client.startCalls.isEmpty)
         #expect(h.client.launchRecoveries.first?["flow"] == "A")
+        // No start() ran in this process, so crash detection must be armed explicitly (C1).
+        #expect(h.client.captureReattachedCalls == 1 && h.client.captureEndedCalls == 0)
         #expect(h.appState.activeAlarms[.micDigitalSilence] != nil)
         #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+    }
+
+    /// Launch recovery that ends without a capture — nothing to recover, or the restart failed —
+    /// disarms crash detection (C1), so a later helper idle-exit is never read as this recording's crash.
+    @Test func recoverAtLaunchWithNothingToRecoverEndsTheCapture() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()   // helper not capturing, no session.json, no audio on disk
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isIdle && h.client.startCalls.isEmpty)
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(h.client.captureEndedCalls == 1)
+    }
+
+    @Test func recoverAtLaunchWhoseRestartFailsEndsTheCapture() async throws {
+        let h = try Harness()
+        // Legacy single-file audio (no `-N` chunk name, so not a chunked session) that Flow B restarts.
+        let outDir = h.tmp.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(), sessionName: "Test",
+            systemAudioPath: outDir.appendingPathComponent("legacy.wav").path,
+            micAudioPath: outDir.appendingPathComponent("legacy_mic.wav").path,
+            micDeviceUID: "mic-1", segment: 1, chunkIndex: 0)
+        try RecordingSentinel.write(sentinel, directory: h.tmp)
+        try Data(count: 4096).write(to: URL(fileURLWithPath: sentinel.systemAudioPath))   // partial audio
+        h.client.startError = FakeCaptureError()
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.startCalls.count == 1)
+        #expect(h.appState.isIdle && h.criticals.value.map(\.title) == ["Recording Failed"])
+        #expect(h.client.captureEndedCalls == 1)
     }
 
     @Test func failedStartReleasesTheRecordingMic() async throws {
@@ -958,6 +999,7 @@ private struct Harness {
         #expect(h.appState.isIdle)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
         #expect(h.client.startCalls.isEmpty)
+        #expect(h.client.captureEndedCalls == 1)
         #expect(h.client.retryEvents == [["attempt": "1", "giveUp": "false"]])
     }
 
@@ -988,6 +1030,7 @@ private struct Harness {
         // first-sample crash comes back as another interruption). The streak resets only after
         // confirmed frames — see retryStreakResetsOnlyAfterConfirmedFrames.
         #expect(h.coordinator.xpcRetryCount == 1)
+        #expect(h.client.captureEndedCalls == 0, "a restart does not end the recording")
         // Honest "Resumed" (L2): nothing is announced until frames arrive.
         #expect(h.notified.value.isEmpty)
         #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
@@ -1007,6 +1050,7 @@ private struct Harness {
         #expect(h.appState.isIdle)
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
+        #expect(h.client.captureEndedCalls == 1)
     }
 
     // NOTE: tests the give-up ESCALATION only (no live pipeline, so nothing to salvage here).
@@ -1026,6 +1070,7 @@ private struct Harness {
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
         #expect(h.client.retryEvents == [["attempt": "3", "giveUp": "true"]])
+        #expect(h.client.captureEndedCalls == 1)
     }
 
     @Test func crashAfterDecayIntervalStartsAFreshStreak() async throws {
