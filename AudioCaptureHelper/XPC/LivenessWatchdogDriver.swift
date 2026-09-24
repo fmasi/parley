@@ -33,11 +33,13 @@ final class LivenessWatchdogDriver {
          .system: TrackLivenessMonitor(track: CaptureTrack.system.rawValue)]
     }
 
-    func start() {
+    /// `shouldRun` is asked on `queue`, after any `stop()` queued before this start: a stop that
+    /// landed first leaves no timer running past its session (mirrors the tap-guard timer's guard).
+    func start(shouldRun: @escaping () -> Bool) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.stopLocked()
-            self.monitors = Self.freshMonitors()
+            self.stopLocked()   // also fresh, unarmed monitors
+            guard shouldRun() else { return }
             let t = DispatchSource.makeTimerSource(queue: self.queue)
             t.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
             t.setEventHandler { [weak self] in self?.tick() }
@@ -46,6 +48,7 @@ final class LivenessWatchdogDriver {
         }
     }
 
+    /// Also disarms both monitors, so an `accelerate` already scheduled is inert after the stop.
     func stop() { queue.async { [weak self] in self?.stopLocked() } }
 
     /// Start / rebuild / wake of one track: judge from now, expect first frames within 5 s.
@@ -88,6 +91,7 @@ final class LivenessWatchdogDriver {
 
     private func stopLocked() {
         timer?.cancel(); timer = nil
+        monitors = Self.freshMonitors()
     }
 
     private func tick() {

@@ -271,9 +271,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.onGate = { [weak self] open, now in self?.accountGate(open: open, nowNanos: now) }
         // A new session starts a new mic episode; on the watchdog queue, like every other use.
         livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy = MicHealPolicy() }
-        mic.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .mic) }
-        tap?.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }
-        livenessWatchdog.start()
+        livenessWatchdog.start { [weak self] in
+            guard let self else { return false }
+            return self.stateLock.sync { self.isCapturing && !self.isUserStopping }
+        }
         livenessWatchdog.arm(track: .mic)
         livenessWatchdog.arm(track: .system)
     }
@@ -743,7 +744,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     // MARK: - Tap permission guard plumbing (all on audioQueue unless noted)
 
     private func startTapGuardTimer() {
-        audioQueue.async {
+        audioQueue.async { [weak self] in
+            guard let self else { return }
             self.tapGuardTimer?.cancel()
             self.tapGuardTimer = nil
             // A stop queued its cancel before this ran: don't arm a timer that outlives the session.
@@ -912,6 +914,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         mic.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
+        // Before `start`: a rebuild between the start and the watchdog's wiring must still re-arm.
+        mic.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .mic) }
         mic.onRecovered = { [weak self] deviceId in
             // Mic self-healed a route change — system audio never stopped.
             // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
@@ -965,6 +969,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
         }
         tap.onBuilt = { [weak self] in self?.tapDidBuild() }
+        tap.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
@@ -1187,6 +1192,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 // stopCapture() silently failed and its stream still delivers, systemStreamGivenUp
                 // still caps the downstream harm — full stream-identity gating is a future hardening.)
                 currentHandler.resetSystemBufferArrival()
+                // That zeroed SCK's heartbeat source: re-arm, or the monitor (first frames already
+                // reported, no episode open) reads it as never-delivered since the gate opened. This is
+                // SCK's generation bump: the rebuilt stream gets a fresh 5 s never-delivered clock.
+                livenessWatchdog.arm(track: .system)
                 // A stop may have begun during the restart's awaits; if so, don't claim success or
                 // notify — the stop path owns teardown now (council F1).
                 if stateLock.sync(execute: { isUserStopping }) { return }

@@ -502,4 +502,25 @@ struct WavFileWriterTests {
         writer.finalize()
         #expect(failures == 1 && successes == 1)
     }
+
+    /// Every failure episode is reported, and every recovery from one: write, fail, write, fail. Pins
+    /// both re-arms — a failure re-arms the success report, a success re-arms the failure report.
+    @Test func eachFailureEpisodeAndEachRecoveryIsReported() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("episodes-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 2, "the first write, then the recovery")
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        #expect(failures == 2, "the recovery re-armed the failure report")
+        writer.finalize()
+    }
 }

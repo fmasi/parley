@@ -30,4 +30,41 @@ import Testing
         #expect(OutputActivity.othersRunningOutput([P(pid: 2430, isRunningOutput: nil, outputDevices: [])], ownPid: 99))
         #expect(OutputActivity.othersRunningOutput([P(pid: 99, isRunningOutput: nil, outputDevices: [])], ownPid: 99) == false)
     }
+
+    // MARK: - Lean probe (H review round 1): the 1 Hz probe reads IsRunningOutput first, the pid only
+    // for a process that runs output (or whose state is unreadable), and stops at the first OTHER one.
+
+    /// Which process indices each read touched, so a test can see what the probe did NOT read.
+    private final class Reads { var running: [Int] = []; var pid: [Int] = [] }
+
+    private func lean(_ procs: [(pid: Int32?, running: Bool?)]?, reads: Reads = Reads()) -> Bool {
+        OutputActivity.othersRunningOutput(
+            processes: procs.map { Array($0.indices) }, ownPid: 99,
+            isRunningOutput: { i in reads.running.append(i); return procs![i].running },
+            pid: { i in reads.pid.append(i); return procs![i].pid })
+    }
+
+    @Test func leanProbeStopsAtTheFirstOtherProcessRunningOutput() {
+        let reads = Reads()
+        #expect(lean([(10, false), (2430, true), (11, true), (12, nil)], reads: reads))
+        #expect(reads.running == [0, 1], "short-circuits on the first other running process")
+        #expect(reads.pid == [1], "never reads the pid of a process that is not running output")
+    }
+
+    @Test func leanProbeSkipsOurOwnRunningAggregate() {
+        #expect(lean([(99, true)]) == false)
+        #expect(lean([(99, true), (10, true)]))
+    }
+
+    @Test func leanProbeFailsOpenExceptOnOurOwnPid() {
+        #expect(lean(nil), "an unreadable process list counts as running")
+        #expect(lean([(2430, nil)]), "another process whose state can't be read counts as running")
+        #expect(lean([(nil, true)]), "a running process whose pid can't be read is not known to be us")
+        #expect(lean([(99, nil)]) == false, "our own unreadable state never opens the gate")
+    }
+
+    @Test func leanProbeWithNobodyRunningIsClosed() {
+        #expect(lean([(10, false), (11, false)]) == false)
+        #expect(lean([]) == false)
+    }
 }

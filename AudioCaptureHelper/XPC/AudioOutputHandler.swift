@@ -123,17 +123,6 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         systemBufferArrival.withLock { $0 = 0 }
     }
 
-    /// Monotonic timestamp of the last mic buffer actually appended (i.e. after conversion
-    /// succeeded), mirroring `systemBufferArrival`. Feeds the #196 1 Hz liveness watchdog — a mic
-    /// delivers buffers even in silence, so a gap here is itself an anomaly. Stamped in
-    /// `appendAlignedMic`, the single funnel point for both the normal and multichannel mic paths.
-    private let micBufferArrival = OSAllocatedUnfairLock<UInt64>(initialState: 0)
-
-    /// Last mic-buffer arrival timestamp (`uptimeNanoseconds`), 0 until the first buffer (#196).
-    func lastMicBufferArrivalNanos() -> UInt64 {
-        micBufferArrival.withLock { $0 }
-    }
-
     /// Session-wide frame totals for per-track coverage (§7.1): delivered = real frames (padding
     /// excluded). MUST be read on the audio queue (the service uses `audioQueue.sync` from an XPC thread).
     func trackTotals() -> (micDelivered: Int64, micPad: Int64, micZero: Int64, sysDelivered: Int64, sysPad: Int64) {
@@ -586,10 +575,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
     /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
-        // Liveness stamp (#196): a real, converted mic buffer arrived — independent of its content
-        // (even exact-zero samples count as "delivered" here; that is a DIFFERENT fault, caught by
-        // the exact-zero monitor below, not a delivery gap).
-        micBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
+        // Liveness is judged on `MicCaptureSession`'s heartbeat (§4.2), not here.
         noteRealAudio(samples, track: .mic)
 
         let pad = timelineSilencePad(

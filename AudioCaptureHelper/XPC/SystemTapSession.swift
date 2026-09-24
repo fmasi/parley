@@ -426,8 +426,12 @@ final class SystemTapSession {
                 self.onAggregateEvent?(name)
             }
             var addr = address
-            if AudioObjectAddPropertyListenerBlock(agg, &addr, monitorQueue, block) == noErr {
+            let st = AudioObjectAddPropertyListenerBlock(agg, &addr, monitorQueue, block)
+            if st == noErr {
                 registered.append((address, block))
+            } else {
+                // An accelerator only: the 1 Hz heartbeat still catches the stall, just later.
+                Logger.audio.error("System tap: aggregate '\(name, privacy: .public)' listener registration failed (\(st))")
             }
         }
         stateLock.sync { aggregateListenerBlocks = registered }

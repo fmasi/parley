@@ -19,7 +19,8 @@ public final class WavFileWriter {
     private var lastSyncTime: ContinuousClock.Instant = .now
     private static let syncInterval: Duration = .milliseconds(500)
 
-    /// Invoked (at most once per writer) when a modern throwing `FileHandle` call fails — disk full
+    /// Invoked once per failure episode (re-armed by the next successful write) when a modern
+    /// throwing `FileHandle` call fails — disk full
     /// or another I/O error (#196). Before this conversion, the legacy `FileHandle` write/seek/sync
     /// API raised an uncatchable Objective-C exception on the same fault, which could abort the
     /// whole helper process mid-meeting. Now the failure is caught, logged, and surfaced here
