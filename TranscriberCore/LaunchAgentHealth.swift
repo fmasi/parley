@@ -121,15 +121,19 @@ public enum LaunchAgentHealth {
         case alarm(String)
     }
 
+    /// `isBusy`: a recording, its transcription or post-recording work. `anyWindowVisible`: any Parley
+    /// window on screen — Settings, the menu-bar panel, a panel — a hand-over (an exit) would close it
+    /// mid-edit (L2/L4 fix round 2, item 6).
     public static func crashProtectionAction(state: State, holdsInstanceLock: Bool, isLaunchdJob: Bool, isBusy: Bool,
-                                             lastHandOverAt: Date?, now: Date, failedHandOvers: Int) -> CrashProtectionAction {
+                                             anyWindowVisible: Bool, lastHandOverAt: Date?, now: Date,
+                                             failedHandOvers: Int) -> CrashProtectionAction {
         switch state {
         case .healthy:
             return .healthy
         case .loadedButNotThisProcess:
             guard holdsInstanceLock else { return .alarm(noLockMessage) }
             guard !isLaunchdJob, failedHandOvers < maxHandOverAttempts else { return .alarm(handOverImpossibleMessage) }
-            if isBusy { return .deferUntilIdle }
+            if isBusy || anyWindowVisible { return .deferUntilIdle }
             if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown {
                 let remaining = handOverCooldown - now.timeIntervalSince(lastHandOverAt)
                 return .retryAfter(seconds: remaining,

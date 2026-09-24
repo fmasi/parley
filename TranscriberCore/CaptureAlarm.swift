@@ -357,6 +357,25 @@ public enum AlarmRealarmPolicy {
         CaptureReadiness.shouldPresentRepair(lastDismissedAt: lastDismissedAt, now: now)
     }
 
+    /// While NOT recording (owner ruling, L2/L4 fix round 2): the gap before the next re-notify of an
+    /// idle alarm after `n` notifications — 2 min, then 10 min, then at most hourly. Mid-call alarms keep
+    /// the 2-minute `notifyInterval`; an idle "crash protection off" every 2 min all day is noise.
+    public static func idleRenotifyInterval(afterNotifications n: Int) -> TimeInterval {
+        switch n {
+        case ...1: return notifyInterval
+        case 2: return 600
+        default: return 3600
+        }
+    }
+
+    /// `notificationsWhileIdle`: how often this kind has been presented since the app went idle. A past
+    /// event (acknowledgeable) is presented once; the sticky row stays until it is acknowledged.
+    public static func shouldRenotifyWhileIdle(_ alarm: ActiveAlarm, notificationsWhileIdle n: Int, now: Date) -> Bool {
+        guard let last = alarm.lastNotifiedAt else { return true }
+        if alarm.kind.isAcknowledgeable { return false }
+        return now.timeIntervalSince(last) >= idleRenotifyInterval(afterNotifications: n)
+    }
+
     /// What one presentation does (§6.3). `notify`: the due alarm the notification names (a newly
     /// raised one first), nil = post nothing. `openWindow`: at once for a new row, else only once the
     /// "Later" snooze has passed.
@@ -366,11 +385,14 @@ public enum AlarmRealarmPolicy {
         public init(notify: ActiveAlarm?, openWindow: Bool) { self.notify = notify; self.openWindow = openWindow }
     }
 
-    /// `due`: the alarms whose notify floor allows a presentation now. Rows the open repair window
-    /// already shows are left to it — including the notification, which it posts itself.
+    /// `due`: the alarms whose notify floor allows a presentation now. Rows the repair window shows
+    /// are left to it — including the notification, which it posts itself: every permission row while
+    /// it is open, and a NEWLY raised one always (the coordinator is opening it for that kind right now,
+    /// asynchronously — L2/L4 fix round 2, item 4).
     public static func presentation(due: [ActiveAlarm], newlyRaised: [AlarmKind], repairWindowOpen: Bool,
                                     lastDismissedAt: Date?, now: Date) -> Presentation {
         let rows = windowRows(due, repairWindowOpen: repairWindowOpen)
+            .filter { !($0.kind.hasOwnRepairWindow && newlyRaised.contains($0.kind)) }
         guard !rows.isEmpty else { return Presentation(notify: nil, openWindow: false) }
         let newRow = rows.first { newlyRaised.contains($0.kind) }
         return Presentation(notify: newRow ?? rows[0],

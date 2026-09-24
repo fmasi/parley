@@ -17,9 +17,6 @@ final class CaptureAlarmWindowController: NSObject, NSWindowDelegate {
     static let notificationIdentifier = "parley-capture-alarm"
 
     private var panel: NSPanel?
-
-    /// Whether the window is on screen: a crash-protection hand-over (an exit) waits while it is (L3).
-    var isShowing: Bool { panel?.isVisible ?? false }
     /// "Later" (or the close button): the window stays closed until the snooze passes or a new kind arrives.
     private var lastDismissedAt: Date?
 

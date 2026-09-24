@@ -9,9 +9,6 @@ import TranscriberCore
 final class RenameWindowController: NSObject, NSWindowDelegate {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
-
-    /// Whether the window is on screen: a crash-protection hand-over (an exit) waits while it is (L3).
-    var isShowing: Bool { panel?.isVisible ?? false }
     private var onDismissCallback: (() -> Void)?
     /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
     /// cannot both reach `present()` and leave an orphaned panel on screen.

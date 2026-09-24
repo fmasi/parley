@@ -137,9 +137,9 @@ import Testing
     @Test func crashProtectionDecisionTable() {
         let now = Date(timeIntervalSince1970: 1000)
         func act(_ state: LaunchAgentHealth.State, lock: Bool = true, job: Bool = false, busy: Bool = false,
-                 last: Date? = nil, failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
+                 window: Bool = false, last: Date? = nil, failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
             LaunchAgentHealth.crashProtectionAction(state: state, holdsInstanceLock: lock, isLaunchdJob: job, isBusy: busy,
-                                                    lastHandOverAt: last, now: now, failedHandOvers: failed)
+                                                    anyWindowVisible: window, lastHandOverAt: last, now: now, failedHandOvers: failed)
         }
         let auto = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: true)
         #expect(act(.healthy) == .healthy)
@@ -147,6 +147,8 @@ import Testing
         #expect(act(.loadedButNotThisProcess) == .handOver)
         // Any post-recording work or panel: no row, re-check on the transition to idle.
         #expect(act(.loadedButNotThisProcess, busy: true) == .deferUntilIdle)
+        // L2/L4 fix round 2, item 6: ANY visible Parley window (Settings, the menu-bar panel, a panel).
+        #expect(act(.loadedButNotThisProcess, window: true) == .deferUntilIdle)
         // Cooldown: ONE re-check when it expires; no row until a hand-over has actually failed.
         #expect(act(.loadedButNotThisProcess, last: now - 10) == .retryAfter(seconds: 20, message: nil))
         #expect(act(.loadedButNotThisProcess, last: now - 10, failed: 1) == .retryAfter(seconds: 20, message: auto))

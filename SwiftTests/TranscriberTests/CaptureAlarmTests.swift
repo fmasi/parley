@@ -42,9 +42,17 @@ import Testing
     /// once the "Later" snooze has passed.
     @Test func presentationNamesTheDueAlarmAndLeavesPermissionRowsToTheRepairWindow() {
         let disk = alarm(.diskLow, at: t0), denied = alarm(.remotePermissionDenied, at: t0 + 1)
+        // Fix round 2, item 4: a NEWLY raised permission kind is the repair window's (it opens
+        // asynchronously, so `repairWindowOpen` is still false here): one window, one notification.
         let fresh = AlarmRealarmPolicy.presentation(due: [disk, denied], newlyRaised: [.remotePermissionDenied],
                                                     repairWindowOpen: false, lastDismissedAt: nil, now: t0)
-        #expect(fresh == .init(notify: denied, openWindow: true))
+        #expect(fresh == .init(notify: disk, openWindow: true))
+        let onlyDenied = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
+                                                         repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+        #expect(onlyDenied == .init(notify: nil, openWindow: false))
+        let reNotify = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [],
+                                                       repairWindowOpen: false, lastDismissedAt: nil, now: t0)
+        #expect(reNotify.notify == denied, "a later re-notify with the repair window closed is the alarm window's")
 
         let repairOpen = AlarmRealarmPolicy.presentation(due: [denied], newlyRaised: [.remotePermissionDenied],
                                                          repairWindowOpen: true, lastDismissedAt: nil, now: t0)
@@ -59,6 +67,23 @@ import Testing
 
         #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: true) == [disk])
         #expect(AlarmRealarmPolicy.windowRows([disk, denied], repairWindowOpen: false) == [disk, denied])
+    }
+
+    /// Fix round 2, item 5: the idle cadence — 2 min, then 10, then hourly; a past event once.
+    @Test func idleRenotifyBacksOff() {
+        #expect(AlarmRealarmPolicy.idleRenotifyInterval(afterNotifications: 1) == 120)
+        #expect(AlarmRealarmPolicy.idleRenotifyInterval(afterNotifications: 2) == 600)
+        #expect(AlarmRealarmPolicy.idleRenotifyInterval(afterNotifications: 3) == 3600)
+        #expect(AlarmRealarmPolicy.idleRenotifyInterval(afterNotifications: 9) == 3600)
+        var off = alarm(.crashProtectionOff, at: t0)
+        #expect(AlarmRealarmPolicy.shouldRenotifyWhileIdle(off, notificationsWhileIdle: 0, now: t0))
+        off.lastNotifiedAt = t0
+        #expect(!AlarmRealarmPolicy.shouldRenotifyWhileIdle(off, notificationsWhileIdle: 2, now: t0 + 599))
+        #expect(AlarmRealarmPolicy.shouldRenotifyWhileIdle(off, notificationsWhileIdle: 2, now: t0 + 600))
+        var stopped = alarm(.recordingStopped, at: t0)
+        #expect(AlarmRealarmPolicy.shouldRenotifyWhileIdle(stopped, notificationsWhileIdle: 0, now: t0))
+        stopped.lastNotifiedAt = t0
+        #expect(!AlarmRealarmPolicy.shouldRenotifyWhileIdle(stopped, notificationsWhileIdle: 1, now: t0 + 86_400), "once")
     }
 
     @Test func raiseIsIdempotentAndKeepsTheOriginalTimestamp() {

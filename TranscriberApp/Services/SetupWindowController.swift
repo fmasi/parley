@@ -7,9 +7,6 @@ final class SetupWindowController {
     static let shared = SetupWindowController()
     private var window: NSWindow?
 
-    /// Whether the window is on screen: a crash-protection hand-over (an exit) waits while it is (L3).
-    var isShowing: Bool { window?.isVisible ?? false }
-
     /// `onReady` is `@MainActor` in the type, not merely by convention: both
     /// call sites mutate `LaunchGate.permissionsReady`, which is
     /// `@MainActor`-isolated. Making the contract explicit means the compiler

@@ -18,9 +18,6 @@ final class SessionNameSuggestion {
 final class SessionNameWindowController {
     static let shared = SessionNameWindowController()
     private var panel: NSPanel?
-
-    /// Whether the window is on screen: a crash-protection hand-over (an exit) waits while it is (L3).
-    var isShowing: Bool { panel?.isVisible ?? false }
     /// The latest show(); an earlier one still awaiting its device scan must not open a second panel.
     private var pendingRequest: UUID?
 

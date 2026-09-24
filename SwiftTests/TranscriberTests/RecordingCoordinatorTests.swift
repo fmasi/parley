@@ -75,7 +75,9 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     }
 
     var statusSnapshot: CaptureStatusSnapshot?
-    func captureStatus() async -> CaptureStatusSnapshot? { statusSnapshot }
+    /// Takes precedence over `statusSnapshot`: lets a test answer every poll with a NEW sequence.
+    var statusProvider: (() -> CaptureStatusSnapshot?)?
+    func captureStatus() async -> CaptureStatusSnapshot? { statusProvider?() ?? statusSnapshot }
 
     var isCapturingResult = false
     /// Whether crash detection was armed (`captureReattached`) when the Flow-A ping ran.
@@ -96,8 +98,11 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         recordedEvents.append((kind, severity, detail))
     }
 
+    /// Whether the task running `stop()` was already cancelled (L2/L4 fix round 2, item 3).
+    var stopSawCancellation: Bool?
     func stop() async throws -> AudioPaths {
         stopCalls += 1
+        stopSawCancellation = Task.isCancelled
         await onStop?()
         if let stopError { throw stopError }
         guard let stopResult else { throw CocoaError(.fileNoSuchFile) }
@@ -603,10 +608,75 @@ private struct Harness {
         await h.coordinator.handleXPCCrash()
         h.appState.phase = .idle   // the recording ended before the restarted helper delivered
 
+        // L2/L4 fix round 2, item 1: the new recording's helper reports its first frames DURING start().
+        let coordinator = h.coordinator
+        h.client.onStart = { coordinator.noteFirstFrames(track: .mic, helperSessionId: "3000-0") }
         await h.coordinator.startRecording(sessionName: "Next", microphoneDeviceId: "mic-1")
         #expect(h.appState.isRecording)
         h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "3000-0")
         #expect(h.notified.value.isEmpty)
+    }
+
+    /// Item 1: every end path clears the restart's pending confirmation — frames reported after the
+    /// recording ended (a late message, or a relaunch) are not a recovery.
+    @Test func aStoppedRestartLeavesNothingArmed() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        await h.coordinator.handleXPCCrash()   // restarted, waiting for frames
+        await h.coordinator.stopRecording()    // (the fake's stop fails: the catch path ends it)
+        #expect(h.appState.isIdle)
+        h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
+        #expect(!h.notified.value.contains { $0.title == "Recording Resumed" })
+    }
+
+    /// Item 2: a Stop pressed during the restart: frames arriving before the deferred stop runs must
+    /// not announce "Resumed" for a recording that is ending.
+    @Test func aStopRequestedDuringTheRestartNeverAnnouncesResumed() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.client.stopError = FakeCaptureError()
+        let coordinator = h.coordinator
+        h.client.onStartAsync = {
+            await coordinator.stopRecording()   // deferred: recovery is in flight
+            coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
+        }
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.stopCalls == 1, "the deferred stop ran")
+        #expect(!h.notified.value.contains { $0.title == "Recording Resumed" })
+    }
+
+    /// Item 3: the not-capturing escalation must not run inside the status-poll task: a Stop deferred
+    /// during that restart cancels the poll, and the whole stop + finalize would run CANCELLED.
+    @Test func aStopDeferredDuringAPollEscalatedRestartIsNotCancelled() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        h.coordinator.statusPollInterval = .milliseconds(5)
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let sequence = Harness.Box<UInt64>(0)
+        h.client.statusProvider = {
+            sequence.value += 1
+            return CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: sequence.value, isCapturing: false, alarms: [], tracks: [])
+        }
+        let coordinator = h.coordinator
+        let stopped = Harness.Box(false)
+        h.client.onStartAsync = {
+            guard !stopped.value else { return }
+            stopped.value = true
+            await coordinator.stopRecording()   // deferred: the escalated recovery is in flight
+        }
+        var waited = 0
+        while h.client.stopCalls == 0, waited < 400 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        #expect(h.client.stopCalls == 1)
+        #expect(h.client.stopSawCancellation == false, "the deferred stop ran in a cancelled task")
     }
 
     // MARK: - L2/L4 fix round 1
@@ -738,6 +808,8 @@ private struct Harness {
         #expect(h.client.startCalls.isEmpty, "one poll is not enough")
         h.client.statusSnapshot = notCapturing("1000-0", 2)
         await h.coordinator.pollHelperStatus()
+        // Dispatched outside the poll task (fix round 2, item 3): let it run.
+        for _ in 0..<50 where h.client.startCalls.isEmpty { await Task.yield() }
         #expect(h.client.startCalls.count == 1, "restarted like an XPC crash")
         #expect(h.client.retryEvents.count == 1, "under the same retry cap")
         #expect(h.client.recordedEvents.contains { $0.kind == .xpcInterruption && $0.detail["classification"] == "not capturing" })
@@ -790,12 +862,63 @@ private struct Harness {
         var waited = 0
         while shown.value.isEmpty, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
         #expect(shown.value.first == [.recordingStopped])
-        #expect(coordinator.idleRealarmActive)
 
-        h.appState.acknowledge(.recordingStopped)
+        // Fix round 2, item 5: an acknowledgeable past event is presented ONCE while idle; with nothing
+        // more to say the timer ends by itself (no idle wakeups).
         waited = 0
         while coordinator.idleRealarmActive, waited < 200 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
-        #expect(!coordinator.idleRealarmActive, "stopped as soon as nothing is active")
+        #expect(!coordinator.idleRealarmActive, "presented once: nothing more to say")
+        #expect(shown.value.count == 1)
+        h.appState.acknowledge(.recordingStopped)
+        #expect(h.appState.activeAlarms.isEmpty)
+    }
+
+    /// Fix round 2, item 5 (owner ruling): while NOT recording, an idle alarm re-notifies at 2 min, then
+    /// 10 min, then at most hourly — mid-call urgency is noise all day. The injected clock drives it.
+    @Test func idleAlarmsBackOffTwoThenTenThenSixtyMinutes() async throws {
+        let h = try Harness()
+        let shown = Harness.Box<Int>(0)
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { _, _ in shown.value += 1 }, recordingMicrophone: h.recordingMic)
+        let t0 = Date()
+        h.appState.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
+        coordinator.presentAlarms(now: t0)
+        #expect(shown.value == 1)
+        coordinator.presentAlarms(now: t0 + 119);  #expect(shown.value == 1)
+        coordinator.presentAlarms(now: t0 + 120);  #expect(shown.value == 2, "2 min")
+        coordinator.presentAlarms(now: t0 + 719);  #expect(shown.value == 2)
+        coordinator.presentAlarms(now: t0 + 720);  #expect(shown.value == 3, "then 10 min")
+        coordinator.presentAlarms(now: t0 + 4319); #expect(shown.value == 3)
+        coordinator.presentAlarms(now: t0 + 4320); #expect(shown.value == 4, "then hourly")
+        coordinator.presentAlarms(now: t0 + 7920); #expect(shown.value == 5)
+    }
+
+    /// Fix round 2, item 5: starting a recording while an idle alarm is active presents it again at once.
+    @Test func startingARecordingPresentsAnActiveIdleAlarmAgain() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) }, recordingMicrophone: h.recordingMic)
+        h.appState.raiseAppAlarm(.crashProtectionOff, message: "off")
+        coordinator.presentAlarms()
+        #expect(shown.value.count == 1)
+
+        await coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        #expect(h.appState.isRecording)
+        #expect(shown.value.count == 2 && shown.value.last?.due == [.crashProtectionOff])
+        #expect(shown.value.last?.new == [.crashProtectionOff], "window and notification again")
     }
 
     @Test func theIdleTimerStopsWhenTheAlarmClears() async throws {

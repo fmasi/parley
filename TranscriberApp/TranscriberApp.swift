@@ -276,14 +276,19 @@ struct TranscriberApp: App {
     /// Waits for the transition to idle before re-checking (never a blind timer).
     private static var idleWatch: IdleWatch?
 
-    /// Whether Parley is doing anything a hand-over (an exit) would cut short: a recording or its
-    /// transcription, post-recording work (the auto-summary), or any Parley panel (L3 fix round 1).
+    /// Whether Parley is doing work a hand-over (an exit) would cut short: a recording or its
+    /// transcription, or post-recording work (the auto-summary) (L3 fix round 1).
     @MainActor
     static func isBusy(_ appState: AppState) -> Bool {
         !appState.isIdle || PostRecordingWork.inFlight > 0
-            || RenameWindowController.shared.isShowing || SessionNameWindowController.shared.isShowing
-            || MicSwitchWindowController.shared.isShowing || SetupWindowController.shared.isShowing
-            || PermissionRepairWindowController.shared.isPanelOpen || CaptureAlarmWindowController.shared.isShowing
+    }
+
+    /// Any Parley window on screen — Settings, the menu-bar panel, any panel: a hand-over would close
+    /// it mid-edit (L2/L4 fix round 2, item 6). The status item's own menu-bar button window is
+    /// always visible and is not one.
+    @MainActor
+    static func anyParleyWindowVisible() -> Bool {
+        NSApp.windows.contains { $0.isVisible && !$0.className.contains("StatusBar") }
     }
 
     @MainActor
@@ -296,6 +301,7 @@ struct TranscriberApp: App {
         let defaults = UserDefaults.standard
         let action = LaunchAgentHealth.crashProtectionAction(
             state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: isBusy(appState),
+            anyWindowVisible: anyParleyWindowVisible(),
             lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: Date(), failedHandOvers: failedHandOvers
         )
         switch action {
@@ -327,7 +333,7 @@ struct TranscriberApp: App {
             // Re-checked AFTER the kickstart returned: a recording, a transcript or a panel may have
             // started meanwhile. Busy → do NOT exit: launchd's copy times out and exits 0 by itself
             // (`SingleInstancePolicy`), and this process re-checks on the transition to idle.
-            guard !isBusy(appState) else {
+            guard !isBusy(appState), !anyParleyWindowVisible() else {
                 Logger.state.info("Became busy during the hand-over — staying; launchd's copy will exit 0")
                 recheckCrashProtectionWhenIdle(appState: appState)
                 return
@@ -348,12 +354,13 @@ struct TranscriberApp: App {
         }
     }
 
-    /// Re-check on the TRANSITION to idle: a Parley window closing, post-recording work finishing, or
-    /// the phase changing — not a timer. One watch at a time.
+    /// Re-check on the TRANSITION to idle: a Parley window closing (or the menu-bar panel, which hides
+    /// rather than closes, resigning key), post-recording work finishing, or the phase changing — not a
+    /// timer. One watch at a time.
     @MainActor
     private static func recheckCrashProtectionWhenIdle(appState: AppState) {
         guard idleWatch == nil else { return }
-        let watch = IdleWatch(isBusy: { isBusy(appState) }) {
+        let watch = IdleWatch(isBusy: { isBusy(appState) || anyParleyWindowVisible() }) {
             idleWatch = nil
             Task { @MainActor in await verifyCrashProtection(appState: appState) }
         }
@@ -507,8 +514,9 @@ private struct SetupRequiredPanel: View {
     }
 }
 
-/// Fires `onIdle` once, on the first transition to "not busy": a window closing, post-recording work
-/// finishing, or the recording phase changing (L3 fix round 1). Observers only — no timer.
+/// Fires `onIdle` once, on the first transition to "not busy": a window closing or resigning key,
+/// post-recording work finishing, or the recording phase changing (L3 fix round 1). Observers only —
+/// no timer.
 @MainActor
 private final class IdleWatch {
     private let isBusy: @MainActor () -> Bool
@@ -523,7 +531,7 @@ private final class IdleWatch {
 
     func start(observing appState: AppState) {
         let center = NotificationCenter.default
-        for name in [NSWindow.willCloseNotification, PostRecordingWork.finished] {
+        for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification, PostRecordingWork.finished] {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // willClose fires while the window is still up: look again on the next turn.
                 Task { @MainActor in self?.evaluate() }
