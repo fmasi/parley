@@ -3296,34 +3296,278 @@ private struct Harness {
         #expect(h.client.stopCalls == 1, "the recording the start began is stopped before the quit")
     }
 
-    @Test func powerOffStopsARecording() async throws {
+    /// Writes header-only WAVs for the recording's first chunk and makes the fake's stop return them.
+    private func stopReturnsTheFirstChunk(_ h: Harness) throws {
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        let mic = call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav")
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: mic)
+    }
+
+    /// L10 review 53: logout, shutdown, restart or a quit from outside Parley — the process ends NOW. Within a
+    /// tight bound the helper is stopped (it seals its files), the sentinel stays marked stopping (and quit),
+    /// and the long finalize is skipped: the next launch salvages it.
+    @Test func aTerminationStopsTheHelperAndLeavesTheFinalizeToTheNextLaunch() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
-        await h.coordinator.systemWillPowerOff()
+        await h.coordinator.prepareForTermination(bound: .seconds(1))
         #expect(h.client.stopCalls == 0, "idle: nothing to stop")
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        await h.coordinator.systemWillPowerOff()
-        #expect(h.client.stopCalls == 1 && !h.appState.isRecording)
+        try stopReturnsTheFirstChunk(h)
+        #expect(h.coordinator.hasWorkInFlight)
+        await h.coordinator.prepareForTermination(bound: .seconds(1))
+        #expect(h.client.stopCalls == 1, "the helper sealed its files")
+        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        #expect(sentinel.stopping && sentinel.quitDuringFinalize, "the next launch salvages it, worded as a quit")
+        #expect(h.client.finalizeCalls.isEmpty && h.presented.value.isEmpty, "the long finalize is skipped")
     }
 
-    /// L5 review: logout or shutdown while a start is in flight waits for it, then stops the recording.
-    @Test func powerOffDuringAStartWaitsForItAndStops() async throws {
+    /// … and a helper that hangs cannot hold the logout: the preparation ends within its bound.
+    @Test func aTerminationWhoseHelperHangsEndsWithinItsBound() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
+        let began = ContinuousClock.now
+        await h.coordinator.prepareForTermination(bound: .milliseconds(200))
+        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
+    }
+
+    /// L5 review, kept for termination: a start in flight is waited for (within the bound), then stopped.
+    @Test func aTerminationDuringAStartWaitsForItAndStops() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         let released = Harness.Box(false)
         h.client.onStartAsync = { while !released.value { await Task.yield() } }
+        h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
         let coordinator = h.coordinator
         let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
         for _ in 0..<20 { await Task.yield() }
-        let poweringOff = Task { await coordinator.systemWillPowerOff() }
+        #expect(h.coordinator.hasWorkInFlight, "a start in flight is busy")
+        let terminating = Task { await coordinator.prepareForTermination(bound: .seconds(2)) }
         for _ in 0..<20 { await Task.yield() }
         #expect(h.client.stopCalls == 0)
         released.value = true
         await starting.value
-        await poweringOff.value
-        #expect(h.client.stopCalls == 1 && !h.appState.isRecording)
+        await terminating.value
+        #expect(h.client.stopCalls == 1)
+    }
+
+    /// A termination while the transcript is being finished: nothing left to stop — the sentinel is marked,
+    /// and the preparation returns at once.
+    @Test func aTerminationDuringAFinalizeMarksTheSentinelAtOnce() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try stopReturnsTheFirstChunk(h)
+        h.runner.finalizeDelayForTesting = .seconds(2)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.appState.isTranscribing }
+        #expect(h.coordinator.hasWorkInFlight, "a finalize is busy")
+        let began = ContinuousClock.now
+        await h.coordinator.prepareForTermination(bound: .seconds(5))
+        #expect(ContinuousClock.now - began < .milliseconds(500))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
+        stopping.cancel()
+    }
+
+    /// L10 review 54: a sleep and a wake while a Stop is in flight. The helper still gets its "sleep"/"wake"
+    /// pair and the wake is recorded — but nothing restarts the recording that is ending: no rotation into
+    /// the stopping helper, no rotation timer (it would wake the idle app forever), no poll, no banner.
+    @Test func aSleepAndWakeDuringAStopKeepThePairingButRestartNothing() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.preflight = { _ in (false, false) }   // no lid-closed banner from this Mac
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let released = Harness.Box(false)
+        h.client.onStop = { while !released.value { await Task.yield() } }
+        h.client.stopError = FakeCaptureError()
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.client.stopCalls == 1 }
+        h.coordinator.systemWillSleep(at: Date(timeIntervalSince1970: 1_000))
+        h.coordinator.systemDidWake(at: Date(timeIntervalSince1970: 1_060))
+        await Harness.until { h.client.powerEvents.count == 2 }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+        #expect(h.client.recordedEvents.contains { $0.kind == .systemWake })
+        #expect(h.client.rotateCalls == 0 && rotator.activeTimerForTesting == nil, "no rotation, no timer")
+        #expect(h.appState.interruptionWarning == nil, "no banner")
+        released.value = true
+        await stopping.value
+        #expect(rotator.activeTimerForTesting == nil)
+    }
+
+    /// L10 review 55: a didWake that never arrives must not silently switch app-side monitoring off. After
+    /// ~30 s of AWAKE time with no wake, an implicit wake runs: the gap is recorded, the helper told, the
+    /// rotation and the poll resumed.
+    @Test func aLostWakeIsHealedAfterThirtySecondsOfAwakeTime() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        let clock = ManualTestClock()
+        h.coordinator.wakeWatchdogClock = clock
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try FileManager.default.createDirectory(at: try #require(h.client.startCalls.first).outputDirectory, withIntermediateDirectories: true)
+        h.coordinator.systemWillSleep(at: Date())
+        await Harness.until { clock.pendingSleeps > 0 }
+        clock.advance(by: .seconds(29))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep"], "29 s awake: still waiting for the wake")
+        clock.advance(by: .seconds(1))
+        await Harness.until { h.client.powerEvents.count == 2 }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+        #expect(h.client.recordedEvents.contains { $0.kind == .systemWake && $0.detail["implicit"] == "true" })
+        await Harness.until { h.client.rotateCalls == 1 }
+        #expect(h.client.rotateCalls == 1 && h.runner.chunkRotator?.activeTimerForTesting != nil, "rotation resumed")
+    }
+
+    /// … and a wake that does arrive disarms it: one wake, never two.
+    @Test func aWakeInTimeDisarmsTheLostWakeWatchdog() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        let clock = ManualTestClock()
+        h.coordinator.wakeWatchdogClock = clock
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.systemWillSleep(at: Date())
+        await Harness.until { clock.pendingSleeps > 0 }
+        h.coordinator.systemDidWake(at: Date())
+        await Harness.until { clock.pendingSleeps == 0 }
+        clock.advance(by: .seconds(60))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+    }
+
+    /// L10 review 57: the recording ends between the sleep and the wake — the helper still gets its "wake"
+    /// (the pairing holds), and the late didWake then does nothing: no second wake, no gap, no restart.
+    @Test func aRecordingThatEndsWhileAsleepStillSendsTheWake() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.systemWillSleep(at: Date())
+        h.client.stopError = FakeCaptureError()
+        await h.coordinator.stopRecording()
+        await Harness.until { h.client.powerEvents.count == 2 }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+        h.coordinator.systemDidWake(at: Date())
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+        #expect(!h.client.recordedEvents.contains { $0.kind == .systemWake })
+    }
+
+    /// L10 review 58: every Quit goes through the coordinator — a Quit from the setup panel during a Flow A
+    /// re-attach asks first and stops the recording; no coordinator (nothing can be recording) just quits.
+    @Test func everyQuitGoesThroughTheCoordinator() async throws {
+        #expect(await RecordingCoordinator.quitGate(nil, confirm: { Issue.record("nothing to confirm"); return false }))
+        let h = try Harness()
+        defer { tearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date(); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isRecording, "re-attached")
+        h.client.stopError = FakeCaptureError()
+        #expect(await RecordingCoordinator.quitGate(h.coordinator, confirm: { false }) == false)
+        #expect(h.client.stopCalls == 0)
+        #expect(await RecordingCoordinator.quitGate(h.coordinator, confirm: { true }))
+        #expect(h.client.stopCalls == 1)
+    }
+
+    /// L10 review 59: the Mac does not idle-sleep until the transcript is finished — the finalize included.
+    @Test func idleSleepIsPreventedUntilTheTranscriptIsFinished() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try stopReturnsTheFirstChunk(h)
+        h.runner.finalizeDelayForTesting = .milliseconds(400)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.appState.isTranscribing }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.coordinator.preventsIdleSleep, "still finishing the transcript")
+        await stopping.value
+        await Harness.until { !h.coordinator.preventsIdleSleep }
+        #expect(!h.coordinator.preventsIdleSleep && h.appState.isIdle)
+    }
+
+    /// L10 review 60: a Quit whose stop hangs still quits within its (injectable) bound — never stuck.
+    @Test func aQuitWhoseStopHangsReturnsWithinItsBound() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.quitStopBound = .milliseconds(200)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
+        let began = ContinuousClock.now
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
+    }
+
+    /// L10 review 60: a Quit while a Stop is already in flight waits for THAT stop (it used to return at once,
+    /// "Stop already in progress") — the transcript is finished before the app goes.
+    @Test func aQuitDuringAStopInFlightWaitsForIt() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try stopReturnsTheFirstChunk(h)
+        let released = Harness.Box(false)
+        h.client.onStop = { while !released.value { await Task.yield() } }
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.client.stopCalls == 1 }
+        let quit = Harness.Box<Bool?>(nil)
+        let quitting = Task { quit.value = await coordinator.prepareForQuit(confirm: { true }) }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(quit.value == nil, "waiting for the stop in flight")
+        released.value = true
+        await stopping.value
+        await quitting.value
+        #expect(quit.value == true && h.presented.value.count == 1 && h.client.stopCalls == 1)
+    }
+
+    /// L10 review 60: a long user Quit says so — a notification once it outlasts `quitFeedbackDelay`, and the
+    /// menu's status while it runs.
+    @Test func aLongQuitSaysSo() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try stopReturnsTheFirstChunk(h)
+        h.coordinator.quitFeedbackDelay = .milliseconds(50)
+        let coordinator = h.coordinator
+        let quittingSeen = Harness.Box(false)
+        h.client.onStop = { quittingSeen.value = coordinator.isQuitting; try? await Task.sleep(for: .milliseconds(300)) }
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(quittingSeen.value && !h.coordinator.isQuitting)
+        #expect(h.notified.value.contains { $0.title == "Quitting Parley" })
+    }
+
+    /// … and a quick one does not.
+    @Test func aQuickQuitSaysNothing() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try stopReturnsTheFirstChunk(h)
+        h.coordinator.quitFeedbackDelay = .seconds(5)
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!h.notified.value.contains { $0.title == "Quitting Parley" })
     }
 }
 

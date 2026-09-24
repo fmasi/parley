@@ -114,6 +114,8 @@ final class ManifestHealthStore {
 
 @main
 struct TranscriberApp: App {
+    /// `applicationShouldTerminate`: a logout, shutdown or outside quit stops the helper first (L10 review 53).
+    @NSApplicationDelegateAdaptor(AppTerminationDelegate.self) private var terminationDelegate
     @State private var appState: AppState
     @State private var launchGate: LaunchGate
     private let captureClient: AudioCaptureClient
@@ -285,8 +287,9 @@ struct TranscriberApp: App {
     /// The one pending bounded re-check of a window deferral.
     private static var windowDeferralRecheck: Task<Void, Never>?
 
-    /// The coordinator, for the busy check only (a recording start in flight). Weak: the App owns it.
-    private static weak var busyCoordinator: RecordingCoordinator?
+    /// The coordinator, for the busy checks: a recording start in flight (the hand-over), work an exit would
+    /// cut short (termination, every Quit). Weak: the App owns it.
+    private(set) static weak var busyCoordinator: RecordingCoordinator?
 
     /// Whether Parley is doing work a hand-over (an exit) would cut short: a recording or its
     /// transcription, a recording START in flight (the phase is still `.idle` while the helper starts),
@@ -557,7 +560,7 @@ private struct SetupRequiredPanel: View {
             Divider()
 
             MenuActionRow(icon: "power", title: "Quit Parley") {
-                quitAfterUninstallingLaunchAgent()
+                quitParley()
             }
             .keyboardShortcut("q")
         }

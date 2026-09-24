@@ -7,15 +7,29 @@ import UserNotifications
 import Sparkle
 import os
 
-/// Shared by both Quit paths (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift):
-/// `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no timeout, so a
-/// safety-net Task races the graceful uninstall-then-terminate path and terminates unconditionally
-/// after a bound generous past any real unload. Racing a second `terminate(nil)` in is safe here
-/// specifically because this app has no `applicationShouldTerminate(_:)` override — termination is
-/// always immediate once requested, never deferred via `.terminateLater` — so there's no
-/// in-progress graceful-shutdown answer for the safety net to cut short.
+/// The one Quit (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift), routed through the
+/// coordinator whenever there is one (L10 review 58): the setup panel can be up during a Flow A re-attach or a
+/// resume. While recording — or while a start is in flight — it asks first; on "Stop and Quit" the recording
+/// is stopped (bounded, ≤ 30 s) BEFORE the LaunchAgent is uninstalled and the app terminates, so the 5 s
+/// safety-net terminate starts only then (§8.10).
 @MainActor
-func quitAfterUninstallingLaunchAgent() {
+func quitParley() {
+    Task {
+        guard await RecordingCoordinator.quitGate(TranscriberApp.busyCoordinator,
+                                                  confirm: { MenuView.confirmQuitWhileRecording() }) else { return }
+        terminateAfterUninstallingLaunchAgent()
+    }
+}
+
+/// The end of the one Quit: `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no
+/// timeout, so a safety-net Task races the graceful uninstall-then-terminate path and terminates
+/// unconditionally after a bound generous past any real unload. `applicationShouldTerminate`
+/// (`AppTerminationDelegate`, L10 review 53) answers this Quit at once — it is marked as the user's, whose
+/// recording `quitGate` already stopped — so a second `terminate(nil)` never lands on a pending
+/// `.terminateLater`, and racing it in is safe.
+@MainActor
+private func terminateAfterUninstallingLaunchAgent() {
+    AppTerminationDelegate.userQuitRequested = true
     // L3 (C2 final): without the single-instance lock another live instance may be launchd's job —
     // possibly recording — and `uninstall()`'s bootout would SIGTERM it. Just quit.
     guard LaunchAgentHealth.shouldUninstallOnQuit(holdsInstanceLock: TranscriberApp.holdsInstanceLock) else {
@@ -34,18 +48,6 @@ func quitAfterUninstallingLaunchAgent() {
     Task {
         try? await Task.sleep(for: .seconds(5))
         NSApplication.shared.terminate(nil)
-    }
-}
-
-/// The menu's Quit (§8.10): while recording — or while a start is in flight — ask first; on "Stop and
-/// Quit" the recording is stopped (bounded) BEFORE the LaunchAgent is uninstalled and the app terminates,
-/// so the 5 s safety-net terminate starts only then. The no-argument form stays for `SetupRequiredPanel`,
-/// which quits before permissions are ready and can never be recording.
-@MainActor
-func quitAfterUninstallingLaunchAgent(coordinator: RecordingCoordinator) {
-    Task {
-        guard await coordinator.prepareForQuit(confirm: { MenuView.confirmQuitWhileRecording() }) else { return }
-        quitAfterUninstallingLaunchAgent()
     }
 }
 
@@ -173,7 +175,7 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    quitAfterUninstallingLaunchAgent(coordinator: coordinator)
+                    quitParley()
                 }
                 .keyboardShortcut("q")
             }
@@ -235,6 +237,8 @@ struct MenuView: View {
         // after a crash the phase falls back to .idle, which would otherwise
         // pair a red dot with "Ready to record". The banner carries the detail.
         if appState.criticalError != nil { return "Error" }
+        // A long user Quit says so while it saves the recording (L10 review 60).
+        if coordinator.isQuitting { return "Quitting — saving the recording…" }
         switch appState.phase {
         case .idle: return "Ready to record"
         case .recording: return appState.interruptionWarning == nil ? "Recording" : "Recording — interrupted"

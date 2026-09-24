@@ -1,9 +1,11 @@
 import AppKit
 import TranscriberCore
 
-/// Forwards the Mac's sleep, wake and power-off to the coordinator (§8.10). Logout, shutdown and
-/// restart all arrive as `willPowerOffNotification`. Fast user switching
-/// (`sessionDidResignActiveNotification`) is deliberately not observed: the recording continues.
+/// Forwards the Mac's sleep and wake to the coordinator (§8.10). Logout, shutdown and restart all arrive as
+/// `willPowerOffNotification`: that only notes the kind of termination coming — the recording is stopped when
+/// the quit itself arrives (`AppTerminationDelegate`, L10 review 53), so a cancelled logout keeps recording.
+/// Fast user switching (`sessionDidResignActiveNotification`) is deliberately not observed: the recording
+/// continues.
 /// A volume mount and a wake also retry the sessions a relaunch could not finish (an unplugged drive,
 /// L follow-up 35): event-driven, never a timer.
 @MainActor
@@ -29,11 +31,8 @@ final class SystemEventObserver {
                 Task { await coordinator.retryPendingSessions() }
             }
         })
-        observers.append(center.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak coordinator] _ in
-            MainActor.assumeIsolated {
-                guard let coordinator else { return }
-                Task { await coordinator.systemWillPowerOff() }
-            }
+        observers.append(center.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppTerminationDelegate.powerOffSeen = true }
         })
     }
 }
