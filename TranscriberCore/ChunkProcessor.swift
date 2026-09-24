@@ -21,6 +21,16 @@ public final class ChunkProcessor {
     private nonisolated let wavHeaderSize = 44
     private nonisolated let taskPriority: TaskPriority
     private var inFlightTasks: [Task<Void, Never>] = []
+    /// Every chunk index this processor has accepted. An index is claimed once and never released:
+    /// the orphan re-ingested by crash recovery and the same index arriving again from the rotator
+    /// must not produce two chunks (L6/L7, scan B P3.2). A lock, not main-actor state, because
+    /// `processLastChunk` is `nonisolated`.
+    private nonisolated let claimedIndices = OSAllocatedUnfairLock<Set<Int>>(initialState: [])
+
+    /// Called on the main actor with the chunk index when session.json could not be written after
+    /// that chunk — the coordinator raises `sessionWriteFailed` (L10). The failure is also recorded
+    /// in `SessionState.issues`, so the next successful write persists it.
+    public var onSessionWriteFailure: ((Int) -> Void)?
 
     /// Actor-isolated mutable session state — replaces NSLock.
     private actor StateStore {
@@ -32,6 +42,13 @@ public final class ChunkProcessor {
 
         func appendChunk(_ chunk: ProcessedChunk) -> SessionState {
             sessionState.chunks.append(chunk)
+            return sessionState
+        }
+
+        func noteSessionWriteFailure(chunkIndex: Int) -> SessionState {
+            sessionState.issues.append(SessionIssue(
+                chunk: chunkIndex, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil)
+            ))
             return sessionState
         }
 
@@ -67,6 +84,7 @@ public final class ChunkProcessor {
 
     /// Process a finalized chunk in the background (non-blocking).
     public func processChunk(_ chunk: ChunkRotator.FinalizedChunk) {
+        guard claim(chunk.index) else { return }
         let priority = taskPriority
         let task = Task(priority: priority) {
             await self.processChunkAsync(chunk)
@@ -80,7 +98,17 @@ public final class ChunkProcessor {
     /// concurrently). `nonisolated` so the heavy work (ASR, diarization, AAC encoding) runs off the
     /// main actor even when awaited from `@MainActor`.
     public nonisolated func processLastChunk(_ chunk: ChunkRotator.FinalizedChunk) async {
+        guard claim(chunk.index) else { return }
         await processChunkAsync(chunk)
+    }
+
+    /// Claim a chunk index for processing; false (logged) when it was already claimed.
+    private nonisolated func claim(_ index: Int) -> Bool {
+        let claimed = claimedIndices.withLock { $0.insert(index).inserted }
+        if !claimed {
+            Logger.transcription.info("Chunk \(index, privacy: .public) already processed or in flight — skipping the duplicate")
+        }
+        return claimed
     }
 
     /// Wait for all background chunk processing to complete before merging.
@@ -107,6 +135,11 @@ public final class ChunkProcessor {
     // MARK: - Private
 
     private nonisolated func processChunkAsync(_ chunk: ChunkRotator.FinalizedChunk) async {
+        // A seeded session (relaunch, L7) already holds its settled chunks: never re-do one.
+        if await stateStore.getSessionState().chunks.contains(where: { $0.index == chunk.index }) {
+            Logger.transcription.info("Chunk \(chunk.index, privacy: .public) is already in the session — skipping the duplicate")
+            return
+        }
         let startTime = ContinuousClock.now
         Logger.transcription.info(
             "Chunk \(chunk.index, privacy: .public) processing started (qos: \(self.config.chunkProcessingQos, privacy: .public))"
@@ -134,6 +167,7 @@ public final class ChunkProcessor {
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
+        var issues = systemResult.issues + micResult.issues
 
         // 3. Merge segments
         var allSegments = systemResult.segments + micResult.segments
@@ -162,6 +196,9 @@ public final class ChunkProcessor {
             )
             allSegments = dedupResult.segments
             echoRemoved = dedupResult.removedCount
+            if echoRemoved > 0 {
+                issues.append(ChunkIssue(code: .echoFlagged, track: "local", count: echoRemoved))
+            }
         }
 
         // 4. Convert to ProcessedChunk.Segment
@@ -191,6 +228,9 @@ public final class ChunkProcessor {
         // deleting a WAV that has no .m4a replacement would be real data loss.
         var audioPath = systemURL.lastPathComponent
         let micFileExists = FileManager.default.fileExists(atPath: chunk.micPath)
+        // An ASR-failed chunk keeps its WAV(s) next to the .m4a so it can be re-transcribed (P3):
+        // the AAC is lossy, and the words it failed to yield exist nowhere else.
+        let preserveSourceWAV = (config.preserveSourceWAV ?? false) || issues.contains { $0.code == .asrFailed }
         do {
             let archiveResult: AudioArchiveResult
             if micFileExists {
@@ -199,14 +239,14 @@ public final class ChunkProcessor {
                     micAudio: micURL,
                     outputDirectory: outputDirectory,
                     bitrateKbps: config.archiveBitrateKbps,
-                    preserveSourceWAV: config.preserveSourceWAV ?? false
+                    preserveSourceWAV: preserveSourceWAV
                 )
             } else {
                 archiveResult = try await AudioArchiver.archiveSystemOnly(
                     systemAudio: systemURL,
                     outputDirectory: outputDirectory,
                     bitrateKbps: config.archiveBitrateKbps,
-                    preserveSourceWAV: config.preserveSourceWAV ?? false
+                    preserveSourceWAV: preserveSourceWAV
                 )
             }
             audioPath = archiveResult.archivePath.lastPathComponent
@@ -231,6 +271,7 @@ public final class ChunkProcessor {
                 micHasFrames: micFileExists && Self.hasAudioFrames(micURL)
             )
             Logger.files.error("Chunk \(chunk.index, privacy: .public) archival failed, keeping WAV(s) — transcript will reference \(audioPath, privacy: .sensitive): \(error, privacy: .public)")
+            issues.append(ChunkIssue(code: .archiveFailed, track: nil, count: nil))
         }
 
         // 7. Create ProcessedChunk
@@ -242,7 +283,8 @@ public final class ChunkProcessor {
             speakerDatabase: speakerDatabase,
             localSpeakerDatabase: localSpeakerDatabase,
             echoSegmentsRemoved: echoRemoved,
-            isDualStream: hasDualStream
+            isDualStream: hasDualStream,
+            issues: issues
         )
 
         // 8. Actor-isolated append + persist
@@ -252,6 +294,10 @@ public final class ChunkProcessor {
             try SessionState.write(snapshot, directory: outputDirectory)
         } catch {
             Logger.state.error("Failed to write session.json for chunk \(chunk.index, privacy: .public): \(error, privacy: .public)")
+            // Recorded in memory so the next successful write persists it, and reported so the
+            // coordinator can tell the user now — a session that cannot be saved is not recoverable.
+            _ = await stateStore.noteSessionWriteFailure(chunkIndex: chunk.index)
+            await MainActor.run { self.onSessionWriteFailure?(chunk.index) }
         }
 
         let elapsed = ContinuousClock.now - startTime
@@ -264,6 +310,7 @@ public final class ChunkProcessor {
     private struct StreamResult {
         let segments: [LabeledSegment]
         let speakerDatabase: [String: [Float]]
+        var issues: [ChunkIssue] = []
     }
 
     /// Whether a WAV holds any audio at all. A capture that opened a file and never wrote a frame
@@ -289,7 +336,8 @@ public final class ChunkProcessor {
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
-            return StreamResult(segments: [], speakerDatabase: [:])
+            return StreamResult(segments: [], speakerDatabase: [:],
+                                issues: [ChunkIssue(code: .streamEmpty, track: source, count: nil)])
         }
 
         Logger.transcription.info("Transcribing \(label, privacy: .public): \(audioPath.lastPathComponent, privacy: .sensitive) (\(fileSize) bytes)")
@@ -299,9 +347,11 @@ public final class ChunkProcessor {
             segments = try await transcriber.transcribe(audioPath: audioPath, language: nil, audioSource: audioSource)
         } catch {
             Logger.transcription.error("Transcription failed for \(label, privacy: .public): \(error, privacy: .public)")
-            return StreamResult(segments: [], speakerDatabase: [:])
+            return StreamResult(segments: [], speakerDatabase: [:],
+                                issues: [ChunkIssue(code: .asrFailed, track: source, count: nil)])
         }
 
+        var issues: [ChunkIssue] = []
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
         if let diarizer {
@@ -312,6 +362,10 @@ public final class ChunkProcessor {
 
                 let diarizationResult = try await diarizedResult
                 let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
+                if speechMap == nil {
+                    // No VAD (model not cached, or it threw): the quality gate ran without a speech map.
+                    issues.append(ChunkIssue(code: .vadUnavailable, track: source, count: nil))
+                }
 
                 let result = StreamLabeling.withDiarization(
                     segments: segments,
@@ -322,8 +376,12 @@ public final class ChunkProcessor {
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase
+                if result.absorbed > 0 {
+                    issues.append(ChunkIssue(code: .clustersAbsorbed, track: source, count: result.absorbed))
+                }
             } catch {
                 Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .public)")
+                issues.append(ChunkIssue(code: .diarizationFailed, track: source, count: nil))
                 // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
                 // is worse than admitting we don't know: with an empty speakerDatabase the
                 // reconciler skips this chunk entirely, so a fabricated "Speaker 1" fuses with the
@@ -340,6 +398,6 @@ public final class ChunkProcessor {
         }
 
         Logger.transcription.info("\(label.capitalized, privacy: .public) transcription: \(labeled.count) segments")
-        return StreamResult(segments: labeled, speakerDatabase: speakerDatabase)
+        return StreamResult(segments: labeled, speakerDatabase: speakerDatabase, issues: issues)
     }
 }

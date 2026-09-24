@@ -95,4 +95,28 @@ import Foundation
             .appendingPathComponent("does-not-exist-\(UUID().uuidString).json")
         #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: missing) == 0)
     }
+
+    // MARK: - Processing problems and empty transcripts (§7.3)
+
+    /// §7.3 precedence: no speech > capture anomalies > processing problems > complete.
+    @Test func processingIssuesGetTheirOwnTitleWithPrecedence() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 2, segmentCount: 40) == "Transcription Complete — 2 chunks had processing problems")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 1, segmentCount: 40) == "Transcription Complete — 1 chunk had processing problems")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 0) == "Transcription Complete — no speech was transcribed")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 1, problemChunkCount: 1, segmentCount: 40) == "Transcription Complete — capture anomalies")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 40) == "Transcription Complete")
+        let body = CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 1, problemChunkCount: 2, segmentCount: 40)
+        #expect(body.contains("1 capture anomaly") && body.contains("2 chunks had processing problems"))
+    }
+
+    @Test func problemChunkCountReadsDistinctChunksWithContentIssues() throws {
+        let url = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 0, "code": "asr_failed", "track": "remote"],
+            ["chunk": 0, "code": "diarization_failed", "track": "local"],
+            ["chunk": 3, "code": "stream_empty", "track": "remote"],
+        ], "processing_problem_chunks": 1], "segments": [["start": 0, "end": 1, "text": "x", "speaker": "S"]]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 1)
+        #expect(CaptureQualityNotice.segmentCount(inTranscriptAt: url) == 1)
+    }
 }

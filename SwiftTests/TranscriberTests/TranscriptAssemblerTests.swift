@@ -135,4 +135,14 @@ struct TranscriptAssemblerTests {
         #expect(gaps.count == 1 && gaps[0]["reason"] as? String == "app relaunch" && gaps[0]["seconds"] as? Double == 4)
         #expect(gaps[0]["start"] as? String == "1970-01-01T00:00:10Z")
     }
+
+    @Test func processingIssuesLandInMetadataWithCounts() throws {
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+            diarization: false, dualStream: false,
+            processingIssues: [["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 0, "code": "stream_empty", "track": "local"], ["chunk": 2, "code": "asr_failed", "track": "remote"]])
+        let m = try #require(json["metadata"] as? [String: Any])
+        #expect((m["processing_issues"] as? [[String: Any]])?.count == 3)
+        #expect(m["processing_issue_count"] as? Int == 2, "stream_empty does not affect content")
+        #expect(m["processing_problem_chunks"] as? Int == 2)
+    }
 }

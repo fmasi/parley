@@ -15,7 +15,8 @@ public enum TranscriptAssembler {
         echoSegmentsRemoved: Int = 0,
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
-        captureGaps: [CaptureGap] = []
+        captureGaps: [CaptureGap] = [],
+        processingIssues: [[String: Any]] = []
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -55,6 +56,18 @@ public enum TranscriptAssembler {
                 ]
             }
             metadata["capture"] = capture
+        }
+        // What went wrong or was removed while processing chunks (§7.2, P3): `{chunk, code, track?,
+        // count?}` per issue. The two counts cover only content-affecting codes — an idle side
+        // (`stream_empty`) is not a processing problem — and the completion notice reads
+        // `processing_problem_chunks`.
+        if !processingIssues.isEmpty {
+            metadata["processing_issues"] = processingIssues
+            let contentAffecting = processingIssues.filter { issue in
+                (issue["code"] as? String).flatMap(ChunkIssue.Code.init(rawValue:))?.affectsContent ?? false
+            }
+            metadata["processing_issue_count"] = contentAffecting.count
+            metadata["processing_problem_chunks"] = Set(contentAffecting.compactMap { $0["chunk"] as? Int }).count
         }
         // Disclosure (#138): the transcript testifies whether its contents left the machine.
         // A transcript is airgapped at assembly time — summaries are generated later (and only

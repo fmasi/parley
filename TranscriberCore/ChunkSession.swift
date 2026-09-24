@@ -1,6 +1,66 @@
 import Foundation
 import os
 
+// MARK: - ChunkIssue
+
+/// Something that went wrong — or was deliberately removed — while processing one chunk.
+///
+/// Every failure `ChunkProcessor` used to swallow (an ASR error became an empty chunk, a failed
+/// diarization a single "Unknown" speaker) is recorded here and carried into the transcript's
+/// `metadata.processing_issues`, so the record states what it lost instead of presenting a
+/// degraded chunk as a clean one (§7.2, P3).
+public struct ChunkIssue: Codable, Equatable, Sendable {
+    public enum Code: String, Codable, Sendable {
+        case asrFailed = "asr_failed"
+        case diarizationFailed = "diarization_failed"
+        case vadUnavailable = "vad_unavailable"
+        case streamEmpty = "stream_empty"
+        case archiveFailed = "archive_failed"
+        case sessionWriteFailed = "session_write_failed"
+        case duplicatesDropped = "duplicates_dropped"
+        case segmentsFiltered = "segments_filtered"
+        case clustersAbsorbed = "clusters_absorbed"
+        case echoFlagged = "echo_flagged"
+
+        /// Whether this issue means content may be missing or wrong. `streamEmpty` is NOT: an
+        /// idle side (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13).
+        public var affectsContent: Bool {
+            switch self {
+            case .asrFailed, .diarizationFailed, .archiveFailed, .sessionWriteFailed: true
+            case .vadUnavailable, .streamEmpty, .duplicatesDropped, .segmentsFiltered,
+                 .clustersAbsorbed, .echoFlagged: false
+            }
+        }
+    }
+
+    public let code: Code
+    /// "remote" | "local" — the stream the issue belongs to; nil when it is chunk-wide.
+    public let track: String?
+    /// How many items the issue covers (dropped duplicates, absorbed clusters…); nil when not a count.
+    public let count: Int?
+
+    public init(code: Code, track: String?, count: Int?) {
+        self.code = code
+        self.track = track
+        self.count = count
+    }
+
+    /// asrFailed, diarizationFailed, archiveFailed, sessionWriteFailed. NOT streamEmpty.
+    public var affectsContent: Bool { code.affectsContent }
+}
+
+/// A chunk issue that could not be stored on the chunk itself — the chunk was already appended when
+/// it happened (a session.json write that failed after the append).
+public struct SessionIssue: Codable, Equatable, Sendable {
+    public let chunk: Int
+    public let issue: ChunkIssue
+
+    public init(chunk: Int, issue: ChunkIssue) {
+        self.chunk = chunk
+        self.issue = issue
+    }
+}
+
 // MARK: - ProcessedChunk
 
 /// A single processed audio chunk with transcription segments and speaker embeddings.
@@ -52,6 +112,9 @@ public struct ProcessedChunk: Codable {
     /// for the rest of the meeting with no error anywhere. Persist the capture-time answer instead,
     /// so the writer and the reader cannot disagree.
     public let isDualStream: Bool
+    /// What went wrong or was removed while processing this chunk (P3). Absent in legacy
+    /// session.json → `[]`.
+    public let issues: [ChunkIssue]
 
     public init(
         index: Int,
@@ -61,7 +124,8 @@ public struct ProcessedChunk: Codable {
         speakerDatabase: [String: [Float]],
         localSpeakerDatabase: [String: [Float]] = [:],
         echoSegmentsRemoved: Int = 0,
-        isDualStream: Bool = false
+        isDualStream: Bool = false,
+        issues: [ChunkIssue] = []
     ) {
         self.index = index
         self.startTime = startTime
@@ -71,6 +135,7 @@ public struct ProcessedChunk: Codable {
         self.localSpeakerDatabase = localSpeakerDatabase
         self.echoSegmentsRemoved = echoSegmentsRemoved
         self.isDualStream = isDualStream
+        self.issues = issues
     }
 
     // MARK: - Codable
@@ -84,6 +149,7 @@ public struct ProcessedChunk: Codable {
         case localSpeakerDatabase
         case echoSegmentsRemoved = "echo_segments_removed"
         case isDualStream = "is_dual_stream"
+        case issues
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +168,7 @@ public struct ProcessedChunk: Codable {
         } else {
             isDualStream = segments.contains { $0.source == "local" }
         }
+        issues = try c.decodeIfPresent([ChunkIssue].self, forKey: .issues) ?? []
     }
 }
 
@@ -141,6 +208,9 @@ public struct SessionState: Codable {
     public var provenance: CaptureProvenance?
     /// Periods with no capture (relaunch, sleep). Absent in legacy session.json → `[]`.
     public var gaps: [CaptureGap]
+    /// Chunk issues that happened after the chunk was appended (a failed session.json write).
+    /// Absent in legacy session.json → `[]`.
+    public var issues: [SessionIssue]
 
     public init(
         sessionId: String,
@@ -149,7 +219,8 @@ public struct SessionState: Codable {
         chunkDurationMinutes: Int,
         chunks: [ProcessedChunk] = [],
         provenance: CaptureProvenance? = nil,
-        gaps: [CaptureGap] = []
+        gaps: [CaptureGap] = [],
+        issues: [SessionIssue] = []
     ) {
         self.sessionId = sessionId
         self.meetingStart = meetingStart
@@ -158,12 +229,13 @@ public struct SessionState: Codable {
         self.chunks = chunks
         self.provenance = provenance
         self.gaps = gaps
+        self.issues = issues
     }
 
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case sessionId, meetingStart, engine, chunkDurationMinutes, chunks, provenance, gaps
+        case sessionId, meetingStart, engine, chunkDurationMinutes, chunks, provenance, gaps, issues
     }
 
     public init(from decoder: Decoder) throws {
@@ -175,6 +247,7 @@ public struct SessionState: Codable {
         chunks = try c.decode([ProcessedChunk].self, forKey: .chunks)
         provenance = try c.decodeIfPresent(CaptureProvenance.self, forKey: .provenance)
         gaps = try c.decodeIfPresent([CaptureGap].self, forKey: .gaps) ?? []
+        issues = try c.decodeIfPresent([SessionIssue].self, forKey: .issues) ?? []
     }
 
     // MARK: - File location

@@ -446,19 +446,22 @@ public final class TranscriptionRunner {
 
         // 7. Assemble JSON
         let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
+        let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues)
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
             audioPaths: audioPaths,
             outputFormat: config.outputFormat,
             language: detectedLanguage,
             numSpeakers: nil,
-            diarization: true,
+            // Diarization happened only if a diarizer ran AND no chunk's diarization failed (§7.2).
+            diarization: diarizer != nil && !processingIssues.contains { $0["code"] as? String == ChunkIssue.Code.diarizationFailed.rawValue },
             dualStream: isDualStream,
             echoSegmentsRemoved: totalEchoRemoved,
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
-            captureGaps: sessionState.gaps
+            captureGaps: sessionState.gaps,
+            processingIssues: processingIssues
         )
 
         let baseName = sessionState.sessionId
@@ -491,6 +494,19 @@ public final class TranscriptionRunner {
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// Flatten per-chunk issues and session-level issues into the `metadata.processing_issues`
+    /// shape `{chunk, code, track?, count?}` — optional fields omitted, never written as null.
+    static func processingIssueDictionaries(chunks: [ProcessedChunk], sessionIssues: [SessionIssue]) -> [[String: Any]] {
+        func dictionary(chunk: Int, issue: ChunkIssue) -> [String: Any] {
+            var d: [String: Any] = ["chunk": chunk, "code": issue.code.rawValue]
+            if let track = issue.track { d["track"] = track }
+            if let count = issue.count { d["count"] = count }
+            return d
+        }
+        return chunks.flatMap { c in c.issues.map { dictionary(chunk: c.index, issue: $0) } }
+            + sessionIssues.map { dictionary(chunk: $0.chunk, issue: $0.issue) }
     }
 
     // MARK: - Chunked Pipeline

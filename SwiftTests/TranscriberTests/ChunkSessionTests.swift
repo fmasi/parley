@@ -144,4 +144,13 @@ struct ChunkSessionTests {
         let back = try #require(SessionState.read(directory: dir))
         #expect(back.gaps.count == 1 && back.gaps[0].reason == "sleep" && back.gaps[0].seconds == 120)
     }
+
+    @Test("processedChunkIssuesDefaultToEmptyAndDecode")
+    func processedChunkIssuesDefaultToEmptyAndDecode() throws {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let bare = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{}}"#.utf8)
+        #expect(try decoder.decode(ProcessedChunk.self, from: bare).issues == [])
+        let withIssue = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{},"issues":[{"code":"asr_failed","track":"remote"}]}"#.utf8)
+        #expect(try decoder.decode(ProcessedChunk.self, from: withIssue).issues == [ChunkIssue(code: .asrFailed, track: "remote", count: nil)])
+    }
 }
