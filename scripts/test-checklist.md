@@ -39,5 +39,8 @@ Check the right channel with `ffmpeg -i <file>.m4a -af "pan=mono|c0=c1,volumedet
 - [ ] **ScreenCaptureKit unaffected.** Switch Capture Method to Screen Recording and Save: Setup/Settings show the **Screen Recording** row, and recording works with no System Audio prompt.
 - [ ] **Switching to the tap asks right away.** `tccutil reset AudioCapture eu.fmasi.parley`, then switch Capture Method to Core Audio Tap and **Save** → the system prompt appears immediately, not at the next meeting.
 
+## A stalled helper must not wedge the permission checks
+- [ ] **Frozen helper.** Start a recording (so the capture helper is running), then `pkill -STOP -f audio-capture-helper-xpc`. In Settings switch Capture Method and **Save**: the app and menu must stay responsive, and within ~5 s the permission check gives up (each helper call has a 3 s deadline and fails open) instead of hanging. Then `pkill -CONT -f audio-capture-helper-xpc` and confirm the recording carries on. (The same deadline protects the launch check; that path is not race-free to test by hand.)
+
 ## Regression
 - [ ] **Normal tap recording.** Permission on, a real call or a video for 2 minutes: transcript has remote segments, and no repair window or new banners appear.

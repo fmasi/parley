@@ -191,7 +191,10 @@ final class PermissionRepairWindowController: NSObject, NSWindowDelegate {
         content.sound = .default
         content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(identifier: "permission-repair", content: content, trigger: nil)
-        Task { try? await UNUserNotificationCenter.current().add(request) }
+        Task {
+            do { try await UNUserNotificationCenter.current().add(request) }
+            catch { Logger.permissions.warning("Permission repair notification not delivered: \(error, privacy: .public)") }
+        }
     }
 
     /// Run `work`, but stop waiting after `seconds` (the work itself keeps running).

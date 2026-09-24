@@ -425,6 +425,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     /// Permission-independent facts about the tap track for provenance: how much of what it delivered
     /// was exact digital zero. A denied tap is 100% zeros however healthy everything else looks.
+    /// Uses `audioQueue.sync`, so it must NEVER be called from a block running on `audioQueue` (it
+    /// would deadlock). Today only `stopCapture` and `stopAndFinalize` call it, on XPC threads.
     private func tapTrackFacts() -> [String: String] {
         let (delivered, zero) = audioQueue.sync { (tapGuard.deliveredFrames, tapGuard.exactZeroFrames) }
         return [

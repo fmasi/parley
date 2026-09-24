@@ -83,6 +83,11 @@ public struct TapPermissionGuard {
 
     /// A tap aggregate was built or rebuilt. `status` is the permission at build time (`nil` = unverifiable).
     public mutating func tapBuilt(status: PermissionStatus?, now: Double) -> [Action] {
+        // `awaitingAudio` and `insuranceRebuildUsed` deliberately survive a rebuild: proof that the
+        // fix worked is still owed after an unrelated output-device rebuild, and only REAL audio
+        // (in `samples`) clears them. The trade-off: a tap that has delivered no real audio since an
+        // earlier insurance rebuild can be reported as "can't confirm" after another rebuild. That
+        // is intended. A false alarm beats "neither audio nor an alarm".
         builtAt = now
         zeroMonitor = ExactZeroRunMonitor(thresholdSeconds: zeroThresholdSeconds)
         // Unverifiable is not "without grant": polling a check that can't answer helps nobody.
