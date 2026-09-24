@@ -877,13 +877,14 @@ private struct Harness {
     /// 10 min, then at most hourly — mid-call urgency is noise all day. The injected clock drives it.
     @Test func idleAlarmsBackOffTwoThenTenThenSixtyMinutes() async throws {
         let h = try Harness()
+        let state = AppState()   // its own: the Harness coordinator must not present into this clock
         let shown = Harness.Box<Int>(0)
         let coordinator = RecordingCoordinator(
-            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            appState: state, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
             sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
             presentAlarmsUI: { _, _ in shown.value += 1 }, recordingMicrophone: h.recordingMic)
         let t0 = Date()
-        h.appState.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
+        state.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
         coordinator.presentAlarms(now: t0)
         #expect(shown.value == 1)
         coordinator.presentAlarms(now: t0 + 119);  #expect(shown.value == 1)
@@ -893,6 +894,35 @@ private struct Harness {
         coordinator.presentAlarms(now: t0 + 4319); #expect(shown.value == 3)
         coordinator.presentAlarms(now: t0 + 4320); #expect(shown.value == 4, "then hourly")
         coordinator.presentAlarms(now: t0 + 7920); #expect(shown.value == 5)
+    }
+
+    /// L round 3, item 2: an alarm raised while idle is presented AT ONCE (not at the first 2-min tick),
+    /// exactly once per raise — that presentation counts toward the backoff.
+    @Test func anAlarmRaisedWhileIdleIsPresentedAtOnceThenBacksOff() async throws {
+        let h = try Harness()
+        let state = AppState()
+        let shown = Harness.Box<[(due: [AlarmKind], new: [AlarmKind])]>([])
+        let coordinator = RecordingCoordinator(
+            appState: state, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) }, recordingMicrophone: h.recordingMic)
+        let t0 = Date()
+        state.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
+        for _ in 0..<50 where shown.value.isEmpty { await Task.yield() }
+        #expect(shown.value.count == 1 && shown.value[0].new == [.crashProtectionOff], "at once, with its window")
+        for _ in 0..<50 { await Task.yield() }
+        #expect(shown.value.count == 1, "exactly once")
+        coordinator.presentAlarms(now: t0 + 110)
+        #expect(shown.value.count == 1)
+        coordinator.presentAlarms(now: t0 + 125)
+        #expect(shown.value.count == 2, "then the 2-min backoff step: the raise's presentation counted")
+
+        // A new raise of the same kind (a new episode) is presented at once again.
+        state.clearAppAlarm(.crashProtectionOff)
+        for _ in 0..<50 { await Task.yield() }
+        state.raiseAppAlarm(.crashProtectionOff, message: "off again")
+        for _ in 0..<50 where shown.value.count == 2 { await Task.yield() }
+        #expect(shown.value.count == 3 && shown.value[2].new == [.crashProtectionOff])
     }
 
     /// Fix round 2, item 5: starting a recording while an idle alarm is active presents it again at once.

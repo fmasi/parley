@@ -104,14 +104,35 @@ public enum LaunchAgentHealth {
     /// Kickstart attempts per process before giving up on the hand-over (L3 fix round 1, item 5).
     public static let maxHandOverAttempts = 3
 
+    /// How long open Parley windows may defer the hand-over while idle before the row says so (L round
+    /// 3): never silently off because some window stays up.
+    public static let windowDeferralLimit: TimeInterval = 15 * 60
+
+    public static let windowsBlockingMessage = "Crash protection is waiting for you to close Parley’s windows — until then, if Parley crashes mid-recording it will not relaunch."
+
+    /// A window's level, as far as the hand-over cares: an ordinary or floating window the user may be
+    /// working in, or anything else (status bar, menus, overlays).
+    public enum WindowLevelClass: Sendable { case normal, floating, other }
+
+    /// Whether a window defers the hand-over (L round 3): on screen, a real size, at an ordinary or
+    /// floating level. The status item's own window is excluded by level; its class name is only the
+    /// fallback.
+    public static func windowDefersHandOver(isVisible: Bool, width: Double, height: Double,
+                                            level: WindowLevelClass, className: String) -> Bool {
+        guard isVisible, width > 0, height > 0, level != .other else { return false }
+        return !className.contains("StatusBar")
+    }
+
     /// What the app does with a crash-protection verdict (L3 fix round 1, item 6). No case schedules a
     /// timer in a steady state: `.deferUntilIdle` waits for the transition to idle, `.retryAfter`
     /// re-checks once, `.alarm` never retries.
     public enum CrashProtectionAction: Equatable, Sendable {
         /// Clear the `crashProtectionOff` alarm.
         case healthy
-        /// Post-recording work or a Parley panel is in flight: no row; re-check on the transition to idle.
-        case deferUntilIdle
+        /// Post-recording work or a Parley window is in flight: re-check on the transition to idle, and
+        /// once more after `recheckAfter` seconds when set. `message`: the row to show meanwhile (a
+        /// window deferral past `windowDeferralLimit`), nil = no row.
+        case deferUntilIdle(message: String?, recheckAfter: TimeInterval?)
         /// Persist `lastHandOverAt`, `kickstart -k`, re-check "idle" after it returns, then `exit(0)`.
         case handOver
         /// The hand-over cooldown is running: re-check ONCE when it expires. `message`: the row to show
@@ -123,17 +144,24 @@ public enum LaunchAgentHealth {
 
     /// `isBusy`: a recording, its transcription or post-recording work. `anyWindowVisible`: any Parley
     /// window on screen — Settings, the menu-bar panel, a panel — a hand-over (an exit) would close it
-    /// mid-edit (L2/L4 fix round 2, item 6).
+    /// mid-edit (L2/L4 fix round 2, item 6). `windowDeferredFor`: how long windows alone (not work) have
+    /// deferred it so far; past `windowDeferralLimit` the row says so (L round 3).
     public static func crashProtectionAction(state: State, holdsInstanceLock: Bool, isLaunchdJob: Bool, isBusy: Bool,
-                                             anyWindowVisible: Bool, lastHandOverAt: Date?, now: Date,
-                                             failedHandOvers: Int) -> CrashProtectionAction {
+                                             anyWindowVisible: Bool, windowDeferredFor: TimeInterval, lastHandOverAt: Date?,
+                                             now: Date, failedHandOvers: Int) -> CrashProtectionAction {
         switch state {
         case .healthy:
             return .healthy
         case .loadedButNotThisProcess:
             guard holdsInstanceLock else { return .alarm(noLockMessage) }
             guard !isLaunchdJob, failedHandOvers < maxHandOverAttempts else { return .alarm(handOverImpossibleMessage) }
-            if isBusy || anyWindowVisible { return .deferUntilIdle }
+            // Work (a recording may last hours) defers without a row or a limit.
+            if isBusy { return .deferUntilIdle(message: nil, recheckAfter: nil) }
+            if anyWindowVisible {
+                return windowDeferredFor >= windowDeferralLimit
+                    ? .deferUntilIdle(message: windowsBlockingMessage, recheckAfter: nil)
+                    : .deferUntilIdle(message: nil, recheckAfter: windowDeferralLimit - windowDeferredFor)
+            }
             if let lastHandOverAt, now.timeIntervalSince(lastHandOverAt) < handOverCooldown {
                 let remaining = handOverCooldown - now.timeIntervalSince(lastHandOverAt)
                 return .retryAfter(seconds: remaining,

@@ -727,13 +727,16 @@ public final class RecordingCoordinator {
         let newKinds = active.map(\.kind).filter { !presentedKinds.contains($0) }
         presentedKinds = Set(active.map(\.kind))
         idleNotifications = idleNotifications.filter { presentedKinds.contains($0.key) }
+        for kind in newKinds { idleNotifications[kind] = nil }   // a new raise starts its own backoff
         if newKinds.contains(where: \.hasOwnRepairWindow) { onSystemAudioPermissionDenied() }
         let idle = !appState.isRecording
         let due = active.filter { alarm in
             if force { return true }
-            return idle
-                ? AlarmRealarmPolicy.shouldRenotifyWhileIdle(alarm, notificationsWhileIdle: idleNotifications[alarm.kind] ?? 0, now: now)
-                : AlarmRealarmPolicy.shouldRenotify(alarm, now: now)
+            guard idle else { return AlarmRealarmPolicy.shouldRenotify(alarm, now: now) }
+            // While idle a newly raised kind presents at once, whatever its floor (L round 3); that
+            // presentation is the first step of its backoff.
+            return newKinds.contains(alarm.kind)
+                || AlarmRealarmPolicy.shouldRenotifyWhileIdle(alarm, notificationsWhileIdle: idleNotifications[alarm.kind] ?? 0, now: now)
         }
         guard !due.isEmpty else { return }
         for alarm in due {
@@ -749,6 +752,13 @@ public final class RecordingCoordinator {
     /// status poll presents instead. The timer sleeps until the next alarm is actually due (backoff:
     /// minutes to an hour), and there is none at all when nothing will ever be due again.
     private func updateIdleRealarm() {
+        if !appState.isRecording {
+            // An alarm raised while idle is presented AT ONCE, exactly once per raise (L round 3); a
+            // cleared kind is forgotten, so its next raise is new again.
+            let active = Set(appState.activeAlarms.keys)
+            presentedKinds.formIntersection(active)
+            if !active.isSubset(of: presentedKinds) { presentAlarms() }
+        }
         idleRealarm?.cancel()
         idleRealarm = nil
         if !appState.isRecording, idleNextDelay() != nil {

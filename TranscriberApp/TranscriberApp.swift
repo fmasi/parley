@@ -275,6 +275,10 @@ struct TranscriberApp: App {
     private static var crashProtectionCheckRunning = false
     /// Waits for the transition to idle before re-checking (never a blind timer).
     private static var idleWatch: IdleWatch?
+    /// Since when open windows alone have deferred the hand-over (bounded: `windowDeferralLimit`).
+    private static var windowDeferralSince: Date?
+    /// The one pending bounded re-check of a window deferral.
+    private static var windowDeferralRecheck: Task<Void, Never>?
 
     /// Whether Parley is doing work a hand-over (an exit) would cut short: a recording or its
     /// transcription, or post-recording work (the auto-summary) (L3 fix round 1).
@@ -283,12 +287,19 @@ struct TranscriberApp: App {
         !appState.isIdle || PostRecordingWork.inFlight > 0
     }
 
-    /// Any Parley window on screen — Settings, the menu-bar panel, any panel: a hand-over would close
-    /// it mid-edit (L2/L4 fix round 2, item 6). The status item's own menu-bar button window is
-    /// always visible and is not one.
+    /// Any Parley window the user may be working in — Settings, a panel: a hand-over would close it
+    /// mid-edit (L2/L4 fix round 2, item 6). Only real ones count: on screen, a non-zero frame, at an
+    /// ordinary or floating level (L round 3), so an always-present helper or status-bar window can
+    /// never defer the hand-over forever.
     @MainActor
     static func anyParleyWindowVisible() -> Bool {
-        NSApp.windows.contains { $0.isVisible && !$0.className.contains("StatusBar") }
+        NSApp.windows.contains { window in
+            let level: LaunchAgentHealth.WindowLevelClass =
+                window.level == .normal ? .normal : window.level == .floating ? .floating : .other
+            return LaunchAgentHealth.windowDefersHandOver(
+                isVisible: window.isVisible, width: window.frame.width, height: window.frame.height,
+                level: level, className: window.className)
+        }
     }
 
     @MainActor
@@ -299,18 +310,35 @@ struct TranscriberApp: App {
 
         let health = await LaunchAgentManager.verifyAndRepair(holdsInstanceLock: holdsInstanceLock)
         let defaults = UserDefaults.standard
+        let now = Date()
+        let busy = isBusy(appState), windowsOpen = anyParleyWindowVisible()
+        // Windows alone (no work) defer the hand-over for a bounded time: track since when.
+        if windowsOpen && !busy {
+            if windowDeferralSince == nil { windowDeferralSince = now }
+        } else {
+            windowDeferralSince = nil
+        }
         let action = LaunchAgentHealth.crashProtectionAction(
-            state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: isBusy(appState),
-            anyWindowVisible: anyParleyWindowVisible(),
-            lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: Date(), failedHandOvers: failedHandOvers
+            state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: busy,
+            anyWindowVisible: windowsOpen, windowDeferredFor: windowDeferralSince.map { now.timeIntervalSince($0) } ?? 0,
+            lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: now, failedHandOvers: failedHandOvers
         )
         switch action {
         case .healthy:
             appState.clearAppAlarm(.crashProtectionOff)
-        case .deferUntilIdle:
-            // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling).
-            appState.clearAppAlarm(.crashProtectionOff)
+        case .deferUntilIdle(let message, let recheckAfter):
+            // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling) —
+            // unless windows have held it for `windowDeferralLimit`: then the row says why (never silent).
+            if let message { raiseCrashProtectionOff(appState, message) } else { appState.clearAppAlarm(.crashProtectionOff) }
             recheckCrashProtectionWhenIdle(appState: appState)
+            if let recheckAfter {
+                windowDeferralRecheck?.cancel()
+                windowDeferralRecheck = Task(priority: .utility) { @MainActor in
+                    try? await Task.sleep(for: .seconds(recheckAfter))
+                    guard !Task.isCancelled else { return }
+                    await verifyCrashProtection(appState: appState)
+                }
+            }
         case .retryAfter(let seconds, let message):
             if let message { raiseCrashProtectionOff(appState, message) }
             Logger.state.info("LaunchAgent hand-over cooldown — one re-check in \(Int(seconds.rounded(.up)), privacy: .public) s")
@@ -347,11 +375,11 @@ struct TranscriberApp: App {
         }
     }
 
+    /// Raising is enough: the coordinator presents a newly raised alarm at once (window + ONE
+    /// notification), then backs off (L round 3). No second notification from here.
     @MainActor
     private static func raiseCrashProtectionOff(_ appState: AppState, _ message: String) {
-        if appState.raiseAppAlarm(.crashProtectionOff, message: message) {
-            MenuView.postNotification(title: "Crash protection is off", body: message)
-        }
+        appState.raiseAppAlarm(.crashProtectionOff, message: message)
     }
 
     /// Re-check on the TRANSITION to idle: a Parley window closing (or the menu-bar panel, which hides

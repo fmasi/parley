@@ -137,18 +137,31 @@ import Testing
     @Test func crashProtectionDecisionTable() {
         let now = Date(timeIntervalSince1970: 1000)
         func act(_ state: LaunchAgentHealth.State, lock: Bool = true, job: Bool = false, busy: Bool = false,
-                 window: Bool = false, last: Date? = nil, failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
+                 window: Bool = false, windowDeferredFor: TimeInterval = 0, last: Date? = nil,
+                 failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
             LaunchAgentHealth.crashProtectionAction(state: state, holdsInstanceLock: lock, isLaunchdJob: job, isBusy: busy,
-                                                    anyWindowVisible: window, lastHandOverAt: last, now: now, failedHandOvers: failed)
+                                                    anyWindowVisible: window, windowDeferredFor: windowDeferredFor,
+                                                    lastHandOverAt: last, now: now, failedHandOvers: failed)
         }
+        let limit = LaunchAgentHealth.windowDeferralLimit
         let auto = LaunchAgentHealth.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: true)
         #expect(act(.healthy) == .healthy)
         #expect(act(.healthy, lock: false, busy: true) == .healthy)
         #expect(act(.loadedButNotThisProcess) == .handOver)
         // Any post-recording work or panel: no row, re-check on the transition to idle.
-        #expect(act(.loadedButNotThisProcess, busy: true) == .deferUntilIdle)
+        #expect(act(.loadedButNotThisProcess, busy: true) == .deferUntilIdle(message: nil, recheckAfter: nil))
         // L2/L4 fix round 2, item 6: ANY visible Parley window (Settings, the menu-bar panel, a panel).
-        #expect(act(.loadedButNotThisProcess, window: true) == .deferUntilIdle)
+        #expect(act(.loadedButNotThisProcess, window: true) == .deferUntilIdle(message: nil, recheckAfter: limit))
+        // L round 3, item 1: the window deferral is bounded — never silent. Past 15 min while idle, the
+        // row says why crash protection is still off, and it keeps waiting for the windows to close.
+        #expect(limit == 15 * 60)
+        #expect(act(.loadedButNotThisProcess, window: true, windowDeferredFor: limit - 60)
+                == .deferUntilIdle(message: nil, recheckAfter: 60))
+        #expect(act(.loadedButNotThisProcess, window: true, windowDeferredFor: limit)
+                == .deferUntilIdle(message: LaunchAgentHealth.windowsBlockingMessage, recheckAfter: nil))
+        // A recording or post-recording work is not a window: it may legitimately last hours.
+        #expect(act(.loadedButNotThisProcess, busy: true, window: true, windowDeferredFor: 3 * limit)
+                == .deferUntilIdle(message: nil, recheckAfter: nil))
         // Cooldown: ONE re-check when it expires; no row until a hand-over has actually failed.
         #expect(act(.loadedButNotThisProcess, last: now - 10) == .retryAfter(seconds: 20, message: nil))
         #expect(act(.loadedButNotThisProcess, last: now - 10, failed: 1) == .retryAfter(seconds: 20, message: auto))
@@ -164,6 +177,22 @@ import Testing
         // Repair failed (or skipped without the lock).
         #expect(act(.notLoaded) == .alarm(LaunchAgentHealth.userMessage(for: .notLoaded, holdsInstanceLock: true)!))
         #expect(act(.stalePath(found: "/x"), lock: false) == .alarm(LaunchAgentHealth.noLockMessage))
+    }
+
+    /// L round 3, item 1: only a real, on-screen, ordinary window defers the hand-over — never a
+    /// zero-size helper window, one ordered out, or a status-bar/menu-level one.
+    @Test func onlyRealOrdinaryWindowsDeferTheHandOver() {
+        func counts(visible: Bool = true, width: Double = 400, height: Double = 300, level: LaunchAgentHealth.WindowLevelClass = .normal,
+                    className: String = "NSPanel") -> Bool {
+            LaunchAgentHealth.windowDefersHandOver(isVisible: visible, width: width, height: height, level: level, className: className)
+        }
+        #expect(counts())
+        #expect(counts(level: .floating))
+        #expect(!counts(visible: false))
+        #expect(!counts(width: 0))
+        #expect(!counts(height: 0))
+        #expect(!counts(level: .other), "status bar / menu levels are not a window the user is editing")
+        #expect(!counts(className: "NSStatusBarWindow"), "fallback: the status item's own window")
     }
 
     // MARK: - Quit (L3, C2 final wiring 4)
