@@ -52,6 +52,10 @@ public enum AlarmEvidence: Sendable {
 /// `interruptionWarning` slot for anything that means "a side is not being recorded".
 public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     case micNotDelivering, micDigitalSilence
+    /// Helper-owned, ACKNOWLEDGEABLE, per recording (H2 round 2 item 12): switching to a new microphone
+    /// failed, but the previous one is still recording. Cleared by a later successful follow, the end
+    /// of the recording, or the user's acknowledgement.
+    case micFollowFailed
     case remoteNotDelivering, remoteRecoveryFailed, remotePermissionDenied, remoteCantConfirm
     case diskWriteFailure
     case diskLow, rotationFailed, sessionWriteFailed, helperUnresponsive, crashProtectionOff
@@ -61,7 +65,7 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
 
     public var track: CaptureTrack? {
         switch self {
-        case .micNotDelivering, .micDigitalSilence: return .mic
+        case .micNotDelivering, .micDigitalSilence, .micFollowFailed: return .mic
         case .remoteNotDelivering, .remoteRecoveryFailed, .remotePermissionDenied, .remoteCantConfirm: return .system
         default: return nil
         }
@@ -71,7 +75,8 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// come from a helper and so are never stale.
     public var disprovedBy: AlarmEvidence? {
         switch self {
-        case .micNotDelivering, .remoteNotDelivering, .remoteRecoveryFailed: return .firstFrames
+        // A replacing helper reopens the mic: its first frames disprove an inherited follow failure too.
+        case .micNotDelivering, .remoteNotDelivering, .remoteRecoveryFailed, .micFollowFailed: return .firstFrames
         case .micDigitalSilence, .remotePermissionDenied, .remoteCantConfirm: return .realAudio
         case .diskWriteFailure: return .writeSucceeded
         default: return nil
@@ -79,11 +84,14 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     }
 
     /// Past events the user dismisses; everything else clears only when the condition clears.
-    public var isAcknowledgeable: Bool { self == .recordingResumedWithGap || self == .recordingStopped }
+    public var isAcknowledgeable: Bool {
+        self == .recordingResumedWithGap || self == .recordingStopped || self == .micFollowFailed
+    }
 
     /// Survives the end of a recording: a machine-level condition, or a past event the user has
     /// not acknowledged yet ("the recording STOPPED at 16:02" must outlive the recording it is about).
-    public var outlivesRecording: Bool { self == .crashProtectionOff || isAcknowledgeable }
+    /// `micFollowFailed` is acknowledgeable but about the recording's own mic: it goes with it.
+    public var outlivesRecording: Bool { self == .crashProtectionOff || (isAcknowledgeable && self != .micFollowFailed) }
 }
 
 public struct ActiveAlarm: Codable, Equatable, Sendable {
@@ -118,6 +126,10 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
     /// Sequence of the last snapshot applied from the current helper; a same-helper snapshot that is
     /// not newer (a pull reply overtaken by a push) is ignored. Reset when a newer helper is adopted.
     private var lastAppliedSequence: UInt64?
+    /// Helper-owned acknowledgeable alarms the user acknowledged, by episode of the current helper: its
+    /// later snapshots of that episode must not bring the row back (H2 round 2 item 12). Episodes count
+    /// per helper registry, so a newer helper forgets them.
+    private var acknowledgedEpisodes: [AlarmKind: Int] = [:]
 
     public init() {}
 
@@ -136,6 +148,12 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
     public mutating func clear(_ kind: AlarmKind) -> ActiveAlarm? {
         staleKinds.remove(kind)
         return alarms.removeValue(forKey: kind)
+    }
+
+    /// The user acknowledged a past event. A no-op for a live condition, which clears only when it clears.
+    public mutating func acknowledge(_ kind: AlarmKind) {
+        guard kind.isAcknowledgeable, let alarm = clear(kind) else { return }
+        if kind.isHelperOwned { acknowledgedEpisodes[kind] = alarm.episode }
     }
 
     public mutating func markNotified(_ kind: AlarmKind, now: Date) {
@@ -157,6 +175,7 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
             if !snapshot.alarms.contains(where: { $0.kind == kind }) { alarms.removeValue(forKey: kind) }
         }
         for incoming in snapshot.alarms where incoming.kind.isHelperOwned {
+            if acknowledgedEpisodes[incoming.kind] == incoming.episode { continue }
             var raisedAt = incoming.raisedAt
             if let existing = alarms[incoming.kind],
                staleKinds.contains(incoming.kind) || existing.episode == incoming.episode {
@@ -216,6 +235,7 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
         for kind in alarms.keys where kind.isHelperOwned { staleKinds.insert(kind) }
         helperSessionId = id
         lastAppliedSequence = nil
+        acknowledgedEpisodes = [:]
         return true
     }
 

@@ -46,6 +46,8 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let attemptedName: String?
         /// The device the running session was built on; nil = none yet.
         let currentName: String?
+        /// That device is still in the HAL's device list (round 2 item 12, minor 2).
+        let currentDevicePresent: Bool
     }
     /// Invoked after every successful (re)build of the session (start, user switch, recovery): the
     /// liveness watchdog re-arms the mic track from here (§4.2).
@@ -385,6 +387,9 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// Silent-but-not-errored session; the liveness verdict is the only caller (H4).
     func heal() { attemptRecover() }
 
+    /// A reopen is running (or blocked in `startRunning`/`stopRunning`, gotcha #68). Leaf lock only.
+    func recoveryInFlight() -> Bool { stateLock.sync { isRecovering } }
+
     /// Kick off a recovery loop on a background queue, at most one at a time.
     private func attemptRecover() {
         let shouldStart: Bool = stateLock.sync {
@@ -405,20 +410,29 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             if stopping { return }
             if attempts >= maxRestartAttempts {
                 Logger.audio.error("Mic recovery budget exhausted — mic unavailable, system audio continues")
-                // Clear the concrete device we are no longer capturing on, so a LATER HAL event — the very
-                // device reconnecting, or a new default appearing — is seen by reevaluateDevices as
-                // needsSwitch (current==nil ⇒ leavingDeviceGone, target!=nil ⇒ needsSwitch) and rebuilds.
-                // Without this the stale concrete makes us think we're already on the right device and the
-                // mic stays silently dead — fatal on Macs with no built-in fallback (council F1).
-                let current: String? = stateLock.sync {
-                    currentConcreteDeviceId = nil
-                    return currentDeviceName
+                let present = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
+                let stamp = lastHeartbeatNanos()
+                let now = DispatchTime.now().uptimeNanoseconds
+                let age: Double? = stamp == 0 ? nil : Double(now > stamp ? now - stamp : 0) / 1e9
+                let (current, currentPresent, stillRecording): (String?, Bool, Bool) = stateLock.sync {
+                    let isPresent = currentConcreteDeviceId.map { present.contains($0) } ?? false
+                    let recording = MicHealPolicy.stillRecording(heartbeatAgeSeconds: age, currentDevicePresent: isPresent)
+                    // Clear the concrete device we are no longer capturing on, so a LATER HAL event — the
+                    // very device reconnecting, or a new default appearing — is seen by reevaluateDevices as
+                    // needsSwitch (current==nil ⇒ leavingDeviceGone, target!=nil ⇒ needsSwitch) and rebuilds.
+                    // Without this the stale concrete makes us think we're already on the right device and
+                    // the mic stays silently dead — fatal on Macs with no built-in fallback (council F1).
+                    // But a follow that failed BEFORE the swap leaves the current mic recording: keep its id
+                    // then, or an unrelated HAL event would tear down a working mic (round 2 item 14).
+                    if !recording { currentConcreteDeviceId = nil }
+                    return (currentDeviceName, isPresent, recording)
                 }
-                // The service's onUnavailable handler records the anomaly (or the notice); don't also
-                // record it here (that would double-count the event).
+                if stillRecording { Logger.audio.warning("Mic recovery budget exhausted, but the current mic is still recording — keeping it") }
+                // The service's onUnavailable handler records the anomaly (or the follow failure); don't
+                // also record it here (that would double-count the event).
                 onUnavailable?(Unavailable(reason: "mic restart budget exhausted",
                                            attemptedName: lastAttempt.flatMap { Self.displayName($0) },
-                                           currentName: current))
+                                           currentName: current, currentDevicePresent: currentPresent))
                 return
             }
             // Recompute the target from FRESH state every iteration: the pinned device if it is currently

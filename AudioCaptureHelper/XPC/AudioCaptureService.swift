@@ -114,6 +114,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Off-audio-queue 1 Hz liveness watchdog (#196). Started once capture is up, stopped on every
     /// teardown path.
     private let livenessWatchdog = LivenessWatchdogDriver()
+    /// The helper's own sleep/wake from IOKit (round 2 item 18), delivered on the watchdog's queue.
+    /// Created at the first start and kept for the process: power messages cost nothing while idle.
+    private var powerObserver: SystemPowerObserver?
     /// Runs the tap's healing ladder from the system track's liveness verdicts (§5).
     private let tapHealer = TapHealer(scheduler: DispatchHealerScheduler(label: "audio-capture.tap-healer"))
     /// Mic side of "heal, then alarm" (§6.1), with the reopen deadline (A-C2). Touched on the watchdog
@@ -302,7 +305,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
         livenessWatchdog.onGate = { [weak self] open, now in self?.accountGate(open: open, nowNanos: now) }
         livenessWatchdog.onTick = { [weak self] now, gateOpen in self?.checkProgress(nowNanos: now, gateOpen: gateOpen) }
-        livenessWatchdog.onPauseExpired = { [weak self] in self?.resumeAfterSleep() }
+        livenessWatchdog.onResumed = { [weak self] work, reason in self?.resumeAfterSleep(work, reason: reason) }
+        livenessWatchdog.fullWakeProbe = { SystemPowerObserver.isFullWake() }
         writeStuck.withLock { $0 = [] }
         // A new session starts a new mic episode and fresh write checks; on the watchdog queue, like
         // every other use.
@@ -376,19 +380,22 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             raiseAlarm(.micNotDelivering, alarmMessage)
         case .clear:
             clearDeliveryAlarm(.micNotDelivering)
-        case .notice, .none:
-            break
+        case .reopenStuck, .followFailed, .none:
+            break   // tick / healFailed only
         }
     }
 
     /// Every mic reopen goes through here — a silence verdict, wake, a coreaudiod restart — so each one
     /// is held to the reopen deadline (A-C2), including a heal that is a no-op behind a recovery already
     /// in flight.
-    private func healMic() {
+    /// `restartingDeadline`: the wake's reopen, whose deadline replaces one that ran before the sleep.
+    private func healMic(restartingDeadline: Bool = false) {
         guard let mic = stateLock.sync(execute: { micSession }) else { return }
         let heartbeat = mic.lastHeartbeatNanos()
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
-        livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy.reopenRequested(now: now, heartbeat: heartbeat) }
+        livenessWatchdog.queue.async { [weak self] in
+            self?.micHealPolicy.reopenRequested(now: now, heartbeat: heartbeat, restartingDeadline: restartingDeadline)
+        }
         mic.heal()
     }
 
@@ -405,12 +412,17 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let (mic, tap, h) = stateLock.sync { (micSession, tapSession, handler) }
         guard let mic, let h else { return }
         let micHeartbeat = mic.lastHeartbeatNanos()
-        switch micHealPolicy.tick(now: Double(nowNanos) / 1e9, heartbeat: micHeartbeat) {
-        case .alarm:
-            let deadline = Int(MicHealPolicy.reopenDeadlineSeconds)
-            Logger.audio.error("Microphone reopen delivered nothing within \(deadline, privacy: .public)s — alarming")
+        let deadline = Int(MicHealPolicy.reopenDeadlineSeconds)
+        switch micHealPolicy.tick(now: Double(nowNanos) / 1e9, heartbeat: micHeartbeat, reopenInFlight: mic.recoveryInFlight()) {
+        case .reopenStuck:
+            // The reopen itself has not returned (gotcha #68): the mic's analog of the tap's stuck rung.
+            Logger.audio.error("Microphone reopen still running after \(deadline, privacy: .public)s — alarming")
             record(.recoveryStuck, .anomaly, ["track": CaptureTrack.mic.rawValue, "seconds": "\(deadline)"])
             raiseAlarm(.micNotDelivering, "The microphone could not be reopened and isn’t delivering any audio. Try another microphone from the menu.")
+        case .alarm:
+            // It returned, so the re-armed monitor records its own verdict; only the alarm is ours (item 15).
+            Logger.audio.error("Microphone reopened but delivered nothing within \(deadline, privacy: .public)s — alarming")
+            raiseAlarm(.micNotDelivering, "The microphone was reopened but isn’t delivering any audio. Try another microphone from the menu.")
         case .clear:
             clearDeliveryAlarm(.micNotDelivering)
         default:
@@ -590,6 +602,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.isRestarting = false
                 self.systemStreamGivenUp = false
                 self.tapSession = nil
+            }
+
+            if powerObserver == nil {
+                powerObserver = SystemPowerObserver(queue: livenessWatchdog.queue) { [weak self] event in
+                    self?.handlePowerEvent(event)
+                }
             }
 
             Task {
@@ -822,24 +840,42 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         guard stateLock.sync(execute: { lifecycle.isLive }) else { return }
         switch kind {
         case "sleep":
-            Logger.audio.info("System sleep: liveness paused")
-            livenessWatchdog.pause()
-            tapHealer.cancelAll()   // paired with trigger(.wake) in resumeAfterSleep (C4)
+            enterSleep(source: "app")
         case "wake":
-            Logger.audio.info("System wake: re-arming both tracks, healing the tap and the mic")
-            livenessWatchdog.wake()
-            resumeAfterSleep()
+            livenessWatchdog.wake()   // idempotent: a no-op if IOKit's full wake or the expiry got there first
         default:
             Logger.audio.warning("Unknown power event \(kind, privacy: .public)")
         }
     }
 
-    /// The wake — the app's message, or the sleep pause expiring because it never came (A-I7; the driver
-    /// has re-armed both monitors either way): the healer resumes, running a coreaudiod restart or a
-    /// grant that arrived while asleep (B-M1), and the mic reopens.
-    private func resumeAfterSleep() {
+    /// Sleep, from the app or from IOKit's will-sleep (idempotent): nothing is judged, healed or deadlined
+    /// until the pause ends. A pending mic reopen's deadline goes with it (round 2 item 11).
+    private func enterSleep(source: String) {
+        Logger.audio.info("System sleep (\(source, privacy: .public)): liveness paused")
+        livenessWatchdog.pause(expiryStartsNow: !(powerObserver?.isRegistered ?? false))
+        tapHealer.cancelAll()   // paired with trigger(.wake) in resumeAfterSleep (C4)
+        livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy.slept() }
+    }
+
+    /// The pause ended, once, by its first exit — the app's wake, IOKit's full wake, a promotion, or the
+    /// expiry (the driver has re-armed both monitors), on the watchdog queue: the healer resumes, running
+    /// a coreaudiod restart or a grant that arrived while asleep (B-M1); the mic's deferred restart runs
+    /// (item 11); the mic reopens under a FRESH deadline.
+    private func resumeAfterSleep(_ micWork: Set<SleepPauseClock.MicWork>, reason: String) {
+        guard stateLock.sync(execute: { lifecycle.isLive }) else { return }
+        Logger.audio.info("Resuming after sleep (\(reason, privacy: .public)): re-arming both tracks, healing the tap and the mic")
         tapHealer.trigger(.wake)   // forgets the episode; never rebuilds blind — the re-armed monitor decides
-        healMic()
+        if micWork.contains(.serviceRestart) { stateLock.sync { micSession }?.reregisterDeviceMonitoring() }
+        healMic(restartingDeadline: true)
+    }
+
+    /// IOKit power messages, on the watchdog queue (round 2 item 18). Live sessions only.
+    private func handlePowerEvent(_ event: SystemPowerObserver.Event) {
+        guard stateLock.sync(execute: { lifecycle.isLive }) else { return }
+        switch event {
+        case .willSleep: enterSleep(source: "IOKit")
+        case .poweredOn(let fullWake): livenessWatchdog.poweredOn(fullWake: fullWake)
+        }
     }
 
     func updateMicrophone(
@@ -863,6 +899,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 // .captureStart (council CONV-1): a switch that fell back to default or failed must not
                 // claim the requested device in mic_device.
                 self.record(.micSwitch, .info, ["mic": micSess.resolvedDeviceId ?? "default"])
+                self.clearAlarm(.micFollowFailed)
                 Logger.audio.info("Mic switched successfully to: \(deviceId ?? "system default", privacy: .private)")
                 reply(true, nil)
             } catch {
@@ -1154,23 +1191,31 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // Mic self-healed a route change — system audio never stopped.
             // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
             self?.onMicDeviceChanged?(deviceId)
+            self?.clearAlarm(.micFollowFailed)   // a later successful follow (round 2 item 12)
         }
         mic.onUnavailable = { [weak self, weak mic] info in
             // Judged on the watchdog queue, with the mic's heartbeat at that moment (A-I5).
             self?.livenessWatchdog.queue.async {
                 guard let self else { return }
+                // Paused for sleep: the devices may be off. The wake's reopen re-evaluates it — with the
+                // budget spent, that reopen reports back at once, awake (round 2 item 11).
+                if self.livenessWatchdog.isPausedForSleep {
+                    Logger.audio.info("Microphone recovery gave up while paused for sleep — re-evaluated at the wake")
+                    return
+                }
                 let stamp = mic?.lastHeartbeatNanos() ?? 0
                 let now = DispatchTime.now().uptimeNanoseconds
                 let age: Double? = stamp == 0 ? nil : Double(now > stamp ? now - stamp : 0) / 1e9
-                switch self.micHealPolicy.healFailed(heartbeatAgeSeconds: age) {
-                case .notice:
-                    // The switch failed before the session swap: the current mic is still recording, so an
-                    // alarm now would never clear. Acknowledgeable notice; names `.private` in the log.
+                switch self.micHealPolicy.healFailed(heartbeatAgeSeconds: age, currentDevicePresent: info.currentDevicePresent) {
+                case .followFailed:
+                    // The switch failed before the session swap and the current mic is still recording: an
+                    // acknowledgeable alarm, never `micNotDelivering`, which nothing would clear (round 2
+                    // item 12). Device names only in the log, `.private`.
                     let target = info.attemptedName ?? "the new microphone"
                     let current = info.currentName ?? "the current microphone"
                     Logger.audio.warning("Mic switch failed (\(info.reason, privacy: .public)) — still recording from \(current, privacy: .private); could not switch to \(target, privacy: .private)")
                     self.record(.streamStopError, .anomaly, ["source": "mic", "reason": "switch failed — still recording from the current microphone"])
-                    self.onQualityAnomaly?(CaptureEventKind.streamStopError.rawValue, "Couldn’t switch to \(target) — still recording from \(current).")
+                    self.raiseAlarm(.micFollowFailed, "Couldn’t switch to the new microphone — still recording from the previous one.")
                 default:
                     // Mic loss is NOT fatal: system audio keeps recording and the partial mic WAV stays
                     // valid. Record the anomaly so the session is flagged and diagnostics flush.
@@ -1240,10 +1285,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             guard let self else { return }
             self.tapHealer.trigger(.serviceRestarted)   // kept for the wake if it lands while asleep (B-M1)
             // The mic's HAL listeners died with coreaudiod too: without them auto-follow and re-pin stay
-            // dead for the rest of the session (B-M2).
-            let mic = self.stateLock.sync { self.micSession }
-            mic?.reregisterDeviceMonitoring()
-            self.healMic()
+            // dead for the rest of the session (B-M2). Not while paused for sleep: the reopen's deadline
+            // would run across the sleep and fire falsely at the wake — the wake runs it (round 2 item 11).
+            self.livenessWatchdog.deferMicWork(.serviceRestart) { [weak self] in
+                guard let self else { return }
+                self.stateLock.sync { self.micSession }?.reregisterDeviceMonitoring()
+                self.healMic()
+            }
         }
         guard stateLock.sync(execute: { () -> Bool in
             guard lifecycle.startMayProceed(token) else { return false }
