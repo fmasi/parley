@@ -272,6 +272,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
 
         Logger.audio.info("Stopping capture")
+        // Read BEFORE the tap is stopped below, so frames delivered in that short window (well under a
+        // second) are not in these facts: `system_exact_zero_seconds` can understate by that margin.
         record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
         stopTapGuardTimer()
