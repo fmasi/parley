@@ -36,6 +36,12 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
                 client?.captureQualityAnomaly?(kind: kind, message: message)
             }
         }
+        service.onFirstFrames = { track in
+            DispatchQueue.global(qos: .utility).async { client?.captureDidDeliverFirstFrames?(track: track) }
+        }
+        service.onAlarmsChanged = { data in
+            DispatchQueue.global(qos: .utility).async { client?.captureAlarmsChanged?(snapshot: data) }
+        }
 
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }

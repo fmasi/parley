@@ -48,6 +48,16 @@ final class AudioCaptureClient {
     /// The recording is NEVER stopped by this; it is a warning surface only.
     var onQualityAnomaly: (@Sendable (String, String) -> Void)?
 
+    /// Invoked (reverse channel) on the first heartbeat of a capture generation; the argument is the
+    /// track ("mic" | "system"). Clears the stale alarms a replaced helper left on that track (§6.2).
+    var onFirstFrames: (@Sendable (String) -> Void)?
+
+    /// Invoked (reverse channel) when the helper pushes a changed alarm set (§6.2).
+    var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
+
+    /// The chunk session id of the most recent `start` (L11 resets the diagnostics ring only when it changes).
+    private(set) var currentSessionId: String?
+
     func connect() {
         crashHandlerFired = false
         let conn = NSXPCConnection(serviceName: audioCaptureServiceName)
@@ -110,7 +120,7 @@ final class AudioCaptureClient {
         connection = conn
     }
 
-    private func record(
+    func record(
         _ kind: CaptureEventKind,
         _ severity: CaptureEvent.Severity,
         _ detail: [String: String] = [:]
@@ -207,15 +217,19 @@ final class AudioCaptureClient {
         outputDirectory: URL,
         baseName: String,
         microphoneDeviceId: String? = nil,
-        systemAudioSource: SystemAudioSource = .screenCaptureKit
+        systemAudioSource: SystemAudioSource = .screenCaptureKit,
+        options: CaptureOptions = CaptureOptions(),
+        sessionId: String = ""
     ) async throws {
         // Per-session reset (#101): the app ring accumulates across ALL sessions, so a clean session
         // would otherwise report the prior session's tallies. Clear it at the very top of start.
         diagnostics.clear()
+        currentSessionId = sessionId
         // crashHandlerFired is reset only in connect() — its sole reset point (#54). Resetting it
         // here would re-arm the dedup latch on a restart that reuses an about-to-be-invalidated
         // connection, letting the trailing invalidation re-fire onServiceCrash (a spurious retry).
         let conn = try getConnection()
+        await configureCapture(options, on: conn)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
                 cont.resume(throwing: CaptureError.startFailed(
@@ -238,6 +252,17 @@ final class AudioCaptureClient {
                 }
             }
         }
+    }
+
+    /// Best effort, 3 s: a helper that does not answer records with its defaults, which are today's behaviour.
+    private func configureCapture(_ options: CaptureOptions, on conn: NSXPCConnection) async {
+        let acknowledged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let once = ResumeOnce(cont)
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(false) } as! AudioCaptureProtocol
+            proxy.configureCapture(optionsJSON: options.encoded()) { once.resume($0) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(false) }
+        }
+        if !acknowledged { Logger.audio.warning("configureCapture not acknowledged — the helper records with default capture options") }
     }
 
     func stop() async throws -> AudioPaths {
@@ -323,6 +348,29 @@ final class AudioCaptureClient {
             } as! AudioCaptureProtocol
             proxy.systemAudioPermissionStatus { once.resume(SystemAudioRecordingPermission.status(fromWire: $0)) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
+        }
+    }
+
+    /// The helper's alarm state + per-track health (§6.2), or `nil` if the helper is unreachable or
+    /// does not answer within 3 s.
+    func captureStatus() async -> CaptureStatusSnapshot? {
+        guard let conn = try? getConnection() else { return nil }
+        return await withCheckedContinuation { (cont: CheckedContinuation<CaptureStatusSnapshot?, Never>) in
+            let once = ResumeOnce(cont)
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(nil) } as! AudioCaptureProtocol
+            proxy.captureStatus { once.resume($0.flatMap(CaptureStatusSnapshot.decode)) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(nil) }
+        }
+    }
+
+    /// Forward an `NSWorkspace` sleep / wake to the helper (§8.10). Bounded at 3 s.
+    func systemPowerEvent(_ kind: String) async {
+        guard let conn = try? getConnection() else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(cont)
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in once.resume(()) } as! AudioCaptureProtocol
+            proxy.systemPowerEvent(kind: kind) { once.resume(()) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) { once.resume(()) }
         }
     }
 
@@ -420,6 +468,15 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
             Logger.audio.warning("Helper reports live capture-quality anomaly (\(kind, privacy: .public)): \(message, privacy: .private)")
             client?.handleQualityAnomaly(kind: kind, message: message)
         }
+    }
+
+    func captureDidDeliverFirstFrames(track: String) {
+        Task { @MainActor [weak client] in client?.onFirstFrames?(track) }
+    }
+
+    func captureAlarmsChanged(snapshot: Data) {
+        guard let decoded = CaptureStatusSnapshot.decode(snapshot) else { return }
+        Task { @MainActor [weak client] in client?.onAlarmsChanged?(decoded) }
     }
 }
 

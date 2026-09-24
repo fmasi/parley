@@ -10,6 +10,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private var systemPath: String?
     private var micPath: String?
     private var isCapturing = false
+    /// Identifies this helper PROCESS in every `CaptureStatusSnapshot`: a changed id tells the app its
+    /// helper was replaced (crash restart), so the old alarms turn stale instead of vanishing (§6.2).
+    let helperSessionId = UUID().uuidString
     /// One persistent serial queue for ALL stream callbacks across the session — initial stream
     /// and every in-place restart register on it, so writer swaps / finalization / sample appends
     /// can never run on two different queues concurrently (council F4). Never reassigned or nil'd.
@@ -28,6 +31,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// per session. The tap self-heals output-device switches internally (HAL listener), so the
     /// SCK-specific #86 restart/autoheal machinery does not apply to it. nil when not capturing or on SCK.
     private var tapSession: SystemTapSession?
+    /// Set by `configureCapture`, read by the NEXT `startCapture`. Guarded by `stateLock`. Defaults to
+    /// today's behaviour, so an app that never configures records exactly as before.
+    private var pendingOptions = CaptureOptions()
     /// Set true while the app is deliberately stopping, so a stop-induced `didStopWithError`
     /// is classified as `.ignore` rather than a route-change restart.
     private var isUserStopping = false
@@ -65,6 +71,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// diagnostic ring which is only read after the fact (#193/#196). `kind` is the
     /// `CaptureEventKind` raw value; `message` is a human-readable description.
     var onQualityAnomaly: ((String, String) -> Void)?
+    /// Invoked on the first heartbeat of a capture generation on a track ("mic" | "system").
+    var onFirstFrames: ((String) -> Void)?
+    /// Invoked with a JSON `CaptureStatusSnapshot` whenever the alarm set changes (§6.2).
+    var onAlarmsChanged: ((Data) -> Void)?
 
     /// Off-audio-queue 1 Hz liveness watchdog (#196). Started once capture is up, stopped on every
     /// teardown path.
@@ -163,6 +173,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Per-session reset (#101): a skipped finalize (crash) leaves stale events in the helper ring,
         // which would otherwise be drained into the next session's provenance. Clear them up front.
         diagnostics.clear()
+        let options = stateLock.sync { pendingOptions }
 
         Logger.audio.info("Starting capture — dir: \(outputDirectory, privacy: .private), base: \(baseName, privacy: .private), mic: \(microphoneDeviceId ?? "default", privacy: .public)")
 
@@ -219,6 +230,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     // start (not on a failed one, which tears down with no provenance consumer).
                     self.record(.captureStart, .info, [
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
+                        "tap_auto_start": "\(options.tapAutoStart)",
                     ])
                     // So finalizeAll()'s frame-count-plausibility backstop can apply the same
                     // gotcha-#66 gate the liveness watchdog already applies mid-recording.
@@ -312,6 +324,25 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     func status(reply: @escaping (Bool, String?) -> Void) {
         reply(stateLock.sync { isCapturing }, nil)
+    }
+
+    /// F4 stub: the registry arrives in H2. Until then the snapshot carries no alarms and no tracks.
+    func captureStatus(reply: @escaping (Data?) -> Void) {
+        let capturing = stateLock.sync { isCapturing }
+        reply(CaptureStatusSnapshot(helperSessionId: helperSessionId, isCapturing: capturing, alarms: [], tracks: []).encoded())
+    }
+
+    func configureCapture(optionsJSON: Data, reply: @escaping (Bool) -> Void) {
+        let options = CaptureOptions.decode(optionsJSON)
+        stateLock.sync { pendingOptions = options }
+        Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public)")
+        reply(true)
+    }
+
+    /// F4 stub: H7 pauses/re-arms the monitors here.
+    func systemPowerEvent(kind: String, reply: @escaping () -> Void) {
+        Logger.audio.info("System power event: \(kind, privacy: .public)")
+        reply()
     }
 
     func updateMicrophone(

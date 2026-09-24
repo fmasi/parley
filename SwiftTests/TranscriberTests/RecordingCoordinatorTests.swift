@@ -12,12 +12,18 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var onFatalFailure: (@Sendable (String) -> Void)?
     var onQualityAnomaly: (@Sendable (String, String) -> Void)?
     var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
+    var onBriefInterruption: (@Sendable () -> Void)?
+    var onRestartInPlace: (@Sendable () -> Void)?
+    var onFirstFrames: (@Sendable (String) -> Void)?
+    var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)?
 
     struct StartCall: Equatable {
         let outputDirectory: URL
         let baseName: String
         let microphoneDeviceId: String?
         let systemAudioSource: SystemAudioSource
+        let options: CaptureOptions
+        let sessionId: String
     }
 
     var startCalls: [StartCall] = []
@@ -47,16 +53,37 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         outputDirectory: URL,
         baseName: String,
         microphoneDeviceId: String?,
-        systemAudioSource: SystemAudioSource
+        systemAudioSource: SystemAudioSource,
+        options: CaptureOptions,
+        sessionId: String
     ) async throws {
         startCalls.append(StartCall(
             outputDirectory: outputDirectory,
             baseName: baseName,
             microphoneDeviceId: microphoneDeviceId,
-            systemAudioSource: systemAudioSource
+            systemAudioSource: systemAudioSource,
+            options: options,
+            sessionId: sessionId
         ))
         onStart?()
         if let startError { throw startError }
+    }
+
+    var statusSnapshot: CaptureStatusSnapshot?
+    func captureStatus() async -> CaptureStatusSnapshot? { statusSnapshot }
+
+    var isCapturingResult = false
+    func isCapturing() async -> Bool { isCapturingResult }
+
+    var launchRecoveries: [[String: String]] = []
+    func recordLaunchRecovery(_ detail: [String: String]) { launchRecoveries.append(detail) }
+
+    var powerEvents: [String] = []
+    func systemPowerEvent(_ kind: String) async { powerEvents.append(kind) }
+
+    var recordedEvents: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])] = []
+    func record(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, _ detail: [String: String]) {
+        recordedEvents.append((kind, severity, detail))
     }
 
     func stop() async throws -> AudioPaths {
@@ -973,6 +1000,16 @@ private struct Harness {
         for _ in 0..<50 { await Task.yield() }
         #expect(h.client.startCalls.count == wiredStarts + 1)  // no further restart attempt
         #expect(h.appState.criticalError == nil)
+    }
+
+    /// v2 F4: the coordinator hands the helper the capture options built from config, before start.
+    @Test func startPassesTheConfiguredCaptureOptionsToTheHelper() async throws {
+        let h = try Harness()
+        h.config.update { $0.tapAutoStart = false; $0.debugDropTapFrames = true }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        let call = try #require(h.client.startCalls.first)
+        #expect(call.options == CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: nil, debugDropTapFrames: true))
+        #expect(call.sessionId.hasSuffix("-Test") && call.baseName == call.sessionId + "-0", "the session id is the chunk base name (HHmmss-name) without the chunk index")
     }
 }
 

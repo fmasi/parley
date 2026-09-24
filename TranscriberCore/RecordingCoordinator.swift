@@ -284,7 +284,9 @@ public final class RecordingCoordinator {
                 outputDirectory: outputDir,
                 baseName: naming.baseName,
                 microphoneDeviceId: microphoneDeviceId,
-                systemAudioSource: configManager.config.systemAudioSource
+                systemAudioSource: configManager.config.systemAudioSource,
+                options: CaptureOptions(config: config),
+                sessionId: naming.chunkBaseName
             )
 
             try transcriptionRunner.setupChunkedPipeline(
@@ -643,7 +645,9 @@ public final class RecordingCoordinator {
                 outputDirectory: outputDir,
                 baseName: baseName,
                 microphoneDeviceId: sentinel.micDeviceUID,
-                systemAudioSource: configManager.config.systemAudioSource
+                systemAudioSource: configManager.config.systemAudioSource,
+                options: CaptureOptions(config: configManager.config),
+                sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
             )
             try RecordingSentinel.write(newSentinel, directory: sentinelDirectory)
             // council FV2: a Stop pressed while we were restarting now runs cleanly — capture is back

@@ -33,13 +33,37 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     var onQualityAnomaly: (@Sendable (String, String) -> Void)? { get set }
     /// Fired when the helper gave up on the remote (system) stream mid-recording; the mic keeps going.
     var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)? { get set }
+    /// Fired on an XPC interruption the helper survived (still capturing) — a benign blip (#86).
+    var onBriefInterruption: (@Sendable () -> Void)? { get set }
+    /// Fired when the helper restarted a stopped stream in place (#86).
+    var onRestartInPlace: (@Sendable () -> Void)? { get set }
+    /// Fired on the first heartbeat of a capture generation; the argument is the track ("mic" | "system").
+    var onFirstFrames: (@Sendable (String) -> Void)? { get set }
+    /// Fired when the helper pushes a changed alarm set (§6.2).
+    var onAlarmsChanged: (@Sendable (CaptureStatusSnapshot) -> Void)? { get set }
 
+    /// `sessionId` is the chunk session id (`SessionState.sessionId`: the chunk base name without its
+    /// index, e.g. `143400-weekly-sync`), stable across in-session restarts whose base names change.
+    /// L11 resets the diagnostics ring only when it changes.
     func start(
         outputDirectory: URL,
         baseName: String,
         microphoneDeviceId: String?,
-        systemAudioSource: SystemAudioSource
+        systemAudioSource: SystemAudioSource,
+        options: CaptureOptions,
+        sessionId: String
     ) async throws
+
+    /// The helper's alarm state + per-track health, or `nil` when the helper is unreachable (§6.2).
+    func captureStatus() async -> CaptureStatusSnapshot?
+    /// Whether the helper reports an active capture session (`false` when unreachable).
+    func isCapturing() async -> Bool
+    /// Record that the app re-attached to or relaunched a recording on launch (crash recovery) (#95).
+    func recordLaunchRecovery(_ detail: [String: String])
+    /// Forward an `NSWorkspace` sleep / wake ("sleep" | "wake") to the helper (§8.10).
+    func systemPowerEvent(_ kind: String) async
+    /// Record an app-origin event into the diagnostic ring.
+    func record(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, _ detail: [String: String])
 
     func stop() async throws -> AudioPaths
     /// Switch the live capture to another microphone (`nil` = system default).

@@ -67,6 +67,15 @@ import Foundation
     func restartSystemAudio(
         reply: @escaping (Bool, String?) -> Void
     )
+
+    /// The helper's current alarm state + per-track health as JSON `CaptureStatusSnapshot` (§6.2).
+    func captureStatus(reply: @escaping (Data?) -> Void)
+
+    /// JSON `CaptureOptions`, applied to the NEXT `startCapture`. Reply false = not understood.
+    func configureCapture(optionsJSON: Data, reply: @escaping (Bool) -> Void)
+
+    /// "sleep" | "wake" from `NSWorkspace` (§8.10). Reply when applied.
+    func systemPowerEvent(kind: String, reply: @escaping () -> Void)
 }
 
 /// Reverse XPC channel: the helper calls back into the app to report that it self-healed a benign
@@ -91,6 +100,11 @@ import Foundation
     /// user-facing description for the banner. Optional so an older app build talking to a newer
     /// helper (or vice versa) doesn't crash on an unrecognized selector.
     @objc optional func captureQualityAnomaly(kind: String, message: String)
+    /// First heartbeat of a capture generation (start / rebuild / wake) on `track` ("mic" | "system").
+    /// The app clears the stale alarms a replaced helper left on that track (§6.2).
+    @objc optional func captureDidDeliverFirstFrames(track: String)
+    /// The helper's alarm set changed: `snapshot` is a JSON `CaptureStatusSnapshot` (§6.2).
+    @objc optional func captureAlarmsChanged(snapshot: Data)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.
