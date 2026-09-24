@@ -218,6 +218,25 @@ import Testing
         #expect(provenance(evidence.finalize(sessionId: "090000-standup", directory: day2)).retries == 0)
     }
 
+    /// L11 review 66: two crashed sessions salvaged one after the other (the pending list, L follow-up 24),
+    /// with nothing bound: the second record carries none of the first one's facts. A second finalize of the
+    /// SAME session (its transcript failed, then the salvage) still carries them all.
+    @Test func consecutiveSalvagesNeverShareTheirFacts() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {
+            let a = SessionEvidence()
+            a.beginCapture(sessionId: "x", directory: d)
+            a.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+            a.mergeHelperEvents([captureStop(remote: 40, local: 40, helper: "1000-0", at: 40)])
+        }
+        let b = SessionEvidence()
+        let x = b.finalize(sessionId: "x", directory: d)
+        #expect(provenance(x).remoteCoverage?.deliveredSeconds == 40 && x.isAnomalous)
+        #expect(provenance(b.finalize(sessionId: "x", directory: d)).remoteCoverage?.deliveredSeconds == 40, "the same session again")
+        let y = b.finalize(sessionId: "y", directory: d)
+        #expect(provenance(y).remoteCoverage == nil && !y.isAnomalous, "never the other session's facts")
+    }
+
     /// L11 review 67: a pull that raced a stop (the helper no longer capturing: full expected time, nothing
     /// delivered) is not coverage — the helper session keeps its last capturing snapshot.
     @Test func aPullFromAHelperThatIsNotCapturingIsIgnored() throws {

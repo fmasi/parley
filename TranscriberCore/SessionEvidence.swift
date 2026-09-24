@@ -22,6 +22,9 @@ public final class SessionEvidence {
     public var sessionId: String? { session?.id }
     private var session: (directory: String, id: String)?
     private var liveLog: LiveDiagnosticsLog?
+    /// The last finalized session and its record: a second finalize of it (a salvage after its transcript
+    /// failed) continues it; any other session never sees it (L11 review 66).
+    private var finalized: (directory: String, id: String, record: CaptureDiagnostics)?
     /// Which session the evidence is bound to, as a tag: bumped whenever a NEW session binds, and when one
     /// ends. A helper call is tagged with it when made; what it records later for another binding is dropped
     /// (L9 review 52).
@@ -43,6 +46,7 @@ public final class SessionEvidence {
         if !isBound(to: sessionId, in: directory) {
             diagnostics.resetSession()
             liveLog = nil
+            finalized = nil
             epoch += 1
         }
         // The same session resumed by a relaunch finds the earlier process's live log and appends to it.
@@ -91,12 +95,19 @@ public final class SessionEvidence {
     /// salvage after its transcript failed) still finds everything.
     public func finalize(sessionId: String, directory: URL) -> CaptureDiagnostics {
         let bound = isBound(to: sessionId, in: directory)
-        // The ring is this session's when bound to it, or when nothing is bound (a salvage at launch); never
-        // another live session's.
+        // The ring is this session's when bound to it, or — nothing bound (a salvage at launch) — the events
+        // recorded since, on top of this session's own record when it was finalized before. Never another
+        // session's (L11 review 66).
         let ownsRing = bound || session == nil
+        var ring = ownsRing ? diagnostics : CaptureDiagnostics(maxEvents: diagnostics.maxEvents)
+        if !bound, ownsRing, let earlier = finalized, earlier.id == sessionId, earlier.directory == Self.key(directory) {
+            var continued = earlier.record
+            continued.merge(ring.events)
+            ring = continued
+        }
         let log = (bound ? liveLog : nil) ?? LiveDiagnosticsLog(directory: directory, sessionId: sessionId)
         let logged = log.events()
-        var merged = log.merged(into: ownsRing ? diagnostics : CaptureDiagnostics(maxEvents: diagnostics.maxEvents))
+        var merged = log.merged(into: ring)
         // Which helper sessions stopped: from the log and the ring's out-of-ring tally, never the evicting
         // ring alone (L11 review 67).
         let stopped = merged.stoppedHelperSessions
@@ -125,7 +136,11 @@ public final class SessionEvidence {
             }
         }
         if !keepLiveLog { log.delete() }
-        if ownsRing { diagnostics = merged }
+        if ownsRing {
+            // Kept aside for a second finalize of this session; the ring starts afresh for whatever comes next.
+            finalized = (Self.key(directory), sessionId, merged)
+            diagnostics = CaptureDiagnostics(maxEvents: diagnostics.maxEvents)
+        }
         if bound {
             liveLog = nil
             session = nil
@@ -141,6 +156,7 @@ public final class SessionEvidence {
         liveLog?.delete()
         liveLog = nil
         session = nil
+        finalized = nil
         diagnostics.resetSession()
         epoch += 1
     }
