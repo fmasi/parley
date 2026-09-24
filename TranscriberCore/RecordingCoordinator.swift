@@ -181,8 +181,8 @@ public final class RecordingCoordinator {
     /// the menu's mic label right too.
     private let recordingMicrophone: RecordingMicrophone
     /// Free bytes on the volume holding a folder (§8.7); nil = unknown. Injected so tests never read the
-    /// machine's real disk.
-    private let freeBytesProvider: (URL) -> Int?
+    /// machine's real disk. `@Sendable`: the start reads it off the main actor (L follow-up 33).
+    private let freeBytesProvider: @Sendable (URL) -> Int?
 
     private func setHelperMic(_ deviceId: String?) {
         recordingMicrophone.set(deviceId)
@@ -206,7 +206,7 @@ public final class RecordingCoordinator {
         notifyAlarm: @escaping @MainActor (ActiveAlarm) -> Void = { _ in },
         engineFactory: (@MainActor (Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))? = nil,
         recordingMicrophone: RecordingMicrophone = .shared,
-        freeBytesProvider: @escaping (URL) -> Int? = { DiskSpaceCheck.freeBytes(at: $0) }
+        freeBytesProvider: @escaping @Sendable (URL) -> Int? = { DiskSpaceCheck.freeBytes(at: $0) }
     ) {
         self.freeBytesProvider = freeBytesProvider
         self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
@@ -343,12 +343,20 @@ public final class RecordingCoordinator {
         // starts, not only via the live exact-zero detector once the meeting is already underway.
         // Non-blocking: recording proceeds either way, exactly like every other interruption banner.
         // The lookups are synchronous IOKit / CoreAudio HAL calls: detached, so a stall never blocks the
-        // main actor, and bounded, so a stall ends the start honestly instead of holding it forever.
-        let preflight = self.preflight
-        let lidClosed: Bool, isBuiltInMic: Bool
+        // main actor, and bounded, so a stall ends the start honestly instead of holding it forever. The
+        // recording folder's reachability and free space are read there too: a hung network volume must
+        // not freeze the UI either (L follow-up 33).
+        let preflight = self.preflight, freeBytesProvider = self.freeBytesProvider
+        let config = configManager.config
+        let recordingDirectory = URL(fileURLWithPath: config.recordingDirectory)
+        let lidClosed: Bool, isBuiltInMic: Bool, folderReachable: Bool, freeBytes: Int?
         do {
-            (lidClosed, isBuiltInMic) = try await withDeadline(seconds: Self.seconds(until: startBy), label: "start: pre-flight") {
-                await Task.detached { preflight(microphoneDeviceId) }.value
+            (lidClosed, isBuiltInMic, folderReachable, freeBytes) = try await withDeadline(seconds: Self.seconds(until: startBy), label: "start: pre-flight") {
+                await Task.detached {
+                    let (lid, builtIn) = preflight(microphoneDeviceId)
+                    let reachable = Self.folderReachable(recordingDirectory)
+                    return (lid, builtIn, reachable, reachable ? freeBytesProvider(Self.nearestExistingDirectory(recordingDirectory)) : nil)
+                }.value
             }
         } catch {
             Logger.state.error("Recording not started: the pre-flight audio-device lookup did not answer")
@@ -363,14 +371,20 @@ public final class RecordingCoordinator {
         // BEFORE the warning is set, so a call that loses the race never shows a banner for a
         // recording it isn't the one driving.
         guard appState.isIdle else { return }
-        let config = configManager.config
+        // Before the sentinel and the helper, and before any banner: nothing of this recording exists yet.
+        // A recording folder on a drive that is not there is named as the cause, before any disk read (L
+        // follow-up 32) — the user copy names the folder, never a meeting.
+        guard folderReachable else {
+            Logger.state.error("Recording not started: the recording folder is unreachable")
+            refuseStart("The recording folder isn’t reachable — is its drive connected? (\(abbreviatedDisplayPath(config.recordingDirectory)))")
+            return
+        }
         // §8.7: never start what the disk cannot hold — two chunks plus headroom. Read on the folder's
         // nearest existing ancestor: a recording folder not created yet is still checked, never skipped.
-        // Before the sentinel and the helper, and before any banner: nothing of this recording exists.
-        let free = freeBytesProvider(Self.nearestExistingDirectory(URL(fileURLWithPath: config.recordingDirectory))) ?? .max
+        let free = freeBytes ?? .max
         guard DiskSpaceCheck.canStart(freeBytes: free, chunkMinutes: config.validatedChunkDuration) else {
             Logger.state.error("Recording not started: \(free / 1_000_000, privacy: .public) MB free")
-            notify("Recording not started", DiskSpaceCheck.message(freeBytes: free, chunkMinutes: config.validatedChunkDuration))
+            refuseStart(DiskSpaceCheck.message(freeBytes: free, chunkMinutes: config.validatedChunkDuration))
             return
         }
         if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
@@ -469,6 +483,13 @@ public final class RecordingCoordinator {
                 notify("Recording Failed", error.localizedDescription)
             }
         }
+    }
+
+    /// A start refused before anything began: said in the app as well as in a notification, so it is seen
+    /// with notifications turned off (L follow-up 34).
+    private func refuseStart(_ message: String) {
+        appState.errorMessage = message
+        notify("Recording not started", message)
     }
 
     /// The start ran out of its deadline: the audio system, not the user, is stuck — said plainly.

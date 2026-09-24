@@ -196,7 +196,8 @@ private struct Harness {
     let freeBytes: Box<Int?> = Box(Int.max)
     let recordingMic: RecordingMicrophone
 
-    final class Box<T> { var value: T; init(_ value: T) { self.value = value } }
+    /// `@unchecked Sendable`: tests hand it to `@Sendable` seams (the disk provider); the main actor owns it.
+    final class Box<T>: @unchecked Sendable { var value: T; init(_ value: T) { self.value = value } }
 
     init(recordingMic: RecordingMicrophone = RecordingMicrophone()) throws {
         self.recordingMic = recordingMic
@@ -2382,6 +2383,25 @@ private struct Harness {
         #expect(h.criticals.value.isEmpty, "one notification: the alarm presenter's")
     }
 
+    /// 41(a)(b): the resume's alarm reaches the presenter (window + notification), and the resumed chunk
+    /// clock is re-anchored at resume time, never at the seeded meeting start.
+    @Test func theResumeAlarmIsPresentedAndTheClockReanchored() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let shown = Harness.Box<[AlarmKind]>([])
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
+            presentAlarmsUI: { _, new in shown.value += new },
+            engineFactory: { _ in (FakeEngine(), FakeDiarizer()) }, recordingMicrophone: h.recordingMic)
+        let s = try writeSentinel(h, alive: 30)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt.addingTimeInterval(-3600), chunkIndices: [0])
+        await coordinator.recoverAtLaunch()
+        #expect(shown.value.contains(.recordingResumedWithGap))
+        let start = try #require(h.runner.chunkRotator?.currentChunkInfo.startTime)
+        #expect(abs(start.timeIntervalSinceNow) < 5, "re-anchored now, not an hour ago")
+    }
+
     @Test func oldSentinelSalvagesAndStopsLoudly() async throws {
         let h = try Harness()
         _ = try writeSentinel(h, alive: 600)
@@ -2421,9 +2441,12 @@ private struct Harness {
 
     @Test func aSentinelFromAnotherBootIsSalvagedNotDeleted() async throws {
         let h = try Harness()
-        _ = try writeSentinel(h, alive: 10, boot: "not-this-boot")
+        let s = try writeSentinel(h, alive: 10, boot: "not-this-boot")
+        // Audio on disk (41d): salvaged into a transcript, never discarded with the stale sentinel.
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.startCalls.isEmpty && h.appState.activeAlarms[.recordingStopped] != nil)
+        #expect(h.presented.value == [outDir(s).appendingPathComponent("sess.json")], "salvaged, not deleted")
     }
 
     @Test func stopMarksTheSentinelStoppingBeforeAskingTheHelper() async throws {
@@ -2576,7 +2599,9 @@ private struct Harness {
         let sealed = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 - 300).rounded(.down))
         try FileManager.default.setAttributes([.modificationDate: sealed], ofItemAtPath: wav.path)
         await h.coordinator.recoverAtLaunch()
-        #expect(h.appState.activeAlarms[.recordingStopped]?.message.hasPrefix("Recording STOPPED at \(RecoveryMessages.clock(sealed))") == true)
+        let message = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(message.hasPrefix("Recording STOPPED at \(RecoveryMessages.clock(sealed))"))
+        #expect(message.contains("The 1 chunk recorded before it was transcribed to sess.json"), "the orphan was consumed (41c): \(message)")
     }
 
     /// A resume whose pipeline cannot be built after the helper started: the helper is stopped (bounded)
@@ -2662,6 +2687,7 @@ private struct Harness {
         #expect(h.client.startCalls.isEmpty && h.appState.isIdle)
         #expect(h.notified.value.first?.title == "Recording not started")
         #expect(h.notified.value.first?.body.contains("MB free") == true)
+        #expect(h.appState.errorMessage == h.notified.value.first?.body, "visible with notifications off (34)")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && !coordinator.isStartInFlight)
     }
 
@@ -2677,8 +2703,63 @@ private struct Harness {
             presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic,
             freeBytesProvider: { url in seen.value = url; return 1_000_000 })
         await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(seen.value.map { FileManager.default.fileExists(atPath: $0.path) } == true)
+        // `rec/not-yet` does not exist: its nearest existing ancestor, symlinks resolved (/var → /private/var).
+        #expect(seen.value?.path == h.tmp.resolvingSymlinksInPath().standardizedFileURL.path)
         #expect(h.client.startCalls.isEmpty)
+    }
+
+    /// 31: a recording folder reached through a symlink is read where it really is.
+    @Test func theStartCheckResolvesSymlinks() async throws {
+        let h = try Harness()
+        let real = h.tmp.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = h.tmp.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        h.config.update { $0.recordingDirectory = link.path }
+        let seen = Harness.Box<URL?>(nil)
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { h.notified.value.append(($0, $1)) }, notifyCritical: { _, _ in },
+            presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic,
+            freeBytesProvider: { url in seen.value = url; return 1_000_000 })
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(seen.value?.path == real.resolvingSymlinksInPath().standardizedFileURL.path)
+    }
+
+    /// 32/34: a recording folder on a drive that is not there is named as the cause, before any disk
+    /// read — and the refusal is visible in the app even with notifications off.
+    @Test func aStartIsRefusedWhenTheRecordingFolderIsUnreachable() async throws {
+        let h = try Harness()
+        let locked = h.tmp.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path) }
+        h.config.update { $0.recordingDirectory = locked.appendingPathComponent("Recordings").path }
+        let read = Harness.Box(false)
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { h.notified.value.append(($0, $1)) }, notifyCritical: { _, _ in },
+            presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic,
+            freeBytesProvider: { _ in read.value = true; return .max })
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.isEmpty && !read.value, "refused before the disk read")
+        #expect(h.notified.value.first?.title == "Recording not started")
+        #expect(h.notified.value.first?.body.contains("isn’t reachable") == true)
+        #expect(h.appState.errorMessage == h.notified.value.first?.body)
+    }
+
+    /// 33: the start's disk read runs off the main actor (a hung network volume must not freeze the UI).
+    @Test func theStartDiskReadIsOffTheMainActor() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        let onMain = Harness.Box<Bool?>(nil)
+        let coordinator = RecordingCoordinator(
+            appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
+            sentinelDirectory: h.tmp, notify: { h.notified.value.append(($0, $1)) }, notifyCritical: { _, _ in },
+            presentTranscript: { _, _ in }, recordingMicrophone: h.recordingMic,
+            freeBytesProvider: { _ in onMain.value = Thread.isMainThread; return 1_000_000 })
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(onMain.value == false)
     }
 
     @Test func aRotationFailureRaisesTheAlarmAndADeadCaptureBecomesACrash() async throws {
@@ -2689,13 +2770,13 @@ private struct Harness {
         try FileManager.default.createDirectory(at: try #require(h.client.startCalls.first).outputDirectory, withIntermediateDirectories: true)
         h.client.rotateError = FakeCaptureError()
         h.runner.chunkRotator?.rotateNow()
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.activeAlarms[.rotationFailed] != nil }
         #expect(h.appState.activeAlarms[.rotationFailed] != nil)
         #expect(h.client.recordedEvents.contains { $0.kind == .rotationFailed })
         #expect(h.client.startCalls.count == 1, "an ordinary rotate failure is not a crash")
         h.client.rotateError = NoCaptureError()
         h.runner.chunkRotator?.rotateNow()
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.client.startCalls.count == 2 }
         #expect(h.client.startCalls.count == 2, "\"No capture in progress\" means the capture is dead: the crash path restarts it")
     }
 
