@@ -90,6 +90,20 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Tracks whose first real audio has been reported. Audio-queue confined.
     private var realAudioReported: Set<CaptureTrack> = []
 
+    /// Real (never padded) frames handed to each track's writer, session-wide. The write-progress
+    /// check (H2 council, A-I3) reads it off the audio queue once a second, so it is lock-only.
+    private let writtenFrameCounts = OSAllocatedUnfairLock<(mic: Int64, system: Int64)>(initialState: (0, 0))
+
+    /// Real frames written to `track` so far this session. Lock-only: any queue.
+    func writtenFrames(_ track: CaptureTrack) -> Int64 {
+        writtenFrameCounts.withLock { track == .mic ? $0.mic : $0.system }
+    }
+
+    private func noteWritten(_ frames: Int64, track: CaptureTrack) {
+        guard frames > 0 else { return }
+        writtenFrameCounts.withLock { if track == .mic { $0.mic += frames } else { $0.system += frames } }
+    }
+
     /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
@@ -369,6 +383,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             totalSystemFramesWritten += Int64(count)
             dataFrames = Int64(count)
         }
+        noteWritten(dataFrames, track: .system)
         notePadding(
             systemPadMonitor.record(padFrames: sysPad, dataFrames: dataFrames, rate: sysRate),
             track: "system")
@@ -409,6 +424,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
         totalSystemFramesWritten += Int64(samples.count)
+        noteWritten(Int64(samples.count), track: .system)
         // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
@@ -588,6 +604,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
         totalMicFramesWritten += Int64(samples.count)
+        noteWritten(Int64(samples.count), track: .mic)
         notePadding(
             micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
                                  rate: AudioConverter.outputSampleRate),

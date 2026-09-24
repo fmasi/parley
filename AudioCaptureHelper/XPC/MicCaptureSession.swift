@@ -35,8 +35,18 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     var onRecovered: ((String?) -> Void)?
     /// Invoked when the mic cannot be (re)started within budget. Mic loss is NOT fatal to the session
     /// — system audio keeps recording — so the service records an anomaly and continues; the partial
-    /// mic WAV captured up to the loss remains valid.
-    var onUnavailable: ((String) -> Void)?
+    /// mic WAV captured up to the loss remains valid. A follow can also fail BEFORE the session swap,
+    /// with the current mic still recording: the service tells the two apart by the heartbeat (A-I5).
+    var onUnavailable: ((Unavailable) -> Void)?
+
+    /// Why the recover loop gave up. The device NAMES are user-facing: log them `.private`.
+    struct Unavailable {
+        let reason: String
+        /// The device the loop was trying to open; nil = unknown (no attempt ran, or none resolved).
+        let attemptedName: String?
+        /// The device the running session was built on; nil = none yet.
+        let currentName: String?
+    }
     /// Invoked after every successful (re)build of the session (start, user switch, recovery): the
     /// liveness watchdog re-arms the mic track from here (§4.2).
     var onGenerationChanged: (() -> Void)?
@@ -71,6 +81,8 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// device-change reevaluation compares against this to decide whether we are already on the device we
     /// SHOULD be on, so an unrelated device appearing (or a duplicate notification) is a no-op.
     private var currentConcreteDeviceId: String?
+    /// The running session's device name, for the failed-follow notice (A-I5). Guarded by `stateLock`.
+    private var currentDeviceName: String?
     private var isStopping = false
     private var isRecovering = false
     private var restartAttempts = 0
@@ -196,6 +208,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             session = newSession
             currentDeviceId = resolvedId
             currentConcreteDeviceId = device.uniqueID
+            currentDeviceName = device.localizedName
             // Pin (the user's REQUESTED id, even on a fallback, so we re-pin when it returns) moves in the
             // SAME critical section as the concrete device — never observable half-applied.
             if userInitiated { pinnedDeviceId = deviceId }
@@ -368,6 +381,8 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     private func recoverLoop() {
         defer { stateLock.sync { isRecovering = false } }
+        // The device the last attempt tried to open (`.some(nil)` = the system default).
+        var lastAttempt: String??
         while true {
             let (stopping, attempts, pinned) = stateLock.sync { (isStopping, restartAttempts, pinnedDeviceId) }
             if stopping { return }
@@ -378,10 +393,15 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 // needsSwitch (current==nil ⇒ leavingDeviceGone, target!=nil ⇒ needsSwitch) and rebuilds.
                 // Without this the stale concrete makes us think we're already on the right device and the
                 // mic stays silently dead — fatal on Macs with no built-in fallback (council F1).
-                stateLock.sync { currentConcreteDeviceId = nil }
-                // The service's onUnavailable handler records the .restartFailed anomaly; don't also
+                let current: String? = stateLock.sync {
+                    currentConcreteDeviceId = nil
+                    return currentDeviceName
+                }
+                // The service's onUnavailable handler records the anomaly (or the notice); don't also
                 // record it here (that would double-count the event).
-                onUnavailable?("mic restart budget exhausted")
+                onUnavailable?(Unavailable(reason: "mic restart budget exhausted",
+                                           attemptedName: lastAttempt.flatMap { Self.displayName($0) },
+                                           currentName: current))
                 return
             }
             // Recompute the target from FRESH state every iteration: the pinned device if it is currently
@@ -390,6 +410,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             // pass (council MIC-FOLLOW-PIN-OVERRIDE / mic-switch-clobbered-by-autofollow-recovery).
             let available = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
             let deviceId = MicTargeting.recoveryTarget(pinned: pinned, available: available)
+            lastAttempt = .some(deviceId)
             do {
                 try configQueue.sync { try buildAndStart(deviceId: deviceId) }
                 // Report the RESOLVED device, not the requested one: buildAndStart may have fallen back
@@ -419,6 +440,13 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 Thread.sleep(forTimeInterval: 0.3)
             }
         }
+    }
+
+    /// A device's user-facing name (`nil` id = the current system default input). A HAL read: never on
+    /// the audio queue.
+    private static func displayName(_ deviceId: String?) -> String? {
+        guard let deviceId else { return AVCaptureDevice.default(for: .audio)?.localizedName }
+        return AVCaptureDevice(uniqueID: deviceId)?.localizedName
     }
 
     // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate

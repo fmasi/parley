@@ -113,8 +113,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private let livenessWatchdog = LivenessWatchdogDriver()
     /// Runs the tap's healing ladder from the system track's liveness verdicts (§5).
     private let tapHealer = TapHealer(scheduler: DispatchHealerScheduler(label: "audio-capture.tap-healer"))
-    /// Mic side of "heal, then alarm" (§6.1). Touched on the watchdog queue only.
+    /// Mic side of "heal, then alarm" (§6.1), with the reopen deadline (A-C2). Touched on the watchdog
+    /// queue only.
     private var micHealPolicy = MicHealPolicy()
+    /// Per-track write progress (A-I3). Touched on the watchdog queue only.
+    private var writeMonitors: [CaptureTrack: WriteProgressMonitor] = [:]
+    /// Tracks whose heartbeat flows while nothing is written: their not-delivering alarm clears on write
+    /// progress only, never on a heartbeat (A-I3). Lock-only: the healer queue clears through it too.
+    private let writeStuck = OSAllocatedUnfairLock<Set<CaptureTrack>>(initialState: [])
     /// Per-track coverage (§7.1) accumulated as it happens: expected seconds from the gate, rebuilds
     /// from the healer (gaps live in `gaps`). Delivered / padded / zero / heartbeat counts
     /// are merged in when read (`coverageFacts`). Lock-only, so the audio queue may read it too.
@@ -292,8 +298,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             ?? { [weak handler] in handler?.lastSystemBufferArrivalNanos() ?? 0 }
         livenessWatchdog.onVerdict = { [weak self] track, verdict in self?.handleLiveness(track: track, verdict: verdict) }
         livenessWatchdog.onGate = { [weak self] open, now in self?.accountGate(open: open, nowNanos: now) }
-        // A new session starts a new mic episode; on the watchdog queue, like every other use.
-        livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy = MicHealPolicy() }
+        livenessWatchdog.onTick = { [weak self] now, gateOpen in self?.checkProgress(nowNanos: now, gateOpen: gateOpen) }
+        writeStuck.withLock { $0 = [] }
+        // A new session starts a new mic episode and fresh write checks; on the watchdog queue, like
+        // every other use.
+        livenessWatchdog.queue.async { [weak self] in
+            self?.micHealPolicy = MicHealPolicy()
+            self?.writeMonitors = [:]
+        }
         livenessWatchdog.start { [weak self] in
             guard let self else { return false }
             return self.stateLock.sync { self.lifecycle.isLive }
@@ -352,14 +364,83 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let alarmMessage = "The microphone isn’t delivering any audio. Try another microphone from the menu."
         switch micHealPolicy.onVerdict(verdict, now: Double(DispatchTime.now().uptimeNanoseconds) / 1e9) {
         case .heal:
-            stateLock.sync { micSession }?.heal()
+            healMic()
         case .healAndAlarm:
-            stateLock.sync { micSession }?.heal()
+            healMic()
             raiseAlarm(.micNotDelivering, alarmMessage)
         case .alarm:
             raiseAlarm(.micNotDelivering, alarmMessage)
         case .clear:
-            clearAlarm(.micNotDelivering)
+            clearDeliveryAlarm(.micNotDelivering)
+        case .notice, .none:
+            break
+        }
+    }
+
+    /// Every mic reopen goes through here — a silence verdict, wake, a coreaudiod restart — so each one
+    /// is held to the reopen deadline (A-C2), including a heal that is a no-op behind a recovery already
+    /// in flight.
+    private func healMic() {
+        guard let mic = stateLock.sync(execute: { micSession }) else { return }
+        let heartbeat = mic.lastHeartbeatNanos()
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy.reopenRequested(now: now, heartbeat: heartbeat) }
+        mic.heal()
+    }
+
+    /// A heartbeat must not clear a track's not-delivering alarm while that track is called but writes
+    /// nothing (A-I3): only write progress (or the track no longer being expected) clears that one.
+    private func clearDeliveryAlarm(_ kind: AlarmKind) {
+        if let track = kind.track, writeStuck.withLock({ $0.contains(track) }) { return }
+        clearAlarm(kind)
+    }
+
+    /// Every 1 Hz tick, on the watchdog queue: the mic reopen deadline (A-C2) and each track's write
+    /// progress (A-I3). Lock-only reads — the heartbeats and the handler's written-frame counters.
+    private func checkProgress(nowNanos: UInt64, gateOpen: Bool) {
+        let (mic, tap, h) = stateLock.sync { (micSession, tapSession, handler) }
+        guard let mic, let h else { return }
+        let micHeartbeat = mic.lastHeartbeatNanos()
+        switch micHealPolicy.tick(now: Double(nowNanos) / 1e9, heartbeat: micHeartbeat) {
+        case .alarm:
+            let deadline = Int(MicHealPolicy.reopenDeadlineSeconds)
+            Logger.audio.error("Microphone reopen delivered nothing within \(deadline, privacy: .public)s — alarming")
+            record(.recoveryStuck, .anomaly, ["track": CaptureTrack.mic.rawValue, "seconds": "\(deadline)"])
+            raiseAlarm(.micNotDelivering, "The microphone could not be reopened and isn’t delivering any audio. Try another microphone from the menu.")
+        case .clear:
+            clearDeliveryAlarm(.micNotDelivering)
+        default:
+            break
+        }
+        // Tap: its callback heartbeat. SCK: the arrival stamp, as the liveness watchdog uses.
+        let systemHeartbeat = tap?.lastHeartbeatNanos() ?? h.lastSystemBufferArrivalNanos()
+        for (track, heartbeat, expected) in [(CaptureTrack.mic, micHeartbeat, true), (.system, systemHeartbeat, gateOpen)] {
+            var monitor = writeMonitors[track] ?? WriteProgressMonitor()
+            let verdict = monitor.check(nowNanos: nowNanos, lastHeartbeatNanos: heartbeat, expected: expected,
+                                        writtenFrames: h.writtenFrames(track))
+            writeMonitors[track] = monitor
+            handleWriteProgress(track: track, verdict: verdict)
+        }
+    }
+
+    /// The track's own not-delivering alarm, detail "audio arrives but can't be recorded", and a
+    /// quality event for the record (A-I3). Cleared on write progress.
+    private func handleWriteProgress(track: CaptureTrack, verdict: WriteProgressMonitor.Verdict) {
+        let kind: AlarmKind = track == .mic ? .micNotDelivering : .remoteNotDelivering
+        switch verdict {
+        case .stuck(let s):
+            writeStuck.withLock { _ = $0.insert(track) }
+            let message = track == .mic
+                ? "The microphone’s audio arrives but can’t be recorded. Try another microphone from the menu."
+                : "The other side’s audio arrives but can’t be recorded."
+            Logger.audio.error("\(track.rawValue, privacy: .public) track: called for \(Int(s), privacy: .public)s with nothing written — audio arrives but can't be recorded")
+            record(.livenessGap, .anomaly, ["track": track.rawValue, "reason": "audio arrives but can't be recorded", "seconds": "\(Int(s))"])
+            onQualityAnomaly?(CaptureEventKind.livenessGap.rawValue, message)
+            raiseAlarm(kind, message)
+        case .cleared:
+            writeStuck.withLock { _ = $0.remove(track) }
+            record(.livenessRecovered, .info, ["track": track.rawValue, "reason": "writing again, or no longer expected"])
+            clearDeliveryAlarm(kind)
         case .none:
             break
         }
@@ -375,13 +456,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         case .firstFrames:
             tapHealer.heartbeatObserved()
             // First frames disprove the delivery kinds (never the permission kinds, which clear on real audio).
-            clearAlarm(.remoteNotDelivering)
+            clearDeliveryAlarm(.remoteNotDelivering)
             clearAlarm(.remoteRecoveryFailed)
         case .cleared(.heartbeat):
             tapHealer.heartbeatObserved()
         case .cleared(.gateClosed):
             tapHealer.gateClosed()
-            clearAlarm(.remoteNotDelivering)
+            clearDeliveryAlarm(.remoteNotDelivering)
         case .healthy:
             break
         }
@@ -396,10 +477,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         switch verdict {
         case .firstFrames:
-            clearAlarm(.remoteNotDelivering)
+            clearDeliveryAlarm(.remoteNotDelivering)
             clearAlarm(.remoteRecoveryFailed)
         case .cleared:
-            clearAlarm(.remoteNotDelivering)
+            clearDeliveryAlarm(.remoteNotDelivering)
         default:
             break
         }
@@ -708,7 +789,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             tapHealer.trigger(.wake)   // forgets the episode; never rebuilds blind — the re-armed monitor decides
             livenessWatchdog.arm(track: .mic)
             livenessWatchdog.arm(track: .system)
-            stateLock.sync { micSession }?.heal()
+            healMic()
         default:
             Logger.audio.warning("Unknown power event \(kind, privacy: .public)")
         }
@@ -1032,15 +1113,28 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
             self?.onMicDeviceChanged?(deviceId)
         }
-        mic.onUnavailable = { [weak self] reason in
-            // Mic loss is NOT fatal: system audio keeps recording and the partial mic WAV stays valid.
-            // Record the anomaly so the session is flagged and diagnostics flush.
-            Logger.audio.error("Microphone unavailable mid-session: \(reason, privacy: .public)")
-            self?.record(.restartFailed, .anomaly, ["source": "mic", "reason": reason])
-            // The heal gave up, so no second verdict will come: alarm now (scan C11).
+        mic.onUnavailable = { [weak self, weak mic] info in
+            // Judged on the watchdog queue, with the mic's heartbeat at that moment (A-I5).
             self?.livenessWatchdog.queue.async {
                 guard let self else { return }
-                if self.micHealPolicy.healFailed() == .alarm {
+                let stamp = mic?.lastHeartbeatNanos() ?? 0
+                let now = DispatchTime.now().uptimeNanoseconds
+                let age: Double? = stamp == 0 ? nil : Double(now > stamp ? now - stamp : 0) / 1e9
+                switch self.micHealPolicy.healFailed(heartbeatAgeSeconds: age) {
+                case .notice:
+                    // The switch failed before the session swap: the current mic is still recording, so an
+                    // alarm now would never clear. Acknowledgeable notice; names `.private` in the log.
+                    let target = info.attemptedName ?? "the new microphone"
+                    let current = info.currentName ?? "the current microphone"
+                    Logger.audio.warning("Mic switch failed (\(info.reason, privacy: .public)) — still recording from \(current, privacy: .private); could not switch to \(target, privacy: .private)")
+                    self.record(.streamStopError, .anomaly, ["source": "mic", "reason": "switch failed — still recording from the current microphone"])
+                    self.onQualityAnomaly?(CaptureEventKind.streamStopError.rawValue, "Couldn’t switch to \(target) — still recording from \(current).")
+                default:
+                    // Mic loss is NOT fatal: system audio keeps recording and the partial mic WAV stays
+                    // valid. Record the anomaly so the session is flagged and diagnostics flush.
+                    Logger.audio.error("Microphone unavailable mid-session: \(info.reason, privacy: .public)")
+                    self.record(.restartFailed, .anomaly, ["source": "mic", "reason": info.reason])
+                    // The heal gave up, so no second verdict will come: alarm now (scan C11).
                     self.raiseAlarm(.micNotDelivering, "The microphone stopped delivering audio and could not be reopened. Try another microphone from the menu.")
                 }
             }
@@ -1094,7 +1188,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         tap.onServiceRestarted = { [weak self] in
             guard let self else { return }
             self.tapHealer.trigger(.serviceRestarted)
-            self.stateLock.sync { self.micSession }?.heal()
+            self.healMic()
         }
         try tap.start()
         // Commit-or-abort against a stop that raced in during start (mirrors startMicSession's council-F1
@@ -1139,7 +1233,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 self.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
             }
         }
-        tapHealer.onRecovered = { [weak self] in self?.clearAlarm(.remoteNotDelivering) }
+        tapHealer.onRecovered = { [weak self] in self?.clearDeliveryAlarm(.remoteNotDelivering) }
         tapHealer.onStuck = { [weak self] in
             self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
         }

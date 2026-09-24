@@ -24,6 +24,9 @@ final class LivenessWatchdogDriver {
     var onVerdict: ((CaptureTrack, TrackLivenessMonitor.Verdict) -> Void)?
     /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
     var onGate: ((Bool, UInt64) -> Void)?
+    /// After every tick's verdicts, on `queue`: (nowNanos, gateOpen). The service's counter checks — the
+    /// mic reopen deadline and write progress (H2 council) — ride the same 1 Hz tick, no timer of their own.
+    var onTick: ((UInt64, Bool) -> Void)?
     /// The last tick's gate reading. Cheap and lock-only, so `trackHealth()` (H6) can read it from
     /// the audio queue; the probe itself is a HAL read and must not run there.
     var lastGateOpen: Bool { gateOpenLock.withLock { $0 } }
@@ -108,5 +111,6 @@ final class LivenessWatchdogDriver {
             monitors[track] = m
             if v != .healthy { onVerdict?(track, v) }
         }
+        onTick?(now, gateOpen)
     }
 }
