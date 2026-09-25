@@ -575,6 +575,12 @@ public final class RecordingCoordinator {
             let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: helperStartIssued,
                                                          error: error, label: "stop after failed start")
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
+            if reply == .alreadyCapturing {
+                // What the refused start drained is the busy capture's: to the pending session that knows it (L review 157).
+                await captureClient.attributeRefusedStartDrain(toOneOf: pendingSessions().map {
+                    (sessionId: stripSegmentSuffix($0.systemAudioPath), directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
+                })
+            }
             if helperLetGo {
                 // A busy helper still holds the mic of the capture it is busy with: that marker stays (#192).
                 if reply == .alreadyCapturing { restoreHelperMic(micBefore) } else { clearHelperMic() }
@@ -814,13 +820,11 @@ public final class RecordingCoordinator {
                         engine: config.engine.rawValue,
                         recordingDirectory: sessionOutputDir
                     )
-                    result = try await ChunkedSessionRecovery.recover(
-                        outputDirectory: sessionOutputDir, sessionId: sessionId, config: config,
-                        transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                        provenance: provenance
-                    )
-                    // A transcript, or nothing at all to keep: the live log goes (L review 97).
-                    captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: sessionOutputDir)
+                    result = try await recoverChunkedSession(outputDirectory: sessionOutputDir, sessionId: sessionId, config: config,
+                                                             transcriber: transcriber, diarizer: diarizer, provenance: provenance)
+                    // Only a transcript commits the evidence (L reviews 97, 140): nil is audio kept untranscribed — its
+                    // live log stays beside it.
+                    if result != nil { captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: sessionOutputDir) }
                 } else {
                     // Genuine single-file input (non-chunked recording / legacy path).
                     let (systemAudio, micAudio) = Self.legacySingleFileInputs(
@@ -1314,7 +1318,7 @@ public final class RecordingCoordinator {
                                       systemAudioSource: systemAudioSource, options: options, sessionId: sessionId)
     }
     func awaitRotationInFlight() async { await transcriptionRunner.chunkRotator?.awaitRotationInFlight() }
-    private func attributeHelperDrain(_ sessions: [(sessionId: String, directory: URL)]) async {
+    private func attributeHelperDrain(_ sessions: [(sessionId: String, directory: URL)]) async -> Bool {
         await captureClient.attributeHelperDrain(toOneOf: sessions)
     }
     private func flushEvidence() async { await captureClient.flushEvidence() }
@@ -1715,7 +1719,7 @@ public final class RecordingCoordinator {
             refreshSentinelLiveness()
             startStatusPoll()
             // The evidence is this session's before anything is recorded into it (L follow-up 43).
-            await captureClient.adoptSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir)
+            await captureClient.adoptSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir, drainHelper: true)
             // Re-checked after the await (L review 72): a Stop in the window owns the session now.
             guard appState.isRecording, !stopInFlight else {
                 Logger.state.info("The re-attached recording was stopped while its session was adopted — nothing more to do")
@@ -1992,20 +1996,36 @@ public final class RecordingCoordinator {
                 }
                 clearHelperMic()   // the helper let go of the mic a held session kept marked (L review 88)
             }
-            // The helper's events — the capture it held, sealed — go to the pending session that knows its helper
-            // session (the held one included), or to none; drained ONCE, before any salvage binds (L review 98).
-            let sessions = (ready + pending.filter { $0.sessionKey == heldKey }).map {
-                (sessionId: stripSegmentSuffix($0.systemAudioPath), directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
-            }
-            _ = try? await withDeadline(seconds: Self.seconds(folderReadDeadline), label: "pending: attribute the helper's events") {
-                await self.attributeHelperDrain(sessions)
+            if heldKey == nil {
+                // The helper's events — the capture it held, sealed — go to the pending session that knows its helper
+                // sessions, or to none; drained ONCE, before any salvage binds (L review 98). A drain that did not answer
+                // leaves them in the helper: no salvage binds and drains them now, as its own — they wait for the next
+                // event (L review 142).
+                let sessions = ready.map {
+                    (sessionId: stripSegmentSuffix($0.systemAudioPath), directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
+                }
+                let answered = (try? await withDeadline(seconds: 3 + Self.seconds(folderReadDeadline), label: "pending: attribute the helper's events") {
+                    await self.attributeHelperDrain(sessions)
+                }) ?? false
+                guard answered else {
+                    Logger.state.error("The capture helper's events could not be drained — the pending recordings wait for the next event")
+                    applyFolderAlarm(pending: pendingSessions(), folders: folders)
+                    return
+                }
+                guard appState.isIdle, !userStartInFlight else {
+                    retryPendingWhenIdle = true
+                    return
+                }
             }
             for sentinel in ready {
                 guard appState.isIdle, !userStartInFlight else {
                     retryPendingWhenIdle = true
                     break
                 }
-                await salvageAtLaunch(sentinel: sentinel, outputDir: URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent())
+                // While the helper still holds a held session's capture, its events are that session's: never drained
+                // into another salvage (L review 167).
+                await salvageAtLaunch(sentinel: sentinel, outputDir: URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent(),
+                                      drainHelper: heldKey == nil)
             }
         }
         applyFolderAlarm(pending: pendingSessions(), folders: folders)
@@ -2102,7 +2122,7 @@ public final class RecordingCoordinator {
         acceptFramesBeforeRecording = true
         setHelperMic(sentinel.micDeviceUID)   // before the helper opens it (#192)
         // The evidence is this session's before the start could reset it (L follow-up 43).
-        await captureClient.adoptSession(sessionId: sessionId, directory: outputDir)
+        await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: true)
         var startIssued = false, captureStarted = false
         do {
             startIssued = true
@@ -2347,7 +2367,9 @@ public final class RecordingCoordinator {
     /// at once (window + one notification) — that the recording STOPPED and what was written (§7.4 P6).
     /// The relaunch decision calls it, a resume that cannot restart the capture, and the pending retry. Wherever the
     /// session came from, it leaves BOTH the slot and the list once salvaged (L review 82).
-    func salvageAtLaunch(sentinel: RecordingSentinel, outputDir: URL) async {
+    /// `drainHelper` false: the helper still holds a held session's capture — this salvage binds without draining it (L
+    /// review 167).
+    func salvageAtLaunch(sentinel: RecordingSentinel, outputDir: URL, drainHelper: Bool = true) async {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         // When the recording stopped, what is on disk, and an older-format file's last write — read before the
         // salvage archives (deletes) its orphan WAVs, off the main actor and bounded (L review 75). A folder that
@@ -2364,6 +2386,9 @@ public final class RecordingCoordinator {
             // delete, or a held session transcribed before its hold (L review 136). Its leftovers were cleaned up
             // (R2's `cleanupFinalized`, L review 94) and that is all: no second finalize, no rename panel, no row.
             Logger.state.info("The recovery file of an already transcribed recording lingered — its leftovers are cleaned up, nothing is transcribed again")
+            // Its transcript verified: the commit a crash cut short happens now — its live log and coverage go (L
+            // review 144).
+            captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)
             forgetSession(sentinel)
             captureClient.captureEnded()
             // Audio written AFTER the transcript, which it does not list, is never silent (L review 137): the scan
@@ -2383,8 +2408,9 @@ public final class RecordingCoordinator {
             let config = configManager.config
             let (transcriber, diarizer) = try prepareEngines(config: config)
             // Bound to this session BEFORE its drain (L review 98): reset, drain, build — as the resume does. What
-            // the helper still holds is this session's (a pending retry attributed a stray helper's already).
-            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir)
+            // the helper still holds is this session's (a pending retry attributed a stray helper's already) — unless
+            // it holds a held session's capture: then nothing is drained (L review 167).
+            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: drainHelper)
             // Drain capture diagnostics and stamp the always-present provenance into the
             // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
             // otherwise a recovered session's `sessionState.provenance` stays nil forever.
@@ -2393,11 +2419,8 @@ public final class RecordingCoordinator {
                 engine: config.engine.rawValue,
                 recordingDirectory: outputDir
             )
-            if let result = try await ChunkedSessionRecovery.recover(
-                outputDirectory: outputDir, sessionId: sessionId, config: config,
-                transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                provenance: provenance
-            ) {
+            if let result = try await recoverChunkedSession(outputDirectory: outputDir, sessionId: sessionId, config: config,
+                                                            transcriber: transcriber, diarizer: diarizer, provenance: provenance) {
                 Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
                 recovered = result
                 // Chunks whose speech recognition failed are never called "transcribed" (R2 item 9, L review 93):
@@ -2528,6 +2551,20 @@ public final class RecordingCoordinator {
     private static func sessionLocation(sentinel: RecordingSentinel?, stoppedPaths: AudioPaths?) -> (outputDir: URL, sessionId: String)? {
         guard sentinel != nil || stoppedPaths != nil else { return nil }
         return fallbackSessionLocation(sentinel: sentinel, stoppedSystemAudioPath: stoppedPaths?.systemAudio.path ?? "")
+    }
+
+    /// A test seam over the rebuild from disk: what `ChunkedSessionRecovery.recover` answers — nil being "the audio is
+    /// kept, untranscribed" (L review 140).
+    var recoverChunkedSessionForTesting: ((URL, String) async throws -> TranscriptionResult?)?
+
+    /// The chunked session rebuilt from disk and transcribed (`ChunkedSessionRecovery.recover`); nil when nothing was
+    /// transcribed — its audio, if any, kept.
+    private func recoverChunkedSession(outputDirectory: URL, sessionId: String, config: Config, transcriber: any TranscriptionEngine,
+                                       diarizer: (any DiarizationProvider)?, provenance: CaptureProvenance) async throws -> TranscriptionResult? {
+        if let recoverChunkedSessionForTesting { return try await recoverChunkedSessionForTesting(outputDirectory, sessionId) }
+        return try await ChunkedSessionRecovery.recover(outputDirectory: outputDirectory, sessionId: sessionId, config: config,
+                                                        transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
+                                                        provenance: provenance)
     }
 
     /// The engines a launch recovery transcribes with: the injected factory (tests), else the runner's.

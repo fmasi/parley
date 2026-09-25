@@ -62,7 +62,10 @@ final class FakeCaptureClient: RecordingCaptureClient {
         sessionId: String
     ) async throws {
         sessionCalls.append("start:\(sessionId)@\(outputDirectory.standardized.path)")
-        bound = (sessionId, outputDirectory.standardizedFileURL.path)
+        // As production's start: its drain first, then `beginCapture` — a NEW session resets what was recorded (L
+        // review 146).
+        bind(sessionId, outputDirectory)
+        realEvidence?.beginCapture(sessionId: sessionId, directory: outputDirectory)
         startCalls.append(StartCall(
             outputDirectory: outputDirectory,
             baseName: baseName,
@@ -112,23 +115,31 @@ final class FakeCaptureClient: RecordingCaptureClient {
     /// Bind, attribute, adopt, finalize (build), commit — in order (L review 97, 98, 121).
     var evidenceOrder: [String] = []
     /// The session the evidence is bound to. Binding a NEW one resets what was recorded, as production's
-    /// `beginCapture` does (L review 121).
+    /// `beginCapture` does (L reviews 121, 146).
     var bound: (id: String, directory: String)?
     private func bind(_ sessionId: String, _ directory: URL) {
-        let key = (sessionId, directory.standardizedFileURL.path)
+        let key = (sessionId, SessionEvidence.key(directory))
         if bound.map({ $0.id != key.0 || $0.directory != key.1 }) ?? true { recordedEvents = [] }
         bound = key
     }
+    private func isBound(_ sessionId: String, _ directory: URL) -> Bool {
+        bound.map { $0.id == sessionId && $0.directory == SessionEvidence.key(directory) } ?? false
+    }
+    /// When set, the evidence calls also go to this REAL `SessionEvidence` (L review 139): a coordinator test sees the
+    /// record files production would write.
+    var realEvidence: SessionEvidence?
     func bindSession(sessionId: String, directory: URL) {
         evidenceOrder.append("bind:\(sessionId)")
         bind(sessionId, directory)
+        realEvidence?.beginCapture(sessionId: sessionId, directory: directory)
     }
     /// Awaited inside adoptSession(): lets a test act while a re-attach adopts (L review 72).
     var onAdopt: (() async -> Void)?
-    func adoptSession(sessionId: String, directory: URL) async {
+    func adoptSession(sessionId: String, directory: URL, drainHelper: Bool) async {
         sessionCalls.append("adopt:\(sessionId)@\(directory.standardized.path)")
-        evidenceOrder.append("adopt:\(sessionId)")
+        evidenceOrder.append(drainHelper ? "adopt:\(sessionId)" : "adopt-undrained:\(sessionId)")
         bind(sessionId, directory)
+        realEvidence?.beginCapture(sessionId: sessionId, directory: directory)
         await onAdopt?()
     }
     var commitCalls: [String] = []
@@ -138,9 +149,16 @@ final class FakeCaptureClient: RecordingCaptureClient {
         commitCalls.append(sessionId)
         evidenceOrder.append("commit:\(sessionId)")
         onCommit?(sessionId, directory)
+        realEvidence?.commit(sessionId: sessionId, directory: directory)
     }
-    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
+    /// Whether the attribution's drain answered (L review 142).
+    var attributionAnswers = true
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async -> Bool {
         evidenceOrder.append("attribute:" + sessions.map(\.sessionId).joined(separator: ","))
+        return attributionAnswers
+    }
+    func attributeRefusedStartDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
+        evidenceOrder.append("attribute-refused:" + sessions.map(\.sessionId).joined(separator: ","))
     }
     var flushCalls = 0
     /// Awaited inside the flush: lets a test hang it.
@@ -151,7 +169,15 @@ final class FakeCaptureClient: RecordingCaptureClient {
     }
     /// Sessions whose evidence was dropped: a start that never became a recording (L11 review 68).
     var discardedSessions: [String] = []
-    func discardSessionEvidence(sessionId: String, directory: URL) { discardedSessions.append(sessionId) }
+    func discardSessionEvidence(sessionId: String, directory: URL) {
+        discardedSessions.append(sessionId)
+        guard isBound(sessionId, directory) else { return }
+        bound = nil   // as production's `discard`: unbound, its ring dropped (L review 146)
+        discardedEvents += recordedEvents
+        recordedEvents = []
+    }
+    /// What `discardSessionEvidence` dropped with its session.
+    var discardedEvents: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])] = []
 
     var powerEvents: [String] = []
     /// Awaited before the event lands: lets a test slow a delivery down (a "sleep" still in flight).
@@ -164,6 +190,7 @@ final class FakeCaptureClient: RecordingCaptureClient {
     var recordedEvents: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])] = []
     func record(_ kind: CaptureEventKind, _ severity: CaptureEvent.Severity, _ detail: [String: String]) {
         recordedEvents.append((kind, severity, detail))
+        realEvidence?.record(CaptureEvent(timestamp: Date(), origin: .app, kind: kind, severity: severity, detail: detail))
     }
 
     /// With no `stopResult`: answer "No capture in progress" when not capturing, as the real helper does — so a
@@ -190,13 +217,26 @@ final class FakeCaptureClient: RecordingCaptureClient {
 
     /// Awaited inside the record's build, before the transcript is written: a test reads the session there.
     var onFinalizeDiagnostics: (() async -> Void)?
+    /// What each build took from the ring, in order: (session id, the events recorded for it). The ring itself is
+    /// reset by the build, as production's is (L review 146).
+    var builtRecords: [(sessionId: String, events: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])])] = []
+    /// Every event recorded, whatever build took it.
+    var everyRecordedEvent: [(kind: CaptureEventKind, severity: CaptureEvent.Severity, detail: [String: String])] {
+        builtRecords.flatMap(\.events) + discardedEvents + recordedEvents
+    }
     func finalizeSessionDiagnostics(
         sessionId: String, engine: String, recordingDirectory: URL
     ) async -> CaptureProvenance {
         await onFinalizeDiagnostics?()
         finalizeCalls.append((sessionId, engine, recordingDirectory))
         evidenceOrder.append("finalize:\(sessionId)")
-        bound = nil
+        // As production's build: the ring is this session's when bound to it or nothing is bound — then it is taken,
+        // and reset; the binding ends (L review 146).
+        let ownsRing = bound == nil || isBound(sessionId, recordingDirectory)
+        builtRecords.append((sessionId, ownsRing ? recordedEvents : []))
+        if ownsRing { recordedEvents = [] }
+        if isBound(sessionId, recordingDirectory) { bound = nil }
+        if let realEvidence { _ = await realEvidence.finalize(sessionId: sessionId, directory: recordingDirectory) }
         return CaptureDiagnostics().makeProvenance(
             engine: engine, systemFormat: nil, micFormat: nil, micDevice: nil
         )
@@ -958,14 +998,15 @@ struct Harness {
     @Test func twoNotCapturingPollsEscalateToCrashRecovery() async throws {
         let h = try Harness()
         _ = try h.writeSentinel()
+        h.client.bindSession(sessionId: "sess", directory: h.tmp.appendingPathComponent("out"))   // its start bound it
         h.appState.phase = .recording(since: Date())
         h.client.statusSnapshot = notCapturing("1000-0", 1)
         await h.coordinator.pollHelperStatus()
         #expect(h.client.startCalls.isEmpty, "one poll is not enough")
         h.client.statusSnapshot = notCapturing("1000-0", 2)
         await h.coordinator.pollHelperStatus()
-        // Dispatched outside the poll task (fix round 2, item 3): let it run.
-        for _ in 0..<50 where h.client.startCalls.isEmpty { await Task.yield() }
+        // Dispatched outside the poll task (fix round 2, item 3): let it run (its restart plans off the main actor).
+        await Harness.until { !h.client.startCalls.isEmpty }
         #expect(h.client.startCalls.count == 1, "restarted like an XPC crash")
         #expect(h.client.retryEvents.count == 1, "under the same retry cap")
         #expect(h.client.recordedEvents.contains { $0.kind == .xpcInterruption && $0.detail["classification"] == "not capturing" })
@@ -3240,7 +3281,7 @@ struct Harness {
         #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
         #expect(h.client.stopCalls == 1, "a bounded stop: a start that commits late is aborted, never left capturing")
         #expect(h.recordingMic.current == .none)
-        #expect(h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+        #expect(h.client.everyRecordedEvent.contains { $0.kind == .xpcTimeout })
 
         stalled.value = false
         await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
@@ -3278,7 +3319,7 @@ struct Harness {
         let critical = try #require(h.criticals.value.first)
         // The title follows what the salvage wrote (L6); the body says why the stop failed.
         #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
-        #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.recordedEvents.contains { $0.kind == .xpcTimeout })
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.everyRecordedEvent.contains { $0.kind == .xpcTimeout })
     }
 
     /// L9 review 45: a stop that times out may leave the helper capturing. The XPC connection is dropped
@@ -5213,7 +5254,7 @@ struct Harness {
         let relaunch = Task { await coordinator.recoverAtLaunch() }
         await Harness.until { reached.value }
         let starting = Task { await coordinator.startRecording(sessionName: "new", microphoneDeviceId: nil) }
-        for _ in 0..<20 { await Task.yield() }   // the start is under way: its own folder read waits behind the slow one
+        await Harness.until { coordinator.userStartInFlight }   // the start is under way (L review 165: never fixed yields)
         release.signal()
         await relaunch.value
         await starting.value

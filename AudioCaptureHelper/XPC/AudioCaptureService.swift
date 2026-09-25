@@ -262,10 +262,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// lock-only counters. Any queue: no audio-queue wait. `incomplete`: the counts are the last cached
     /// ones (the seal timed out). Reads `helperSessionId` (`stateLock`): never call it inside a `stateLock.sync`.
     private func coverageFacts(_ counts: CoverageCounts?, mic: MicCaptureSession?, tap: SystemTapSession?,
-                               incomplete: Bool = false) -> [String: String] {
+                               incomplete: Bool = false, helperSession: String? = nil) -> [String: String] {
         // Which helper session these facts are: a `captureStop` supersedes the app's last pulled snapshot
-        // of the SAME helper session (L11).
-        let session = helperSessionId
+        // of the SAME helper session (L11). `helperSession`: read by the caller with the capture session it counted.
+        let session = helperSession ?? helperSessionId
         var (remote, local) = coverage.withLock { c in (c[.system] ?? TrackAccounting(), c[.mic] ?? TrackAccounting()) }
         let now = DispatchTime.now().uptimeNanoseconds
         let gapTracker = gaps.withLock { $0 }
@@ -949,9 +949,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// XPC thread (L11 review 64). No cached counts yet for this session: the snapshot carries no coverage,
     /// never a bogus "nothing delivered".
     func captureStatus(reply: @escaping (Data?) -> Void) {
-        let (capturing, session, mic, tap) = stateLock.sync { (isCapturing, lifecycle.session, micSession, tapSession) }
+        // The helper session in the SAME `stateLock` section as the capture session (L review 154): a registry reset
+        // between the two reads can never stamp this session's counts with another helper session.
+        let (capturing, session, mic, tap, helper) = stateLock.sync {
+            (isCapturing, lifecycle.session, micSession, tapSession,
+             HelperSessionId(processStartMillis: processStartMillis, registryResets: registryResets).description)
+        }
         let counts = capturing ? lastCoverageCounts.withLock { $0.value(for: session) } : nil
-        let facts = counts.map { coverageFacts($0, mic: mic, tap: tap) }
+        let facts = counts.map { coverageFacts($0, mic: mic, tap: tap, helperSession: helper) }
         reply(snapshot(tracks: trackHealth(), coverage: facts).encoded())
     }
 

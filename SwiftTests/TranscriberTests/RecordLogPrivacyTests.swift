@@ -56,6 +56,9 @@ import Testing
                 reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
         Allowed(file: "CaptureAlarm.swift", line: #"Logger.audio.error("Capture status snapshot could not be encoded: \(error, privacy: .public)")"#,
                 reason: "alarm registry (stream H2); an EncodingError, reported to H2"),
+        Allowed(file: "TranscriptionRunner.swift",
+                line: #"Logger.state.error("Capture gap (\(gap.reason, privacy: .public), \(gap.seconds, privacy: .public)s) not recorded: no chunk pipeline is running")"#,
+                reason: "CaptureGap.reason: an app constant (\"sleep\", \"app relaunch\"), never a name or a path (L review 155)"),
         // App sources (L review 95): enum values, no path, no free text.
         Allowed(file: "AppTerminationDelegate.swift",
                 line: #"Logger.state.info("Termination (\(String(describing: kind), privacy: .public)) with work in flight — stopping the helper first, bounded")"#,
@@ -69,7 +72,9 @@ import Testing
         return allowlist.contains { $0.file == file && $0.line == trimmed }
     }
 
-    static let sensitiveWords = ["error", "Error", "localizedDescription", "path", "url", "URL", "lastPathComponent"]
+    /// L review 155: free text too — a helper's reason, a message, a description or a detail can name a file or a meeting.
+    static let sensitiveWords = ["error", "Error", "localizedDescription", "path", "url", "URL", "lastPathComponent",
+                                 "reason", "message", "description", "detail"]
 
     /// Every `\(…)` interpolation on a line, with nested parentheses.
     static func interpolations(in line: Substring) -> [Substring] {
@@ -151,6 +156,8 @@ import Testing
         let flagged = Self.interpolations(in: line).compactMap(Self.leakyPublicExpression)
         #expect(flagged == ["type(of: error)", "url.lastPathComponent"])
         #expect(Self.leakyPublicExpression("String(describing: x), privacy: .public") == "String(describing: x)")
+        #expect(Self.leakyPublicExpression("reason, privacy: .public") == "reason", "free text (L review 155)")
+        #expect(Self.leakyPublicExpression("message, privacy: .public") == "message")
     }
 
     /// Round 3 item 7: an allowlisted file gets no pass for a NEW line — only the exact lines listed.

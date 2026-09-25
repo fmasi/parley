@@ -19,6 +19,9 @@ final class AudioCaptureClient {
     /// recording, and each helper session's latest coverage. Reset only on a NEW session id (council
     /// A-C1); flushed to `<session>.diag.jsonl` only when the session was anomalous (#95).
     private let evidence = SessionEvidence()
+    /// What a start drained from a helper that then refused it as busy with an earlier capture (L review 157): that
+    /// capture's events, never the refused session's — kept for the coordinator to attribute to the held session.
+    private var refusedStartDrain: Data?
 
     /// Invoked when the XPC connection is invalidated or interrupted by a *real* crash (a fresh
     /// crash report names the helper). Drives the full relaunch / re-attach recovery flow.
@@ -183,10 +186,12 @@ final class AudioCaptureClient {
         record(.launchRecovery, .warning, detail)
     }
 
-    /// A relaunch continues `sessionId`: adopt it first, then drain the helper into it (L follow-up 43).
+    /// A relaunch continues `sessionId`: adopt it first, then drain the helper into it (L follow-up 43) — unless the
+    /// helper holds ANOTHER session's capture (a held one, L review 167): then it binds without draining.
     /// The resume's own `start` then keeps it all (the same session id resets nothing).
-    func adoptSession(sessionId: String, directory: URL) async {
+    func adoptSession(sessionId: String, directory: URL, drainHelper: Bool) async {
         evidence.beginCapture(sessionId: sessionId, directory: directory)
+        guard drainHelper else { return }
         if !(await drainHelperDiagnostics()) { recordDrainTimeout() }
     }
 
@@ -207,14 +212,30 @@ final class AudioCaptureClient {
     }
 
     /// A pending retry stopped a stray helper: drain it ONCE, and give its events to the pending session that
-    /// knows its helper session, or to none (L review 98). The folders are read off the main actor.
-    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
-        guard let data = await drainHelperData() else {
+    /// knows its helper sessions, or to none (L review 98). The folders are read off the main actor, bounded. False when
+    /// the drain did not answer — it timed out, or failed — and the helper's events are still with it (L review 142).
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async -> Bool {
+        switch await drainHelperData() {
+        case .timedOut:
             Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s — its events stay with it")
-            return
+            return false
+        case .failed:
+            Logger.audio.error("The capture helper's drainDiagnostics failed — its events stay with it")
+            return false
+        case .nothing:
+            return true
+        case .data(let data):
+            await evidence.attributeHelperDrain(data, toOneOf: sessions)
+            return true
         }
-        guard let data else { return }
-        await Task.detached(priority: .userInitiated) { SessionEvidence.attributeHelperDrain(data, toOneOf: sessions) }.value
+    }
+
+    /// A start the helper refused as busy (L review 157): what that start drained is the busy capture's — given to the
+    /// pending session that knows its helper sessions, never lost with the refused session's evidence.
+    func attributeRefusedStartDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
+        guard let data = refusedStartDrain else { return }
+        refusedStartDrain = nil
+        await evidence.attributeHelperDrain(data, toOneOf: sessions)
     }
 
     /// Every queued live-log write reaches the disk (L review 96). Blocking file work: off the main actor; the
@@ -266,24 +287,45 @@ final class AudioCaptureClient {
     /// on that timeout: the caller records it into the session it concerns (L11 review 68) — a start's drain,
     /// say, is the NEW session's first call, while its events still belong to the previous one.
     private func drainHelperDiagnostics() async -> Bool {
-        guard let data = await drainHelperData() else {
-            Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
-            return false
-        }
-        if let data { evidence.mergeHelperDrain(data) }
-        return true
+        merge(await drainHelperData())
     }
 
-    /// The helper's drained ring as it came off the wire: `.some(nil)` when there is no connection or nothing
-    /// came back, nil when it did not answer within 3 s.
-    private func drainHelperData() async -> Data?? {
-        guard let conn = connection else { return .some(nil) }
-        let reply: Result<Data?, Error> = await boundedReply("drainDiagnostics", seconds: 3) { done in
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
-            proxy.drainDiagnostics { done(.success($0)) }
+    /// A drain into the ring: false when it timed out. A failed drain is said — never silent (L review 142).
+    private func merge(_ drain: HelperDrain) -> Bool {
+        switch drain {
+        case .timedOut:
+            Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
+            return false
+        case .failed:
+            Logger.audio.error("The capture helper's drainDiagnostics failed — its events stay with it")
+            return true
+        case .nothing:
+            return true
+        case .data(let data):
+            evidence.mergeHelperDrain(data)
+            return true
         }
-        guard case .success(let data) = reply else { return nil }
-        return .some(data)
+    }
+
+    /// A drain of the helper's ring, as it came back (L review 142).
+    private enum HelperDrain: Sendable {
+        case data(Data)
+        /// No connection, or the helper had nothing: answered.
+        case nothing
+        /// The XPC call failed: the helper's events, if any, are still with it.
+        case failed
+        /// No answer within 3 s.
+        case timedOut
+    }
+
+    private func drainHelperData() async -> HelperDrain {
+        guard let conn = connection else { return .nothing }
+        let reply: Result<HelperDrain, Error> = await boundedReply("drainDiagnostics", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(.failed)) } as! AudioCaptureProtocol
+            proxy.drainDiagnostics { done(.success($0.map(HelperDrain.data) ?? .nothing)) }
+        }
+        guard case .success(let drain) = reply else { return .timedOut }
+        return drain
     }
 
     private func recordDrainTimeout() {
@@ -292,15 +334,15 @@ final class AudioCaptureClient {
 
     /// Drain the helper, merge the live log and the helper sessions' latest coverage (L11), and build the
     /// transcript provenance stamp. The evidence writes `<sessionId>.diag.jsonl` beside the recording only
-    /// when the session was anomalous (#95), before its live log goes (L11 review 61). A clean session writes
-    /// no log, only the ~200-byte provenance stamp the caller embeds.
+    /// when the session was anomalous (#95). Its live log stays until `commitSessionDiagnostics`, once the transcript
+    /// exists (L review 97). A clean session writes no log, only the ~200-byte provenance stamp the caller embeds.
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,
         recordingDirectory: URL
     ) async -> CaptureProvenance {
         if !(await drainHelperDiagnostics()) { recordDrainTimeout() }
-        let diagnostics = evidence.finalize(sessionId: sessionId, directory: recordingDirectory)
+        let diagnostics = await evidence.finalize(sessionId: sessionId, directory: recordingDirectory)
 
         func formatString(_ kind: CaptureEventKind) -> String? {
             guard let e = diagnostics.events.last(where: { $0.kind == kind }) else { return nil }
@@ -333,9 +375,11 @@ final class AudioCaptureClient {
         options: CaptureOptions = CaptureOptions(),
         sessionId: String = ""
     ) async throws {
+        refusedStartDrain = nil
         // The previous helper's events first (bounded, 3 s): its start clears its own ring, and an
         // in-session restart must not lose them (L11).
-        let drained = await drainHelperDiagnostics()
+        let drain = await drainHelperData()
+        let drained = merge(drain)
         // A NEW session resets every tally, so no recording inherits an earlier one's facts (council
         // A-C1); the SAME session — an in-session restart, a resume — keeps its evidence.
         evidence.beginCapture(sessionId: sessionId, directory: outputDirectory)
@@ -345,6 +389,19 @@ final class AudioCaptureClient {
         interruptionPolicy.captureStarted()
         let conn = try getConnection()
         await configureCapture(options, on: conn)
+        do {
+            try await startCapture(on: conn, outputDirectory: outputDirectory, baseName: baseName,
+                                   microphoneDeviceId: microphoneDeviceId, systemAudioSource: systemAudioSource)
+        } catch {
+            // Refused: the helper is busy with an earlier capture. What this start drained is THAT capture's (L review 157).
+            if error.localizedDescription == CaptureReplies.alreadyInProgress, case .data(let data) = drain { refusedStartDrain = data }
+            throw error
+        }
+    }
+
+    /// The `startCapture` call itself, bounded at 15 s.
+    private func startCapture(on conn: NSXPCConnection, outputDirectory: URL, baseName: String, microphoneDeviceId: String?,
+                              systemAudioSource: SystemAudioSource) async throws {
         try await bounded("start", seconds: 15) { (done: @escaping @Sendable (Result<Void, Error>) -> Void) in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
                 done(.failure(CaptureError.startFailed("XPC connection failed: \(error.localizedDescription)")))
@@ -397,7 +454,7 @@ final class AudioCaptureClient {
     ) async throws -> (systemPath: String, micPath: String) {
         let conn = try getConnection()
         // Bounded at 10 s (§8.8). The reply text is passed on as-is: the coordinator reads it in one place
-        // (`RecordingCoordinator.rotateFailure`) — a dead capture, a refusal while stopping, or neither.
+        // (`RecordingCoordinator.helperReply`) — a dead capture, a refusal while stopping, or neither.
         let paths: (systemPath: String, micPath: String) = try await bounded("rotateChunk", seconds: 10) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
                 done(.failure(CaptureError.rotateChunkFailed("XPC connection failed: \(error.localizedDescription)")))
@@ -537,7 +594,7 @@ final class ReverseChannel: NSObject, AudioCaptureClientProtocol {
 
     func captureDidFailFatally(reason: String) {
         Task { @MainActor [weak client] in
-            Logger.audio.error("Helper reported fatal capture failure: \(reason, privacy: .public)")
+            Logger.audio.error("Helper reported fatal capture failure: \(reason, privacy: .private)")
             client?.onFatalFailure?(reason)
         }
     }

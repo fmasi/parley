@@ -10,16 +10,32 @@ import os
 /// A-I4 / C-I1): coverage otherwise lives only in `captureStop`, which a crashed helper never writes. One
 /// small file, rewritten atomically on every status pull, whatever the length of the call.
 ///
-/// Every file operation runs on one serial background queue (L11 review 65): the app appends and pulls
-/// coverage on the main actor, and a slow disk must never stall it. Writes are queued; reads and deletes wait
-/// for the writes queued before them. The queue is shared by every log, so a second instance for the same
-/// session (a salvage, a relaunch's resume) sees what the first one queued.
+/// Every file operation runs on a serial background queue (L11 review 65): the app appends and pulls coverage on the
+/// main actor, and a slow disk must never stall it. Writes are queued; reads and blocking deletes wait for the writes
+/// queued before them. ONE queue per folder (L review 158): every log of a folder shares it — a second instance for the
+/// same session (a salvage, a relaunch's resume) sees what the first one queued — while a write that hangs on one folder
+/// (a dead share) never holds up another folder's reads. The reads block: callers run them off the main actor, bounded.
 public final class LiveDiagnosticsLog: @unchecked Sendable {
     public let url: URL
     public let coverageURL: URL
     /// Guards `coverageCache` and `writeObserver`.
     private let lock = NSLock()
-    private static let io = DispatchQueue(label: "eu.fmasi.parley.live-diagnostics", qos: .utility)
+    /// This log's folder's queue.
+    private let io: DispatchQueue
+    /// Guards `queues`.
+    private static let queuesLock = NSLock()
+    /// One serial queue per folder, by its lexical key (`/private` stripped before the firmlinked roots, L review 168).
+    private static var queues: [String: DispatchQueue] = [:]
+
+    private static func ioQueue(for directory: URL) -> DispatchQueue {
+        let key = SessionEvidence.key(directory)
+        return queuesLock.withLock {
+            if let queue = queues[key] { return queue }
+            let queue = DispatchQueue(label: "eu.fmasi.parley.live-diagnostics.\(queues.count)", qos: .utility)
+            queues[key] = queue
+            return queue
+        }
+    }
     /// Runs on the write queue before each write. Internal for tests.
     var writeObserver: (@Sendable () -> Void)? {
         get { lock.withLock { observer } }
@@ -33,7 +49,8 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         public let facts: [String: String]
         public init(at: Date, facts: [String: String]) { self.at = at; self.facts = facts }
     }
-    /// Loaded from disk on first use (an earlier process may have written it), then kept in memory.
+    /// Loaded from disk on first use (an earlier process may have written it), then kept in memory. Only ever loaded
+    /// and updated on the folder's queue.
     private var coverageCache: [String: CoverageSnapshot]?
 
     // `.iso8601` (JSONEncoder's built-in strategy) drops sub-second precision, so a disk round-trip
@@ -69,6 +86,7 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
     public init(directory: URL, sessionId: String) {
         url = directory.appendingPathComponent("\(sessionId).diag.live.jsonl")
         coverageURL = directory.appendingPathComponent("\(sessionId).diag.coverage.json")
+        io = Self.ioQueue(for: directory)
     }
 
     /// Coverage evidence is `.info`, yet it is what the record's per-track coverage is built from: kept
@@ -80,7 +98,7 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         guard var line = try? Self.encoder.encode(event) else { return }
         line.append(0x0A)
         let url = url, observer = writeObserver
-        Self.io.async {
+        io.async {
             observer?()
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }
@@ -92,20 +110,21 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         }
     }
 
-    /// Returns once every write queued — by any log — is on disk. Blocks: the caller bounds it (an exit runs it
-    /// off the main actor under a deadline, L review 96).
+    /// Returns once every write queued — by any log, in any folder — is on disk. Blocks: the caller bounds it (an exit
+    /// runs it off the main actor under a deadline, L review 96).
     public static func flushAll() {
+        for queue in queuesLock.withLock({ Array(queues.values) }) { queue.sync {} }
+    }
+
+    /// Returns once every write queued before it — in this log's folder — is on disk.
+    public func flush() {
         io.sync {}
     }
 
-    /// Returns once every write queued before it is on disk.
-    public func flush() {
-        Self.flushAll()
-    }
-
+    /// Blocks until the folder's queued writes are done: never on the main actor (L review 158).
     public func events() -> [CaptureEvent] {
         let url = url
-        guard let data = Self.io.sync(execute: { try? Data(contentsOf: url) }) else { return [] }
+        guard let data = io.sync(execute: { try? Data(contentsOf: url) }) else { return [] }
         return data.split(separator: 0x0A).compactMap { try? Self.decoder.decode(CaptureEvent.self, from: $0) }
     }
 
@@ -121,44 +140,52 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         return result
     }
 
-    /// Keep `facts` as `helperSession`'s latest coverage.
-    /// The write is queued INSIDE the lock that built its map (L review 102): two racing writes reach the queue in
-    /// the order their maps were built, so an older map is never the last one on disk.
+    /// Keep `facts` as `helperSession`'s latest coverage. Never blocks the caller (L review 158): the map is read —
+    /// an earlier process's, once — updated and written on the folder's queue, in the order the writes were made, so
+    /// an older map is never the last one on disk (L review 102).
     public func writeCoverage(helperSession: String, facts: [String: String], at date: Date) {
-        let coverageURL = coverageURL
-        lock.withLock {
-            var all = coverageCache ?? readCoverage()
-            all[helperSession] = CoverageSnapshot(at: date, facts: facts)
-            coverageCache = all
+        let snapshot = CoverageSnapshot(at: date, facts: facts)
+        let coverageURL = coverageURL, observer = writeObserver
+        io.async { [self] in
+            observer?()
+            let all = lock.withLock { () -> [String: CoverageSnapshot] in
+                var all = coverageCache ?? Self.readCoverage(coverageURL)
+                all[helperSession] = snapshot
+                coverageCache = all
+                return all
+            }
             guard let data = try? Self.encoder.encode(all) else { return }
-            let observer = observer
-            Self.io.async {
-                observer?()
-                if (try? data.write(to: coverageURL, options: .atomic)) == nil {
-                    Logger.files.error("LiveDiagnosticsLog: could not write \(coverageURL.lastPathComponent, privacy: .sensitive)")
-                }
+            if (try? data.write(to: coverageURL, options: .atomic)) == nil {
+                Logger.files.error("LiveDiagnosticsLog: could not write \(coverageURL.lastPathComponent, privacy: .sensitive)")
             }
         }
     }
 
-    /// The latest coverage of every helper session of this recording session, by helper session id.
+    /// The latest coverage of every helper session of this recording session, by helper session id, after the writes
+    /// queued before it (an earlier instance's included). Blocks: never on the main actor.
     public func coverageSnapshots() -> [String: CoverageSnapshot] {
-        lock.withLock { coverageCache ?? readCoverage() }
-    }
-
-    /// From disk, after the writes queued before it (an earlier instance's included).
-    private func readCoverage() -> [String: CoverageSnapshot] {
         let coverageURL = coverageURL
-        guard let data = Self.io.sync(execute: { try? Data(contentsOf: coverageURL) }) else { return [:] }
-        return (try? Self.decoder.decode([String: CoverageSnapshot].self, from: data)) ?? [:]
+        return io.sync { lock.withLock { coverageCache ?? Self.readCoverage(coverageURL) } }
     }
 
+    private static func readCoverage(_ url: URL) -> [String: CoverageSnapshot] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? decoder.decode([String: CoverageSnapshot].self, from: data)) ?? [:]
+    }
+
+    /// Deletes the log and its coverage, after the writes queued before it. Blocks: never on the main actor.
     public func delete() {
+        io.sync { removeFiles() }
+    }
+
+    /// `delete`, queued behind the folder's writes — the caller never waits on the folder (L review 158).
+    public func deleteQueued() {
+        io.async { [self] in removeFiles() }
+    }
+
+    private func removeFiles() {
         lock.withLock { coverageCache = nil }
-        let url = url, coverageURL = coverageURL
-        Self.io.sync {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.removeItem(at: coverageURL)
-        }
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: coverageURL)
     }
 }

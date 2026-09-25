@@ -92,10 +92,11 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     func dropConnection()
     /// Record that the app re-attached to or relaunched a recording on launch (crash recovery) (#95).
     func recordLaunchRecovery(_ detail: [String: String])
-    /// A relaunch continues session `sessionId` (a re-attach or a resume): its evidence is this session's
+    /// A relaunch continues session `sessionId` (a re-attach, a resume, a salvage): its evidence is this session's
     /// from now on, and the helper's events — a `captureStop` it sealed when the crashed app went, say — are
-    /// drained into it BEFORE anything could reset them (L follow-up 43).
-    func adoptSession(sessionId: String, directory: URL) async
+    /// drained into it BEFORE anything could reset them (L follow-up 43). `drainHelper` false: the helper still holds
+    /// ANOTHER session's capture (a held one) — bound without draining, its events wait for that session (L review 167).
+    func adoptSession(sessionId: String, directory: URL, drainHelper: Bool) async
     /// A start that never became a recording (L11 review 68): its evidence is dropped and its live log deleted.
     func discardSessionEvidence(sessionId: String, directory: URL)
     /// Bind the evidence to `sessionId` NOW, synchronously — a relaunch that re-attaches does it before it builds
@@ -104,8 +105,12 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     /// The session's transcript is on disk: its live log is deleted — never before (L review 97).
     func commitSessionDiagnostics(sessionId: String, directory: URL)
     /// A pending retry stopped a stray helper: drain it once and give its events to the pending session whose
-    /// live log knows its helper session, or to none — never to whichever is salvaged first (L review 98).
-    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async
+    /// live log knows its helper sessions, or to none — never to whichever is salvaged first (L review 98). False when
+    /// the drain itself did not answer (timed out or failed): the helper's events are still with it (L review 142).
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async -> Bool
+    /// A start the helper refused because it is busy with an earlier capture drained THAT capture's events: they go to
+    /// the pending session that knows their helper sessions — never lost with the refused start (L review 157).
+    func attributeRefusedStartDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async
     /// Every queued live-log write reaches the disk (L review 96). The caller bounds it.
     func flushEvidence() async
     /// Forward an `NSWorkspace` sleep / wake ("sleep" | "wake") to the helper (§8.10).
