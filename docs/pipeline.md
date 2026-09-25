@@ -409,7 +409,7 @@ python3 scripts/dev.py --debug
 | `TranscriberCore` | Library | All business logic (engines, pipeline, CLI) |
 | `AudioCaptureHelperXPC` | Executable | XPC service for audio capture |
 | `AudioCaptureProtocol` | Library | `@objc` XPC protocol + service name constant |
-| `TranscriberTests` | Test | 2321 tests across 261 suites (Swift Testing, not XCTest) |
+| `TranscriberTests` | Test | 2354 tests across 263 suites (Swift Testing, not XCTest) |
 
 Test path: `SwiftTests/TranscriberTests/` (not `Tests/` — APFS case-collision workaround).
 
