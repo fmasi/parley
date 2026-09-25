@@ -325,3 +325,117 @@ final class StuckSentinelQueue: @unchecked Sendable {
         #expect(try Data(contentsOf: first.jsonPath) == written, "never written over")
     }
 }
+
+// MARK: - Evidence: a start's failed drain, long titles, a late write (243, 245, 246)
+
+@MainActor
+@Suite struct SessionEvidenceRoundGTests {
+    private func dir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("evidence-g-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    private let anomaly = CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly)
+
+    /// L review 243 (203): a start's drain that FAILED is on record in the session starting — recorded after its reset, which
+    /// would wipe it — while what a drain brings is still the previous session's.
+    @Test func aStartsFailedDrainIsInTheNewSessionsRecord() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-g-\(UUID().uuidString)"))
+        evidence.beginCapture(sessionId: "old", directory: d)
+        evidence.record(anomaly)
+        #expect(evidence.beginCapture(sessionId: "new", directory: d, after: .failed), "answered")
+        #expect(evidence.diagnostics.events.contains { $0.kind == .helperDrainFailed }, "in the new session's record")
+        #expect(!evidence.diagnostics.events.contains { $0.kind == .xpcInterruption }, "the old session's events are not")
+        #expect(!evidence.beginCapture(sessionId: "new", directory: d, after: .timedOut), "a timeout: the caller records it")
+    }
+
+    /// L review 245: a record's temporary name is short — a long title (a 250-byte record name) never makes it too long.
+    /// (APFS counts characters, so the title here is one whose characters are bytes; a byte-counting share fails as soon for
+    /// a long CJK one.)
+    @Test func aLongTitlesRecordIsWritten() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let sessionId = "120000-" + String(repeating: "a", count: 232)   // 239 bytes: "<id>.diag.jsonl" is 250
+        #expect("\(sessionId).diag.jsonl".utf8.count == 250)
+        let url = try SessionEvidence.writeRecord(Data("x".utf8), sessionId: sessionId, directory: d,
+                                                  own: SessionEvidence.OwnRecords(), files: .live)
+        #expect(url.lastPathComponent == "\(sessionId).diag.jsonl" && FileManager.default.fileExists(atPath: url.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: d.path).filter { $0.hasSuffix(".tmp") }.isEmpty, "no temporary left")
+    }
+
+    /// L review 246: a build that timed out and whose write lands later clears the "unwritten" mark it left: the record is on
+    /// disk now, so the commit lets the live log go — never a stale mark keeping it forever.
+    @Test func aLateWriteThatLandsClearsTheUnwrittenMark() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        defer { hung.release() }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-g-\(UUID().uuidString)", beforeEachRead: { name in
+            guard once.value, name == hung.label else { return }
+            once.value = false
+            hung.hangIfNamed(name)
+        }))
+        evidence.folderDeadline = 0.2
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(anomaly)
+        LiveDiagnosticsLog.flushAll()
+        _ = await evidence.finalize(sessionId: "s", directory: d)   // timed out: marked unwritten
+        hung.release()
+        await Harness.until { FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.jsonl").path) }
+        _ = await evidence.folderReads.read("settle", folder: d.path, seconds: 5) { 0 }
+        evidence.commit(sessionId: "s", directory: d)
+        LiveDiagnosticsLog.flushAll()
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.jsonl").path))
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "the live log goes")
+    }
+}
+
+// MARK: - A held session's record says why; the gate drains what is its own (247, 248)
+
+@MainActor
+@Suite struct HeldEvidenceRoundGTests {
+    private func outDir(_ s: RecordingSentinel) -> URL { URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent() }
+
+    /// L review 247: the stop failure that held a session was recorded into whatever evidence was bound then — the next
+    /// salvage's adopt resets it. Why it was held is kept in its pending entry instead, and its record says it when it is
+    /// finally salvaged.
+    @Test func aHeldSessionsRecordSaysWhyItWasHeld() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let older = try roundFPendingSession(h, "old", in: "other")   // finished while the helper still holds on
+        try RecordingSentinel.writePending([older], directory: h.tmp)
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(200)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }   // the stream's stop never answers in time
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.builtRecords.contains { $0.sessionId == "old" }, "the other session's salvage adopted — and reset — the evidence")
+        let held = try #require(RecordingSentinel.readPending(directory: h.tmp).first { $0.sessionKey == s.sessionKey })
+        #expect(held.heldBecause?.contains("timed out") == true, "its pending entry says why: \(String(describing: held.heldBecause))")
+        // The helper lets go: the held session is finished.
+        h.client.onStop = nil
+        h.client.isCapturingResult = false
+        await h.coordinator.retryPendingSessions()
+        let record = try #require(h.client.builtRecords.last { $0.sessionId == "sess" })
+        #expect(record.events.contains { $0.detail["held_because"] != nil }, "\(record.events.map(\.detail))")
+    }
+
+    /// L review 248: right after the helper let go of THIS session — the relaunch's stop of a recording that was stopping —
+    /// the gate that finds it already transcribed builds its record WITH the helper's events: they are this session's.
+    @Test func aStoppingSessionFoundTranscribedTakesItsOwnHelpersEvents() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        _ = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: outDir(s), sessionId: "sess", config: h.config.config,
+                                                                   transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: h.runner))
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.stopCalls == 1, "the helper was asked, and let go")
+        #expect(h.client.drains == ["adopt:sess", "finalize:sess"], "\(h.client.drains)")
+        #expect(h.presented.value.isEmpty, "never finalized again")
+    }
+}

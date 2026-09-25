@@ -363,10 +363,11 @@ final class AudioCaptureClient {
         // The previous helper's events first (bounded, 3 s): its start clears its own ring, and an
         // in-session restart must not lose them (L11).
         let drain = await drainHelperData()
-        let drained = merge(drain)
+        if case .timedOut = drain { Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s") }
         // A NEW session resets every tally, so no recording inherits an earlier one's facts (council
-        // A-C1); the SAME session — an in-session restart, a resume — keeps its evidence.
-        evidence.beginCapture(sessionId: sessionId, directory: outputDirectory)
+        // A-C1); the SAME session — an in-session restart, a resume — keeps its evidence. What the drain brought is merged
+        // before the reset; a drain that failed is recorded after it, into the session starting (L review 243).
+        let drained = evidence.beginCapture(sessionId: sessionId, directory: outputDirectory, after: drain)
         // A drain that timed out is this start's news: recorded into the session starting (L11 review 68).
         if !drained { recordDrainTimeout() }
         // Armed BEFORE the XPC start (C1): a crash during configure/start is this capture's crash.

@@ -621,8 +621,9 @@ public final class RecordingCoordinator {
             // The helper is capturing (a later step failed), or its start timed out and may still commit:
             // stop it — bounded — BEFORE the mic marker is released, so no meter opens the mic the helper
             // still holds (#192, §8.6). A stop during a start aborts it (H2): no helper is left capturing.
-            let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: helperStartIssued,
-                                                         error: error, label: "stop after failed start")
+            let helperStop = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: helperStartIssued,
+                                                        error: error, label: "stop after failed start")
+            let helperLetGo = helperStop.letGo
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
             if reply == .alreadyCapturing {
                 // What the refused start drained is the busy capture's: to the pending session that knows it (L review 157).
@@ -646,7 +647,7 @@ public final class RecordingCoordinator {
                 Logger.state.error("A failed start left the capture helper unanswered — holding its session")
                 if let held = slot ?? startedSentinel {
                     holdForHelper(held, message: "Parley couldn’t stop the capture of the recording that failed to start — its audio is kept, and Parley will finish it once the capture helper lets go.",
-                                  cause: .startFailed, reason: .startFailed)
+                                  cause: .startFailed, reason: .startFailed, because: helperStop.because)
                 } else {
                     reportStopped("Parley couldn’t stop the capture of a recording that failed to start, and has no record of it — check the recordings folder.", recovered: false)
                 }
@@ -958,7 +959,8 @@ public final class RecordingCoordinator {
                 if let held = await slotReadOffMain("stop: read") ?? sentinel
                     ?? location.map({ Self.keptSentinel(for: $0, cause: .stopInterrupted, micDeviceUID: marked ?? nil) }) {
                     if sentinel == nil { Logger.state.error("The held Stop's session has no recovery file — held from where its pipeline was") }
-                    holdForHelper(held, message: message, cause: .stopInterrupted, reason: .stopUnderWay)
+                    holdForHelper(held, message: message, cause: .stopInterrupted, reason: .stopUnderWay,
+                                  because: "the Stop found another stop still under way in the capture helper")
                 } else {
                     Logger.state.error("The held Stop's session has no recovery file and no known folder")
                     reportStopped("Stopping the recording is taking longer than expected — another stop is still under way in the capture helper, and Parley has no record of where the recording is. Check the recordings folder.", recovered: false)
@@ -1474,20 +1476,20 @@ public final class RecordingCoordinator {
     /// "Refused: capture is starting or stopping" is a stop already under way in the helper (it ends within its
     /// own 6 s): asked again, shortly, within the same bound (L review 91) — never read as a helper that will not
     /// let go.
-    private func boundedHelperStop(_ label: String) async -> Bool {
+    private func boundedHelperStop(_ label: String) async -> HelperStopAnswer {
         let deadline = SuspendingClock.now + helperStopDeadline
         while true {
             do {
                 try await bounded(label, seconds: Self.seconds(until: deadline)) { try await self.stopHelper() }
-                return true
+                return .released
             } catch is CaptureCallTimeout {
                 Logger.state.error("The capture helper did not stop (\(label, privacy: .public)) — it may still be capturing; dropping the connection")
                 captureClient.dropConnection()
-                return false
+                return .heldOn(because: "its stop timed out (\(label))")
             } catch {
                 switch Self.helperReply(error.localizedDescription) {
                 case .notCapturing, .startCancelled:
-                    return true   // nothing is capturing: it has let go
+                    return .released   // nothing is capturing: it has let go
                 case .stopping where SuspendingClock.now + stopReaskInterval < deadline:
                     Logger.state.info("The capture helper is already stopping (\(label, privacy: .public)) — asking again shortly")
                     try? await Task.sleep(for: stopReaskInterval)
@@ -1495,10 +1497,19 @@ public final class RecordingCoordinator {
                 default:
                     Logger.state.error("The capture helper's stop failed (\(label, privacy: .public)): \(error, privacy: .private)")
                     captureClient.record(.streamStopError, .anomaly, ["source": "app", "call": label, "error": error.localizedDescription])
-                    return false
+                    return .heldOn(because: "its stop failed (\(label)): \(Self.describe(error))")
                 }
             }
         }
+    }
+
+    /// What a bounded helper stop found (L reviews 27, 247): it let go — or it held on, and why, in words: what the held
+    /// session's record says when it is finally finished.
+    enum HelperStopAnswer: Equatable {
+        case released
+        case heldOn(because: String)
+        var letGo: Bool { self == .released }
+        var because: String? { if case .heldOn(let why) = self { return why } else { return nil } }
     }
 
     /// How soon a stop the helper refused because it is already stopping is asked again (L review 91).
@@ -1554,8 +1565,8 @@ public final class RecordingCoordinator {
     /// rule for all three (L9 review 44). The helper's capture is running (a later step failed), or its start
     /// timed out and may still commit: stop it, bounded. True once the helper let go, or when it was never
     /// started; false when it may still be capturing.
-    private func stopAfterFailedStart(captureStarted: Bool, startIssued: Bool, error: Error, label: String) async -> Bool {
-        guard captureStarted || (startIssued && error is CaptureCallTimeout) else { return true }
+    private func stopAfterFailedStart(captureStarted: Bool, startIssued: Bool, error: Error, label: String) async -> HelperStopAnswer {
+        guard captureStarted || (startIssued && error is CaptureCallTimeout) else { return .released }
         return await boundedHelperStop(label)
     }
 
@@ -1720,8 +1731,9 @@ public final class RecordingCoordinator {
             awaitingRecoveryFrames = false
             // Never a capturing helper behind an idle app (L9 review 44): a restart that captured, or whose
             // start timed out and may still commit, is stopped (bounded) before the salvage.
-            let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued,
-                                                         error: error, label: "stop after failed restart")
+            let helperStop = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued,
+                                                        error: error, label: "stop after failed restart")
+            let helperLetGo = helperStop.letGo
             guard helperLetGo else {
                 // It may still be capturing — the restart's own capture, into THIS session — and hold the mic: HELD
                 // (L review 81), salvage-only, never resumed. Nothing is transcribed now (L review 137): a transcript
@@ -1735,7 +1747,7 @@ public final class RecordingCoordinator {
                 Logger.state.error("A failed restart left the capture helper unanswered — holding its session, untranscribed")
                 holdForHelper(await slotReadOffMain("crash: read") ?? sentinel,
                               message: "Parley couldn’t stop the capture after the failed restart — its audio is kept, and Parley will transcribe it once the capture helper lets go.",
-                              cause: .captureFailed, reason: .restartFailed)
+                              cause: .captureFailed, reason: .restartFailed, because: helperStop.because)
                 notifyCritical("Recording Failed", appState.criticalError ?? "")
                 return
             }
@@ -1932,10 +1944,10 @@ public final class RecordingCoordinator {
         // A helper that did not answer may still be capturing (L9 review 49): never re-attached to, and
         // stopped — bounded — before any salvage or resume. One that will not stop keeps the session.
         if helperState == .unknown {
-            let letGo = await boundedHelperStop("stop an unanswering helper at relaunch")
+            let helperStop = await boundedHelperStop("stop an unanswering helper at relaunch")
             guard stillOwnsTheSession(sentinel) else { return .handled }   // L review 112: after every await
-            if !letGo {
-                holdForHelper(sentinel)
+            if !helperStop.letGo {
+                holdForHelper(sentinel, because: helperStop.because)
                 return .heldForHelper
             }
         }
@@ -1963,14 +1975,14 @@ public final class RecordingCoordinator {
                 // finalize it a second time over its transcript (L review 157). The capture is stopped (bounded); the
                 // salvage then cleans up and says what was recorded after the transcript (L review 137).
                 Logger.state.info("The capturing session was already transcribed — stopping its capture, never re-attached")
-                let letGo = await boundedHelperStop("stop the capture of a finished session")
+                let helperStop = await boundedHelperStop("stop the capture of a finished session")
                 guard stillOwnsTheSession(sentinel) else { return .handled }
-                if !letGo {
-                    holdForHelper(sentinel)
+                if !helperStop.letGo {
+                    holdForHelper(sentinel, because: helperStop.because)
                     return .heldForHelper
                 }
                 relaunchProbing = false
-                await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
+                await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir, helperJustLetGo: true)   // L review 248
                 return .handled
             }
             // From here to the adopt, all synchronous (L review 72): a crash or a Stop can only arrive once the
@@ -2020,16 +2032,17 @@ public final class RecordingCoordinator {
             // progress" counts — releases the session, never a ping. A helper that will not stop keeps its
             // session: a file still being written is never salvaged (L follow-up 40).
             if reason == .wasStopping {
-                let letGo = await boundedHelperStop("stop after relaunch")
+                let helperStop = await boundedHelperStop("stop after relaunch")
                 // A Start that got in during the stop owns the app now (L review 112): the session waits.
                 guard stillOwnsTheSession(sentinel) else { return .handled }
-                if !letGo {
-                    holdForHelper(sentinel)
+                if !helperStop.letGo {
+                    holdForHelper(sentinel, because: helperStop.because)
                     return .heldForHelper
                 }
             }
             relaunchProbing = false   // the helper let go: a salvage is no start (L review 159)
-            await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
+            // A recording that was stopping: the helper was stopped just now — its events are this session's (L review 248).
+            await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir, helperJustLetGo: reason == .wasStopping)
         case .salvageStale:
             relaunchProbing = false
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
@@ -2037,10 +2050,10 @@ public final class RecordingCoordinator {
             // A stopping session's helper may still be capturing: stopped first, bounded, as a salvage does (L review
             // 128) — never `captureEnded` while it may still write. One that will not stop is held.
             if sentinel.stopping {
-                let letGo = await boundedHelperStop("stop before waiting for the folder")
+                let helperStop = await boundedHelperStop("stop before waiting for the folder")
                 guard stillOwnsTheSession(sentinel) else { return .handled }
-                if !letGo {
-                    holdForHelper(sentinel)
+                if !helperStop.letGo {
+                    holdForHelper(sentinel, because: helperStop.because)
                     return .heldForHelper
                 }
             }
@@ -2141,12 +2154,14 @@ public final class RecordingCoordinator {
     /// (L review 147). Without one, this launch's: the Mac restarted, or Parley went. `held`: why the helper holds it —
     /// stamped once too (L review 177).
     private func keepPending(_ sentinel: RecordingSentinel, markStopping: Bool = false, cause: RecordingSentinel.StopCause? = nil,
-                             held: RecordingSentinel.HeldReason? = nil, keptWhileWriting: RecordingSentinel.KeptWhileWriting? = nil) {
+                             held: RecordingSentinel.HeldReason? = nil, heldBecause: String? = nil,
+                             keptWhileWriting: RecordingSentinel.KeptWhileWriting? = nil) {
         let slot = slotRead()
         let slotIsThisSession = slot?.sessionKey == sentinel.sessionKey
         var kept = (slotIsThisSession ? slot : nil) ?? sentinel
         kept.stopCause = kept.stopCause ?? sentinel.stopCause ?? cause ?? Self.relaunchCause(sentinel)
         kept.heldReason = kept.heldReason ?? sentinel.heldReason ?? held
+        kept.heldBecause = kept.heldBecause ?? sentinel.heldBecause ?? heldBecause   // the first hold's, as its reason (L review 247)
         kept.stopping = kept.stopping || sentinel.stopping || markStopping
         kept.salvageBegan = kept.salvageBegan || sentinel.salvageBegan
         // Why it was kept, apart from why it stopped (L review 228): the latest salvage's, whose write may still land.
@@ -2185,14 +2200,17 @@ public final class RecordingCoordinator {
     /// next Start writes), the helper's mic kept marked (#192, L review 88) — the user told (a sticky row), and
     /// finished at the next event once the helper's stop says it let go (L review 84). `reason`: why it is held, carried on
     /// the pending entry (L review 177) — the relaunch's by default.
+    /// `because`: why the helper held on, in words (L review 247) — kept on the pending entry, so the session's record says it
+    /// when it is finished, whatever evidence was reset in between.
     private func holdForHelper(_ sentinel: RecordingSentinel,
                                message: String = "Parley couldn’t stop the previous recording cleanly — its audio is kept, and Parley will finish it once the capture helper lets go.",
-                               cause: RecordingSentinel.StopCause? = nil, reason: RecordingSentinel.HeldReason = .relaunch) {
+                               cause: RecordingSentinel.StopCause? = nil, reason: RecordingSentinel.HeldReason = .relaunch,
+                               because: String? = nil) {
         // The caller's own capture (L review 242): a start's, a restart's or a Stop's — or a relaunch's, reached only through
         // `stillOwnsTheSession` right before.
         captureClient.captureEnded()
         setHelperMic(sentinel.micDeviceUID)
-        keepPending(sentinel, markStopping: true, cause: cause, held: reason)
+        keepPending(sentinel, markStopping: true, cause: cause, held: reason, heldBecause: because)
         reportStopped(message, recovered: false, session: sentinel.sessionKey)
         // Held during a confirmed Quit (L review 223): the Quit says so, and keeps the LaunchAgent for the next launch.
         if isQuitting { quitLeftAHeldSession = true }
@@ -2334,7 +2352,7 @@ public final class RecordingCoordinator {
                 // can read a slow helper as not capturing (L review 84).
                 // Busy while it asks (L review 161): Record is disabled, an exit waits for the answer.
                 pendingHelperStopInFlight = true
-                let letGo = await boundedHelperStop("stop a pending session")
+                let letGo = await boundedHelperStop("stop a pending session").letGo
                 pendingHelperStopInFlight = false
                 guard letGo else {
                     applyFolderAlarm(pending: pendingSessions(), folders: folders)
@@ -2516,6 +2534,7 @@ public final class RecordingCoordinator {
             newSentinel.quitDuringFinalize = false
             newSentinel.quitMarkedByPowerOff = false
             newSentinel.heldReason = nil
+            newSentinel.heldBecause = nil
             newSentinel.salvageBegan = false
             try slotWrite(newSentinel)
             // The rotator is anchored at the current time inside: the monotonic clock behind it cannot be
@@ -2534,9 +2553,10 @@ public final class RecordingCoordinator {
             // Never a capturing helper behind an idle app — a start that timed out may still commit (L9 review
             // 44); its sealed file joins the salvage below. A helper that will not stop keeps the session: a file
             // still being written is never salvaged (27, 40).
-            if !(await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued, error: error,
-                                            label: "stop after failed resume")) {
-                holdForHelper(sentinel)
+            let helperStop = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued, error: error,
+                                                        label: "stop after failed resume")
+            if !helperStop.letGo {
+                holdForHelper(sentinel, because: helperStop.because)
                 return .heldForHelper
             }
             clearHelperMic()
@@ -2893,8 +2913,10 @@ public final class RecordingCoordinator {
     /// The relaunch decision calls it, a resume that cannot restart the capture, and the pending retry. Wherever the
     /// session came from, it leaves BOTH the slot and the list once salvaged (L review 82).
     /// `drainHelper` false: the helper still holds a held session's capture — this salvage binds without draining it (L
-    /// review 167).
-    func salvageAtLaunch(sentinel: RecordingSentinel, outputDir: URL, drainHelper: Bool = true) async {
+    /// review 167). `helperJustLetGo`: the helper let go of THIS session just now — a relaunch stopped its capture (a
+    /// re-attach that found it transcribed, a recording that was stopping) — so what it holds is this session's, even for a
+    /// session found already transcribed (L review 248).
+    func salvageAtLaunch(sentinel: RecordingSentinel, outputDir: URL, drainHelper: Bool = true, helperJustLetGo: Bool = false) async {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         // Before the first await: a Quit from here on came while Parley was RECOVERING it (L review 194).
         markSalvageBegan(sentinel)
@@ -2916,11 +2938,14 @@ public final class RecordingCoordinator {
             Logger.state.info("The recovery file of an already transcribed recording lingered — its leftovers are cleaned up, nothing is transcribed again")
             // Its transcript verified: the commit a crash cut short happens now — its live log and coverage go (L review
             // 144) — but only once its record is BUILT (L review 200): the crashed process may never have written it, and
-            // the live log may be its only copy. Built without draining: the helper's events are not this session's to take.
-            // A record that cannot be written keeps the live log (the commit's unwritten guard).
-            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: false)
+            // the live log may be its only copy. Built without draining: the helper's events are not this session's to take —
+            // unless the helper let go of THIS session just now (L review 248): then they are. A record that cannot be written
+            // keeps the live log (the commit's unwritten guard).
+            let drainNow = drainHelper && helperJustLetGo
+            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: drainNow)
+            recordWhyHeld(sentinel)
             _ = await captureClient.finalizeSessionDiagnostics(sessionId: sessionId, engine: configManager.config.engine.rawValue,
-                                                               recordingDirectory: outputDir, drainHelper: false)
+                                                               recordingDirectory: outputDir, drainHelper: drainNow)
             captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)
             forgetSession(sentinel)
             // After the adopt's and the build's awaits (L review 242): a Start that got in during them keeps its crash detection.
@@ -2988,6 +3013,7 @@ public final class RecordingCoordinator {
             // the helper still holds is this session's (a pending retry attributed a stray helper's already) — unless
             // it holds a held session's capture: then nothing is drained (L review 167).
             await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: drainHelper)
+            recordWhyHeld(sentinel)
             // Drain capture diagnostics and stamp the always-present provenance into the
             // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
             // otherwise a recovered session's `sessionState.provenance` stays nil forever.
@@ -3096,6 +3122,15 @@ public final class RecordingCoordinator {
         }
         // Why it stopped: as the launch that first kept it saw it — never the boot it is salvaged in (L reviews 69, 147).
         return RecoveryMessages.relaunchStopped(at: stoppedAt, outcome: outcome, cause: sentinel.stopCause ?? Self.relaunchCause(sentinel))
+    }
+
+    /// A held session's record says why it was held (L review 247): the stop failure recorded when it was held went into
+    /// whatever evidence was bound then, which a later adopt reset. Recorded again, into this session's own — just bound.
+    private func recordWhyHeld(_ sentinel: RecordingSentinel) {
+        guard let held = sentinel.heldReason else { return }
+        var detail = ["source": "app", "held": held.rawValue]
+        if let because = sentinel.heldBecause { detail["held_because"] = because }
+        captureClient.record(.streamStopError, .anomaly, detail)
     }
 
     /// The slot's session is being salvaged (L review 194): the slot is stamped with the cause this launch first sees — first

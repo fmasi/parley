@@ -3464,7 +3464,9 @@ struct Harness {
         let t0 = Date(timeIntervalSince1970: 1_000)
         h.coordinator.systemWillSleep(at: t0)
         h.coordinator.systemDidWake(at: t0 + 120)
-        for _ in 0..<50 { await Task.yield() }
+        // A deadline, never a fixed number of yields (L review 165): the wake's rotation looks at the folder off the main
+        // actor first (measured in round G: 1 run in 6 missed 50 yields).
+        await Harness.until { h.client.powerEvents.count == 2 && h.client.rotateCalls == 1 }
         #expect(h.client.powerEvents == ["sleep", "wake"])
         let powerKinds: [CaptureEventKind] = h.client.recordedEvents.map(\.kind).filter { $0 == .systemSleep || $0 == .systemWake }
         #expect(powerKinds == [.systemSleep, .systemWake])

@@ -36,6 +36,11 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
     /// ran — and so no held session is salvaged while another held helper still holds on (L review 183). nil: never held.
     public var heldReason: HeldReason?
 
+    /// Why the helper held on, in words — its stop timed out, or failed and how (L review 247): the stop failure was recorded
+    /// into whatever evidence was bound when it was held, which a later salvage's adopt resets; kept here, so the session's
+    /// own record says it when it is finished. nil: never held, or held by an earlier build.
+    public var heldBecause: String?
+
     /// A launch's salvage of this session began (L review 194): a quit marked from here on came while Parley was RECOVERING
     /// it — said so, after the cause that salvage first saw (`stopCause`, stamped with it) — never "quit while finishing".
     public var salvageBegan: Bool
@@ -100,7 +105,8 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         quitMarkedByPowerOff: Bool = false,
         heldReason: HeldReason? = nil,
         salvageBegan: Bool = false,
-        keptWhileWriting: KeptWhileWriting? = nil
+        keptWhileWriting: KeptWhileWriting? = nil,
+        heldBecause: String? = nil
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -118,6 +124,7 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         self.heldReason = heldReason
         self.salvageBegan = salvageBegan
         self.keptWhileWriting = keptWhileWriting
+        self.heldBecause = heldBecause
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -146,6 +153,7 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         }
         salvageBegan = try container.decodeIfPresent(Bool.self, forKey: .salvageBegan) ?? false
         keptWhileWriting = (try? container.decodeIfPresent(KeptWhileWriting.self, forKey: .keptWhileWriting)) ?? nil
+        heldBecause = (try? container.decodeIfPresent(String.self, forKey: .heldBecause)) ?? nil
     }
 
     // MARK: - File location
@@ -388,7 +396,8 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
             quitMarkedByPowerOff: quitMarkedByPowerOff,
             heldReason: heldReason,
             salvageBegan: salvageBegan,
-            keptWhileWriting: keptWhileWriting
+            keptWhileWriting: keptWhileWriting,
+            heldBecause: heldBecause
         )
     }
 }

@@ -34,8 +34,9 @@ public final class SessionEvidence {
     private var finalized: (directory: String, id: String, record: CaptureDiagnostics)?
     /// Sessions whose `.diag.jsonl` could not be written: their live log is their only record, never committed away. The
     /// mark stays until a SUCCESSFUL write (L review 200) — a commit never removes it, so no later commit deletes the only
-    /// copy.
-    private var unwrittenRecords: Set<String> = []
+    /// copy. By record key, with the build that left it unwritten: a write of that build — or a later one — that lands late
+    /// clears it (L review 246).
+    private var unwrittenRecords: [String: Int] = [:]
     /// The record files THIS process wrote, by path (L review 139). Whether a build may write over an existing record
     /// is decided by provenance, never by binding: only a file this process wrote is ever written again — a relaunch
     /// binds the session it salvages, and the recording's own `.diag.jsonl` (another process's) is still never touched.
@@ -43,12 +44,16 @@ public final class SessionEvidence {
     /// later build of the session updates it — never a misleading `.relaunch` beside it (L review 204).
     private let ownRecordFiles = OwnRecords()
 
-    /// The record files this process wrote: written from the build's queue, read by the next build.
+    /// The record files this process wrote: written from the build's queue, read by the next build. And, by record key, the
+    /// latest build whose write landed — whenever it landed (L review 246).
     final class OwnRecords: @unchecked Sendable {
         private let lock = NSLock()
         private var paths: Set<String> = []
+        private var landed: [String: Int] = [:]
         func contains(_ path: String) -> Bool { lock.withLock { paths.contains(path) } }
         func insert(_ path: String) { lock.withLock { _ = paths.insert(path) } }
+        func noteWritten(_ recordKey: String, build: Int) { lock.withLock { landed[recordKey] = max(landed[recordKey] ?? build, build) } }
+        func writtenBuild(_ recordKey: String) -> Int? { lock.withLock { landed[recordKey] } }
     }
     /// Bumped whenever a session's record is built or committed, by session (L review 142): an attribution that answers
     /// after that never appends to its live log.
@@ -157,6 +162,20 @@ public final class SessionEvidence {
         session = (Self.key(directory), sessionId)
     }
 
+    /// A capture starts, after the start's drain of the previous helper (L reviews 146, 203, 243): what the drain brought is
+    /// merged BEFORE the session's reset — the previous helper's events — while a drain that FAILED is this start's news,
+    /// recorded AFTER it, into the session starting: the reset never wipes it. False when the drain timed out (the caller
+    /// records that, as its own).
+    public func beginCapture(sessionId: String, directory: URL, after drain: HelperDrain) -> Bool {
+        if case .failed = drain {
+            beginCapture(sessionId: sessionId, directory: directory)
+            return mergeDrain(drain)
+        }
+        let answered = mergeDrain(drain)
+        beginCapture(sessionId: sessionId, directory: directory)
+        return answered
+    }
+
     /// An app-origin event: into the ring and, as it happens, the live log.
     public func record(_ event: CaptureEvent) {
         diagnostics.record(event)
@@ -226,17 +245,19 @@ public final class SessionEvidence {
         }
         let recordKey = Self.recordKey(sessionId, directory)
         recordEpochs[recordKey, default: 0] += 1
+        let build = recordEpochs[recordKey] ?? 0
         let own = ownRecordFiles, taken = ring, files = recordFiles
         let built = await folderReads.read("evidence: build", folder: directory.path, key: recordKey + "#build", seconds: folderDeadline) {
-            Self.build(ring: taken, log: log, sessionId: sessionId, directory: directory, own: own, files: files)
+            Self.build(ring: taken, log: log, sessionId: sessionId, directory: directory, own: own, files: files,
+                       registering: (recordKey, build))
         }
         var merged: CaptureDiagnostics
         if let built {
             merged = built.record
             if built.written != nil {
-                unwrittenRecords.remove(recordKey)   // written: the record has a copy beside the live log now
+                unwrittenRecords[recordKey] = nil   // written: the record has a copy beside the live log now
             } else if built.writeFailed {
-                unwrittenRecords.insert(recordKey)
+                unwrittenRecords[recordKey] = build
             }
         } else {
             // Nothing could be read or written: the ring alone, said — and its live log is its record, never committed.
@@ -244,7 +265,7 @@ public final class SessionEvidence {
             merged = ring
             merged.record(CaptureEvent(timestamp: Date(), origin: .app, kind: .folderNotAnswering, severity: .anomaly,
                                        detail: ["during": "the diagnostic record's build"]))
-            unwrittenRecords.insert(recordKey)
+            unwrittenRecords[recordKey] = build   // until its write lands, if it ever does (L review 246)
         }
         // Kept aside for a second finalize of this session — unless another session was bound meanwhile.
         if ownsRing, session == nil { finalized = (Self.key(directory), sessionId, merged) }
@@ -259,8 +280,10 @@ public final class SessionEvidence {
     }
 
     /// The build itself: blocking file-system work, run only through `folderReads`.
+    /// `registering`: the record key and this build's number — a write that lands, however late, registers there (L review
+    /// 246).
     nonisolated private static func build(ring: CaptureDiagnostics, log: LiveDiagnosticsLog, sessionId: String, directory: URL,
-                                          own: OwnRecords, files: RecordFiles) -> Built {
+                                          own: OwnRecords, files: RecordFiles, registering: (key: String, build: Int)) -> Built {
         let logged = log.events()
         // Same identity `CaptureDiagnostics` uses internally to make its counting idempotent (E2 fix round 1).
         var seen = Set(ring.events.map(CaptureEvent.dedupKey))
@@ -280,8 +303,10 @@ public final class SessionEvidence {
         guard merged.isAnomalous else { return Built(record: merged) }
         do {
             let url = try writeRecord(merged.jsonlData(), sessionId: sessionId, directory: directory, own: own, files: files)
-            // This process's own from now on — even when the build that wrote it timed out long before (L review 204).
+            // This process's own from now on — even when the build that wrote it timed out long before (L review 204) — and
+            // written: an "unwritten" mark its timeout left is cleared by it (L review 246).
             own.insert(key(url))
+            own.noteWritten(registering.key, build: registering.build)
             Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(merged.events.count) events)")
             return Built(record: merged, written: key(url))
         } catch {
@@ -321,7 +346,8 @@ public final class SessionEvidence {
                 if looked != 0 { Logger.files.error("A record name could not be looked at (errno \(looked, privacy: .public)) — taken as used") }
                 continue
             }
-            let temporary = directory.appendingPathComponent(".\(name).\(UUID().uuidString).tmp")
+            // Short (L review 245): a long title's record name never makes its temporary one too long.
+            let temporary = directory.appendingPathComponent(".\(UUID().uuidString.prefix(16)).tmp")
             try data.write(to: temporary)
             switch files.renameExclusively(temporary.path, url.path) {
             case 0:
@@ -349,7 +375,12 @@ public final class SessionEvidence {
     public func commit(sessionId: String, directory: URL) {
         let recordKey = Self.recordKey(sessionId, directory)
         recordEpochs[recordKey, default: 0] += 1
-        guard !unwrittenRecords.contains(recordKey) else {
+        // A write that landed after its build timed out — of the build that left the mark, or a later one — clears it (L
+        // review 246): the record is on disk.
+        if let marked = unwrittenRecords[recordKey], let landed = ownRecordFiles.writtenBuild(recordKey), landed >= marked {
+            unwrittenRecords[recordKey] = nil
+        }
+        guard unwrittenRecords[recordKey] == nil else {
             Logger.files.error("The session's diagnostics file could not be written — its live log is kept")
             return
         }
