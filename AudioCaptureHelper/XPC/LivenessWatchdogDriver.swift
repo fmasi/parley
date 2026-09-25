@@ -25,7 +25,8 @@ final class LivenessWatchdogDriver {
     var lastSystemHeartbeatNanos: (() -> UInt64)?
     /// Every non-healthy verdict, on `queue`: (track, verdict).
     var onVerdict: ((CaptureTrack, TrackLivenessMonitor.Verdict) -> Void)?
-    /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
+    /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos). Not while paused
+    /// for sleep: nothing is expected then (final review H-M4).
     var onGate: ((Bool, UInt64) -> Void)?
     /// After every tick's verdicts, on `queue`: (nowNanos, gateOpen). The service's counter checks — the
     /// mic reopen deadline and write progress (H2 council) — ride the same 1 Hz tick, no timer of their
@@ -173,7 +174,10 @@ final class LivenessWatchdogDriver {
         }
         let gateOpen = outputActivity.othersRunningOutput()
         gateOpenLock.withLock { $0 = gateOpen }
-        onGate?(gateOpen, now)
+        // Paused for sleep (a DarkWake tick): nothing is expected of either track — the app records the
+        // sleep as a capture gap (final review H-M4). The 2 s cap in accountGate bounds the first tick after
+        // the pause.
+        if !sleepPause.isPaused { onGate?(gateOpen, now) }
         for track in CaptureTrack.allCases {
             guard var m = monitors[track] else { continue }
             // The mic is always expected; only the tap has a gate (§4.3).
