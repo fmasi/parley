@@ -136,10 +136,11 @@ import Testing
 
     @Test func crashProtectionDecisionTable() {
         let now = Date(timeIntervalSince1970: 1000)
-        func act(_ state: LaunchAgentHealth.State, lock: Bool = true, job: Bool = false, busy: Bool = false,
+        func act(_ state: LaunchAgentHealth.State, lock: Bool = true, job: Bool = false, busy: Bool = false, recording: Bool = false,
                  window: Bool = false, windowDeferredFor: TimeInterval = 0, last: Date? = nil,
                  failed: Int = 0) -> LaunchAgentHealth.CrashProtectionAction {
             LaunchAgentHealth.crashProtectionAction(state: state, holdsInstanceLock: lock, isLaunchdJob: job, isBusy: busy,
+                                                    isRecording: recording,
                                                     anyWindowVisible: window, windowDeferredFor: windowDeferredFor,
                                                     lastHandOverAt: last, now: now, failedHandOvers: failed)
         }
@@ -162,6 +163,14 @@ import Testing
         // A recording or post-recording work is not a window: it may legitimately last hours.
         #expect(act(.loadedButNotThisProcess, busy: true, window: true, windowDeferredFor: 3 * limit)
                 == .deferUntilIdle(message: nil, recheckAfter: nil))
+        // Final review A-I2: a RECORDING under a process that could not hand over runs without crash relaunch — said, once:
+        // the row, whatever the windows; post-recording work alone (busy, not recording) still says nothing.
+        #expect(act(.loadedButNotThisProcess, busy: true, recording: true)
+                == .deferUntilIdle(message: LaunchAgentHealth.recordingUnprotectedMessage, recheckAfter: nil))
+        #expect(act(.loadedButNotThisProcess, busy: true, recording: true, window: true, windowDeferredFor: 3 * limit)
+                == .deferUntilIdle(message: LaunchAgentHealth.recordingUnprotectedMessage, recheckAfter: nil))
+        #expect(act(.healthy, busy: true, recording: true) == .healthy, "protected: nothing to say")
+        #expect(LaunchAgentHealth.recordingUnprotectedMessage.contains("Crash protection is off for this recording"))
         // Cooldown: ONE re-check when it expires; no row until a hand-over has actually failed.
         #expect(act(.loadedButNotThisProcess, last: now - 10) == .retryAfter(seconds: 20, message: nil))
         #expect(act(.loadedButNotThisProcess, last: now - 10, failed: 1) == .retryAfter(seconds: 20, message: auto))

@@ -413,6 +413,29 @@ import Testing
         #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0), "never notified: notify now")
     }
 
+    /// Final review A-I2: crash protection off during a recording can only be fixed after it — its sticky row stays, and
+    /// it notifies ONCE mid-call, never every two minutes; a live helper condition still re-notifies.
+    @Test func crashProtectionOffNotifiesOnceWhileActive() throws {
+        var a = ActiveAlarm(kind: .crashProtectionOff, raisedAt: t0, lastNotifiedAt: nil, message: "m", episode: 1)
+        #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0), "never notified: notify now")
+        a.lastNotifiedAt = t0
+        #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0 + 120) == false)
+        #expect(AlarmRealarmPolicy.shouldRenotify(a, now: t0 + 10 * 60) == false)
+        let live = ActiveAlarm(kind: .remoteNotDelivering, raisedAt: t0, lastNotifiedAt: t0, message: "m", episode: 1)
+        #expect(AlarmRealarmPolicy.shouldRenotify(live, now: t0 + 10 * 60))
+        // Once per RAISE: a raise inherits the kind's last notification from an earlier raise — that one is not this row's.
+        var reraised = CaptureAlarmRegistry()
+        reraised.raise(.crashProtectionOff, message: "windows", now: t0)
+        reraised.markNotified(.crashProtectionOff, now: t0)
+        reraised.clear(.crashProtectionOff)
+        reraised.raise(.crashProtectionOff, message: "recording", now: t0 + 3600)
+        let row = try #require(reraised.alarms[.crashProtectionOff])
+        #expect(row.lastNotifiedAt == t0, "the registry remembers the kind's last notification")
+        #expect(AlarmRealarmPolicy.shouldRenotify(row, now: t0 + 3600), "this raise is said once")
+        reraised.markNotified(.crashProtectionOff, now: t0 + 3601)
+        #expect(AlarmRealarmPolicy.shouldRenotify(try #require(reraised.alarms[.crashProtectionOff]), now: t0 + 3600 + 600) == false)
+    }
+
     @Test func windowReopensAfterTheSnooze() {
         #expect(AlarmRealarmPolicy.shouldReopenWindow(lastDismissedAt: nil, now: t0))
         #expect(AlarmRealarmPolicy.shouldReopenWindow(lastDismissedAt: t0, now: t0 + 60) == false)

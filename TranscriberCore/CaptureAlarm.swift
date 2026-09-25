@@ -455,10 +455,15 @@ public enum AlarmRealarmPolicy {
     public static let notifyInterval: TimeInterval = 120
 
     /// A past event (acknowledgeable) is presented ONCE: its sticky row stays until acknowledged, but it
-    /// never re-notifies (L round 4). A live condition re-notifies every `notifyInterval`.
+    /// never re-notifies (L round 4). A live condition re-notifies every `notifyInterval` — except crash
+    /// protection off during a recording, which can only be fixed after it: the sticky row stays, ONE
+    /// notification per raise (final review A-I2). A raise inherits the kind's last notification (the
+    /// registry remembers it across clears): one from before this raise does not count. The idle cadence
+    /// (`shouldRenotifyWhileIdle`) is unchanged.
     public static func shouldRenotify(_ alarm: ActiveAlarm, now: Date) -> Bool {
         guard let last = alarm.lastNotifiedAt else { return true }
         if alarm.kind.isAcknowledgeable { return false }
+        if alarm.kind == .crashProtectionOff { return last < alarm.raisedAt }
         return now.timeIntervalSince(last) >= notifyInterval
     }
 

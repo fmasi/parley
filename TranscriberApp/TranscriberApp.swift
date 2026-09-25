@@ -176,6 +176,11 @@ struct TranscriberApp: App {
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
         Self.busyCoordinator = coordinator
+        // A recording under a process that has not handed over runs without crash relaunch: re-checked on the
+        // transition INTO a recording, so the row says so (final review A-I2).
+        coordinator.onRecordingStarted = {
+            Task { @MainActor in await Self.verifyCrashProtection(appState: state) }
+        }
         systemEvents = SystemEventObserver(coordinator: coordinator)
 
         // CLI mode: only enter for known subcommands (not system-injected args)
@@ -347,7 +352,7 @@ struct TranscriberApp: App {
         }
         let action = LaunchAgentHealth.crashProtectionAction(
             state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: busy,
-            anyWindowVisible: windowsOpen, windowDeferredFor: windowDeferralSince.map { now.timeIntervalSince($0) } ?? 0,
+            isRecording: appState.isRecording, anyWindowVisible: windowsOpen, windowDeferredFor: windowDeferralSince.map { now.timeIntervalSince($0) } ?? 0,
             lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: now, failedHandOvers: failedHandOvers
         )
         switch action {
@@ -355,7 +360,8 @@ struct TranscriberApp: App {
             appState.clearAppAlarm(.crashProtectionOff)
         case .deferUntilIdle(let message, let recheckAfter):
             // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling) —
-            // unless windows have held it for `windowDeferralLimit`: then the row says why (never silent).
+            // unless windows have held it for `windowDeferralLimit`, or a recording runs unprotected (final
+            // review A-I2): then the row says why (never silent).
             if let message { raiseCrashProtectionOff(appState, message) } else { appState.clearAppAlarm(.crashProtectionOff) }
             recheckCrashProtectionWhenIdle(appState: appState)
             if let recheckAfter {

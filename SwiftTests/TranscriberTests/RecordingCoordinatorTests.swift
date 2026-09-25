@@ -611,6 +611,30 @@ struct Harness {
         #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
     }
 
+    /// Final review A-I2: the app re-checks crash protection on the transition INTO a recording — a user's start and a
+    /// relaunch's resume — so a recording the hand-over cannot happen under is said, never silent for its whole length.
+    @Test func aRecordingStartCallsTheRecordingStartedHook() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        let calls = Harness.Box(0), appState = h.appState
+        let recordingWhenCalled = Harness.Box<[Bool]>([])
+        h.coordinator.onRecordingStarted = { calls.value += 1; recordingWhenCalled.value.append(appState.isRecording) }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        #expect(calls.value == 1 && recordingWhenCalled.value == [true], "a user's start: once, recording")
+        await h.coordinator.stopRecording()
+        await Harness.until { h.appState.isIdle }
+
+        let r = try Harness()
+        defer { roundFTearDown(r) }
+        try writeFreshSentinel(r)
+        let resumed = Harness.Box(0), rState = r.appState
+        r.coordinator.onRecordingStarted = { resumed.value += 1; recordingWhenCalled.value.append(rState.isRecording) }
+        await r.coordinator.recoverAtLaunch()
+        #expect(r.appState.isRecording && r.client.startCalls.count == 1, "resumed")
+        #expect(resumed.value == 1 && recordingWhenCalled.value == [true, true], "a relaunch's resume: once, recording")
+    }
+
     // MARK: - Alarms (§6)
 
     private func snapshot(_ id: String, _ sequence: UInt64, _ kinds: [AlarmKind]) -> CaptureStatusSnapshot {

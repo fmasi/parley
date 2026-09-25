@@ -110,6 +110,10 @@ public enum LaunchAgentHealth {
 
     public static let windowsBlockingMessage = "Crash protection is waiting for you to close Parley’s windows — until then, if Parley crashes mid-recording it will not relaunch."
 
+    /// A recording under a process that has not handed over to its crash-relaunch job (final review A-I2): the hand-over
+    /// (an exit) cannot happen under it, and it may last hours.
+    public static let recordingUnprotectedMessage = "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it. It turns back on after the recording ends."
+
     /// Whether a window defers the hand-over (L rounds 3-4): on screen, a real size, at any level up to
     /// and including `maxLevel` (the app passes `NSWindow.Level.popUpMenu`, so the menu-bar dropdown
     /// panel counts). Only the status item's own button window is excluded, by its class name.
@@ -138,11 +142,13 @@ public enum LaunchAgentHealth {
         case alarm(String)
     }
 
-    /// `isBusy`: a recording, its transcription or post-recording work. `anyWindowVisible`: any Parley
+    /// `isBusy`: a recording, its transcription or post-recording work. `isRecording`: a recording is running — the
+    /// hand-over cannot happen under it, so the row says so (final review A-I2). `anyWindowVisible`: any Parley
     /// window on screen — Settings, the menu-bar panel, a panel — a hand-over (an exit) would close it
     /// mid-edit (L2/L4 fix round 2, item 6). `windowDeferredFor`: how long windows alone (not work) have
     /// deferred it so far; past `windowDeferralLimit` the row says so (L round 3).
     public static func crashProtectionAction(state: State, holdsInstanceLock: Bool, isLaunchdJob: Bool, isBusy: Bool,
+                                             isRecording: Bool,
                                              anyWindowVisible: Bool, windowDeferredFor: TimeInterval, lastHandOverAt: Date?,
                                              now: Date, failedHandOvers: Int) -> CrashProtectionAction {
         switch state {
@@ -151,7 +157,9 @@ public enum LaunchAgentHealth {
         case .loadedButNotThisProcess:
             guard holdsInstanceLock else { return .alarm(noLockMessage) }
             guard !isLaunchdJob, failedHandOvers < maxHandOverAttempts else { return .alarm(handOverImpossibleMessage) }
-            // Work (a recording may last hours) defers without a row or a limit.
+            // A recording may last hours and the hand-over (an exit) cannot happen under it: say so, once (final review A-I2).
+            if isRecording { return .deferUntilIdle(message: recordingUnprotectedMessage, recheckAfter: nil) }
+            // Other work (transcription, post-recording work, a panel preparing) defers without a row or a limit.
             if isBusy { return .deferUntilIdle(message: nil, recheckAfter: nil) }
             if anyWindowVisible {
                 return windowDeferredFor >= windowDeferralLimit

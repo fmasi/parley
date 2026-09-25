@@ -219,6 +219,10 @@ public final class RecordingCoordinator {
     var recoveryFramesAt: Date?
     /// The last time a snapshot carried `micNotDelivering`: inside the window it voids the confirmation.
     private var lastMicAlarmAt: Date?
+    /// Called on the transition INTO a recording — a user's start, a relaunch's resume — once its phase is `.recording`:
+    /// the app re-checks crash protection there, since the hand-over (an exit) cannot happen under a recording (final
+    /// review A-I2).
+    public var onRecordingStarted: (() -> Void)?
     /// Only a relaunch's resume awaits frames before the phase is `.recording`: set there before its
     /// `start()`, cleared when the capture is up. Nothing else accepts frames outside a recording (L2/L4
     /// fix round 2, item 1).
@@ -603,6 +607,7 @@ public final class RecordingCoordinator {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
             presentCarriedAlarmsAtRecordingStart()
+            onRecordingStarted?()
             if crashBeforeRecording {
                 crashBeforeRecording = false
                 Logger.state.warning("The helper crashed while the recording was starting — crash recovery now")
@@ -2720,6 +2725,7 @@ public final class RecordingCoordinator {
         // `recordingStopped`, L6 fix round 1). "Recording Resumed" still waits for the first mic frames.
         appState.raiseAppAlarm(.recordingResumedWithGap, message: RecoveryMessages.resumedAfterCrash(crashedAt: gapStart, resumedAt: now))
         presentAlarms()
+        onRecordingStarted?()
         if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
         if crashBeforeRecording {
             crashBeforeRecording = false
