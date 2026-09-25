@@ -32,7 +32,7 @@ import Testing
         // deadline all describe the episode already being handled.
         #expect(l.trigger(.listenerStopped, now: 0.3) == .none)
         #expect(l.trigger(.rebuildFailed, now: 0.35) == .none)
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 0.4) == .none)
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 0.4, gateOpen: true) == .none)
         #expect(l.inFlightToken == 2 && l.totalRebuilds == 2)
     }
 
@@ -56,11 +56,11 @@ import Testing
         var l = L()
         _ = l.trigger(.stalled, now: 0)
         _ = l.rungCompleted(token: 1, succeeded: true, now: 0.3)
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3) == .run(.rebuildAggregate, token: 2, afterSeconds: 0.25))
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3, gateOpen: true) == .run(.rebuildAggregate, token: 2, afterSeconds: 0.25))
         _ = l.rungCompleted(token: 2, succeeded: true, now: 3.9)
-        #expect(l.heartbeatDeadlineMissed(token: 2, now: 6.9) == .run(.rebuildTap, token: 3, afterSeconds: 0.5))
+        #expect(l.heartbeatDeadlineMissed(token: 2, now: 6.9, gateOpen: true) == .run(.rebuildTap, token: 3, afterSeconds: 0.5))
         _ = l.rungCompleted(token: 3, succeeded: true, now: 7.6)
-        #expect(l.heartbeatDeadlineMissed(token: 3, now: 10.6) == .run(.rebuildTap, token: 4, afterSeconds: 1))
+        #expect(l.heartbeatDeadlineMissed(token: 3, now: 10.6, gateOpen: true) == .run(.rebuildTap, token: 4, afterSeconds: 1))
     }
 
     @Test func aThrownRungMovesOnAfterBackoff() {
@@ -74,7 +74,7 @@ import Testing
         for _ in 0..<4 {
             let token = l.inFlightToken!
             _ = l.rungCompleted(token: token, succeeded: true, now: 1)
-            _ = l.heartbeatDeadlineMissed(token: token, now: 4)
+            _ = l.heartbeatDeadlineMissed(token: token, now: 4, gateOpen: true)
         }
     }
 
@@ -95,7 +95,7 @@ import Testing
         for _ in 0..<4 {
             let token = l.inFlightToken!
             _ = l.rungCompleted(token: token, succeeded: true, now: 1)
-            last = l.heartbeatDeadlineMissed(token: token, now: 4)
+            last = l.heartbeatDeadlineMissed(token: token, now: 4, gateOpen: true)
         }
         #expect(last == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
     }
@@ -110,7 +110,7 @@ import Testing
         _ = l.trigger(.permissionGrant, now: 62)                                        // token 5
         #expect(l.rungCompleted(token: 5, succeeded: true, now: 63.8) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 5))
         #expect(l.slowRetryDue(now: 64) == .none)
-        #expect(l.heartbeatDeadlineMissed(token: 5, now: 66.8) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
+        #expect(l.heartbeatDeadlineMissed(token: 5, now: 66.8, gateOpen: true) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
         #expect(l.slowRetryDue(now: 126.8) == .run(.rebuildTap, token: 6, afterSeconds: 0))
     }
 
@@ -118,7 +118,7 @@ import Testing
         var l = L()
         _ = l.trigger(.stalled, now: 0)
         _ = l.rungCompleted(token: 1, succeeded: true, now: 0.5)
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 20) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 20, gateOpen: true) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
     }
 
     // MARK: - Fix round 1: a heal must hold before the budget comes back
@@ -205,9 +205,9 @@ import Testing
         _ = l.rungCompleted(token: 1, succeeded: true, now: 0.3)                   // its deadline: 3.3
         _ = l.trigger(.serviceRestarted, now: 1)                                   // token 2
         #expect(l.rungCompleted(token: 2, succeeded: true, now: 1.5) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 2))
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3) == .none)
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3, gateOpen: true) == .none)
         #expect(l.awaitingHeartbeat)
-        #expect(l.heartbeatDeadlineMissed(token: 2, now: 4.5) == .run(.rebuildAggregate, token: 3, afterSeconds: 0.25))
+        #expect(l.heartbeatDeadlineMissed(token: 2, now: 4.5, gateOpen: true) == .run(.rebuildAggregate, token: 3, afterSeconds: 0.25))
     }
 
     /// Review focus 4 (scan A66/C9): an output-device rebuild completing while a ladder rung is in
@@ -222,7 +222,7 @@ import Testing
         #expect(l.totalRebuilds == 2)
         #expect(l.rungCompleted(token: 1, succeeded: true, now: 0.4) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 1))
         // The external rebuild used one of the two aggregate attempts: the next miss escalates to the tap rung.
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.4) == .run(.rebuildTap, token: 2, afterSeconds: 0.25))
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.4, gateOpen: true) == .run(.rebuildTap, token: 2, afterSeconds: 0.25))
     }
 
     @Test func anExternalRebuildOutsideAnEpisodeCostsNoBudget() {
@@ -231,7 +231,7 @@ import Testing
         #expect(l.totalRebuilds == 1)
         _ = l.trigger(.stalled, now: 10)
         _ = l.rungCompleted(token: 1, succeeded: true, now: 10.3)
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 13.3) == .run(.rebuildAggregate, token: 2, afterSeconds: 0.25), "both aggregate attempts still available")
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 13.3, gateOpen: true) == .run(.rebuildAggregate, token: 2, afterSeconds: 0.25), "both aggregate attempts still available")
     }
 
     // MARK: - The gate
@@ -248,7 +248,7 @@ import Testing
         #expect(l.slowRetryDue(now: 64) == .none, "nothing is expected: no slow retry")
         #expect(l.trigger(.neverDelivered, now: 100) == .run(.rebuildTap, token: 5, afterSeconds: 0))
         _ = l.rungCompleted(token: 5, succeeded: true, now: 100.3)
-        #expect(l.heartbeatDeadlineMissed(token: 5, now: 103.3) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
+        #expect(l.heartbeatDeadlineMissed(token: 5, now: 103.3, gateOpen: true) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
     }
 
     /// The reviewer's harness: 10 s open / 1 s closed over a tap that never delivers. Refunding on
@@ -285,7 +285,7 @@ import Testing
                 _ = l.rungCompleted(token: token, succeeded: true, now: now)
                 now += L.heartbeatDeadlineSeconds
                 guard now < t + openSeconds else { break }          // the gate closes first
-                action = l.heartbeatDeadlineMissed(token: token, now: now)
+                action = l.heartbeatDeadlineMissed(token: token, now: now, gateOpen: true)
             }
             _ = l.gateClosed()
             t += openSeconds + 1
@@ -323,6 +323,49 @@ import Testing
         #expect(!l.awaitingHeartbeat)
     }
 
+    // MARK: - Final review H-I1: a deadline that passes while nothing is expected
+
+    /// Recording started before the call (N-06), and a rung ran while nothing plays: a permission grant,
+    /// a coreaudiod restart or the insurance rebuild. Its 3 s heartbeat window cannot judge a tap nobody
+    /// expects to hear, so the deadline ends the episode as a gate close does — the silent tap is
+    /// remembered — and never climbs to a false alarm. When the call starts, the re-armed monitor's
+    /// never-delivered verdict gets the reopen's ONE tap rung, then the alarm: never a fresh four-rung
+    /// episode, never silence.
+    @Test(arguments: zip([TapRecoveryLadder.Trigger.permissionGrant, .serviceRestarted, .permissionInsurance],
+                         [TapRecoveryLadder.Rung.rebuildAggregate, .rebuildTap, .rebuildAggregate]))
+    func aGrantRungWhoseDeadlinePassesWithTheGateClosedDoesNotClimb(_ trigger: TapRecoveryLadder.Trigger,
+                                                                    _ rung: TapRecoveryLadder.Rung) {
+        var l = L()
+        #expect(l.trigger(trigger, now: 0) == .run(rung, token: 1, afterSeconds: 0))
+        #expect(l.rungCompleted(token: 1, succeeded: true, now: 0.1) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 1))
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.1, gateOpen: false) == .none)
+        #expect(l.inFlight == nil && !l.awaitingHeartbeat && !l.exhausted)
+        #expect(l.totalRebuilds == 1, "nothing climbed")
+        // The call starts ten minutes later and the tap still delivers nothing.
+        #expect(l.trigger(.neverDelivered, now: 600) == .run(.rebuildTap, token: 2, afterSeconds: 0), "the reopen's last chance, not a fresh aggregate")
+        #expect(l.rungCompleted(token: 2, succeeded: true, now: 600.3) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 2))
+        #expect(l.heartbeatDeadlineMissed(token: 2, now: 603.3, gateOpen: true) == .giveUp(retryAfterSeconds: L.slowRetrySeconds))
+    }
+
+    /// The default path: with the track expected at the deadline, a missed heartbeat still climbs.
+    @Test func aStallRungWhoseDeadlinePassesWithTheGateOpenStillClimbs() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)
+        _ = l.rungCompleted(token: 1, succeeded: true, now: 0.3)
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3, gateOpen: true) == .run(.rebuildAggregate, token: 2, afterSeconds: 0.25))
+    }
+
+    /// Only the awaited rung's deadline is judged: a stale one with the gate closed ends nothing — the
+    /// rung that replaced it stays in flight.
+    @Test func aStaleDeadlineWithTheGateClosedEndsNothing() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)                                            // token 1
+        _ = l.rungCompleted(token: 1, succeeded: true, now: 0.3)
+        _ = l.trigger(.serviceRestarted, now: 1)                                   // token 2
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 3.3, gateOpen: false) == .none)
+        #expect(l.inFlight == .rebuildTap && l.inFlightToken == 2)
+    }
+
     // MARK: - Wake (§5, §8.8: re-arm + heartbeat check, never a blind rebuild)
 
     /// Fix round 1: the helper cancels its timers on sleep, so an exhausted ladder that ignored
@@ -341,7 +384,7 @@ import Testing
         _ = l.rungCompleted(token: 1, succeeded: true, now: 0.3)
         #expect(l.trigger(.wake, now: 500) == .none)
         #expect(!l.awaitingHeartbeat)
-        #expect(l.heartbeatDeadlineMissed(token: 1, now: 503) == .none, "the pre-sleep deadline is gone")
+        #expect(l.heartbeatDeadlineMissed(token: 1, now: 503, gateOpen: true) == .none, "the pre-sleep deadline is gone")
         #expect(l.trigger(.stalled, now: 505) == .run(.rebuildAggregate, token: 2, afterSeconds: 0))
     }
 

@@ -92,6 +92,10 @@ public final class TapHealer {
     public var onStuck: (() -> Void)?
     /// A rebuild (ladder-ordered or external) succeeded.
     public var onRungSucceeded: (() -> Void)?
+    /// Whether the track is expected now: the helper's last gate reading (lock-only). Read on the serial
+    /// context at a rung's heartbeat deadline, the one judgement the monitor's gate verdicts do not reach
+    /// (final review H-I1).
+    public var gateOpen: () -> Bool = { true }
 
     public init(scheduler: HealerScheduler) {
         self.scheduler = scheduler
@@ -273,7 +277,16 @@ public final class TapHealer {
             heartbeatDeadline = scheduler.after(seconds) { [weak self] in
                 guard let self, !self.suspended else { return }
                 self.heartbeatDeadline = nil
-                self.apply(self.ladder.heartbeatDeadlineMissed(token: token, now: self.scheduler.now))
+                // Nothing expected at the deadline: the ladder ends the episode as at a gate close, and the
+                // healer drops that episode's work as `gateClosed()` does (final review H-I1) — only for the
+                // awaited rung's own deadline: a stale one ends nothing, so it must cancel nothing either.
+                let open = self.gateOpen()
+                if !open, self.ladder.awaitedToken == token {
+                    self.cancel(&self.pendingRun)
+                    self.cancel(&self.slowRetry)
+                    self.rebuildFailedSinceHeartbeat = false
+                }
+                self.apply(self.ladder.heartbeatDeadlineMissed(token: token, now: self.scheduler.now, gateOpen: open))
             }
         case .giveUp(let retryAfter):
             onEvent?(.tapRecoveryGivenUp, .anomaly, ["rebuilds": "\(ladder.totalRebuilds)"])

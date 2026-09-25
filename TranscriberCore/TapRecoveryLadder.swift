@@ -59,7 +59,8 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     /// When a heartbeat first ended the episode's current silence; `nil` = silent since the last trouble.
     private var healedAt: Double?
     private var onReopen: Reopen = .fresh
-    private var awaitedToken: Int?
+    /// The rung whose heartbeat the ladder is waiting for; `nil` = none.
+    public private(set) var awaitedToken: Int?
     private var nextToken = 1
     public private(set) var inFlight: Rung?
     public private(set) var inFlightToken: Int?
@@ -138,9 +139,14 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         return .none
     }
 
-    public mutating func heartbeatDeadlineMissed(token: Int, now: Double) -> Action {
+    /// Rung `token`'s heartbeat window passed with no heartbeat. `gateOpen`: whether the track was expected
+    /// at the deadline. With the gate closed nothing was expected, so the rung cannot be judged — not failed
+    /// (final review H-I1): the episode ends as at a gate close, a tap still silent is remembered (the
+    /// reopen gets one tap rung, then the alarm), and nothing climbs. A stale token is judged not at all.
+    public mutating func heartbeatDeadlineMissed(token: Int, now: Double, gateOpen: Bool) -> Action {
         guard awaitedToken == token else { return .none }
         awaitedToken = nil
+        guard gateOpen else { return gateClosed() }
         return nextRung(now: now)
     }
 

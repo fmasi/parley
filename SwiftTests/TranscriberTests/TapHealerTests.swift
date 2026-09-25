@@ -47,7 +47,7 @@ import Testing
     final class Calls {
         var giveUps: [Bool] = []
         var recovered = 0, stuck = 0, succeeded = 0
-        var rungEvents = 0
+        var rungEvents = 0, givenUpEvents = 0
     }
 
     /// Keeps the fake tap alive (the healer holds it weakly).
@@ -65,7 +65,10 @@ import Testing
         healer.onRecovered = { calls.recovered += 1 }
         healer.onStuck = { calls.stuck += 1 }
         healer.onRungSucceeded = { calls.succeeded += 1 }
-        healer.onEvent = { kind, _, _ in if kind == .tapRecoveryRung { calls.rungEvents += 1 } }
+        healer.onEvent = { kind, _, _ in
+            if kind == .tapRecoveryRung { calls.rungEvents += 1 }
+            if kind == .tapRecoveryGivenUp { calls.givenUpEvents += 1 }
+        }
         healer.startSession(tap: tap)
         return Rig(healer: healer, clock: clock, tap: tap, calls: calls)
     }
@@ -330,6 +333,45 @@ import Testing
         r.healer.trigger(.wake)
         r.clock.advance(by: 5)
         #expect(r.tap.rebuilds.isEmpty, "a stopped session's restart never reaches the next one")
+    }
+
+    // MARK: - Final review H-I1: nothing expected at the deadline
+
+    /// Recording started before the call; the grant rebuilds the tap while nothing plays. The rung's
+    /// heartbeat window passes with the gate closed: no climb, no give-up, no alarm, nothing left queued
+    /// — the re-armed monitor judges the tap once the call starts.
+    @Test func aGrantWhileNothingPlaysNeverGivesUp() {
+        let r = rig()
+        r.healer.gateOpen = { false }
+        r.healer.trigger(.permissionGrant)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.count == 1)
+        #expect(r.tap.rebuilds.first?.rung == .rebuildAggregate && r.tap.rebuilds.first?.token == 1)
+        r.healer.rebuildResult(rung: .rebuildAggregate, token: 1, succeeded: true)
+        r.clock.advance(by: 3.1)
+        r.clock.advance(by: 120)
+        #expect(r.calls.giveUps.isEmpty && r.calls.givenUpEvents == 0)
+        #expect(r.tap.rebuilds.count == 1, "the deadline climbed nothing")
+        #expect(r.clock.pending == 0, "no rung, deadline or slow retry left")
+        r.healer.gateOpen = { true }
+        r.healer.heartbeatObserved()          // the call starts and the rebuilt tap is heard
+        #expect(r.calls.recovered == 0, "nothing was healing")
+    }
+
+    /// A stale deadline — its rung replaced by a coreaudiod restart that did not cancel the timer —
+    /// firing with the gate closed must not drop the CURRENT episode's work: the rung the restart's
+    /// failure queued still runs (a cancelled rung left in flight would wedge the ladder).
+    @Test func aStaleDeadlineWithTheGateClosedLeavesTheNextRungAlone() {
+        let r = rig()
+        r.healer.trigger(.neverDelivered)
+        answerNextRung(r, succeeded: true)    // token 1 awaits its heartbeat; its deadline is 3 s out
+        r.clock.advance(by: 2.9)
+        r.healer.trigger(.serviceRestarted)   // token 2 at once; token 1's deadline timer stays armed
+        r.clock.advance(by: 0)
+        r.healer.rebuildResult(rung: .rebuildTap, token: 2, succeeded: false)   // token 3 waits out 0.25 s
+        r.healer.gateOpen = { false }
+        r.clock.advance(by: 0.5)              // token 1's stale deadline fires first, then token 3 is due
+        #expect(r.tap.rebuilds.map(\.token) == [1, 2, 3], "the stale deadline cancelled nothing")
     }
 
     @Test func aVerdictAfterAStopIsStillIgnored() {

@@ -1526,6 +1526,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self?.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
         }
         tapHealer.onRungSucceeded = { [weak self] in self?.clearAlarm(.remoteRecoveryFailed) }
+        // A rung's heartbeat deadline that passes while nothing plays cannot judge the tap: it must not
+        // climb to a false "although audio is playing" (final review H-I1). Lock-only: safe on the healer's queue.
+        tapHealer.gateOpen = { [weak self] in self?.livenessWatchdog.lastGateOpen ?? true }
         // Last: reset the healer and target this tap in one step on the healer's queue (review round 1) —
         // enqueued under `stateLock` with the token check, so a start whose deadline fired can never
         // retarget the healer of the session that followed: that one's claim comes after (round 3 C).

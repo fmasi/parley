@@ -636,6 +636,12 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         var diagnostics = CaptureDiagnostics()
         /// Whether the tap's IOProc is being called; flips off at the stall, on at a successful rebuild.
         var delivering = true
+        /// A successful rebuild brings the IOProc back (`delivering = true`); false: rebuilds succeed and
+        /// nothing ever arrives (Incident B).
+        var rebuildRestoresDelivery = true
+        /// The output-activity gate (`LivenessWatchdogDriver.lastGateOpen`): the monitor's tick reads it, and
+        /// so does the healer at a rung's heartbeat deadline (`wireTapHealer`, final review H-I1).
+        var gateOpen = true
         var lastHeartbeat: UInt64 = 0
         /// `rebuild(rung:token:)` outcome: true = rebuilt, false = threw, nil = never returns (stuck).
         var rebuildOutcome: (TapRecoveryLadder.Rung, Int) -> Bool? = { _, _ in false }
@@ -660,6 +666,7 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
             healer.onRecovered = { [unowned self] in self.recovered += 1; self.clear(.remoteNotDelivering) }
             healer.onStuck = { [unowned self] in self.stuck += 1; self.raise(.remoteRecoveryFailed, "Parley could not restart system-audio capture.") }
             healer.onRungSucceeded = { [unowned self] in self.rungSucceeded += 1; self.clear(.remoteRecoveryFailed) }
+            healer.gateOpen = { [unowned self] in self.gateOpen }
             healer.startSession(tap: tap)
             monitor.arm(nowNanos: 0)
         }
@@ -686,7 +693,7 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         /// The 1 Hz watchdog tick → `handleLiveness` → `handleTapLiveness`.
         func tick() {
             guard !stopped else { return }
-            let verdict = monitor.check(nowNanos: nowNanos, lastHeartbeatNanos: lastHeartbeat, gateOpen: true)
+            let verdict = monitor.check(nowNanos: nowNanos, lastHeartbeatNanos: lastHeartbeat, gateOpen: gateOpen)
             switch verdict {
             case .firstFrames:
                 record(.firstFrames, .info, ["track": "system"])
@@ -725,7 +732,7 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
                     healer.rebuildResult(rung: rung.rung, token: rung.token, succeeded: ok)
                     if ok {
                         monitor.arm(nowNanos: nowNanos)   // SystemTapSession.onGenerationChanged
-                        delivering = true
+                        if rebuildRestoresDelivery { delivering = true }
                     }
                 }
                 if clock.now.truncatingRemainder(dividingBy: 1) == 0 { tick() }
@@ -772,6 +779,26 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.count(.systemAudioUnrecovered) == 0 && r.count(.tapRecoveryGivenUp) == 0)
         let p = r.diagnostics.makeProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(!p.systemAudioUnrecovered)
+    }
+
+    /// Final review H-I1, mirrored through the chain: recording started before the call, and the grant
+    /// rebuilds the tap while nothing plays. Nothing is expected, so the rung's deadline climbs nothing and
+    /// nothing is raised; when the call starts, the rebuilt tap's first frames are heard.
+    @Test func aGrantRungWithTheGateClosedRaisesNothing() {
+        let r = Rig()
+        r.delivering = false
+        r.gateOpen = false
+        r.rebuildOutcome = { _, _ in true }
+        r.healer.trigger(.permissionGrant)
+        r.run(until: 30)
+        #expect(r.newlyRaised.isEmpty && r.giveUps.isEmpty)
+        #expect(r.tap.rebuilds.count == 1, "the grant's one rebuild; the closed gate climbed nothing")
+        r.gateOpen = true
+        r.delivering = true
+        r.run(until: 40)
+        #expect(r.newlyRaised.isEmpty && r.giveUps.isEmpty)
+        #expect(r.count(.firstFrames) == 1)
+        #expect(r.recovered == 0, "nothing was healing")
     }
 
     /// Stop while a rung is in flight (it never returns — a HAL call blocked on a paused context):
