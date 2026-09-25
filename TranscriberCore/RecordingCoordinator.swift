@@ -1699,18 +1699,22 @@ public final class RecordingCoordinator {
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         let baseName: String
         var newSentinel: RecordingSentinel
+        // The orphaned in-progress chunk, located before the rotator advances and processed only once nothing may still
+        // write it: after the restart's start, or after a failed restart's helper let go (final review A-I1).
+        var pendingOrphan: (chunk: ChunkRotator.FinalizedChunk, processor: ChunkProcessor)?
 
-        // #92: when the chunked pipeline is still live (the common live-crash case), re-ingest the
-        // orphaned in-progress chunk and advance the rotator BEFORE restarting capture. Otherwise
-        // the orphan's audio is processed by no one and silently dropped from the final transcript.
+        // #92: when the chunked pipeline is still live (the common live-crash case), locate the orphaned
+        // in-progress chunk and advance the rotator BEFORE restarting capture. Otherwise the orphan's audio
+        // is processed by no one and silently dropped from the final transcript.
         if let rotator = transcriptionRunner.chunkRotator,
            let processor = transcriptionRunner.chunkProcessor {
-            let orphan = await reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
+            let orphan = await locateOrphanChunk(rotator: rotator, outputDir: outputDir)
+            pendingOrphan = (orphan, processor)
             let plan = await rotator.recoverFromCrash()
             let restart = Self.liveRestartPlan(sentinel: sentinel, recoveryPlan: plan, outputDir: outputDir)
             baseName = restart.baseName
             newSentinel = restart.newSentinel
-            Logger.state.info("Re-ingested orphan chunk \(orphan.index, privacy: .public) (\(orphan.baseName, privacy: .sensitive)); recovery continues at \(baseName, privacy: .sensitive)")
+            Logger.state.info("Orphan chunk \(orphan.index, privacy: .public) located; recovery continues at \(baseName, privacy: .sensitive)")
         } else {
             // No live pipeline (app-relaunch re-attach): there is no rotator to hand us a
             // collision-free index, so derive one directly. #135: name the restart capture in the
@@ -1752,6 +1756,11 @@ public final class RecordingCoordinator {
                 sessionId: stripSegmentSuffix(sentinel.systemAudioPath)
             )
             captureStarted = true
+            // The restart's start succeeded, so the helper that wrote the orphan is gone: it is sealed (A-I1).
+            if let orphan = pendingOrphan {
+                pendingOrphan = nil
+                orphan.processor.processChunk(orphan.chunk)
+            }
             newSentinel.lastAliveAt = Date()
             // A Stop deferred during this restart already marked the sentinel; the rewrite keeps the mark.
             newSentinel.stopping = newSentinel.stopping || stopRequestedDuringRecovery
@@ -1787,8 +1796,13 @@ public final class RecordingCoordinator {
             awaitingRecoveryFrames = false
             // Never a capturing helper behind an idle app (L9 review 44): a restart that captured, or whose
             // start timed out and may still commit, is stopped (bounded) before the salvage.
-            let helperStop = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued,
-                                                        error: error, label: "stop after failed restart", session: sentinel.sessionKey)
+            // The helper refused the restart because it is STILL capturing — this session's own capture: a crash verdict
+            // can be false (final review A-I1). It never let go: stop it, bounded, so its files are sealed before anything
+            // reads them; not letting go holds the session below — never a transcript over a file it still writes.
+            let refusedAsBusy = Self.helperReply(error.localizedDescription) == .alreadyCapturing
+            let helperStop = await stopAfterFailedStart(captureStarted: captureStarted || refusedAsBusy, startIssued: startIssued,
+                                                        error: error, label: refusedAsBusy ? "stop after a refused restart" : "stop after failed restart",
+                                                        session: sentinel.sessionKey)
             let helperLetGo = helperStop.letGo
             guard helperLetGo else {
                 // It may still be capturing — the restart's own capture, into THIS session — and hold the mic: HELD
@@ -1810,7 +1824,13 @@ public final class RecordingCoordinator {
                 notifyCritical("Recording Failed", appState.criticalError ?? "")
                 return
             }
-            // council F3: the orphan was already re-ingested above, so just finalize what's been processed
+            // The helper let go: the orphan is sealed now, and joins the salvage (final review A-I1). Not in the HELD branch
+            // above — the salvage that runs once the helper lets go finds it on disk and transcribes everything once.
+            if let orphan = pendingOrphan {
+                pendingOrphan = nil
+                orphan.processor.processChunk(orphan.chunk)
+            }
+            // council F3: the orphan is re-ingested now, so just finalize what's been processed
             // rather than abandoning the whole session. The restart's own file (the rotator's current chunk
             // now) holds audio only if the restart captured: sealed by the stop, it joins the salvage — never
             // while the helper may still be writing it.
@@ -3662,23 +3682,30 @@ public final class RecordingCoordinator {
         presentTranscript(result.jsonPath, configManager.config)
     }
 
-    /// Re-ingest the orphaned in-progress chunk into the processor, previously duplicated verbatim
-    /// in `handleXPCCrash` and `finalizeAbandonedSession`. Uses the rotator's live-index base name,
-    /// NOT the stale sentinel path. Returns the orphan's (index, baseName) for logging.
+    /// Re-ingest the orphaned in-progress chunk into the processor, for the callers that run once the helper
+    /// stopped or let go (the salvage). Uses the rotator's live-index base name, NOT the stale sentinel path.
+    /// Returns the orphan's (index, baseName) for logging.
     private func reingestOrphanChunk(
         rotator: ChunkRotator, processor: ChunkProcessor, outputDir: URL
     ) async -> (index: Int, baseName: String) {
+        let orphan = await locateOrphanChunk(rotator: rotator, outputDir: outputDir)
+        processor.processChunk(orphan)
+        return (orphan.index, rotator.currentBaseName)
+    }
+
+    /// The orphaned in-progress chunk — the file the helper was writing — located, NOT processed: the crash restart
+    /// processes it only once nothing may still write it (final review A-I1: a crash verdict can be false).
+    private func locateOrphanChunk(rotator: ChunkRotator, outputDir: URL) async -> ChunkRotator.FinalizedChunk {
         // A timed-out rotation the helper completed late: the orphan is the chunk it was really writing, and
         // the chunk it sealed goes through the pipeline from its own files (L9 review 46). Not a rotation (118).
         // The folder is looked at off the main actor, bounded (L review 158).
         await rotator.reconcileLateRotation()
         let orphan = rotator.currentChunkInfo
-        let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
-        processor.processChunk(Self.orphanChunk(
+        return Self.orphanChunk(
             index: orphan.index, startTime: orphan.startTime,
-            liveBaseName: orphanBase, outputDir: outputDir
-        ))
-        return (orphan.index, orphanBase)
+            liveBaseName: rotator.currentBaseName,   // live-index base, NOT the stale sentinel path
+            outputDir: outputDir
+        )
     }
 }
 
