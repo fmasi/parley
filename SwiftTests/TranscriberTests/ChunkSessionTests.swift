@@ -350,9 +350,36 @@ struct ChunkSessionTests {
     @Test("aWriteIsFullySyncedBeforeTheRename")
     func aWriteIsFullySyncedBeforeTheRename() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        DurableFile.recordsSyncsForTesting = true
+        defer { DurableFile.recordsSyncsForTesting = false }
         let before = DurableFile.syncedForTesting.count
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
         #expect(DurableFile.syncedForTesting.dropFirst(before).contains(dir.appendingPathComponent("session.json").path))
+    }
+
+    /// Round 4 item 4: the seam records paths (meeting names) only when a test asks it to.
+    @Test("theSyncSeamRecordsNothingUnlessATestAsks")
+    func theSyncSeamRecordsNothingUnlessATestAsks() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let before = DurableFile.syncedForTesting.count
+        try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
+        #expect(DurableFile.syncedForTesting.count == before)
+
+        // Round 4 item 1: a FINALIZED session's leftover session.json (its transcript verifies) is
+        // deleted when the next recording writes, never moved aside and never recorded as displaced.
+        let leftover = session("finished", chunks: [0])
+        try SessionState.write(leftover, directory: dir)
+        try TranscriptAssembler.write(["metadata": [:] as [String: Any], "segments": [] as [Any]], to: dir.appendingPathComponent("finished.json"))
+        try SessionState.markFinalized(directory: dir, sessionId: "finished", transcript: "finished.json")
+        #expect(try SessionState.write(session("afternoon", chunks: [0, 1]), directory: dir) == nil)
+        #expect(SessionState.read(directory: dir, sessionId: "finished") == nil)
+        #expect(!(try FileManager.default.contentsOfDirectory(atPath: dir.path).contains { $0.hasPrefix("session-finished") }))
+
+        // …but one whose transcript does NOT verify is still moved aside (never deleted).
+        try SessionState.write(session("damaged", chunks: [0]), directory: dir)
+        try Data("{".utf8).write(to: dir.appendingPathComponent("damaged.json"))
+        try SessionState.markFinalized(directory: dir, sessionId: "damaged", transcript: "damaged.json")
+        #expect(try SessionState.write(session("afternoon", chunks: [0, 1, 2]), directory: dir)?.sessionId == "damaged")
     }
 
     /// Round 3 item 1 (IMPORTANT): `RENAME_EXCL` is not supported on exFAT or SMB (ENOTSUP), and

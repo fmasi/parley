@@ -91,7 +91,7 @@ public enum MeetingSummarizer {
         metadata["disclosure"] = stamped.asMetadataDictionary()
         json["metadata"] = metadata
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: transcriptPath, options: .atomic)
+        try DurableFile.replace(transcriptPath, with: out)   // round 4 item 6
     }
 
     /// Convenience: create provider from config + summarize. Never throws; returns a

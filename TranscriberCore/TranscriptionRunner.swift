@@ -508,6 +508,7 @@ public final class TranscriptionRunner {
 
         let baseName = sessionState.sessionId
         let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+        SessionState.sweepTemporaries(directory: outputDirectory, sessionId: baseName)
         try TranscriptAssembler.write(json, to: jsonPath)
         // Durably: this session is finished. A lingering recovery file must never re-finalize over it
         // (R2a item 12). A failure here leaves the transcript itself as the (weaker) marker.

@@ -11,38 +11,39 @@ public enum ChunkedSessionRecovery {
     public static func recover(outputDirectory: URL, sessionId: String, config: Config,
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
                         runner: TranscriptionRunner, provenance: CaptureProvenance? = nil) async throws -> TranscriptionResult? {
+        SessionState.sweepTemporaries(directory: outputDirectory, sessionId: sessionId)
         // A finalized session is finished (R2a item 12): a lingering recovery file never re-ingests its
         // chunks (preserved WAVs, archives) or re-finalizes over its transcript — renames and edits
         // would be lost.
+        var rebuilding = false
         if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
             let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
-            if TranscriptAssembler.verifies(transcript) {
-                // Verified: a leftover session.json (a crash between the marker and its deletion) goes,
-                // so the next recording records no false displacement, and a missing TXT/SRT is
-                // re-written from the transcript (round 3 items 2, 3).
+            if CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
+                // Verified: its leftovers are cleaned up and its transcript handed back as it is.
                 Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) already finalized — the recovery file lingered; nothing re-ingested or re-finalized")
-                SessionState.delete(directory: outputDirectory, sessionId: sessionId)
-                rewriteMissingFormatFile(of: transcript)
                 return TranscriptionResult(jsonPath: transcript)
             }
             // The transcript is missing or unreadable. Never delete session.json on the marker's word:
-            // when this session's state is there, finalize again from it — its chunks only, no orphans.
-            guard var state = SessionState.read(directory: outputDirectory, sessionId: sessionId), !state.chunks.isEmpty else {
+            // when this session's state is there, rebuild from it (plus any unregistered chunk).
+            guard let state = SessionState.read(directory: outputDirectory, sessionId: sessionId), !state.chunks.isEmpty else {
                 Logger.state.info("Recovery found \(sessionId, privacy: .sensitive) finalized, its transcript gone or unreadable and no session state — nothing re-ingested")
                 return nil
             }
-            Logger.state.error("Recovery found \(sessionId, privacy: .sensitive) finalized but its transcript unreadable — finalizing again from session.json")
-            if let provenance { state.provenance = provenance }
-            return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
+            Logger.state.error("Recovery found \(sessionId, privacy: .sensitive) finalized but its transcript unreadable (\(state.chunks.count, privacy: .public) chunks) — rebuilding it")
+            if FileManager.default.fileExists(atPath: transcript.path) {
+                try moveDamagedAside(transcript)
+            }
+            rebuilding = true
         }
         let existingState = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         // `orphanChunks` only needs completed indices, not the whole baseState, so it's computed
         // before baseState — the all-orphan fallback below needs the orphan list to derive
-        // meetingStart.
-        let orphans = CrashRecoveryPlanner.orphanChunks(
-            outputDirectory: outputDirectory, sessionId: sessionId,
-            completedIndices: Set(existingState?.chunks.map(\.index) ?? [])
-        )
+        // meetingStart. A rebuild takes unregistered chunks too — a failed session.json write left
+        // them out (round 4 item 3); the finalized guard would hide them.
+        let completed = Set(existingState?.chunks.map(\.index) ?? [])
+        let orphans = rebuilding
+            ? CrashRecoveryPlanner.unregisteredChunks(outputDirectory: outputDirectory, sessionId: sessionId, completedIndices: completed)
+            : CrashRecoveryPlanner.orphanChunks(outputDirectory: outputDirectory, sessionId: sessionId, completedIndices: completed)
         let baseState = existingState ?? {
             // No session.json at all — every chunk is an orphan. Derive meetingStart from the
             // earliest orphan WAV's filesystem creation date rather than defaulting to `Date()`
@@ -88,24 +89,22 @@ public enum ChunkedSessionRecovery {
             SessionState.delete(directory: outputDirectory, sessionId: sessionId)
             return nil
         }
-        if let provenance { state.provenance = provenance }
+        // A rebuild's capture facts are the relaunch's, not the recording's: said so (round 4 item 7).
+        if let provenance { state.provenance = rebuilding ? provenance.markedReconstructed() : provenance }
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
     }
 
-    /// The TXT/SRT a finalized transcript's `output_format` asks for, re-written when missing.
-    private static func rewriteMissingFormatFile(of transcript: URL) {
-        guard let data = try? Data(contentsOf: transcript),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let format = (json["metadata"] as? [String: Any])?["output_format"] as? String,
-              ["txt", "srt"].contains(format)
-        else { return }
-        let file = transcript.deletingPathExtension().appendingPathExtension(format)
-        guard !FileManager.default.fileExists(atPath: file.path) else { return }
-        do {
-            try TranscriptWriter.writeFormatFile(fromJSON: transcript)
-        } catch {
-            Logger.files.error("Could not re-write the finalized transcript's \(format, privacy: .public): \(error, privacy: .private)")
+    /// A damaged transcript is kept, never overwritten by its rebuild (round 4 item 2):
+    /// `<id>.damaged.json`, or `<id>.damaged-<uuid>.json` when that name is taken.
+    private static func moveDamagedAside(_ transcript: URL) throws {
+        let base = transcript.deletingPathExtension().lastPathComponent
+        let directory = transcript.deletingLastPathComponent()
+        var aside = directory.appendingPathComponent("\(base).damaged.json")
+        if FileManager.default.fileExists(atPath: aside.path) {
+            aside = directory.appendingPathComponent("\(base).damaged-\(UUID().uuidString).json")
         }
+        try FileManager.default.moveItem(at: transcript, to: aside)
+        Logger.state.error("Kept the unreadable transcript as \(aside.lastPathComponent, privacy: .sensitive)")
     }
 
     /// When an orphan chunk began: its WAV's creation date (the helper created it at the rotation).

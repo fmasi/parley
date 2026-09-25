@@ -353,9 +353,9 @@ public enum TranscriptRediarizer {
         // otherwise be gone. If it cannot be written, the transcript is not overwritten either.
         let backup = backupURL(for: url)
         if !FileManager.default.fileExists(atPath: backup.path) {
-            try data.write(to: backup, options: .atomic)
+            try DurableFile.replace(backup, with: data)   // round 4 item 6
         }
-        try out.write(to: url, options: .atomic)
+        try DurableFile.replace(url, with: out)
         Logger.transcription.info(
             "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)

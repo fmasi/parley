@@ -314,7 +314,10 @@ enum DurableFile {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var synced: [String] = []
 
-    /// Test seam: every path fully synced, in order.
+    /// Test seam, OFF in production (round 4 item 4): while on, every fully synced path is recorded
+    /// in order. Off, nothing is kept — the paths carry meeting names.
+    nonisolated(unsafe) static var recordsSyncsForTesting = false
+    /// Test seam: every path fully synced while `recordsSyncsForTesting` was on, in order.
     static var syncedForTesting: [String] { lock.withLock { synced } }
 
     static func replace(_ url: URL, with data: Data) throws {
@@ -343,7 +346,7 @@ enum DurableFile {
             }
         }
         if fcntl(fd, F_FULLFSYNC) == 0 {
-            lock.withLock { synced.append(final.path) }
+            if recordsSyncsForTesting { lock.withLock { synced.append(final.path) } }
         } else if fsync(fd) != 0 {
             throw posixError(errno)
         }
@@ -517,7 +520,15 @@ public struct SessionState: Codable {
         let dest = fileURL(directory: directory)
 
         var displaced: DisplacedSession?
-        if let theirs = storedSessionId(at: dest), theirs != state.sessionId {
+        if let theirs = storedSessionId(at: dest), let finished = theirs, finished != state.sessionId,
+           CrashRecoveryPlanner.isFinalized(outputDirectory: directory, sessionId: finished),
+           TranscriptAssembler.verifies(directory.appendingPathComponent("\(finished).json")) {
+            // A FINISHED session's leftover (a crash between its marker and this file's deletion): its
+            // verified transcript is the durable copy. Deleted, not moved aside, and nothing is
+            // recorded as displaced — nothing was (round 4 item 1).
+            try FileManager.default.removeItem(at: dest)
+            Logger.state.info("Removed the leftover session.json of an already finalized session")
+        } else if let theirs = storedSessionId(at: dest), theirs != state.sessionId {
             let aside = try moveAsideExclusively(dest, directory: directory, sessionId: theirs)
             Logger.state.error(
                 "session.json belonged to \(theirs ?? "a session whose id can't be read", privacy: .sensitive), not \(state.sessionId, privacy: .sensitive) — moved it aside to \(aside.lastPathComponent, privacy: .sensitive) instead of overwriting it"
@@ -560,6 +571,22 @@ public struct SessionState: Codable {
     private static func renameExclusively(_ from: URL, to: URL) -> Int32 {
         if exclusiveRenameUnsupportedForTesting { return ENOTSUP }
         return renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 ? 0 : errno
+    }
+
+    /// Temp files an interrupted durable write left for this session: `session.json.<uuid>.tmp`,
+    /// `<id>.json.<uuid>.tmp` (the transcript) and `.<id>.finalized.<uuid>.tmp` (round 4 item 5).
+    /// Under the lock; called at finalize and at recovery.
+    public static func sweepTemporaries(directory: URL, sessionId: String) {
+        ioLock.lock(); defer { ioLock.unlock() }
+        let finals = [fileName, "\(sessionId).json", ".\(sessionId).finalized"]
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasSuffix(".tmp") {
+            for final in finals where name.hasPrefix(final + ".") {
+                let middle = name.dropFirst(final.count + 1).dropLast(".tmp".count)
+                guard UUID(uuidString: String(middle)) != nil else { continue }
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
     }
 
     /// `session.json.<uuid>.tmp` left by a write that died. Only this process writes session.json and

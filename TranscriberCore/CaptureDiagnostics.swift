@@ -267,6 +267,19 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// (and in provenance written before this field).
     public let localContentAnomalyCount: Int?
     public let remoteContentAnomalyCount: Int?
+    /// The transcript was rebuilt by a recovery run (its original was unreadable), and these capture
+    /// facts come from that run's diagnostics, not the recording's: they may be incomplete (round 4
+    /// item 7).
+    public var reconstructed = false
+
+    static let reconstructedNote = "Capture facts come from the recovery run that rebuilt this transcript, not from the recording itself; they may be incomplete."
+
+    /// This stamp, marked as coming from a recovery run's rebuild.
+    public func markedReconstructed() -> CaptureProvenance {
+        var copy = self
+        copy.reconstructed = true
+        return copy
+    }
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -289,6 +302,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case systemPermissionDeniedConfirmed = "system_permission_denied_confirmed"
         case localContentAnomalyCount = "local_content_anomaly_count"
         case remoteContentAnomalyCount = "remote_content_anomaly_count"
+        case reconstructed
     }
 
     public init(
@@ -366,6 +380,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         systemPermissionDeniedConfirmed = try c.decodeIfPresent(Bool.self, forKey: .systemPermissionDeniedConfirmed) ?? false
         localContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .localContentAnomalyCount)
         remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
+        reconstructed = try c.decodeIfPresent(Bool.self, forKey: .reconstructed) ?? false
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -381,6 +396,10 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "events_dropped": eventsDropped,
             "system_permission_denied_confirmed": systemPermissionDeniedConfirmed,
         ]
+        if reconstructed {
+            d["reconstructed"] = true
+            d["reconstructed_note"] = Self.reconstructedNote
+        }
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
         if let micDevice { d["mic_device"] = micDevice }

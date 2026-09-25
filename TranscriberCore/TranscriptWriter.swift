@@ -60,6 +60,26 @@ public enum TranscriptWriter {
         return result
     }
 
+    /// The TXT/SRT a transcript's `output_format` asks for, when it is not on disk.
+    public static func formatFileIsMissing(forJSON jsonPath: URL) -> Bool {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let format = (json["metadata"] as? [String: Any])?["output_format"] as? String,
+              ["txt", "srt"].contains(format)
+        else { return false }
+        return !FileManager.default.fileExists(atPath: jsonPath.deletingPathExtension().appendingPathExtension(format).path)
+    }
+
+    /// Re-write the TXT/SRT from the transcript when it is missing (a finalized session's cleanup).
+    public static func writeFormatFileIfMissing(fromJSON jsonPath: URL) {
+        guard formatFileIsMissing(forJSON: jsonPath) else { return }
+        do {
+            try writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Could not re-write a transcript's text file: \(error, privacy: .private)")
+        }
+    }
+
     public enum WriterError: Error {
         case invalidJSON
     }

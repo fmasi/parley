@@ -683,3 +683,23 @@ struct MeetingSummarizerLowerBoundTests {
         #expect(metadata.remoteCapture?.exactZeroIsLowerBound == true)
     }
 }
+
+/// Round 4 item 6: every rewrite of a finalized transcript is durable — the marker must never vouch
+/// for a transcript a power loss can take back.
+struct TranscriptRewritesAreDurableTests {
+    @Test func renamesAndDisclosuresAreFullySynced() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("durable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("m.json")
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "Remote Speaker 1", "text": "hi"]]]).write(to: url)
+        DurableFile.recordsSyncsForTesting = true
+        defer { DurableFile.recordsSyncsForTesting = false }
+        let before = DurableFile.syncedForTesting.count
+        #expect(TranscriptRenamer.applyRenames(["Remote Speaker 1": "Alice"], jsonPath: url))
+        try MeetingSummarizer.stampDisclosure(.attempted(endpoint: "http://127.0.0.1:1"), into: url)
+        #expect(DurableFile.syncedForTesting.dropFirst(before).filter { $0 == url.path }.count == 2)
+    }
+}
+

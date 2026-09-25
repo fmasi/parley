@@ -351,6 +351,20 @@ struct TranscriptRediarizerProgressTests {
         }
     }
 
+    /// Round 4 item 6: the re-detect's backup and rewrite are durable.
+    @Test("the backup and the rewritten transcript are fully synced")
+    func rewritesAreDurable() async throws {
+        let (transcript, cleanup) = try makeMicOnlyRecording()
+        defer { cleanup() }
+        DurableFile.recordsSyncsForTesting = true
+        defer { DurableFile.recordsSyncsForTesting = false }
+        let before = DurableFile.syncedForTesting.count
+        _ = try await TranscriptRediarizer.rediarize(transcript: transcript, source: "local", speakerCount: 1, diarizer: FakeDiarizer())
+        let synced = DurableFile.syncedForTesting.dropFirst(before)
+        #expect(synced.contains(transcript.path))
+        #expect(synced.contains(TranscriptRediarizer.backupURL(for: transcript).path))
+    }
+
     @Test("reports decodingAudio then detectingSpeakers, with the diarizer's own fraction forwarded")
     func progressSequenceMatchesDiarizerCallback() async throws {
         let (transcript, cleanup) = try makeMicOnlyRecording()

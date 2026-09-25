@@ -230,7 +230,7 @@ public enum TranscriptRenamer {
             let updatedData = try JSONSerialization.data(
                 withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
             )
-            try updatedData.write(to: jsonPath, options: .atomic)
+            try DurableFile.replace(jsonPath, with: updatedData)   // round 4 item 6
             return true
         } catch {
             Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
