@@ -477,5 +477,17 @@ struct AudioConcatenatorTests {
             outputDirectory: dir, outputName: "c", deleteSources: false)
         #expect(abs(r.gapsInsertedSeconds - 2) < 0.1, "a plausible gap still merges")
     }
+
+    /// Round 8 item 4: a gap just over the bound must never read "12.0 h > 12 h" — minutes then.
+    @Test func aGapJustOverTheBoundIsNeverWordedAsTheBound() {
+        let t0 = Date(timeIntervalSince1970: 0)
+        let a = URL(fileURLWithPath: "/tmp/a.m4a"), b = URL(fileURLWithPath: "/tmp/b.m4a")
+        let why = AudioConcatenator.implausibleTiming([ChunkAudio(url: a, startTime: t0), ChunkAudio(url: b, startTime: t0.addingTimeInterval(12 * 3600 + 61))],
+                                                       durations: [1, 1])
+        #expect(why == "gap 721 min > 720 min bound")
+        let clear = AudioConcatenator.implausibleTiming([ChunkAudio(url: a, startTime: t0), ChunkAudio(url: b, startTime: t0.addingTimeInterval(13.2 * 3600 + 1))],
+                                                         durations: [1, 1])
+        #expect(clear == "gap 13.2 h > 12 h bound")
+    }
 }
 

@@ -35,6 +35,13 @@ public enum StorageManager {
             .reduce(0, +)
     }
 
+    /// What a quota pass did: the files it deleted, and by how much the protected files alone still
+    /// keep usage over the quota (0 when they don't) — never silent (round 8 item 2).
+    public struct QuotaReport: Sendable {
+        public let deleted: [URL]
+        public let protectedOverrunBytes: Int
+    }
+
     /// Enforce storage quota by deleting oldest .m4a files (recursive scan), never `protectedFile`.
     @discardableResult
     public static func enforceQuota(
@@ -55,6 +62,16 @@ public enum StorageManager {
         bitrateKbps: Int,
         protectedFiles: [URL]
     ) throws -> [URL] {
+        try enforceQuotaReport(in: directory, limitHours: limitHours, bitrateKbps: bitrateKbps, protectedFiles: protectedFiles).deleted
+    }
+
+    /// `enforceQuota`, reporting what the protected files alone leave over the quota.
+    public static func enforceQuotaReport(
+        in directory: URL,
+        limitHours: Int,
+        bitrateKbps: Int,
+        protectedFiles: [URL]
+    ) throws -> QuotaReport {
         let quota = quotaBytes(hours: limitHours, bitrateKbps: bitrateKbps)
 
         var m4aFiles = findM4aFiles(in: directory)
@@ -70,7 +87,7 @@ public enum StorageManager {
             (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
         }.reduce(0, +)
 
-        guard totalSize > quota else { return [] }
+        guard totalSize > quota else { return QuotaReport(deleted: [], protectedOverrunBytes: 0) }
 
         let resolvedProtected = Set(protectedFiles.map { $0.resolvingSymlinksInPath().path })
 
@@ -89,7 +106,11 @@ public enum StorageManager {
         if !deleted.isEmpty {
             Logger.files.info("StorageManager: deleted \(deleted.count) file(s), usage now \(totalSize) / \(quota) bytes")
         }
-
-        return deleted
+        // Everything deletable is gone and usage is still over: the protected files alone overrun it.
+        let overrun = max(0, totalSize - quota)
+        if overrun > 0 {
+            Logger.files.info("StorageManager: protected audio alone keeps usage \(overrun) bytes over the quota — nothing more may be deleted")
+        }
+        return QuotaReport(deleted: deleted, protectedOverrunBytes: overrun)
     }
 }

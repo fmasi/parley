@@ -74,6 +74,16 @@ public enum AudioConcatenator {
         return h.rounded() == h ? String(Int(h)) : String(format: "%.1f", h)
     }
 
+    /// "gap 13.2 h > 12 h bound"; in minutes when the hours would round to the bound itself (round 8
+    /// item 4: never "12.0 h > 12 h").
+    private static func overBound(_ what: String, _ seconds: Double) -> String {
+        let shown = hours(seconds)
+        if let value = Double(shown), value > maxInsertedSilenceSeconds / 3600 {
+            return "\(what) \(shown) h > \(hours(maxInsertedSilenceSeconds)) h bound"
+        }
+        return "\(what) \(Int(seconds / 60)) min > \(Int(maxInsertedSilenceSeconds / 60)) min bound"
+    }
+
     /// Why these start times can't be merged as a timeline, or nil when they can. `chunks` in the
     /// order they will be inserted; `durations` their lengths.
     static func implausibleTiming(_ chunks: [ChunkAudio], durations: [Double]) -> String? {
@@ -86,11 +96,9 @@ public enum AudioConcatenator {
             guard offset >= -gapThresholdSeconds else { return "a chunk starts \(Int(-offset)) s before the first chunk" }
             let gap = offset - inserted
             if gap > gapThresholdSeconds {
-                guard gap <= maxInsertedSilenceSeconds else { return "gap \(hours(gap)) h > \(hours(maxInsertedSilenceSeconds)) h bound" }
+                guard gap <= maxInsertedSilenceSeconds else { return overBound("gap", gap) }
                 total += gap
-                guard total <= maxInsertedSilenceSeconds else {
-                    return "gaps totalling \(hours(total)) h > \(hours(maxInsertedSilenceSeconds)) h bound"
-                }
+                guard total <= maxInsertedSilenceSeconds else { return overBound("gaps totalling", total) }
                 inserted += gap
             }
             inserted += duration

@@ -444,16 +444,17 @@ public final class TranscriptionRunner {
         let sourcesGone = present.contains(false)
         let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
         if chunkAudioPaths.count > 1, sourcesGone, mergedSeconds > 0 {
-            // The merged file starts at the earliest chunk. A chunk is outside it only when it starts
-            // at the merged file's end or later — never merely because its own file survived: with
-            // preserve_source_wav on, the merged chunks' files survive too (round 7 item 2). Half the
-            // chunk's own length of slack: a chunk inside the merge ends by the merged end, so it
-            // starts a whole chunk before it; one outside starts at it, give or take rotation jitter
-            // and AAC padding.
+            // The merged file starts at the earliest chunk. A chunk is outside it only when it ENDS
+            // past the merged file's end — never merely because its own file survived: with
+            // preserve_source_wav on, the merged chunks' files survive too (round 7 item 2). The
+            // merge keeps every chunk within one gap threshold of its wall-clock offset (sub-second
+            // gaps are not padded), so a chunk inside it ends no later than the merged end plus that
+            // threshold; one after it ends a whole chunk later (round 8 item 3: a tiny final chunk
+            // was listed twice when measured from its start).
             let mergedOffset = perChunkOffsets.min() ?? 0
-            let mergedEnd = mergedOffset + mergedSeconds
+            let mergedEnd = mergedOffset + mergedSeconds + AudioConcatenator.gapThresholdSeconds
             let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present)
-                .filter { $0.1 && $0.0.1 >= mergedEnd - TranscriptAssembler.duration(of: $0.0.0) / 2 }.map(\.0)
+                .filter { $0.1 && $0.0.1 + TranscriptAssembler.duration(of: $0.0.0) > mergedEnd }.map(\.0)
             let listed = ([(mergedURL, mergedOffset)] + alongside).sorted { $0.1 < $1.1 }
             Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it, with \(alongside.count, privacy: .public) chunk file(s) not in it")
             audioPaths = listed.map(\.0)
@@ -507,6 +508,28 @@ public final class TranscriptionRunner {
         default: detectedLanguage = "multilingual"
         }
 
+        // 6b. Storage quota enforcement, before the record is written so it can say what the quota
+        // could not do. Never a file backing this record: every listed audio file, every chunk file,
+        // and every archive of the session in the folder (rounds 7-8 item 1). Protecting only the
+        // last listed file let a rebuild's quota pass delete the merged file — the only copy of the
+        // earlier chunks.
+        do {
+            let report = try StorageManager.enforceQuotaReport(
+                in: outputDirectory,
+                limitHours: config.audioArchiveLimitHours,
+                bitrateKbps: config.archiveBitrateKbps,
+                protectedFiles: audioPaths + chunkAudioPaths + [mergedURL]
+                    + CrashRecoveryPlanner.sessionArchives(outputDirectory: outputDirectory, sessionId: sessionState.sessionId)
+            )
+            if report.protectedOverrunBytes > 0,
+               !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                    code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(report.protectedOverrunBytes) bytes over the quota")))
+            }
+        } catch {
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+        }
+
         // 7. Assemble JSON
         let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
         let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues + finalizeIssues)
@@ -547,20 +570,6 @@ public final class TranscriptionRunner {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
             Logger.files.error("Failed to write format file: \(error, privacy: .private)")
-        }
-
-        // 9. Storage quota enforcement. Never a file backing this record: every listed audio file,
-        // the merged file and every chunk file (round 7 item 1). Protecting only the last listed file
-        // let a rebuild's quota pass delete the merged file — the only copy of the earlier chunks.
-        do {
-            try StorageManager.enforceQuota(
-                in: outputDirectory,
-                limitHours: config.audioArchiveLimitHours,
-                bitrateKbps: config.archiveBitrateKbps,
-                protectedFiles: audioPaths + chunkAudioPaths + [mergedURL]
-            )
-        } catch {
-            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
         }
 
         // 10. Clean up session.json

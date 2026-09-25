@@ -694,8 +694,8 @@ struct TranscriptRewritesAreDurableTests {
         let url = dir.appendingPathComponent("m.json")
         try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any],
             "segments": [["start": 0.0, "end": 1.0, "speaker": "Remote Speaker 1", "text": "hi"]]]).write(to: url)
-        DurableFile.startRecordingSyncsForTesting()
-        defer { DurableFile.stopRecordingSyncsForTesting() }
+        DurableFile.startRecordingSyncsForTesting(under: dir)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: dir) }
         let before = DurableFile.syncedForTesting.count
         #expect(TranscriptRenamer.applyRenames(["Remote Speaker 1": "Alice"], jsonPath: url))
         try MeetingSummarizer.stampDisclosure(.attempted(endpoint: "http://127.0.0.1:1"), into: url)

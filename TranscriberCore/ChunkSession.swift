@@ -64,6 +64,9 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// is not a real time or before the first chunk's): they were not merged, and the transcript
         /// lists each chunk's own audio file (round 5). Informational: no audio is missing.
         public static let mergeSkippedImplausibleTiming = Code(rawValue: "merge_skipped_implausible_timing")
+        /// The storage quota could not be met without deleting this session's own audio, which it
+        /// never does (round 8 item 2). Informational: nothing is missing; the folder is over quota.
+        public static let quotaExceededByCurrentSession = Code(rawValue: "quota_exceeded_by_current_session")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
@@ -317,13 +320,19 @@ enum DurableFile {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var synced: [String] = []
 
-    /// Test seam, OFF in production (round 4 item 4): while any test has started recording, every
-    /// fully synced path is recorded in order. Off, nothing is kept — the paths carry meeting names.
-    /// A counter under the lock (round 7 item 5), so overlapping tests can't switch it off for each
-    /// other.
-    nonisolated(unsafe) private static var recorders = 0
-    static func startRecordingSyncsForTesting() { lock.withLock { recorders += 1 } }
-    static func stopRecordingSyncsForTesting() { lock.withLock { recorders = max(0, recorders - 1) } }
+    /// Test seam, OFF in production (round 4 item 4): only paths under a folder a test registered are
+    /// recorded, in order — per folder (round 8 item 5), so tests running in parallel never record
+    /// each other's files. Nothing registered, nothing kept: the paths carry meeting names.
+    nonisolated(unsafe) private static var recordedFolders: [String: Int] = [:]
+    static func startRecordingSyncsForTesting(under directory: URL) {
+        lock.withLock { recordedFolders[directory.path + "/", default: 0] += 1 }
+    }
+    static func stopRecordingSyncsForTesting(under directory: URL) {
+        lock.withLock {
+            let key = directory.path + "/"
+            if let n = recordedFolders[key], n > 1 { recordedFolders[key] = n - 1 } else { recordedFolders[key] = nil }
+        }
+    }
     /// Test seam: every path fully synced while a test was recording, in order.
     static var syncedForTesting: [String] { lock.withLock { synced } }
 
@@ -353,7 +362,9 @@ enum DurableFile {
             }
         }
         if fcntl(fd, F_FULLFSYNC) == 0 {
-            lock.withLock { if recorders > 0 { synced.append(final.path) } }
+            lock.withLock {
+                if recordedFolders.keys.contains(where: { final.path.hasPrefix($0) }) { synced.append(final.path) }
+            }
         } else if fsync(fd) != 0 {
             throw posixError(errno)
         }

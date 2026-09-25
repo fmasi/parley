@@ -330,8 +330,8 @@ struct ChunkedSessionRecoveryTests {
     // MARK: - Round 3 (items 2, 3, 4)
 
     /// A finalized session "m" with preserved WAVs: returns the directory, the transcript and the runner.
-    private func finalizedSession(format: String = "json") async throws -> (dir: URL, transcript: URL, config: Config, runner: TranscriptionRunner) {
-        let dir = try makeTempDir()
+    private func finalizedSession(format: String = "json", in given: URL? = nil) async throws -> (dir: URL, transcript: URL, config: Config, runner: TranscriptionRunner) {
+        let dir = try given ?? makeTempDir()
         var config = Config.default
         config.preserveSourceWAV = true
         config.outputFormat = format
@@ -349,10 +349,11 @@ struct ChunkedSessionRecoveryTests {
 
     /// Item 2: the transcript is flushed to the disk BEFORE the marker that vouches for it.
     @Test func theTranscriptIsDurableBeforeTheMarker() async throws {
-        DurableFile.startRecordingSyncsForTesting()
-        defer { DurableFile.stopRecordingSyncsForTesting() }
+        let dir = try makeTempDir()
+        DurableFile.startRecordingSyncsForTesting(under: dir)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: dir) }
         let before = DurableFile.syncedForTesting.count
-        let (dir, transcript, _, _) = try await finalizedSession()
+        let (_, transcript, _, _) = try await finalizedSession(in: dir)
         defer { try? FileManager.default.removeItem(at: dir) }
         let synced = Array(DurableFile.syncedForTesting.dropFirst(before))
         let transcriptAt = try #require(synced.firstIndex(of: transcript.path))
@@ -625,6 +626,78 @@ struct ChunkedSessionRecoveryTests {
                                                      transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
         #expect(!FileManager.default.fileExists(atPath: backup.path))
         #expect(try Data(contentsOf: dir.appendingPathComponent("m.damaged.json.bak")) == Data("{\"old\": true}".utf8))
+    }
+
+    // MARK: - Round 8
+
+    /// Item 1 (IMPORTANT): each orphan's quota pass protected only the registered chunks, so orphan 1's
+    /// pass deleted orphan 2's archive — for an archive-only orphan, its only copy. Every archive of
+    /// the current session is protected, registered or not.
+    @Test(.timeLimit(.minutes(1)))
+    func theQuotaNeverTouchesTheCurrentSessionsUnregisteredArchives() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0...2 {
+            let wav = dir.appendingPathComponent("m-\(i).wav")
+            try RecoveryFixtures.writeFakeWav(at: wav, seconds: 1)
+            let archive = try await AudioArchiver.archiveSystemOnly(systemAudio: wav, outputDirectory: dir, bitrateKbps: 64).archivePath
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: archive.path)
+        }
+        let other = dir.appendingPathComponent("other-0.m4a")
+        try Data(count: 4096).write(to: other)
+        let start = Date().addingTimeInterval(-60)
+        try SessionState.write(SessionState(sessionId: "m", meetingStart: start, engine: "fluid_audio", chunkDurationMinutes: 1,
+                                            chunks: [ProcessedChunk(index: 0, startTime: start, audioPath: "m-0.m4a",
+                                                                    segments: [.init(start: 0, end: 1, text: "chunk 0", speaker: "Speaker 1", source: "remote")],
+                                                                    speakerDatabase: ["Speaker 1": [1, 0, 0]])]),
+                               directory: dir)
+        var config = Config.default
+        config.audioArchiveLimitHours = 0
+        config.mergeChunkedAudio = false
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                                           transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner()))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        // (Sorted: back-dating the archives' modification dates for the quota also back-dates their
+        // creation dates, which place the orphans on the timeline.)
+        #expect((json["segments"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.sorted() == ["chunk 0", "hello", "hello"],
+                "both archive-only orphans survived their siblings' quota passes and were ingested")
+        #expect((0...2).allSatisfy { FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-\($0).m4a").path) })
+        #expect(!FileManager.default.fileExists(atPath: other.path), "another recording's archive still goes")
+        // Item 2: the current session alone keeps usage over the quota — recorded once, as information.
+        let issues = try #require((json["metadata"] as? [String: Any])?["processing_issues"] as? [[String: Any]])
+        #expect(issues.filter { $0["code"] as? String == "quota_exceeded_by_current_session" }.count == 1)
+        #expect(!ChunkIssue.Code.quotaExceededByCurrentSession.affectsContent)
+    }
+
+    /// Item 3: a tiny final chunk that IS in the merge (it started under a second after the one before,
+    /// so no silence was inserted and the merged file is shorter than its wall-clock span) was listed
+    /// beside the merged file too. Membership compares the chunk's END with the merged file's end.
+    @Test(.timeLimit(.minutes(1)))
+    func aTinyFinalChunkInsideTheMergeIsListedOnce() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var config = Config.default
+        config.preserveSourceWAV = true
+        let start = Date().addingTimeInterval(-60)
+        let processor = await ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "m", meetingStart: start, engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        for (i, (seconds, offset)) in [(1.0, 0.0), (1.5, 1.8)].enumerated() {
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-\(i).wav"), seconds: seconds)
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: i, systemPath: dir.appendingPathComponent("m-\(i).wav").path,
+                                                                         micPath: dir.appendingPathComponent("m-\(i)_mic.wav").path,
+                                                                         startTime: start.addingTimeInterval(offset)))
+        }
+        let state = await processor.getSessionState()
+        let runner = await TranscriptionRunner()
+        let first = try await runner.finalize(sessionState: state, outputDirectory: dir, config: config)
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("m-0.m4a"))
+        try SessionState.write(state, directory: dir)
+        try Data("{".utf8).write(to: first.jsonPath)
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                                           transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        #expect((json["metadata"] as? [String: Any])?["audio_files"] as? [String] == ["m.m4a"])
     }
 }
 

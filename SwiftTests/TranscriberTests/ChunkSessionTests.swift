@@ -350,8 +350,8 @@ struct ChunkSessionTests {
     @Test("aWriteIsFullySyncedBeforeTheRename")
     func aWriteIsFullySyncedBeforeTheRename() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        DurableFile.startRecordingSyncsForTesting()
-        defer { DurableFile.stopRecordingSyncsForTesting() }
+        DurableFile.startRecordingSyncsForTesting(under: dir)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: dir) }
         let before = DurableFile.syncedForTesting.count
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
         #expect(DurableFile.syncedForTesting.dropFirst(before).contains(dir.appendingPathComponent("session.json").path))
@@ -361,6 +361,10 @@ struct ChunkSessionTests {
     @Test("theSyncSeamRecordsNothingUnlessATestAsks")
     func theSyncSeamRecordsNothingUnlessATestAsks() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        // Round 8 item 5: another test recording its own folder at the same time can't record this one.
+        let other = try makeTempDir(); defer { try? FileManager.default.removeItem(at: other) }
+        DurableFile.startRecordingSyncsForTesting(under: other)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: other) }
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
         #expect(!DurableFile.syncedForTesting.contains { $0.hasPrefix(dir.path) }, "this test's own folder: nothing recorded")
 

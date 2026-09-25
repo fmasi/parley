@@ -23,6 +23,20 @@ public enum CrashRecoveryPlanner {
         return found.map { (index: $0.key, baseName: $0.value.baseName, hasWav: $0.value.hasWav) }
     }
 
+    /// Every archive of `sessionId` in the folder, registered or not: `<id>.m4a` (a merge) and
+    /// `<id>-<n>.m4a` (chunks), by the same name rule as the orphan scan. What a quota pass must never
+    /// delete while the session is being processed (round 8 item 1).
+    public static func sessionArchives(outputDirectory: URL, sessionId: String) -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        let prefix = "\(sessionId)-"
+        return names.filter { name in
+            guard name.hasSuffix(".m4a") else { return false }
+            if name == "\(sessionId).m4a" { return true }
+            guard name.hasPrefix(prefix) else { return false }
+            return Int(name.dropFirst(prefix.count).dropLast(".m4a".count)) != nil
+        }.map { outputDirectory.appendingPathComponent($0) }
+    }
+
     /// Chunks on disk that `session.json` does not hold. An archive with no WAV counts (C-I4: a crash
     /// between archiving a chunk and writing session.json left only its `.m4a`; `ChunkProcessor`
     /// transcribes it from the archive). A FINALIZED session has no orphans at all: its WAVs (kept by

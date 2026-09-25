@@ -76,6 +76,13 @@ public final class ChunkProcessor {
             ))
         }
 
+        /// The current session alone keeps usage over the quota: recorded once (round 8 item 2).
+        func noteQuotaOverrun(_ bytes: Int) {
+            guard !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) else { return }
+            sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(bytes) bytes over the quota")))
+        }
+
         func appendGap(_ gap: CaptureGap) {
             sessionState.gaps.append(gap)
         }
@@ -452,17 +459,20 @@ public final class ChunkProcessor {
         // that were already deleted. No archive, no quota pass. Scope stays the day folder (#224).
         if let archivePath {
             do {
-                // Never this session's own audio (round 7 item 1): this chunk's archive, every chunk
-                // archive already in the session, and a merged `<id>.m4a` an earlier finalize wrote.
+                // Never this session's own audio (rounds 7-8 item 1): this chunk's archive, every chunk
+                // archive already in the session, and EVERY archive of the session in the folder —
+                // an orphan not ingested yet (for an archive-only one, the only copy), a chunk still
+                // processing in parallel, a merged `<id>.m4a` an earlier finalize wrote.
                 let state = await stateStore.getSessionState()
                 let protected = [archivePath] + state.chunks.map { outputDirectory.appendingPathComponent($0.audioPath) }
-                    + [outputDirectory.appendingPathComponent("\(state.sessionId).m4a")]
-                try StorageManager.enforceQuota(
+                    + CrashRecoveryPlanner.sessionArchives(outputDirectory: outputDirectory, sessionId: state.sessionId)
+                let report = try StorageManager.enforceQuotaReport(
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
                     protectedFiles: protected
                 )
+                if report.protectedOverrunBytes > 0 { await stateStore.noteQuotaOverrun(report.protectedOverrunBytes) }
             } catch {
                 Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")
             }
