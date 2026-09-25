@@ -332,12 +332,13 @@ struct Harness {
 
     /// `launchRecoveryPending`: the recovery gate starts held until `recoverAtLaunch` runs, as in the app (L review
     /// 131). Off by default: most tests drive a retry without a launch.
-    init(recordingMic: RecordingMicrophone = RecordingMicrophone(), launchRecoveryPending: Bool = false) throws {
+    /// `tmp`: another harness's folder — a relaunch of the same app, as a new process sees it (L review 236).
+    init(recordingMic: RecordingMicrophone = RecordingMicrophone(), launchRecoveryPending: Bool = false, tmp: URL? = nil) throws {
         self.recordingMic = recordingMic
-        tmp = FileManager.default.temporaryDirectory
+        self.tmp = tmp ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("coordinator-tests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        config = ConfigManager(configDir: tmp)  // empty dir -> Config.default
+        try FileManager.default.createDirectory(at: self.tmp, withIntermediateDirectories: true)
+        config = ConfigManager(configDir: self.tmp)  // empty dir -> Config.default
         let notified = notified
         let criticals = criticals
         let presented = presented, onPresent = onPresent
@@ -350,7 +351,7 @@ struct Harness {
             captureClient: client,
             transcriptionRunner: runner,
             configManager: config,
-            sentinelDirectory: tmp,
+            sentinelDirectory: self.tmp,
             notify: { notified.value.append(($0, $1)) },
             notifyCritical: { criticals.value.append(($0, $1)) },
             presentTranscript: { url, _ in presented.value.append(url); onPresent.value?(url) },

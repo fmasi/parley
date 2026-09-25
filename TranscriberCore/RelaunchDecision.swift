@@ -26,13 +26,23 @@ public enum RelaunchDecision: Equatable, Sendable {
     /// recorded) — the boundary itself, and anything older, salvages and says STOPPED.
     public static let resumeWindow: TimeInterval = 180
 
+    /// A Stop was asked for and its stopping mark never landed (L review 236): `stopRequestedAt` — kept apart from the
+    /// sentinel — no earlier than the recording was last known alive means nothing recorded since. That recording is
+    /// stopping: never resumed, never re-attached.
+    public static func stopWasRequested(lastAliveAt: Date?, stopRequestedAt: Date?) -> Bool {
+        guard let stopRequestedAt else { return false }
+        return stopRequestedAt >= (lastAliveAt ?? .distantPast)
+    }
+
     public static func decide(lastAliveAt: Date?, bootSessionUUID: String?, wasStopping: Bool, now: Date,
-                              helperCapturing: Bool, currentBootSessionUUID: String?, folderReachable: Bool) -> RelaunchDecision {
+                              helperCapturing: Bool, currentBootSessionUUID: String?, folderReachable: Bool,
+                              stopRequestedAt: Date? = nil) -> RelaunchDecision {
         // `wasStopping` is checked first, ahead of `helperCapturing` (fix round 1, item 7) — but
         // NOT ahead of `folderReachable`: salvaging off a folder we can't reach (e.g. an unmounted
         // external drive) would delete the sentinel out from under data we can't currently see,
         // breaking "never deletes". An unreachable folder still waits, even mid-stop. (Fix round 2,
-        // item 4 — a regression introduced by round 1's fix.)
+        // item 4 — a regression introduced by round 1's fix.) A Stop kept apart counts as the mark (L review 236).
+        let wasStopping = wasStopping || stopWasRequested(lastAliveAt: lastAliveAt, stopRequestedAt: stopRequestedAt)
         if wasStopping { return folderReachable ? .salvageAndStop(reason: .wasStopping) : .waitForFolder }
         if helperCapturing { return .reattach }
         if !folderReachable { return .waitForFolder }

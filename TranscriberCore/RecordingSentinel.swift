@@ -218,6 +218,39 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         }
     }
 
+    // MARK: - A Stop kept apart (L review 236)
+
+    /// A Stop of the recording `sessionKey` names, asked for at `requestedAt`, whose stopping mark on the recovery file did
+    /// not answer (L review 236). Kept in a file of its own, written on a queue of its own: a crash before the mark lands
+    /// still leaves the next launch knowing the user stopped it — salvaged, never resumed.
+    public struct StopRequest: Codable, Equatable, Sendable {
+        public var sessionKey: String
+        public var requestedAt: Date
+        public init(sessionKey: String, requestedAt: Date) {
+            self.sessionKey = sessionKey
+            self.requestedAt = requestedAt
+        }
+    }
+
+    private static let stopRequestFileName = "stop-requested.json"
+
+    public static func writeStopRequest(_ request: StopRequest, directory: URL? = nil) throws {
+        let dir = directory ?? AppPaths.dataDirectory
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try makeEncoder().encode(request).write(to: dir.appendingPathComponent(stopRequestFileName), options: .atomic)
+    }
+
+    /// The Stop kept apart, if any. Unreadable reads as none: it only ever adds a caution.
+    public static func readStopRequest(directory: URL? = nil) -> StopRequest? {
+        let url = (directory ?? AppPaths.dataDirectory).appendingPathComponent(stopRequestFileName)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? makeDecoder().decode(StopRequest.self, from: data)
+    }
+
+    public static func deleteStopRequest(directory: URL? = nil) {
+        try? FileManager.default.removeItem(at: (directory ?? AppPaths.dataDirectory).appendingPathComponent(stopRequestFileName))
+    }
+
     // MARK: - Sessions awaiting salvage (L follow-ups 24, 40)
 
     private static let pendingFileName = "pending-sessions.json"
