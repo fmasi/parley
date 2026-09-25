@@ -1094,6 +1094,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // start in between leave the phase `capturing` again (round 2 item 10).
             var oldPaths: (systemPath: String, micPath: String)?
             var counts: CoverageCounts?
+            /// The new chunk's paths reached this rotate's session (re-checked after the swap, H-I2).
+            var installed = false
             let (mic, tap) = stateLock.sync { (micSession, tapSession) }
             // Bounded (round 5 item 1): a swap stuck behind a stalled audio queue must not hold this XPC
             // connection — and a Stop queued behind it — past 3 s. Abandoned means it never applies late.
@@ -1107,9 +1109,18 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 )
                 // Coverage read in the same block: no second `audioQueue.sync` (round 4 N2).
                 counts = self.coverageCountsOnAudioQueue(currentHandler, tapActive: tap != nil)
-                self.stateLock.sync {
+                // Re-checked AFTER the swap (final review H-I2): a swap that overran its bound can land after
+                // this session ended and a new one installed its paths — those stay. On IDENTITY, not the
+                // rotation gate: a Stop that has claimed but not ended still gets the new paths (its seal is
+                // queued behind this swap and returns the new chunk).
+                installed = self.stateLock.sync { () -> Bool in
+                    guard self.handler === currentHandler, self.lifecycle.session == session else { return false }
                     self.systemPath = newSysPath
                     self.micPath = newMicPath
+                    return true
+                }
+                if !installed {
+                    Logger.audio.error("Chunk rotation finished after its session ended — its new chunk paths are not installed")
                 }
                 return true
             }
@@ -1119,6 +1130,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             case .abandoned:
                 // Never ran, never will: the current chunk keeps recording; its would-be successor goes.
                 Logger.audio.error("Chunk rotation timed out on a stalled audio queue — abandoned; the current chunk keeps recording")
+                // A chunk boundary nobody can vouch for (final review H3 #2) — in its own session's record only.
+                if stateLock.sync(execute: { lifecycle.session == session }) {
+                    record(.rotationFailed, .anomaly, ["reason": "timed out — abandoned"])
+                }
                 newSystemWriter.finalize()
                 newMicWriter.finalize()
                 try? FileManager.default.removeItem(atPath: newSysPath)
@@ -1129,6 +1144,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 // The swap started but has not finished (a disk stall inside it): it may still complete, and
                 // then Stop returns the new chunk's paths — the old chunk is sealed on disk, not handed over.
                 Logger.audio.error("Chunk rotation started but did not finish in time — it may complete late; the old chunk stays on disk")
+                // Up to 6 s have passed: a Stop and a new Record may have come and gone — record into this
+                // rotate's own session only (final review H3 #2).
+                if stateLock.sync(execute: { lifecycle.session == session }) {
+                    record(.rotationFailed, .anomaly, ["reason": "timed out — may complete late"])
+                }
                 reply(nil, nil, CaptureReplies.rotationTimedOut)
                 return
             }
@@ -1138,6 +1158,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 newMicWriter.finalize()
                 try? FileManager.default.removeItem(atPath: newSysPath)
                 try? FileManager.default.removeItem(atPath: newMicPath)
+                reply(nil, nil, CaptureReplies.refusedStopping)
+                return
+            }
+            guard installed else {
+                // The swap finished within its bound but after its session ended (a Stop whose seal timed out
+                // behind it): that Stop already returned the chunk this swap sealed — never hand it over twice
+                // (B-I3). The new writers stay with the ended session's handler, whose late seal closes them; a
+                // header-only stub is flagged by the app's orphan scan, never deleted here (H-I2).
                 reply(nil, nil, CaptureReplies.refusedStopping)
                 return
             }

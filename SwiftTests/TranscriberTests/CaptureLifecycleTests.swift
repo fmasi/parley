@@ -1,3 +1,4 @@
+// RED-FIRST-EXEMPT: characterization of AbandonableStep.overran (final review H3 #5)
 import Dispatch
 import Foundation
 import os
@@ -415,6 +416,28 @@ import Testing
         release.signal()
         queue.sync {}   // the queue drains: the abandoned step has had its chance to run
         #expect(!ran.withLock { $0 }, "no writer swap applies late")
+    }
+
+    /// Final review H3 #5: a step that STARTED but outlives both bounds is `.overran` — and it may still
+    /// complete afterwards. That is why a rotation's swap re-checks its session before it installs the
+    /// new chunk's paths (H-I2): the caller has long answered and moved on when it lands.
+    @Test func aStepThatStartsButOutlivesItsBoundIsOverranAndStillCompletes() {
+        let queue = DispatchQueue(label: "overrunning")
+        let release = DispatchSemaphore(value: 0)
+        let ran = OSAllocatedUnfairLock(initialState: false)
+        let start = DispatchTime.now()
+        let outcome = AbandonableStep.run(timeout: 0.2, on: queue) { () -> Int in
+            release.wait()                  // a disk stall inside the swap
+            ran.withLock { $0 = true }
+            return 7
+        }
+        let waited = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+        #expect(outcome == .overran)
+        #expect(waited < 1.5)
+        #expect(!ran.withLock { $0 }, "still running when the caller gave up on it")
+        release.signal()
+        queue.sync {}
+        #expect(ran.withLock { $0 }, "it may still complete — late")
     }
 
     @Test func theRotationBoundIsThreeSeconds() {
