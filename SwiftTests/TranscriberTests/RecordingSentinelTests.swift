@@ -334,4 +334,23 @@ struct RecordingSentinelTests {
         #expect(RecordingSentinel.readPending(directory: dir).count == 2)
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-") } == ["pending-sessions.json"])
     }
+
+    /// L review 196: a main list that becomes readable again (fixed by hand, restored) is folded back — but it never
+    /// overrides a NEWER copy of a session kept in a list beside it meanwhile: the newest copy per session wins.
+    @Test func aFixedMainListNeverOverridesANewerCopyBesideIt() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let main = dir.appendingPathComponent("pending-sessions.json")
+        let old = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        try RecordingSentinel.writePending([old], directory: dir)
+        let fixed = try Data(contentsOf: main)
+        try Data("{ not a list".utf8).write(to: main)   // unreadable: the next keeping goes beside it
+        var newer = old
+        newer.heldReason = .stopUnderWay
+        newer.stopCause = .stopInterrupted
+        try RecordingSentinel.writePending([newer], directory: dir)
+        try fixed.write(to: main)   // the main list is readable again — with its OLDER copy
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: main.path)
+        let loaded = RecordingSentinel.readPending(directory: dir)
+        #expect(loaded.count == 1 && loaded.first?.heldReason == .stopUnderWay && loaded.first?.stopCause == .stopInterrupted, "\(loaded)")
+    }
 }

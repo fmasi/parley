@@ -439,11 +439,22 @@ public final class TranscriptionRunner {
         let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
         let transcriptURL = outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")
         let removeLeftovers = !(config.preserveSourceWAV ?? false), leftoverChunks = sortedChunks
+        let finalizingId = sessionState.sessionId
         guard let look = await folderReads.read("transcript: chunk files", folder: outputDirectory.path,
                                                 key: outputDirectory.path + "#finalize:" + sessionState.sessionId, seconds: folderReadSeconds, {
+            // Its own guard (L review 197): a session already finalized — its transcript verifies — is never finalized again
+            // over it, whatever a gate upstream could or could not look at. Its leftovers are cleaned up (R2), and that is all.
+            if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDirectory, sessionId: finalizingId), TranscriptAssembler.verifies(transcriptURL) {
+                CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDirectory, sessionId: finalizingId)
+                return FinalizeLook(present: [], alreadyFinalized: true)
+            }
             if removeLeftovers { Self.removeLeftoverWAVs(of: leftoverChunks, in: outputDirectory) }
             return Self.lookBeforeFinalize(chunkAudioPaths: chunkAudioPaths, mergedURL: mergedURL, transcriptURL: transcriptURL)
         }) else { throw FolderNotAnswering() }
+        if look.alreadyFinalized {
+            Logger.state.error("A finalize found its session already finalized — its transcript is kept as it is, never written over")
+            throw SessionAlreadyFinalized(transcript: transcriptURL.lastPathComponent)
+        }
         let present = look.present
 
         // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
@@ -597,6 +608,8 @@ public final class TranscriptionRunner {
     /// chunk's, and that finalize's `merged_audio` block. Blocking file work: only through `folderReads`.
     struct FinalizeLook {
         var present: [Bool]
+        /// The session was already finalized, its transcript verifies (L review 197): nothing more is looked at or written.
+        var alreadyFinalized = false
         var mergedSeconds: Double = 0
         /// Per chunk, its length when its file is there (0 otherwise).
         var chunkSeconds: [Double] = []

@@ -348,6 +348,7 @@ struct NotReadyEngine: TranscriptionEngine {
         h.client.stopError = RefusedStoppingError()
         h.coordinator.stopDeadline = .milliseconds(200)
         h.coordinator.stopReaskInterval = .milliseconds(50)
+        h.coordinator.stopReaskMinimumBudget = .milliseconds(10)
         await h.coordinator.stopRecording()
         #expect(pending(h).first?.heldReason == .stopUnderWay)
         h.appState.acknowledge(.recordingStopped)
@@ -355,7 +356,7 @@ struct NotReadyEngine: TranscriptionEngine {
         await h.coordinator.retryPendingSessions()
         #expect(pending(h).isEmpty)
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
-        #expect(!row.contains("crashed") && row.contains("another stop was still under way") && row.contains("until the capture helper let go"), "\(row)")
+        #expect(!row.contains("crashed") && row.contains("another stop was still under way") && row.contains("once the capture helper let go"), "\(row)")
     }
 
     /// L review 183: while a held helper has not let go, NO held session is salvaged — the stuck helper may still be writing

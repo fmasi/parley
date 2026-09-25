@@ -5,8 +5,10 @@ public struct SalvageOutcome: Equatable, Sendable {
     /// `folderNotAnswering`: the recording folder did not answer, so nothing could be checked or salvaged; its audio
     /// is kept (L review 122). `transcriptUnreadable`: a finished session's transcript cannot be read back and there is
     /// no progress file to rebuild it from — it and its audio are kept as they are (L review 150).
+    /// `transcriptMissing`: a finished session's transcript is not there (its finalized marker is) and there is no progress
+    /// file to rebuild it from (L review 190).
     public enum Kind: Equatable, Sendable { case transcriptWritten(URL), nothingToSalvage, finalizeFailed(String), folderNotAnswering,
-                                              transcriptUnreadable(URL) }
+                                              transcriptUnreadable(URL), transcriptMissing(URL) }
     public let kind: Kind
     public let chunkCount: Int
     /// The in-progress chunk was re-ingested but did not make it into the written transcript: its
@@ -33,15 +35,19 @@ public struct SalvageOutcome: Equatable, Sendable {
     /// Whether the in-progress chunk is on disk could not be checked: the folder did not answer (L review 163).
     public let lastChunkUnchecked: Bool
     /// The transcript was REBUILT because the finished one could not be read back; the damaged copy is kept under this
-    /// name (L review 150).
+    /// name (L review 150) — only when a look FOUND it (L review 190).
     public let rebuiltKeeping: String?
+    /// Why a finished session's transcript was REBUILT (L reviews 150, 190): it was missing, or could not be read back.
+    public enum Rebuilt: Equatable, Sendable { case transcriptMissing, transcriptUnreadable }
+    public let rebuilt: Rebuilt?
     public init(kind: Kind, chunkCount: Int, lastChunkKeptOnDisk: Bool = false, recognitionFailures: RecognitionFailures = .init(),
-                recognitionChecked: Bool = true, lastChunkUnchecked: Bool = false, rebuiltKeeping: String? = nil) {
+                recognitionChecked: Bool = true, lastChunkUnchecked: Bool = false, rebuiltKeeping: String? = nil, rebuilt: Rebuilt? = nil) {
         // Chunks on disk are never "no recorded audio": callers report them as kept (`finalizeFailed`).
         assert(!(kind == .nothingToSalvage && chunkCount > 0), "nothingToSalvage with \(chunkCount) chunks on disk")
         self.kind = kind; self.chunkCount = chunkCount; self.lastChunkKeptOnDisk = lastChunkKeptOnDisk
         self.recognitionFailures = recognitionFailures
         self.recognitionChecked = recognitionChecked; self.lastChunkUnchecked = lastChunkUnchecked; self.rebuiltKeeping = rebuiltKeeping
+        self.rebuilt = rebuilt ?? (rebuiltKeeping != nil ? .transcriptUnreadable : nil)
     }
 
     /// Counted from the chunks' own `asr_failed` issues. An issue with no track fails the chunk.
@@ -98,10 +104,14 @@ public enum RecoveryMessages {
         switch outcome.kind {
         case .transcriptWritten(let url):
             let tail = lastChunkTail(outcome)
-            if let damaged = outcome.rebuiltKeeping {
-                // Rebuilt, never a quiet overwrite: the damaged copy is named (L review 150).
+            if let rebuilt = outcome.rebuilt {
+                // Rebuilt, never a quiet overwrite (L review 150): why — missing, or unreadable (L review 190) — the new
+                // transcript's check (L review 191), and the damaged copy only when a look found it.
                 let from = outcome.chunkCount > 0 ? " from its \(chunkPhrase(outcome.chunkCount).noun)" : ""
-                return "Its transcript could not be read back, so it was REBUILT\(from) to \(url.lastPathComponent)\(recognitionClauses(outcome)); the damaged copy is kept as \(damaged)." + tail
+                let why = rebuilt == .transcriptMissing ? "Its transcript was missing" : "Its transcript could not be read back"
+                let checked = outcome.recognitionChecked ? recognitionClauses(outcome) : "; the new one could not be read back to check them"
+                let kept = outcome.rebuiltKeeping.map { "; the damaged copy is kept as \($0)" } ?? ""
+                return "\(why), so it was REBUILT\(from) to \(url.lastPathComponent)\(checked)\(kept)." + tail
             }
             guard outcome.chunkCount > 0 else {
                 return "No chunks were recorded, but a transcript was written to \(url.lastPathComponent)." + tail
@@ -131,6 +141,10 @@ public enum RecoveryMessages {
             // Never "could not be transcribed": it was, and its transcript is kept, only unreadable (L review 150).
             let audio = outcome.chunkCount > 0 ? " Its audio (\(chunkPhrase(outcome.chunkCount).noun)) is kept on disk." : ""
             return "Its transcript \(url.lastPathComponent) could not be read back, and no progress file was left to rebuild it from — it is kept as it is.\(audio)"
+        case .transcriptMissing(let url):
+            // Missing is not unreadable: nothing is "kept" of a transcript that is not there (L review 190).
+            let audio = outcome.chunkCount > 0 ? " Its audio (\(chunkPhrase(outcome.chunkCount).noun)) is kept on disk." : ""
+            return "Its transcript \(url.lastPathComponent) is missing, and no progress file was left to rebuild it from.\(audio)"
         }
     }
 
@@ -172,7 +186,7 @@ public enum RecoveryMessages {
     public static func stopFailureTitle(after outcome: SalvageOutcome, stopSucceeded: Bool) -> String {
         switch outcome.kind {
         case .transcriptWritten: return "Transcript Saved After an Error"
-        case .finalizeFailed, .transcriptUnreadable: return "Transcription Failed"
+        case .finalizeFailed, .transcriptUnreadable, .transcriptMissing: return "Transcription Failed"
         case .nothingToSalvage, .folderNotAnswering: return stopSucceeded ? "Transcription Failed" : "Stopping the Recording Failed"
         }
     }
@@ -187,9 +201,13 @@ public enum RecoveryMessages {
     /// Parley was quit (or the user logged out) while the stopped recording's transcript was being finished
     /// (L follow-up 42): a deliberate exit, not a crash.
     public static func quitWhileFinishing(outcome: SalvageOutcome) -> String {
-        if case .transcriptWritten(let url) = outcome.kind, outcome.rebuiltKeeping == nil {
+        if case .transcriptWritten(let url) = outcome.kind, outcome.rebuilt == nil {
             let what = outcome.chunkCount > 0 ? chunkPhrase(outcome.chunkCount).noun : "the recording"
             let tail = lastChunkTail(outcome)
+            guard outcome.recognitionChecked else {
+                // It could not be read back: nothing is claimed about its words (L review 191).
+                return "Parley was quit while finishing the transcript; it recovered \(what) to \(url.lastPathComponent), but could not read it back to check them." + tail
+            }
             if let allFailed = allFailed(outcome) {
                 return "Parley was quit while finishing the transcript; it recovered \(what) to \(url.lastPathComponent), but \(allFailed)." + tail
             }
@@ -222,7 +240,7 @@ public enum RecoveryMessages {
     public static func relaunchStoppedByRestart(at: Date, outcome: SalvageOutcome) -> String {
         let tail = lastChunkTail(outcome)
         let cause = "Recording STOPPED at \(clock(at)) — your Mac restarted during the recording. "
-        guard case .transcriptWritten(let url) = outcome.kind, outcome.chunkCount > 0, outcome.recognitionChecked, outcome.rebuiltKeeping == nil else {
+        guard case .transcriptWritten(let url) = outcome.kind, outcome.chunkCount > 0, outcome.recognitionChecked, outcome.rebuilt == nil else {
             return cause + outcomeSentence(outcome)
         }
         let (noun, _, _) = chunkPhrase(outcome.chunkCount)
@@ -258,11 +276,31 @@ public enum RecoveryMessages {
         switch cause {
         case .restart: return relaunchStoppedByRestart(at: at, outcome: outcome)
         case .appCrash: return relaunchStopped(at: at, outcome: outcome)
-        case .captureFailed:
-            return "Recording STOPPED at \(clock(at)) — its capture failed and could not be restarted. " + outcomeSentence(outcome)
-        case .folderNotAnswering:
-            return "Recording STOPPED at \(clock(at)) — the recording folder stopped answering. " + outcomeSentence(outcome)
+        case .captureFailed, .folderNotAnswering, .stopInterrupted, .startFailed:
+            return "Recording STOPPED at \(clock(at)) — \(reason(cause)). " + outcomeSentence(outcome)
+        case .userStopped:
+            // The user's own Stop, whose transcript had to wait (L review 218): nothing stopped it but the user.
+            return "You stopped the recording at \(clock(at)). " + outcomeSentence(outcome)
         }
+    }
+
+    /// Why a recording stopped, as a clause (L reviews 147, 186, 193, 194).
+    static func reason(_ cause: RecordingSentinel.StopCause) -> String {
+        switch cause {
+        case .restart: return "your Mac restarted during the recording"
+        case .appCrash: return "Parley crashed"
+        case .captureFailed: return "its capture failed and could not be restarted"
+        case .folderNotAnswering: return "the recording folder stopped answering"
+        case .stopInterrupted: return "you stopped it while another stop was still under way"
+        case .startFailed: return "its capture could not be started"
+        case .userStopped: return "you stopped it"
+        }
+    }
+
+    /// A launch's salvage was cut short by a Quit (L review 194): the cause that salvage first saw, then the quit — never
+    /// "quit while finishing the transcript", which is a quit during the user's own Stop.
+    public static func quitWhileRecovering(at: Date, outcome: SalvageOutcome, cause: RecordingSentinel.StopCause) -> String {
+        "Recording STOPPED at \(clock(at)) — \(reason(cause)). Parley was quit while recovering it. " + outcomeSentence(outcome)
     }
 
     /// Audio recorded after a finished recording's transcript was written (L reviews 137, 181): how much — seconds under a
@@ -283,20 +321,18 @@ public enum RecoveryMessages {
     /// a capture that failed while Parley ran. A relaunch's hold is worded by why the recording stopped (`cause`).
     public static func heldStopped(at: Date, outcome: SalvageOutcome, held: RecordingSentinel.HeldReason,
                                    cause: RecordingSentinel.StopCause) -> String {
-        let why: String
+        let kept = "Parley kept it until the capture helper let go of it"
         switch held {
-        case .restartFailed: why = "its capture failed and could not be restarted"
-        case .startFailed: why = "it failed to start"
-        case .stopUnderWay: why = "another stop was still under way in the capture helper"
+        case .restartFailed:
+            return "Recording STOPPED at \(clock(at)) — \(reason(.captureFailed)). \(kept). " + outcomeSentence(outcome)
+        case .startFailed:
+            return "Recording STOPPED at \(clock(at)) — \(reason(.startFailed)). \(kept). " + outcomeSentence(outcome)
+        case .stopUnderWay:
+            // The user's own Stop (L review 186): nothing failed — another stop was under way, and the helper let go later.
+            return "Recording STOPPED at \(clock(at)) — \(reason(.stopInterrupted)); Parley finished stopping it once the capture helper let go of it. " + outcomeSentence(outcome)
         case .relaunch:
-            switch cause {
-            case .restart: why = "your Mac restarted during the recording"
-            case .appCrash: why = "Parley crashed"
-            case .captureFailed: why = "its capture failed and could not be restarted"
-            case .folderNotAnswering: why = "the recording folder stopped answering"
-            }
+            return "Recording STOPPED at \(clock(at)) — \(reason(cause)). \(kept). " + outcomeSentence(outcome)
         }
-        return "Recording STOPPED at \(clock(at)) — \(why). Parley kept it until the capture helper let go of it. " + outcomeSentence(outcome)
     }
 
     /// A recording kept because its folder stopped answering while its transcript was written, whose write landed once the

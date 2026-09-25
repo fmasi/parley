@@ -36,6 +36,10 @@ public struct RecordingSentinel: Codable, Equatable {
     /// ran — and so no held session is salvaged while another held helper still holds on (L review 183). nil: never held.
     public var heldReason: HeldReason?
 
+    /// A launch's salvage of this session began (L review 194): a quit marked from here on came while Parley was RECOVERING
+    /// it — said so, after the cause that salvage first saw (`stopCause`, stamped with it) — never "quit while finishing".
+    public var salvageBegan: Bool
+
     /// Why a session was held (L review 177).
     public enum HeldReason: String, Codable, Sendable, Equatable {
         /// A start failed, and the helper would not stop the capture it may have begun.
@@ -58,6 +62,12 @@ public struct RecordingSentinel: Codable, Equatable {
         case captureFailed
         /// The recording folder stopped answering.
         case folderNotAnswering
+        /// The user stopped it while another stop was still under way in the capture helper (L review 186).
+        case stopInterrupted
+        /// Its capture could not be started (L review 193).
+        case startFailed
+        /// The user stopped it, and its transcript had to wait — its transcription engine was not ready (L review 218).
+        case userStopped
     }
 
     public init(
@@ -74,7 +84,8 @@ public struct RecordingSentinel: Codable, Equatable {
         quitDuringFinalize: Bool = false,
         stopCause: StopCause? = nil,
         quitMarkedByPowerOff: Bool = false,
-        heldReason: HeldReason? = nil
+        heldReason: HeldReason? = nil,
+        salvageBegan: Bool = false
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -90,6 +101,7 @@ public struct RecordingSentinel: Codable, Equatable {
         self.stopCause = stopCause
         self.quitMarkedByPowerOff = quitMarkedByPowerOff
         self.heldReason = heldReason
+        self.salvageBegan = salvageBegan
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -116,6 +128,7 @@ public struct RecordingSentinel: Codable, Equatable {
         } else {
             heldReason = nil
         }
+        salvageBegan = try container.decodeIfPresent(Bool.self, forKey: .salvageBegan) ?? false
     }
 
     // MARK: - File location
@@ -205,30 +218,54 @@ public struct RecordingSentinel: Codable, Equatable {
     /// session it named. `setAside` says where. When even the move fails, `keptUnreadable` says the file was LEFT
     /// in place — never overwritten: `writePending` then writes a NEW list, `pending-<uuid>.json`, which this reads
     /// too (L review 166) — so a session held since is always tracked.
-    public static func loadPending(directory: URL? = nil) -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?) {
+    /// `unreadableOverflow`: lists beside the main one that cannot be read (L review 196) — left as they are, and said.
+    ///
+    /// A session in more than one list (the main list, fixed by hand or readable again, beside a list written while it was
+    /// not) is the copy in the NEWEST list (L review 196): a folded-back main list never overrides what was kept since.
+    public static func loadPending(directory: URL? = nil)
+        -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?, unreadableOverflow: [URL]) {
         let dir = directory ?? AppPaths.dataDirectory
         let main = loadMainPending(dir)
-        var sessions = main.sessions
-        for (_, overflow) in readableOverflowLists(dir) {
-            for session in overflow where !sessions.contains(where: { $0.sessionKey == session.sessionKey }) { sessions.append(session) }
+        let overflow = overflowLists(dir)
+        let mainDate = main.sessions.isEmpty ? .distantPast : modificationDate(dir.appendingPathComponent(pendingFileName))
+        var chosen: [String: (session: RecordingSentinel, date: Date)] = [:]
+        var order: [String] = []
+        for (sessions, date) in [(main.sessions, mainDate)] + overflow.readable.map({ ($0.sessions, $0.date) }) {
+            for session in sessions {
+                if let earlier = chosen[session.sessionKey] {
+                    if date > earlier.date { chosen[session.sessionKey] = (session, date) }
+                } else {
+                    chosen[session.sessionKey] = (session, date)
+                    order.append(session.sessionKey)
+                }
+            }
         }
-        return (sessions, main.setAside, main.keptUnreadable)
+        return (order.compactMap { chosen[$0]?.session }, main.setAside, main.keptUnreadable, overflow.unreadable)
+    }
+
+    private static func modificationDate(_ url: URL) -> Date {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date ?? .distantPast
     }
 
     /// The pending lists written beside an unreadable one that could not be set aside (L review 166): `pending-<uuid>.json`.
-    /// Only the readable ones — an unreadable one is left alone, never deleted.
-    private static func readableOverflowLists(_ dir: URL) -> [(url: URL, sessions: [RecordingSentinel])] {
+    /// The readable ones, with when each was last written; an unreadable one is left alone, never deleted — and named.
+    private static func overflowLists(_ dir: URL)
+        -> (readable: [(url: URL, sessions: [RecordingSentinel], date: Date)], unreadable: [URL]) {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        return names.sorted().compactMap { name -> (URL, [RecordingSentinel])? in
+        var readable: [(url: URL, sessions: [RecordingSentinel], date: Date)] = []
+        var unreadable: [URL] = []
+        for name in names.sorted() {
             guard name.hasPrefix("pending-"), name.hasSuffix(".json"),
-                  UUID(uuidString: String(name.dropFirst("pending-".count).dropLast(".json".count))) != nil else { return nil }
+                  UUID(uuidString: String(name.dropFirst("pending-".count).dropLast(".json".count))) != nil else { continue }
             let url = dir.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url), let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) else {
                 Logger.state.error("A pending list \(name, privacy: .sensitive) is unreadable — left as it is")
-                return nil
+                unreadable.append(url)
+                continue
             }
-            return (url, sessions)
+            readable.append((url, sessions, modificationDate(url)))
         }
+        return (readable, unreadable)
     }
 
     private static func loadMainPending(_ dir: URL) -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?) {
@@ -264,7 +301,7 @@ public struct RecordingSentinel: Codable, Equatable {
     public static func writePending(_ sessions: [RecordingSentinel], directory: URL? = nil) throws {
         let dir = directory ?? AppPaths.dataDirectory
         let url = dir.appendingPathComponent(pendingFileName)
-        let overflows = readableOverflowLists(dir).map(\.url)
+        let overflows = overflowLists(dir).readable.map(\.url)
         let mainUnreadable = FileManager.default.fileExists(atPath: url.path)
             && (try? Data(contentsOf: url)).flatMap({ try? makeDecoder().decode([RecordingSentinel].self, from: $0) }) == nil
         var written: URL?
@@ -299,7 +336,8 @@ public struct RecordingSentinel: Codable, Equatable {
             quitDuringFinalize: quitDuringFinalize,
             stopCause: stopCause,
             quitMarkedByPowerOff: quitMarkedByPowerOff,
-            heldReason: heldReason
+            heldReason: heldReason,
+            salvageBegan: salvageBegan
         )
     }
 }

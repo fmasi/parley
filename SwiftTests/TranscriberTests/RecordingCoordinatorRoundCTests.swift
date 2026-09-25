@@ -449,8 +449,10 @@ final class HungRead: @unchecked Sendable {
         clock.advance(by: .seconds(30))
         await Harness.until { h.client.rotateCalls == 1 }
         h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "1000-1")   // the capture's frames are back
+        #expect(h.coordinator.framesSinceImplicitWake, "noted: the frames came back after the implicit wake (L review 196)")
         h.appState.interruptionWarning = nil
         h.coordinator.systemDidWake(at: Date())
+        #expect(!h.coordinator.framesSinceImplicitWake && h.coordinator.implicitWakeAt == nil, "settled by the real wake")
         for _ in 0..<50 { await Task.yield() }
         try await Task.sleep(for: .milliseconds(50))
         let gaps = try #require(await h.runner.chunkProcessor?.getSessionState().gaps)
@@ -537,6 +539,7 @@ final class HungRead: @unchecked Sendable {
         h.client.stopError = RefusedStoppingError()
         h.coordinator.stopDeadline = .milliseconds(300)
         h.coordinator.stopReaskInterval = .milliseconds(50)
+        h.coordinator.stopReaskMinimumBudget = .milliseconds(10)
         await h.coordinator.stopRecording()
         #expect(h.client.stopCalls > 1, "asked again while the other stop ran")
         #expect(h.recordingMic.current == .some("mic-1"), "the mic stays marked: the helper may still hold it")
@@ -559,6 +562,7 @@ final class HungRead: @unchecked Sendable {
         try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
         try Harness.headerOnlyWAV().write(to: call.outputDirectory.appendingPathComponent(call.baseName + ".wav"))
         h.coordinator.stopReaskInterval = .milliseconds(20)
+        h.coordinator.stopReaskMinimumBudget = .milliseconds(10)
         let client = h.client
         client.stopError = RefusedStoppingError()
         client.onStop = { if client.stopCalls == 3 { client.stopError = NoCaptureError() } }   // the other stop ended

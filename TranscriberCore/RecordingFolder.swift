@@ -215,6 +215,9 @@ extension RecordingCoordinator {
         case cleanedUp
         /// Its transcript cannot be read back: rebuilt from its session.json when there is one (L review 93b).
         case damaged
+        /// Its finalized marker is there and its transcript is not: rebuilt the same way — and said missing, never unreadable
+        /// (L review 190).
+        case missing
     }
 
     /// What a salvage needs from the session's folder, read off the main actor (L review 75).
@@ -305,9 +308,10 @@ extension RecordingCoordinator {
                 return SalvageScan(finalized: .cleanedUp, stoppedAt: Date(), chunkCount: 0, legacyAudio: false, legacyLastWrite: nil,
                                    lateAudio: noteAudioAfterTranscript(outputDir: outputDir, sessionId: sessionId))
             }
-            finalized = .damaged
+            let transcript = outputDir.appendingPathComponent("\(sessionId).json").path
+            finalized = FileManager.default.fileExists(atPath: transcript) ? .damaged : .missing
         }
-        let counts = chunkCounts(outputDir: outputDir, sessionId: sessionId, finalized: finalized == .damaged)
+        let counts = chunkCounts(outputDir: outputDir, sessionId: sessionId, finalized: finalized != .notFinalized)
         let files = [sentinel.systemAudioPath, sentinel.micAudioPath].compactMap { try? FileManager.default.attributesOfItem(atPath: $0) }
         let withAudio = files.filter { ($0[.size] as? Int ?? 0) > 44 }
         return SalvageScan(finalized: finalized, stoppedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt),

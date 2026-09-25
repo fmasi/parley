@@ -42,6 +42,12 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     /// already flushed (L review 141): the live logs' queued lines reach the disk, bounded — a hung folder never holds
     /// the exit longer than this.
     func applicationWillTerminate(_ notification: Notification) {
+        // The preparation's own flush already ran out of its bound (L review 195): a folder is not answering — a second wait
+        // here would only hold the exit past the termination's bound. Its queued lines go with the process.
+        if TranscriberApp.busyCoordinator?.exitFlushTimedOut == true {
+            Logger.state.error("The exit's flush already ran out of its bound — the last flush is skipped")
+            return
+        }
         if !LiveDiagnosticsLog.flushAll(within: Self.exitFlushBound) {
             Logger.state.error("A recording folder did not answer the exit's flush — its last queued diagnostic lines are lost")
         }
