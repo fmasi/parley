@@ -119,7 +119,8 @@ import Testing
         b.mergeHelperEvents([captureStop(remote: 30, local: 30, helper: "3000-0", at: 200)])
         let p = provenance(b.finalize(sessionId: "s", directory: d))
         #expect(p.remoteCoverage?.deliveredSeconds == 90, "40 s stopped + 20 s pulled before the crash + 30 s after")
-        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "finalized: the live log is gone")
+        b.commit(sessionId: "s", directory: d)
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "committed: the live log is gone")
     }
 
     /// A helper that survived the app's crash seals its session on disconnect: that `captureStop`, drained
@@ -179,7 +180,96 @@ import Testing
         _ = evidence.finalize(sessionId: "s", directory: d)
         let written = try String(contentsOf: d.appendingPathComponent("s.diag.jsonl"), encoding: .utf8)
         #expect(written.contains("xpcInterruption"))
+        evidence.commit(sessionId: "s", directory: d)
         #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path))
+    }
+
+    /// L review 97: the record is BUILT before the transcript and COMMITTED after it. Until the commit the live
+    /// log (and its coverage) stays: a crash while the transcript is being written is salvaged with everything.
+    @Test func theLiveLogOutlivesTheBuildUntilTheCommit() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .retry, severity: .warning))
+        evidence.noteCoverage(statusPull(remote: 30, local: 30, helper: "1000-0"))
+        _ = evidence.finalize(sessionId: "s", directory: d)
+        LiveDiagnosticsLog.flushAll()
+        let live = d.appendingPathComponent("s.diag.live.jsonl"), coverage = d.appendingPathComponent("s.diag.coverage.json")
+        #expect(FileManager.default.fileExists(atPath: live.path) && FileManager.default.fileExists(atPath: coverage.path),
+                "a clean session keeps its live log until its transcript exists")
+        // The transcript failed; the salvage builds the record again from what is still on disk.
+        let again = SessionEvidence().finalize(sessionId: "s", directory: d)
+        #expect(provenance(again).remoteCoverage?.deliveredSeconds == 30 && provenance(again).retries == 1)
+        evidence.commit(sessionId: "s", directory: d)
+        #expect(!FileManager.default.fileExists(atPath: live.path) && !FileManager.default.fileExists(atPath: coverage.path))
+    }
+
+    /// L review 119: a relaunch's record (a rebuild, a salvage) never overwrites the recording's own
+    /// `.diag.jsonl`: it is written beside it as `<id>.relaunch.diag.jsonl`.
+    @Test func aRelaunchNeverOverwritesTheRecordingsDiagnosticsFile() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let original = Data("the recording's own record\n".utf8)
+        try original.write(to: d.appendingPathComponent("s.diag.jsonl"))
+        let evidence = SessionEvidence()   // the relaunched app: nothing bound
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        _ = evidence.finalize(sessionId: "s", directory: d)
+        #expect(try Data(contentsOf: d.appendingPathComponent("s.diag.jsonl")) == original)
+        let relaunch = try String(contentsOf: d.appendingPathComponent("s.relaunch.diag.jsonl"), encoding: .utf8)
+        #expect(relaunch.contains("xpcInterruption"))
+    }
+
+    /// … while a second build of the SAME session in this process (the transcript failed, the salvage builds
+    /// again) continues its own record — a superset — and updates its own file.
+    @Test func aSecondBuildOfTheSameSessionUpdatesItsOwnFile() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        _ = evidence.finalize(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 6), origin: .app, kind: .retry, severity: .warning))
+        _ = evidence.finalize(sessionId: "s", directory: d)
+        let written = try String(contentsOf: d.appendingPathComponent("s.diag.jsonl"), encoding: .utf8)
+        #expect(written.contains("xpcInterruption") && written.contains("retry"))
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.relaunch.diag.jsonl").path))
+    }
+
+    /// L review 98: a pending retry stops a stray helper and drains it ONCE, before any salvage. Its events go
+    /// to the pending session whose live log knows that helper session — never to whichever session is
+    /// salvaged first. Here pending = [older P, held H]; the helper was H's.
+    @Test func aStrayHelpersEventsGoToThePendingSessionThatKnowsIt() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {   // the crashed processes' evidence: P recorded on helper 1000-0, H on helper 2000-0
+            let p = SessionEvidence(); p.beginCapture(sessionId: "p", directory: d)
+            p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
+            let held = SessionEvidence(); held.beginCapture(sessionId: "h", directory: d)
+            held.noteCoverage(statusPull(remote: 20, local: 20, helper: "2000-0"))
+        }
+        var helperRing = CaptureDiagnostics()
+        helperRing.record(captureStop(remote: 25, local: 25, helper: "2000-0", at: 50))   // sealed by the retry's stop
+        let evidence = SessionEvidence()
+        SessionEvidence.attributeHelperDrain(helperRing.snapshotData(), toOneOf: [("p", d), ("h", d)])
+        let p = provenance(evidence.finalize(sessionId: "p", directory: d))
+        let h = provenance(evidence.finalize(sessionId: "h", directory: d))
+        #expect(p.remoteCoverage?.deliveredSeconds == 10, "P's own coverage only")
+        #expect(h.remoteCoverage?.deliveredSeconds == 25, "H's captureStop supersedes its last pull")
+    }
+
+    /// … and a helper session no pending session knows is attributed to none of them.
+    @Test func aStrayHelpersEventsNobodyKnowsAreNotAttributed() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {
+            let p = SessionEvidence(); p.beginCapture(sessionId: "p", directory: d)
+            p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
+        }
+        var helperRing = CaptureDiagnostics()
+        helperRing.record(captureStop(remote: 99, local: 99, helper: "3000-0", at: 50))
+        helperRing.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 51), origin: .helper, kind: .rateDrift, severity: .anomaly,
+                                       detail: ["source": "system-tap"]))
+        let evidence = SessionEvidence()
+        SessionEvidence.attributeHelperDrain(helperRing.snapshotData(), toOneOf: [("p", d)])
+        let record = evidence.finalize(sessionId: "p", directory: d)
+        #expect(provenance(record).remoteCoverage?.deliveredSeconds == 10)
+        #expect(!record.events.contains { $0.kind == .rateDrift }, "never under the wrong session")
     }
 
     /// … and when it cannot be written, the live log is KEPT and the failure is on record.
@@ -190,6 +280,7 @@ import Testing
         evidence.beginCapture(sessionId: "s", directory: d)
         evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
         let merged = evidence.finalize(sessionId: "s", directory: d)
+        evidence.commit(sessionId: "s", directory: d)
         #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "the live log is kept")
         #expect(merged.events.contains { $0.kind == .sessionWriteFailed && $0.detail["file"] == "diag.jsonl" })
     }

@@ -112,6 +112,8 @@ public final class RecordingCoordinator {
     var quitFeedbackDelay: Duration = .seconds(2)
     /// The user's Quit is stopping the recording: the menu says "Quitting…".
     public private(set) var isQuitting = false
+    /// The bound on the live-log flush at every exit (L review 96). Tests shorten it.
+    var evidenceFlushBound: Duration = .seconds(1)
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
     /// two quit events) joins it instead of stopping twice.
     private var terminationPrep: Task<Void, Never>?
@@ -748,6 +750,8 @@ public final class RecordingCoordinator {
                     outputDirectory: outputDir,
                     config: configManager.config
                 )
+                // Only now, the transcript on disk, does the live log go (L review 97).
+                captureClient.commitSessionDiagnostics(sessionId: sessionState.sessionId, directory: outputDir)
                 await presentCompletedTranscription(result)
             } else {
                 // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
@@ -778,6 +782,8 @@ public final class RecordingCoordinator {
                         transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
                         provenance: provenance
                     )
+                    // A transcript, or nothing at all to keep: the live log goes (L review 97).
+                    captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: sessionOutputDir)
                 } else {
                     // Genuine single-file input (non-chunked recording / legacy path).
                     let (systemAudio, micAudio) = Self.legacySingleFileInputs(
@@ -802,6 +808,7 @@ public final class RecordingCoordinator {
                         config: configManager.config,
                         provenance: provenance
                     )
+                    captureClient.commitSessionDiagnostics(sessionId: sid, directory: outputDir)
                 }
 
                 if let result {
@@ -1264,6 +1271,16 @@ public final class RecordingCoordinator {
                                       systemAudioSource: systemAudioSource, options: options, sessionId: sessionId)
     }
     private func awaitRotationInFlight() async { await transcriptionRunner.chunkRotator?.awaitRotationInFlight() }
+    private func attributeHelperDrain(_ sessions: [(sessionId: String, directory: URL)]) async {
+        await captureClient.attributeHelperDrain(toOneOf: sessions)
+    }
+    private func flushEvidence() async { await captureClient.flushEvidence() }
+
+    /// Every queued live-log write reaches the disk before the process ends (L review 96) — bounded: a stuck disk
+    /// never holds an exit longer than `evidenceFlushBound`.
+    private func flushEvidenceForExit() async {
+        _ = try? await withDeadline(seconds: Self.seconds(evidenceFlushBound), label: "exit: evidence flush") { await self.flushEvidence() }
+    }
 
     /// A bounded helper stop on a path that ends a capture (§8.6). True once the helper has let go: it
     /// stopped, or it answered that nothing was capturing. False when it did not stop — it timed out, or
@@ -1608,6 +1625,9 @@ public final class RecordingCoordinator {
             // finishes the recording once, on the live pipeline (the orphans are already queued in it).
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
+            // Bound NOW (L review 121): what the pipeline's setup records — a re-attach that cannot rotate — is this
+            // session's, and the adopt below, finding it bound, only drains.
+            captureClient.bindSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir)
             reattachPipeline(sentinel: sentinel, outputDir: outputDir, scan: scan)
             // At once: the crashed app's last refresh may be minutes old, and a crash in the next minute
             // must still resume. The alive timer (with the status poll) takes over from here.
@@ -1860,6 +1880,13 @@ public final class RecordingCoordinator {
                 return
             }
             clearHelperMic()   // the helper let go of the mic a held session kept marked (L review 88)
+            // The helper just stopped: its events — the capture it held, sealed — go to the pending session that knows
+            // its helper session, or to none; drained ONCE, before any salvage binds (L review 98). Bounded.
+            let sessions = ready.map { (sessionId: stripSegmentSuffix($0.systemAudioPath),
+                                        directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent()) }
+            _ = try? await withDeadline(seconds: Self.seconds(folderReadDeadline), label: "pending: attribute the helper's events") {
+                await self.attributeHelperDrain(sessions)
+            }
             for sentinel in ready {
                 guard appState.isIdle, !isStartInFlight else {
                     retryPendingWhenIdle = true
@@ -2378,6 +2405,7 @@ public final class RecordingCoordinator {
         // Again: a restart or a start may have rewritten the sentinel meanwhile.
         markSentinelStopping()
         markExitDuringFinalize()
+        await flushEvidenceForExit()
     }
 
     /// The app is ending NOW (L review 85): SYNCHRONOUSLY — the process can exit in the same turn, before any
@@ -2410,8 +2438,10 @@ public final class RecordingCoordinator {
         _ = try? await withDeadline(seconds: Self.seconds(startDeadline + helperStopDeadline), label: "exit: start in flight") {
             await self.awaitSettled { !$0.isStartInFlight }
         }
-        guard !appState.isIdle else { return }
-        _ = try? await withDeadline(seconds: Self.seconds(bound), label: "exit stop") { await self.stopUntilIdle() }
+        if !appState.isIdle {
+            _ = try? await withDeadline(seconds: Self.seconds(bound), label: "exit stop") { await self.stopUntilIdle() }
+        }
+        await flushEvidenceForExit()
     }
 
     private func stopUntilIdle() async {
@@ -2627,6 +2657,9 @@ public final class RecordingCoordinator {
         do {
             let config = configManager.config
             let (transcriber, diarizer) = try prepareEngines(config: config)
+            // Bound to this session BEFORE its drain (L review 98): reset, drain, build — as the resume does. What
+            // the helper still holds is this session's (a pending retry attributed a stray helper's already).
+            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir)
             // Drain capture diagnostics and stamp the always-present provenance into the
             // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
             // otherwise a recovered session's `sessionState.provenance` stays nil forever.
@@ -2648,6 +2681,7 @@ public final class RecordingCoordinator {
                 let failures = await readOffMain("salvage: transcript") { SalvageOutcome.recognitionFailures(inTranscriptAt: jsonPath) } ?? nil
                 outcome = SalvageOutcome(kind: .transcriptWritten(result.jsonPath), chunkCount: chunkCount,
                                          recognitionFailures: failures ?? .init())
+                captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)   // L review 97
             } else {
                 Logger.state.info("Chunked session had nothing to recover")
                 // Chunks on disk that produced nothing are kept, not "no recorded audio" (L round 5). A finalized
@@ -2658,6 +2692,8 @@ public final class RecordingCoordinator {
                 outcome = chunkCount > 0
                     ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: chunkCount)
                     : SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
+                // Nothing on disk at all: nothing to keep evidence for. Chunks kept untranscribed keep theirs.
+                if chunkCount == 0 { captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir) }
             }
         } catch {
             Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
@@ -2852,6 +2888,7 @@ public final class RecordingCoordinator {
             appState.lastTranscriptPath = result.jsonPath.path
             Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
             kind = .transcriptWritten(result.jsonPath)
+            captureClient.commitSessionDiagnostics(sessionId: sessionState.sessionId, directory: outputDir)   // L review 97
         } catch {
             // Reported, not swallowed (§7.4 P6): the chunks stay on disk, untranscribed.
             Logger.state.error("Salvage finalize failed: \(error, privacy: .private)")

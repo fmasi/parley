@@ -10,8 +10,10 @@ import os
 ///   id (L11 review 66): ids are `HHmmss-<name>` with no date, so a recurring meeting started at the same
 ///   second on another day has the same id in another day folder. The SAME session — an in-session restart,
 ///   or a relaunch that resumes it — keeps it all; a finalized one is never continued.
-/// - Every event is also appended to `<session>.diag.live.jsonl` as it happens, so an app crash loses at
-///   most the line in flight; finalize merges it back, deduplicated.
+/// - Every event is also appended to `<session>.diag.live.jsonl` as it happens (queued: an app crash loses only
+///   the lines still queued, and every exit flushes them first — L review 96); building the record merges it
+///   back, deduplicated. It is deleted only when the session is COMMITTED, once its transcript exists (L review
+///   97): a crash while the transcript is written is salvaged with all of it.
 /// - Every status pull's coverage is kept per helper session (council A-I4 / C-I1). At finalize a helper
 ///   session's latest snapshot stands in for the `captureStop` a crashed helper never wrote; a
 ///   `captureStop` of that helper session, when there is one, supersedes it (never counted twice).
@@ -25,6 +27,8 @@ public final class SessionEvidence {
     /// The last finalized session and its record: a second finalize of it (a salvage after its transcript
     /// failed) continues it; any other session never sees it (L11 review 66).
     private var finalized: (directory: String, id: String, record: CaptureDiagnostics)?
+    /// Sessions whose `.diag.jsonl` could not be written: their live log is their only record, never committed away.
+    private var unwrittenRecords: Set<String> = []
     /// Which session the evidence is bound to, as a tag: bumped whenever a NEW session binds, and when one
     /// ends. A helper call is tagged with it when made; what it records later for another binding is dropped
     /// (L9 review 52).
@@ -94,14 +98,17 @@ public final class SessionEvidence {
         liveLog.writeCoverage(helperSession: facts["helper_session"] ?? snapshot.helperSessionId, facts: facts, at: date)
     }
 
-    /// Everything the session recorded, for its provenance and `.diag.jsonl`: the ring, the live log (this
-    /// process's, or an earlier one's for a session salvaged or resumed after a crash), and the latest
-    /// coverage of every helper session that wrote no `captureStop`.
+    /// BUILDS the session's record, for its provenance and `.diag.jsonl` (L review 97): the ring, the live log
+    /// (this process's, or an earlier one's for a session salvaged or resumed after a crash), and the latest
+    /// coverage of every helper session that wrote no `captureStop`. The live log is NOT deleted here: that is
+    /// `commit`, once the transcript exists.
     ///
-    /// When the session was anomalous, `<session>.diag.jsonl` is written — atomically — BEFORE the live log is
-    /// deleted (L11 review 61); if it cannot be written, the live log is kept and the failure is on record.
-    /// The session then ends: nothing continues it (L11 review 66). A second finalize of the same session (a
-    /// salvage after its transcript failed) still finds everything.
+    /// When the session was anomalous, `<session>.diag.jsonl` is written, atomically; if it cannot be, the failure
+    /// is on record and the live log is never committed away (L11 review 61). A relaunch's record — nothing of
+    /// this session bound in this process — never overwrites the recording's own file: it goes beside it as
+    /// `<session>.relaunch.diag.jsonl` (L review 119). The session then ends: nothing continues it (L11 review
+    /// 66). A second finalize of the same session (a salvage after its transcript failed) still finds
+    /// everything, and updates its own file.
     public func finalize(sessionId: String, directory: URL) -> CaptureDiagnostics {
         let bound = isBound(to: sessionId, in: directory)
         // The ring is this session's when bound to it, or — nothing bound (a salvage at launch) — the events
@@ -109,10 +116,12 @@ public final class SessionEvidence {
         // session's (L11 review 66).
         let ownsRing = bound || session == nil
         var ring = ownsRing ? diagnostics : CaptureDiagnostics(maxEvents: diagnostics.maxEvents)
+        var continuesOwnRecord = bound
         if !bound, ownsRing, let earlier = finalized, earlier.id == sessionId, earlier.directory == Self.key(directory) {
             var continued = earlier.record
             continued.merge(ring.events)
             ring = continued
+            continuesOwnRecord = true
         }
         let log = (bound ? liveLog : nil) ?? LiveDiagnosticsLog(directory: directory, sessionId: sessionId)
         let logged = log.events()
@@ -129,22 +138,24 @@ public final class SessionEvidence {
             }
         if !standIns.isEmpty { merged.merge(standIns) }
 
-        var keepLiveLog = false
         if merged.isAnomalous {
-            let url = directory.appendingPathComponent("\(sessionId).diag.jsonl")
+            var url = directory.appendingPathComponent("\(sessionId).diag.jsonl")
+            if !continuesOwnRecord, FileManager.default.fileExists(atPath: url.path) {
+                url = directory.appendingPathComponent("\(sessionId).relaunch.diag.jsonl")   // never over the richer original
+            }
             do {
                 try merged.jsonlData().write(to: url, options: .atomic)
+                unwrittenRecords.remove(Self.recordKey(sessionId, directory))
                 Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(merged.events.count) events)")
             } catch {
                 Logger.files.error("Failed to flush diagnostics — keeping the live log: \(error, privacy: .private)")
-                keepLiveLog = true
+                unwrittenRecords.insert(Self.recordKey(sessionId, directory))
                 let failure = CaptureEvent(timestamp: Date(), origin: .app, kind: .sessionWriteFailed, severity: .anomaly,
                                            detail: ["file": "diag.jsonl", "error": error.localizedDescription])
                 merged.record(failure)
                 log.append(failure)
             }
         }
-        if !keepLiveLog { log.delete() }
         if ownsRing {
             // Kept aside for a second finalize of this session; the ring starts afresh for whatever comes next.
             finalized = (Self.key(directory), sessionId, merged)
@@ -156,6 +167,40 @@ public final class SessionEvidence {
             epoch += 1
         }
         return merged
+    }
+
+    private static func recordKey(_ sessionId: String, _ directory: URL) -> String { key(directory) + "\u{0}" + sessionId }
+
+    /// The session's transcript is on disk (L review 97): its live log and coverage go — unless its `.diag.jsonl`
+    /// could not be written, when the live log is its only record and stays.
+    public func commit(sessionId: String, directory: URL) {
+        guard unwrittenRecords.remove(Self.recordKey(sessionId, directory)) == nil else {
+            Logger.files.error("The session's diagnostics file could not be written — its live log is kept")
+            return
+        }
+        LiveDiagnosticsLog(directory: directory, sessionId: sessionId).delete()
+    }
+
+    /// A pending retry's drain of the helper it stopped (L review 98). The events belong to the pending session
+    /// whose live log knows that helper session — a `captureStop` of it, or a status pull's coverage — and are
+    /// appended to THAT session's live log, which its salvage merges. A helper session no pending session knows
+    /// (or more than one claims) is attributed to none: logged, never recorded under the wrong session, and never
+    /// left in a ring for whichever session is finalized next. Reads the sessions' folders: never on the main actor.
+    nonisolated public static func attributeHelperDrain(_ data: Data, toOneOf sessions: [(sessionId: String, directory: URL)]) {
+        let events = CaptureDiagnostics.events(from: data)
+        guard !events.isEmpty else { return }
+        let helpers = Set(events.compactMap { $0.detail["helper_session"] })
+        let owners = sessions.filter { session in
+            let log = LiveDiagnosticsLog(directory: session.directory, sessionId: session.sessionId)
+            let known = Set(log.coverageSnapshots().keys).union(log.events().compactMap { $0.detail["helper_session"] })
+            return !known.isDisjoint(with: helpers)
+        }
+        guard owners.count == 1, let owner = owners.first else {
+            Logger.state.info("\(events.count, privacy: .public) helper events of a helper session no pending recording can claim — not attributed")
+            return
+        }
+        let log = LiveDiagnosticsLog(directory: owner.directory, sessionId: owner.sessionId)
+        for event in events { log.append(event) }
     }
 
     /// A start that never became a recording (L11 review 68): its evidence is dropped and its live log

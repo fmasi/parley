@@ -98,6 +98,16 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     func adoptSession(sessionId: String, directory: URL) async
     /// A start that never became a recording (L11 review 68): its evidence is dropped and its live log deleted.
     func discardSessionEvidence(sessionId: String, directory: URL)
+    /// Bind the evidence to `sessionId` NOW, synchronously — a relaunch that re-attaches does it before it builds
+    /// its pipeline, so nothing recorded meanwhile is reset by the adopt that follows (L review 121).
+    func bindSession(sessionId: String, directory: URL)
+    /// The session's transcript is on disk: its live log is deleted — never before (L review 97).
+    func commitSessionDiagnostics(sessionId: String, directory: URL)
+    /// A pending retry stopped a stray helper: drain it once and give its events to the pending session whose
+    /// live log knows its helper session, or to none — never to whichever is salvaged first (L review 98).
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async
+    /// Every queued live-log write reaches the disk (L review 96). The caller bounds it.
+    func flushEvidence() async
     /// Forward an `NSWorkspace` sleep / wake ("sleep" | "wake") to the helper (§8.10).
     func systemPowerEvent(_ kind: String) async
     /// Record an app-origin event into the diagnostic ring.
@@ -107,8 +117,9 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     /// Switch the live capture to another microphone (`nil` = system default).
     func updateMicrophone(deviceId: String?) async throws
 
-    /// Drain the helper's diagnostics, flush the anomaly-gated `<sessionId>.diag.jsonl`, and
-    /// build the transcript provenance stamp (#95).
+    /// Drain the helper's diagnostics, build the session's record — writing the anomaly-gated
+    /// `<sessionId>.diag.jsonl` — and the transcript provenance stamp (#95). The live log stays until
+    /// `commitSessionDiagnostics`, once the transcript exists (L review 97).
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,

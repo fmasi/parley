@@ -27,6 +27,19 @@ import Testing
         #expect(merged.events.count == 2, "the event both on disk and in the ring is one event")
     }
 
+    /// L review 96: live-log writes are queued (item 65); an exit flushes every queued write of every log.
+    @Test func flushAllWaitsForEveryQueuedWrite() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        let release = DispatchSemaphore(value: 0)
+        log.writeObserver = { release.wait() }   // the write queue is held until the flush is under way
+        log.append(retry(at: 1))
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { release.signal() }
+        LiveDiagnosticsLog.flushAll()
+        let onDisk = try String(contentsOf: d.appendingPathComponent("s.diag.live.jsonl"), encoding: .utf8)
+        #expect(onDisk.contains("retry"))
+    }
+
     @Test func aSubSecondTimestampDedupsAcrossDiskAndRing() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")

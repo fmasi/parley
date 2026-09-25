@@ -194,6 +194,34 @@ final class AudioCaptureClient {
         evidence.discard(sessionId: sessionId, directory: directory)
     }
 
+    /// A relaunch binds the session it continues at once, before anything is recorded into it; the adopt that
+    /// follows then only drains (L review 121).
+    func bindSession(sessionId: String, directory: URL) {
+        evidence.beginCapture(sessionId: sessionId, directory: directory)
+    }
+
+    /// The session's transcript is on disk: its live log goes (L review 97).
+    func commitSessionDiagnostics(sessionId: String, directory: URL) {
+        evidence.commit(sessionId: sessionId, directory: directory)
+    }
+
+    /// A pending retry stopped a stray helper: drain it ONCE, and give its events to the pending session that
+    /// knows its helper session, or to none (L review 98). The folders are read off the main actor.
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
+        guard let data = await drainHelperData() else {
+            Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s — its events stay with it")
+            return
+        }
+        guard let data else { return }
+        await Task.detached(priority: .userInitiated) { SessionEvidence.attributeHelperDrain(data, toOneOf: sessions) }.value
+    }
+
+    /// Every queued live-log write reaches the disk (L review 96). Blocking file work: off the main actor; the
+    /// caller bounds it.
+    func flushEvidence() async {
+        await Task.detached(priority: .userInitiated) { LiveDiagnosticsLog.flushAll() }.value
+    }
+
     /// Reverse-channel receipt of a system-stream-unrecoverable warning (#86). Records the anomaly into
     /// the app ring — so it lands in the transcript provenance (`system_audio_unrecovered`) and flags
     /// the session — then surfaces the warning. The recording is NEVER stopped (the mic keeps recording).
@@ -237,17 +265,24 @@ final class AudioCaptureClient {
     /// on that timeout: the caller records it into the session it concerns (L11 review 68) — a start's drain,
     /// say, is the NEW session's first call, while its events still belong to the previous one.
     private func drainHelperDiagnostics() async -> Bool {
-        guard let conn = connection else { return true }
-        let reply: Result<Data?, Error> = await boundedReply("drainDiagnostics", seconds: 3) { done in
-            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
-            proxy.drainDiagnostics { done(.success($0)) }
-        }
-        guard case .success(let data) = reply else {
+        guard let data = await drainHelperData() else {
             Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
             return false
         }
         if let data { evidence.mergeHelperDrain(data) }
         return true
+    }
+
+    /// The helper's drained ring as it came off the wire: `.some(nil)` when there is no connection or nothing
+    /// came back, nil when it did not answer within 3 s.
+    private func drainHelperData() async -> Data?? {
+        guard let conn = connection else { return .some(nil) }
+        let reply: Result<Data?, Error> = await boundedReply("drainDiagnostics", seconds: 3) { done in
+            let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(nil)) } as! AudioCaptureProtocol
+            proxy.drainDiagnostics { done(.success($0)) }
+        }
+        guard case .success(let data) = reply else { return nil }
+        return .some(data)
     }
 
     private func recordDrainTimeout() {

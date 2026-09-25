@@ -62,6 +62,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         sessionId: String
     ) async throws {
         sessionCalls.append("start:\(sessionId)")
+        bound = (sessionId, outputDirectory.standardizedFileURL.path)
         startCalls.append(StartCall(
             outputDirectory: outputDirectory,
             baseName: baseName,
@@ -108,11 +109,45 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     /// The order of the calls that decide which session the evidence belongs to (L follow-up 43).
     var sessionCalls: [String] = []
+    /// Bind, attribute, adopt, finalize (build), commit — in order (L review 97, 98, 121).
+    var evidenceOrder: [String] = []
+    /// The session the evidence is bound to. Binding a NEW one resets what was recorded, as production's
+    /// `beginCapture` does (L review 121).
+    var bound: (id: String, directory: String)?
+    private func bind(_ sessionId: String, _ directory: URL) {
+        let key = (sessionId, directory.standardizedFileURL.path)
+        if bound.map({ $0.id != key.0 || $0.directory != key.1 }) ?? true { recordedEvents = [] }
+        bound = key
+    }
+    func bindSession(sessionId: String, directory: URL) {
+        evidenceOrder.append("bind:\(sessionId)")
+        bind(sessionId, directory)
+    }
     /// Awaited inside adoptSession(): lets a test act while a re-attach adopts (L review 72).
     var onAdopt: (() async -> Void)?
     func adoptSession(sessionId: String, directory: URL) async {
         sessionCalls.append("adopt:\(sessionId)")
+        evidenceOrder.append("adopt:\(sessionId)")
+        bind(sessionId, directory)
         await onAdopt?()
+    }
+    var commitCalls: [String] = []
+    /// Runs inside the commit: (session id, folder).
+    var onCommit: ((String, URL) -> Void)?
+    func commitSessionDiagnostics(sessionId: String, directory: URL) {
+        commitCalls.append(sessionId)
+        evidenceOrder.append("commit:\(sessionId)")
+        onCommit?(sessionId, directory)
+    }
+    func attributeHelperDrain(toOneOf sessions: [(sessionId: String, directory: URL)]) async {
+        evidenceOrder.append("attribute:" + sessions.map(\.sessionId).joined(separator: ","))
+    }
+    var flushCalls = 0
+    /// Awaited inside the flush: lets a test hang it.
+    var onFlush: (() async -> Void)?
+    func flushEvidence() async {
+        flushCalls += 1
+        await onFlush?()
     }
     /// Sessions whose evidence was dropped: a start that never became a recording (L11 review 68).
     var discardedSessions: [String] = []
@@ -155,6 +190,8 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         sessionId: String, engine: String, recordingDirectory: URL
     ) async -> CaptureProvenance {
         finalizeCalls.append((sessionId, engine, recordingDirectory))
+        evidenceOrder.append("finalize:\(sessionId)")
+        bound = nil
         return CaptureDiagnostics().makeProvenance(
             engine: engine, systemFormat: nil, micFormat: nil, micDevice: nil
         )
@@ -4399,6 +4436,9 @@ private struct Harness {
         h.client.isCapturingResult = true
         h.runner.failSetupForTesting = true
         await h.coordinator.recoverAtLaunch()
+        // L review 121: the anomaly is recorded into the BOUND session — the adopt that follows, whose bind of a
+        // new session resets the evidence, would otherwise wipe it.
+        #expect(h.client.evidenceOrder.prefix(2) == ["bind:sess", "adopt:sess"])
         #expect(h.appState.isRecording, "still re-attached: the helper keeps capturing")
         #expect(h.appState.activeAlarms[.rotationFailed]?.message.contains("re-attached recording can’t rotate") == true)
         #expect(h.client.recordedEvents.contains { $0.kind == .rotationFailed && $0.severity == .anomaly })
@@ -4733,5 +4773,97 @@ private struct Harness {
                                  chunks: [chunk(0, []), chunk(1, [ChunkIssue(code: .asrFailed, track: "remote", count: nil)])])
         let outcome = await h.coordinator.salvageAbandonedSession(sessionState: state, outputDir: dir)
         #expect(outcome.recognitionFailures == .init(remoteOnly: 1))
+    }
+}
+
+// MARK: - L round A: evidence survives every exit and is credited to its own session (96, 97, 98)
+
+@MainActor
+@Suite struct RecordingCoordinatorEvidenceTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    /// L review 96: live-log writes are queued (item 65); a termination flushes them after the helper's stop.
+    @Test func aTerminationFlushesTheQueuedEvidenceAfterTheStop() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let client = h.client, afterStop = Harness.Box(false)
+        client.onFlush = { afterStop.value = client.stopCalls == 1 }
+        await h.coordinator.prepareForTermination(bound: .seconds(2))
+        #expect(h.client.flushCalls == 1 && afterStop.value)
+    }
+
+    /// … a user's Quit too, and a flush that hangs is bounded (1 s at most; shortened here).
+    @Test func aQuitFlushesTheEvidenceWithinItsBound() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.evidenceFlushBound = .milliseconds(100)
+        h.client.onFlush = { try? await Task.sleep(for: .seconds(3)) }
+        let began = ContinuousClock.now
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(h.client.flushCalls == 1)
+        #expect(ContinuousClock.now - began < .seconds(2), "the hung flush is bounded")
+    }
+
+    /// L review 97: the live log is committed only once the transcript is on disk: a crash while it is written
+    /// is salvaged with all of its evidence.
+    @Test func theEvidenceIsCommittedOnlyOnceTheTranscriptExists() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        let transcriptThere = Harness.Box(false)
+        h.client.onCommit = { id, dir in transcriptThere.value = FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(id).json").path) }
+        await h.coordinator.stopRecording()
+        #expect(h.client.commitCalls == [call.sessionId] && transcriptThere.value)
+        #expect(h.client.evidenceOrder.suffix(2) == ["finalize:\(call.sessionId)", "commit:\(call.sessionId)"])
+    }
+
+    /// … and a transcript that could not be written commits nothing: the live log stays for the next salvage.
+    @Test func aTranscriptThatCannotBeWrittenCommitsNothing() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: call.outputDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: call.outputDirectory.path) }
+        await h.coordinator.stopRecording()
+        #expect(!h.client.finalizeCalls.isEmpty, "the record was built")
+        #expect(h.client.commitCalls.isEmpty, "never committed without a transcript")
+    }
+
+    /// L review 98: a pending retry drains the stray helper it stopped ONCE, attributed by helper session,
+    /// before any salvage; each salvage then binds its own session before its drain and build.
+    @Test func aPendingRetryAttributesTheStraysEventsBeforeAnySalvage() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        var sessions: [RecordingSentinel] = []
+        for name in ["p", "h"] {
+            let dir = h.tmp.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: name, meetingStart: Date(), chunkIndices: [0])
+            sessions.append(RecordingSentinel(startedAt: Date(), sessionName: name, systemAudioPath: dir.appendingPathComponent("\(name)-0.wav").path,
+                                              micAudioPath: dir.appendingPathComponent("\(name)-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true))
+        }
+        try RecordingSentinel.writePending(sessions, directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.client.evidenceOrder == ["attribute:p,h", "adopt:p", "finalize:p", "commit:p", "adopt:h", "finalize:h", "commit:h"])
     }
 }

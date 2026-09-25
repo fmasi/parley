@@ -1,8 +1,10 @@
 import Foundation
 import os
 
-/// Append-as-you-go anomaly log (§8.11): `<session>.diag.live.jsonl` next to the recording. Written
-/// line by line so a crash loses at most the line in flight; merged into the ring at finalize.
+/// Append-as-you-go anomaly log (§8.11): `<session>.diag.live.jsonl` next to the recording. Written line by line,
+/// queued (below): an app crash loses only the lines still queued — normally none, each write takes a moment —
+/// and every exit flushes the queue first (L review 96). Merged into the ring when the record is built, and
+/// deleted only once the session's transcript exists (L review 97).
 ///
 /// Beside it, `<session>.diag.coverage.json` keeps the LATEST coverage of each helper session (council
 /// A-I4 / C-I1): coverage otherwise lives only in `captureStop`, which a crashed helper never writes. One
@@ -90,9 +92,15 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         }
     }
 
-    /// Returns once every write queued before it is on disk. Internal for tests.
-    func flush() {
-        Self.io.sync {}
+    /// Returns once every write queued — by any log — is on disk. Blocks: the caller bounds it (an exit runs it
+    /// off the main actor under a deadline, L review 96).
+    public static func flushAll() {
+        io.sync {}
+    }
+
+    /// Returns once every write queued before it is on disk.
+    public func flush() {
+        Self.flushAll()
     }
 
     public func events() -> [CaptureEvent] {
