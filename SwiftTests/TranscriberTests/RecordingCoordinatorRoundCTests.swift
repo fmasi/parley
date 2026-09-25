@@ -729,3 +729,66 @@ final class HungRead: @unchecked Sendable {
         #expect(row.contains("separate list"), "\(row)")
     }
 }
+
+// MARK: - The transcript's and the rebuild's folder looks (158)
+
+@MainActor
+@Suite struct RecordingCoordinatorTranscriptReadsRoundCTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+    private func hanging(_ hung: HungRead) -> FolderReads {
+        FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+    }
+
+    /// L review 158: the transcript's look at its folder (which chunk files are there, the leftover WAVs) runs off the
+    /// main actor, bounded. A Stop whose folder stops answering there is never finalized blind, and never frozen: the
+    /// session is kept for when the folder answers, and its evidence is not committed.
+    @Test func aStopWhoseTranscriptFolderDoesNotAnswerIsKept() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        let hung = HungRead("transcript: chunk files")
+        defer { hung.release() }
+        h.coordinator.folderReads = hanging(hung)
+        h.coordinator.folderReadDeadline = .milliseconds(150)
+        let began = ContinuousClock.now
+        await h.coordinator.stopRecording()
+        #expect(ContinuousClock.now - began < .seconds(3), "bounded")
+        #expect(h.appState.isIdle && h.client.commitCalls.isEmpty)
+        let kept = try #require(pending(h).first, "kept for when the folder answers")
+        #expect(kept.sessionKey == call.outputDirectory.appendingPathComponent(call.sessionId).path && kept.stopCause == .folderNotAnswering)
+        #expect(h.criticals.value.last?.body.contains("isn’t answering") == true, "\(h.criticals.value)")
+    }
+
+    /// L review 158: the rebuild from disk reads its folder off the main actor, bounded. A salvage whose folder does not
+    /// answer there waits — pending, its folder said not to answer — never a failure, never a row claiming anything.
+    @Test func aSalvageWhoseRebuildFolderDoesNotAnswerWaits() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let dir = h.tmp.appendingPathComponent("p")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "p", meetingStart: Date(), chunkIndices: [0])
+        let p = RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: dir.appendingPathComponent("p-0.wav").path,
+                                  micAudioPath: dir.appendingPathComponent("p-0_mic.wav").path, stopping: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        let hung = HungRead("recovery: session folder")
+        defer { hung.release() }
+        h.coordinator.folderReads = hanging(hung)
+        h.coordinator.folderReadDeadline = .milliseconds(150)
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "it waits")
+        #expect(h.presented.value.isEmpty && h.client.commitCalls.isEmpty)
+        #expect(h.appState.isIdle && h.appState.activeAlarms[.recordingStopped] == nil, "nothing claimed")
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil, "its folder is said not to answer")
+    }
+}

@@ -46,6 +46,11 @@ public final class TranscriptionRunner {
     var failSetupForTesting = false
     /// Test seam: `finalize` sleeps this long before doing anything.
     var finalizeDelayForTesting: Duration?
+    /// Where the transcript's looks at its folder run — which chunk files are there, the leftover WAVs, the mic file —
+    /// off the main actor, bounded (L review 158). The coordinator hands over its own; tests inject one that hangs.
+    public var folderReads: FolderReads = .shared
+    /// The bound on one such look, in awake seconds; a folder that does not answer throws `FolderNotAnswering`.
+    public var folderReadSeconds: Double = 15
     private enum SetupFailure: Error { case forTesting }
 
     private let wavHeaderSize = 44
@@ -133,7 +138,11 @@ public final class TranscriptionRunner {
             var micSpeakerDb: [String: [Float]] = [:]
             if isDualStream {
                 let micPath = segmentPair.mic
-                if FileManager.default.fileExists(atPath: micPath.path) {
+                // Off the main actor, bounded (L review 158).
+                guard let micThere = await folderReads.read("transcript: mic file", folder: micPath.deletingLastPathComponent().path,
+                                                            key: micPath.path, seconds: folderReadSeconds, { FileManager.default.fileExists(atPath: micPath.path) })
+                else { throw FolderNotAnswering() }
+                if micThere {
                     let micResult = try await transcribeStream(
                         audioPath: micPath,
                         source: "local",
@@ -411,18 +420,23 @@ public final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
-        // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
-        // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
-        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV.
-        if !(config.preserveSourceWAV ?? false) {
-            Self.removeLeftoverWAVs(of: sortedChunks, in: outputDirectory)
-        }
-
         // 5. Audio paths from chunks — must be in index order so AudioConcatenator
         // stitches them chronologically. (#56)
         let chunkAudioPaths = sortedChunks.map {
             outputDirectory.appendingPathComponent($0.audioPath)
         }
+
+        // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
+        // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
+        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV.
+        // With which chunk files are there (5b): one look at the folder, off the main actor, bounded (L review 158) —
+        // a folder that does not answer is never finalized blind.
+        let removeLeftovers = !(config.preserveSourceWAV ?? false), leftoverChunks = sortedChunks
+        guard let present = await folderReads.read("transcript: chunk files", folder: outputDirectory.path,
+                                                   key: outputDirectory.path + "#finalize:" + sessionState.sessionId, seconds: folderReadSeconds, {
+            if removeLeftovers { Self.removeLeftoverWAVs(of: leftoverChunks, in: outputDirectory) }
+            return chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
+        }) else { throw FolderNotAnswering() }
 
         // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
         // Each chunk carries its start time so a gap (crash restart, sleep) is kept as silence and the
@@ -440,7 +454,6 @@ public final class TranscriptionRunner {
         // it is listed too, in time order with its offset, so every segment has audio behind it
         // (round 6 item 1). Not re-merged: the merged file is the only copy of the chunks it holds.
         let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
-        let present = chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
         let sourcesGone = present.contains(false)
         let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
         if chunkAudioPaths.count > 1, sourcesGone, mergedSeconds > 0 {
@@ -582,7 +595,7 @@ public final class TranscriptionRunner {
     }
 
     /// See step 4b of `finalize`.
-    static func removeLeftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) {
+    nonisolated static func removeLeftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) {
         let fm = FileManager.default
         for chunk in chunks where chunk.audioPath.hasSuffix(".m4a") && !chunk.issues.contains(where: { $0.code == .asrFailed }) {
             guard fm.fileExists(atPath: directory.appendingPathComponent(chunk.audioPath).path) else { continue }

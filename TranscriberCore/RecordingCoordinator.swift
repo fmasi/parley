@@ -793,6 +793,7 @@ public final class RecordingCoordinator {
                     engine: configManager.config.engine.rawValue,
                     recordingDirectory: outputDir
                 )
+                useFolderReadsForTheTranscript()
                 let result = try await transcriptionRunner.finalize(
                     sessionState: sessionState,
                     outputDirectory: outputDir,
@@ -852,6 +853,7 @@ public final class RecordingCoordinator {
                         recordingDirectory: outputDir
                     )
 
+                    useFolderReadsForTheTranscript()
                     result = try await transcriptionRunner.run(
                         systemAudio: systemAudio,
                         micAudio: micAudio,
@@ -2556,6 +2558,13 @@ public final class RecordingCoordinator {
                     if chunkCount == 0 { captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir) }
                 }
             }
+        } catch is FolderNotAnswering {
+            // The folder stopped answering mid-salvage (L review 158): nothing was written, and the session waits — kept,
+            // its folder said not to answer — never salvaged as failed.
+            Logger.state.error("The salvage's folder did not answer — the session waits")
+            if case .transcribing = appState.phase { appState.phase = .idle }
+            await waitForUnansweringFolder(sentinel)
+            return
         } catch {
             Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
             outcome = SalvageOutcome(kind: .finalizeFailed(error.localizedDescription), chunkCount: chunkCount)
@@ -2707,9 +2716,16 @@ public final class RecordingCoordinator {
     private func recoverChunkedSession(outputDirectory: URL, sessionId: String, config: Config, transcriber: any TranscriptionEngine,
                                        diarizer: (any DiarizationProvider)?, provenance: CaptureProvenance) async throws -> TranscriptionResult? {
         if let recoverChunkedSessionForTesting { return try await recoverChunkedSessionForTesting(outputDirectory, sessionId) }
+        useFolderReadsForTheTranscript()
         return try await ChunkedSessionRecovery.recover(outputDirectory: outputDirectory, sessionId: sessionId, config: config,
                                                         transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                                                        provenance: provenance)
+                                                        provenance: provenance, reads: folderReads, seconds: Self.seconds(folderReadDeadline))
+    }
+
+    /// The transcript's looks at its folder go through this coordinator's reader, with its bound (L review 158).
+    private func useFolderReadsForTheTranscript() {
+        transcriptionRunner.folderReads = folderReads
+        transcriptionRunner.folderReadSeconds = Self.seconds(folderReadDeadline)
     }
 
     /// The engines a launch recovery transcribes with: the injected factory (tests), else the runner's.
@@ -2787,6 +2803,7 @@ public final class RecordingCoordinator {
         )
         let kind: SalvageOutcome.Kind
         do {
+            useFolderReadsForTheTranscript()
             let result = try await transcriptionRunner.finalize(
                 sessionState: sessionState, outputDirectory: outputDir, config: configManager.config
             )
@@ -2795,6 +2812,10 @@ public final class RecordingCoordinator {
             Logger.state.info("Salvaged abandoned chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
             kind = .transcriptWritten(result.jsonPath)
             captureClient.commitSessionDiagnostics(sessionId: sessionState.sessionId, directory: outputDir)   // L review 97
+        } catch is FolderNotAnswering {
+            // Nothing could be written: the session is kept for when the folder answers (L review 158) — never "failed".
+            Logger.state.error("Salvage finalize: the recording folder did not answer")
+            kind = .folderNotAnswering
         } catch {
             // Reported, not swallowed (§7.4 P6): the chunks stay on disk, untranscribed.
             Logger.state.error("Salvage finalize failed: \(error, privacy: .private)")
