@@ -1492,21 +1492,38 @@ public final class RecordingCoordinator {
         switch decision {
         case .reattach:
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
+            // The session's folder, read off the main actor BEFORE the recording is re-attached (L review 75).
+            let scan = await readOffMain("re-attach: session folder") { Self.scanForReattach(sentinel: sentinel, outputDir: outputDir) }
+            // A Start pressed during the read owns the app now (as after the ping).
+            guard appState.isIdle, !isStartInFlight else {
+                Logger.state.info("A recording start is in flight — the relaunch session waits")
+                keepPending(sentinel)
+                return .handled
+            }
+            // From here to the adopt, all synchronous (L review 72): a crash or a Stop can only arrive once the
+            // chunk pipeline exists — the crash path then names its restart from the live rotator, and a Stop
+            // finishes the recording once, on the live pipeline (the orphans are already queued in it).
             appState.phase = .recording(since: sentinel.startedAt)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
-            // The evidence is this session's before anything else (L follow-up 43).
-            await captureClient.adoptSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir)
-            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
-            reattachPipeline(sentinel: sentinel, outputDir: outputDir)
+            reattachPipeline(sentinel: sentinel, outputDir: outputDir, scan: scan)
             // At once: the crashed app's last refresh may be minutes old, and a crash in the next minute
             // must still resume. The alive timer (with the status poll) takes over from here.
             refreshSentinelLiveness()
             startStatusPoll()
+            // The evidence is this session's before anything is recorded into it (L follow-up 43).
+            await captureClient.adoptSession(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), directory: outputDir)
+            // Re-checked after the await (L review 72): a Stop in the window owns the session now.
+            guard appState.isRecording, !stopInFlight else {
+                Logger.state.info("The re-attached recording was stopped while its session was adopted — nothing more to do")
+                return .handled
+            }
+            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
+            // A crash in the window is being recovered: that recovery owns the helper now.
+            guard !recoveryInFlight else { return .handled }
             // Restore the helper's alarm state now: the pull on connect ran before anything listened.
             Task { await pollHelperStatus() }
         case .resumeSameSession(let lastAlive):
-            return await resumeSameSession(sentinel: sentinel, outputDir: outputDir,
-                                           gapStart: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive))
+            return await resumeSameSession(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive)
         case .salvageAndStop(let reason):
             // A stop-in-flight race: the helper may still be capturing (C7 round 1 — the decision only says
             // "never resume"; stopping the helper is ours), bounded, BEFORE the salvage, so the salvage sees
@@ -1528,45 +1545,90 @@ public final class RecordingCoordinator {
         return .handled
     }
 
-    /// Flow A (L follow-up 30): the helper kept capturing, so the recording goes on — with its chunk
-    /// pipeline rebuilt, seeded from `session.json`, and the rotator naming the helper's live file, so
-    /// rotation, the disk checks and their alarms continue as normal. A chunk the crash cut short (sealed,
-    /// never processed) goes through the live processor; the live file is left to its rotation.
-    private func reattachPipeline(sentinel: RecordingSentinel, outputDir: URL) {
+    /// What a re-attach needs from the session's folder, read off the main actor (L review 75).
+    struct ReattachScan {
+        let persisted: SessionState?
+        /// The helper's live file: the newest chunk on disk (indices only grow), never below the sentinel's.
+        let liveIndex: Int
+        /// When the live chunk began: its file's creation — before this process existed.
+        let liveStartedAt: Date?
+        /// Chunks the crash cut short (sealed, never processed), the live file excluded, with their creation.
+        let orphans: [(chunk: CrashRecoveryPlanner.OrphanChunk, created: Date?)]
+    }
+
+    nonisolated static func scanForReattach(sentinel: RecordingSentinel, outputDir: URL) -> ReattachScan {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-        let config = configManager.config
         let persisted = SessionState.read(directory: outputDir, sessionId: sessionId)
         let onDisk = CrashRecoveryPlanner.orphanChunks(
             outputDirectory: outputDir, sessionId: sessionId, completedIndices: Set(persisted?.chunks.map(\.index) ?? []))
-        // The helper's live file is the newest chunk on disk (indices only grow), never below the sentinel's.
         let liveIndex = max(sentinel.chunkIndex, onDisk.map(\.index).max() ?? sentinel.chunkIndex)
-        let seed = persisted ?? SessionState(sessionId: sessionId, meetingStart: sentinel.startedAt, engine: config.engine.rawValue,
-                                             chunkDurationMinutes: config.validatedChunkDuration)
-        do {
-            try transcriptionRunner.setupChunkedPipeline(
-                captureClient: captureClient, outputDirectory: outputDir, sessionBaseName: sessionId,
-                config: config, seededState: seed, firstChunkIndex: liveIndex)
-        } catch {
-            // The stop's fallback branch still recovers the session from disk.
-            Logger.state.error("Re-attached without a chunk pipeline: \(error, privacy: .private)")
+        return ReattachScan(
+            persisted: persisted, liveIndex: liveIndex,
+            liveStartedAt: creationDate(outputDir.appendingPathComponent("\(sessionId)-\(liveIndex).wav")),
+            orphans: onDisk.filter { $0.index != liveIndex }.map { ($0, creationDate(outputDir.appendingPathComponent($0.baseName + ".wav"))) })
+    }
+
+    nonisolated private static func creationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.creationDate] as? Date
+    }
+
+    /// The session a relaunch continues: `session.json`'s, or — a crash inside the first chunk left none — a
+    /// fresh one that began at the sentinel's start (L review 73: shared by the re-attach and the resume).
+    private func seedState(for sentinel: RecordingSentinel, persisted: SessionState?) -> SessionState {
+        let config = configManager.config
+        return persisted ?? SessionState(sessionId: stripSegmentSuffix(sentinel.systemAudioPath), meetingStart: sentinel.startedAt,
+                                         engine: config.engine.rawValue, chunkDurationMinutes: config.validatedChunkDuration)
+    }
+
+    /// Every chunk the crash cut short goes through the LIVE processor: its index lock is per instance
+    /// (`ChunkedSessionRecovery` builds its own). A duplicate index is a no-op (R2). Shared by the re-attach and
+    /// the resume (L review 73).
+    private func ingestOrphans(_ orphans: [(chunk: CrashRecoveryPlanner.OrphanChunk, created: Date?)], outputDir: URL,
+                               fallbackStart: Date) {
+        guard let processor = transcriptionRunner.chunkProcessor else { return }
+        for (orphan, created) in orphans {
+            processor.processChunk(ChunkRotator.FinalizedChunk(
+                index: orphan.index, systemPath: outputDir.appendingPathComponent(orphan.baseName + ".wav").path,
+                micPath: outputDir.appendingPathComponent(orphan.baseName + "_mic.wav").path,
+                startTime: created ?? fallbackStart))
+        }
+    }
+
+    /// Flow A (L follow-up 30): the helper kept capturing, so the recording goes on — with its chunk
+    /// pipeline rebuilt, seeded from `session.json`, and the rotator naming the helper's live file, so
+    /// rotation, the disk checks and their alarms continue as normal. The live chunk rotates when IT is due
+    /// (L review 77). A chunk the crash cut short (sealed, never processed) goes through the live processor;
+    /// the live file is left to its rotation. Synchronous: called before the re-attach's first await.
+    private func reattachPipeline(sentinel: RecordingSentinel, outputDir: URL, scan: ReattachScan?) {
+        guard let scan else {
+            reattachedWithoutPipeline(because: "its folder did not answer")
             return
         }
-        guard let rotator = transcriptionRunner.chunkRotator, let processor = transcriptionRunner.chunkProcessor else { return }
-        let live = outputDir.appendingPathComponent("\(sessionId)-\(liveIndex).wav")
-        if let began = (try? FileManager.default.attributesOfItem(atPath: live.path))?[.creationDate] as? Date {
-            rotator.adoptCurrentChunk(startedAt: began)
+        let seed = seedState(for: sentinel, persisted: scan.persisted)
+        do {
+            try transcriptionRunner.setupChunkedPipeline(
+                captureClient: captureClient, outputDirectory: outputDir, sessionBaseName: stripSegmentSuffix(sentinel.systemAudioPath),
+                config: configManager.config, seededState: seed, firstChunkIndex: scan.liveIndex)
+        } catch {
+            reattachedWithoutPipeline(because: error.localizedDescription)
+            return
         }
-        transcriptionRunner.startChunkRotation()
+        guard let rotator = transcriptionRunner.chunkRotator else { return }
+        if let began = scan.liveStartedAt { rotator.adoptCurrentChunk(startedAt: began) }
+        rotator.start(firstRotationAt: rotator.currentChunkDue)
         wirePipelineHooks()
-        for orphan in onDisk where orphan.index != liveIndex {
-            let system = outputDir.appendingPathComponent(orphan.baseName + ".wav")
-            let created = (try? FileManager.default.attributesOfItem(atPath: system.path))?[.creationDate] as? Date
-            processor.processChunk(ChunkRotator.FinalizedChunk(
-                index: orphan.index, systemPath: system.path,
-                micPath: outputDir.appendingPathComponent(orphan.baseName + "_mic.wav").path,
-                startTime: created ?? seed.meetingStart))
+        ingestOrphans(scan.orphans, outputDir: outputDir, fallbackStart: seed.meetingStart)
+        Logger.state.info("Re-attached at chunk \(scan.liveIndex, privacy: .public) with its pipeline")
+    }
+
+    /// The re-attached recording goes on without a chunk pipeline: nothing rotates, and it is transcribed from
+    /// disk when it stops (the stop's fallback branch). Said, never only logged (L review 76).
+    private func reattachedWithoutPipeline(because reason: String) {
+        Logger.state.error("Re-attached without a chunk pipeline: \(reason, privacy: .private)")
+        captureClient.record(.rotationFailed, .anomaly, ["error": "re-attached recording can't rotate", "reason": reason])
+        if appState.raiseAppAlarm(.rotationFailed, message: "The re-attached recording can’t rotate its chunks — it keeps recording into one file, and is transcribed when you stop it.") {
+            presentAlarms()
         }
-        Logger.state.info("Re-attached at chunk \(liveIndex, privacy: .public) with its pipeline")
     }
 
     /// Move a session the relaunch cannot finish now into the pending list — persisted, so a later
@@ -1791,22 +1853,22 @@ public final class RecordingCoordinator {
     /// live processor, and the gap recorded — in the session, in the record, and as the
     /// `recordingResumedWithGap` alarm. If the capture cannot restart, the session is salvaged instead and
     /// the recording is said STOPPED.
-    private func resumeSameSession(sentinel: RecordingSentinel, outputDir: URL, gapStart: Date) async -> RelaunchOutcome {
+    private func resumeSameSession(sentinel: RecordingSentinel, outputDir: URL, lastAlive: Date?) async -> RelaunchOutcome {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)   // the R5 session-id gate refuses any other
         let config = configManager.config
         // Both BEFORE the start (ledger, L7): the helper then creates the plan's file, which must be neither
         // a name already on disk (its audio would be overwritten) nor mistaken for an orphan (ingested
-        // mid-recording, its real finalization would be skipped as a duplicate — the rest lost).
-        let plan = Self.resumePlan(sentinel: sentinel, outputDir: outputDir)
-        let persisted = SessionState.read(directory: outputDir, sessionId: sessionId)
-        let orphans = CrashRecoveryPlanner.orphanChunks(
-            outputDirectory: outputDir, sessionId: sessionId,
-            completedIndices: Set(persisted?.chunks.map(\.index) ?? [])
-        ).filter { $0.baseName != plan.baseName }
-        // A crash inside the first chunk left no session.json: the session still began at the sentinel's start.
-        let seed = persisted ?? SessionState(sessionId: sessionId, meetingStart: sentinel.startedAt, engine: config.engine.rawValue,
-                                             chunkDurationMinutes: config.validatedChunkDuration)
-        Logger.state.info("Resuming the crashed session at chunk \(plan.index, privacy: .public) (\(orphans.count, privacy: .public) orphan chunks)")
+        // mid-recording, its real finalization would be skipped as a duplicate — the rest lost). Read off the
+        // main actor, bounded (L review 75): a folder that does not answer waits.
+        guard let scan = await readOffMain("resume: session folder", { Self.scanForResume(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive) }) else {
+            captureClient.captureEnded()
+            keepPending(sentinel)
+            await updateFolderAlarm()
+            return .handled
+        }
+        let plan = scan.plan, gapStart = scan.crashedAt
+        let seed = seedState(for: sentinel, persisted: scan.persisted)
+        Logger.state.info("Resuming the crashed session at chunk \(plan.index, privacy: .public) (\(scan.orphans.count, privacy: .public) orphan chunks)")
 
         // A user Start already running owns the helper: never race it, never clear its flag (L follow-up 38).
         guard !startRunning else {
@@ -1871,19 +1933,7 @@ public final class RecordingCoordinator {
         }
         transcriptionRunner.startChunkRotation()
         wirePipelineHooks()
-        // Every chunk the crash cut short goes through the LIVE processor: its index lock is per instance
-        // (`ChunkedSessionRecovery` builds its own). A duplicate index is a no-op (R2).
-        if let processor = transcriptionRunner.chunkProcessor {
-            for orphan in orphans {
-                let system = outputDir.appendingPathComponent(orphan.baseName + ".wav")
-                let created = (try? FileManager.default.attributesOfItem(atPath: system.path))?[.creationDate] as? Date
-                processor.processChunk(ChunkRotator.FinalizedChunk(
-                    index: orphan.index, systemPath: system.path,
-                    micPath: outputDir.appendingPathComponent(orphan.baseName + "_mic.wav").path,
-                    startTime: created ?? seed.meetingStart
-                ))
-            }
-        }
+        ingestOrphans(scan.orphans, outputDir: outputDir, fallbackStart: seed.meetingStart)
         let now = Date()
         captureClient.recordLaunchRecovery(["flow": "resume", "gap_seconds": "\(max(0, Int(now.timeIntervalSince(gapStart))))"])
         captureClient.record(.captureGap, .anomaly, ["start": gapStart.ISO8601Format(), "end": now.ISO8601Format(), "reason": "app relaunch"])
@@ -1911,11 +1961,32 @@ public final class RecordingCoordinator {
         return .handled
     }
 
+    /// What a resume needs from the session's folder, read off the main actor (L review 75).
+    struct ResumeScan {
+        let plan: (baseName: String, index: Int, newSentinel: RecordingSentinel)
+        let persisted: SessionState?
+        /// The chunks the crash cut short, the plan's own file excluded, with their creation.
+        let orphans: [(chunk: CrashRecoveryPlanner.OrphanChunk, created: Date?)]
+        let crashedAt: Date
+    }
+
+    nonisolated static func scanForResume(sentinel: RecordingSentinel, outputDir: URL, lastAlive: Date?) -> ResumeScan {
+        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        let plan = resumePlan(sentinel: sentinel, outputDir: outputDir)
+        let persisted = SessionState.read(directory: outputDir, sessionId: sessionId)
+        let orphans = CrashRecoveryPlanner.orphanChunks(
+            outputDirectory: outputDir, sessionId: sessionId, completedIndices: Set(persisted?.chunks.map(\.index) ?? [])
+        ).filter { $0.baseName != plan.baseName }
+        return ResumeScan(plan: plan, persisted: persisted,
+                          orphans: orphans.map { ($0, creationDate(outputDir.appendingPathComponent($0.baseName + ".wav"))) },
+                          crashedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive))
+    }
+
     /// The resume's capture name: `CrashRecoveryPlanner.planRestart`'s index (the shared collision guard,
     /// #170), moved past any index that still has a chunk artefact on disk — like the rotator's own
     /// rule, the archive included: a chunk archived just before the crash, not yet in session.json,
     /// would otherwise be overwritten when the resumed chunk is archived under its name.
-    private static func resumePlan(sentinel: RecordingSentinel, outputDir: URL) -> (baseName: String, index: Int, newSentinel: RecordingSentinel) {
+    nonisolated private static func resumePlan(sentinel: RecordingSentinel, outputDir: URL) -> (baseName: String, index: Int, newSentinel: RecordingSentinel) {
         let planned = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         func onDisk(_ index: Int) -> Bool {
@@ -1940,11 +2011,11 @@ public final class RecordingCoordinator {
     /// a newer `lastAliveAt`, which vouches for the app, not the capture (L follow-up 37) — else the
     /// sentinel's `lastAliveAt` — refreshed every 60 s, so it can be up to that much early (C7/C9) — else
     /// `startedAt`. Never later than now. Read BEFORE a salvage archives (deletes) the orphans.
-    private func crashTime(sentinel: RecordingSentinel, outputDir: URL, lastAlive: Date?) -> Date {
+    nonisolated static func crashTime(sentinel: RecordingSentinel, outputDir: URL, lastAlive: Date?) -> Date {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         let orphanEnds = CrashRecoveryPlanner.orphanChunks(
             outputDirectory: outputDir, sessionId: sessionId,
-            completedIndices: completedIndices(outputDir: outputDir, sessionId: sessionId)
+            completedIndices: Set(SessionState.read(directory: outputDir, sessionId: sessionId)?.chunks.map(\.index) ?? [])
         )
         .flatMap { [$0.baseName + ".wav", $0.baseName + "_mic.wav"] }
         .compactMap { (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent($0).path))?[.modificationDate] as? Date }
@@ -2351,7 +2422,7 @@ public final class RecordingCoordinator {
     func salvageAtLaunch(sentinel: RecordingSentinel, outputDir: URL, pending: Bool = false) async {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
         // When the recording stopped: read before the salvage archives (deletes) its orphan WAVs.
-        let stoppedAt = crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt)
+        let stoppedAt = Self.crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt)
         let chunkCount = chunksOnDisk(outputDir: outputDir, sessionId: sessionId)
         appState.phase = .transcribing(progress: "Recovering…")
         let outcome: SalvageOutcome

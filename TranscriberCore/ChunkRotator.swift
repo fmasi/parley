@@ -102,6 +102,9 @@ public final class ChunkRotator {
         currentChunkStartTime = date
     }
 
+    /// When the chunk being recorded is due to rotate: its start plus one chunk.
+    public var currentChunkDue: Date { currentChunkStartTime.addingTimeInterval(chunkDuration) }
+
     /// Recover from a live XPC crash: advance to the next chunk index so the post-crash recording
     /// continues at a fresh chunk, and return the plan whose names the caller uses for the orphan
     /// (the current index) and the recovery segment. The caller MUST enqueue the orphan chunk
@@ -126,10 +129,12 @@ public final class ChunkRotator {
         return plan
     }
 
-    /// Start the rotation timer.
-    public func start() {
+    /// Start the rotation timer. The first rotation is one chunk from now — or at `firstRotationAt`: a re-attach
+    /// rotates the live chunk when IT is due, at once when that has passed (L review 77).
+    public func start(firstRotationAt: Date? = nil) {
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .sensitive)")
-        let newTimer = Timer(timeInterval: chunkDuration, repeats: true) { [weak self] timer in
+        let firstFire = firstRotationAt ?? Date().addingTimeInterval(chunkDuration)
+        let newTimer = Timer(fire: firstFire, interval: chunkDuration, repeats: true) { [weak self] timer in
             // A rotator torn down without `stop()` takes its timer with it: never a repeating timer left
             // waking an idle app (L10 review 54). The run loop calls this on the main thread, where it was added.
             guard self != nil else {

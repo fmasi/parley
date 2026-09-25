@@ -108,7 +108,12 @@ private final class FakeCaptureClient: RecordingCaptureClient {
 
     /// The order of the calls that decide which session the evidence belongs to (L follow-up 43).
     var sessionCalls: [String] = []
-    func adoptSession(sessionId: String, directory: URL) async { sessionCalls.append("adopt:\(sessionId)") }
+    /// Awaited inside adoptSession(): lets a test act while a re-attach adopts (L review 72).
+    var onAdopt: (() async -> Void)?
+    func adoptSession(sessionId: String, directory: URL) async {
+        sessionCalls.append("adopt:\(sessionId)")
+        await onAdopt?()
+    }
     /// Sessions whose evidence was dropped: a start that never became a recording (L11 review 68).
     var discardedSessions: [String] = []
     func discardSessionEvidence(sessionId: String, directory: URL) { discardedSessions.append(sessionId) }
@@ -163,11 +168,14 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     var rotateCalls = 0
     /// Awaited inside rotateChunk(): lets a test hold a rotation in flight.
     var onRotate: (() async -> Void)?
+    /// The sealed chunk's paths a rotation answers with, as the real helper does (default: the new name's).
+    var rotateReply: ((String) -> (systemPath: String, micPath: String))?
     func rotateChunk(outputDirectory: String, newBaseName: String) async throws
         -> (systemPath: String, micPath: String) {
         rotateCalls += 1
         await onRotate?()
         if let rotateError { throw rotateError }
+        if let rotateReply { return rotateReply(newBaseName) }
         return (outputDirectory + "/" + newBaseName + ".wav",
                 outputDirectory + "/" + newBaseName + "_mic.wav")
     }
@@ -208,7 +216,8 @@ private struct Harness {
     let diskReadHook: Box<(@Sendable () -> Void)?> = Box(nil)
     let recordingMic: RecordingMicrophone
 
-    /// `@unchecked Sendable`: tests hand it to `@Sendable` seams (the disk provider); the main actor owns it.
+    /// `@unchecked Sendable`: tests hand it to `@Sendable` seams that run OFF the main actor (the disk and folder
+    /// reads, the rotator's reply); a test reads it only once the work that writes it has finished.
     final class Box<T>: @unchecked Sendable { var value: T; init(_ value: T) { self.value = value } }
 
     init(recordingMic: RecordingMicrophone = RecordingMicrophone()) throws {
@@ -2406,8 +2415,10 @@ private struct Harness {
             sentinelDirectory: h.tmp, notify: { _, _ in }, notifyCritical: { _, _ in }, presentTranscript: { _, _ in },
             presentAlarmsUI: { _, new in shown.value += new },
             engineFactory: { _ in (FakeEngine(), FakeDiarizer()) }, recordingMicrophone: h.recordingMic)
-        let s = try writeSentinel(h, alive: 30)
-        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt.addingTimeInterval(-3600), chunkIndices: [0])
+        var s = try writeSentinel(h, alive: 30)
+        s.startedAt = Date().addingTimeInterval(-3600)   // the recording began an hour ago (L review 78)
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
         await coordinator.recoverAtLaunch()
         #expect(shown.value.contains(.recordingResumedWithGap))
         let start = try #require(h.runner.chunkRotator?.currentChunkInfo.startTime)
@@ -2454,11 +2465,16 @@ private struct Harness {
     @Test func aSentinelFromAnotherBootIsSalvagedNotDeleted() async throws {
         let h = try Harness()
         let s = try writeSentinel(h, alive: 10, boot: "not-this-boot")
-        // Audio on disk (41d): salvaged into a transcript, never discarded with the stale sentinel.
-        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        // Real audio on disk, never transcribed (41d, L review 80): salvaged into a transcript, never discarded
+        // with the stale sentinel.
+        try RecoveryFixtures.writeFakeWav(at: outDir(s).appendingPathComponent("sess-0.wav"), seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: outDir(s).appendingPathComponent("sess-0_mic.wav"), seconds: 1)
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.startCalls.isEmpty && h.appState.activeAlarms[.recordingStopped] != nil)
-        #expect(h.presented.value == [outDir(s).appendingPathComponent("sess.json")], "salvaged, not deleted")
+        let transcript = outDir(s).appendingPathComponent("sess.json")
+        #expect(h.presented.value == [transcript], "salvaged, not deleted")
+        let text = try String(contentsOf: transcript, encoding: .utf8)
+        #expect(text.contains("hello"), "the orphan's audio was transcribed (the fake engine says hello)")
     }
 
     /// L9 review 44: the resume's start timed out — it may still commit — so the helper is stopped, bounded,
@@ -4042,8 +4058,13 @@ private struct Harness {
         let rotator = try #require(h.runner.chunkRotator)
         #expect(rotator.currentBaseName == "sess-1")
         #expect(abs(rotator.currentChunkInfo.startTime.timeIntervalSince(began)) < 1, "the live chunk began before this process")
+        try Harness.headerOnlyWAV().write(to: dir(s).appendingPathComponent("sess-1_mic.wav"))
+        h.client.rotateReply = { _ in (live.path, self.dir(s).appendingPathComponent("sess-1_mic.wav").path) }   // the helper seals the live file
+        let processor = try #require(h.runner.chunkProcessor)
         await rotator.rotateForTesting()
         #expect(h.client.rotateCalls == 1 && rotator.currentChunkInfo.index == 2, "the live file handed over")
+        await processor.awaitAllProcessed()
+        #expect(await processor.getSessionState().chunks.map(\.index).contains(1), "chunk 1 processed from the live file")
         h.freeBytes.value = 1_000   // below one chunk
         await rotator.rotateForTesting()
         await h.coordinator.awaitRotationDiskCheckForTesting()
@@ -4084,6 +4105,82 @@ private struct Harness {
         h.client.isCapturingResult = true
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.sessionCalls == ["adopt:sess"])
+    }
+
+    /// L review 72: a crash reported while the re-attach adopts its session (an await) finds the chunk pipeline
+    /// already built — the crash path names its restart from the live rotator — never a pipeline built after it.
+    @Test func aCrashWhileTheReattachAdoptsIsRecoveredOnTheLivePipeline() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h)
+        try Harness.headerOnlyWAV().write(to: dir(s).appendingPathComponent("sess-1.wav"))   // the helper's live file
+        h.client.isCapturingResult = true
+        let client = h.client
+        client.onAdopt = {
+            client.onAdopt = nil
+            client.onServiceCrash?()                  // the helper dies right then
+            await Harness.until { client.startCalls.count == 1 }
+        }
+        await h.coordinator.recoverAtLaunch()
+        let restart = try #require(h.client.startCalls.first)
+        let rotator = try #require(h.runner.chunkRotator)
+        #expect(rotator.currentBaseName == restart.baseName, "the rotator names the file the restarted helper writes")
+        #expect(restart.baseName == "sess-2", "past the live chunk")
+        #expect(h.appState.isRecording)
+    }
+
+    /// L review 72: a Stop while the re-attach adopts finishes the recording ONCE, on the live pipeline, and
+    /// leaves nothing running on the idle app afterwards.
+    @Test func aStopWhileTheReattachAdoptsFinishesOnceAndLeavesNothingRunning() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h)
+        let live = dir(s).appendingPathComponent("sess-1.wav"), liveMic = dir(s).appendingPathComponent("sess-1_mic.wav")
+        try Harness.headerOnlyWAV().write(to: dir(s).appendingPathComponent("sess-0.wav"))   // sealed, never processed
+        try Harness.headerOnlyWAV().write(to: live); try Harness.headerOnlyWAV().write(to: liveMic)
+        h.client.isCapturingResult = true
+        h.client.stopResult = AudioPaths(systemAudio: live, micAudio: liveMic)
+        let client = h.client, coordinator = h.coordinator
+        client.onAdopt = {
+            client.onAdopt = nil
+            await coordinator.stopRecording()
+        }
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isIdle && h.client.stopCalls == 1)
+        #expect(h.runner.chunkRotator == nil && h.runner.chunkProcessor == nil, "no pipeline left running on an idle app")
+        #expect(h.presented.value.count == 1)
+        #expect(!h.client.launchRecoveries.contains { $0["flow"] == "A" }, "the stop owned the session: nothing more after the adopt")
+    }
+
+    /// L review 76: a re-attach whose chunk pipeline cannot be built says so — an anomaly on record and the
+    /// rotation alarm — never only a log line.
+    @Test func aReattachThatCannotBuildItsPipelineRaisesTheAlarm() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        _ = try freshSentinel(h)
+        h.client.isCapturingResult = true
+        h.runner.failSetupForTesting = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isRecording, "still re-attached: the helper keeps capturing")
+        #expect(h.appState.activeAlarms[.rotationFailed]?.message.contains("re-attached recording can’t rotate") == true)
+        #expect(h.client.recordedEvents.contains { $0.kind == .rotationFailed && $0.severity == .anomaly })
+    }
+
+    /// L review 77: the first rotation after a re-attach is due when the live chunk is — its start plus one
+    /// chunk — not a full chunk from the re-attach; at once when that time has passed.
+    @Test func theFirstRotationAfterAReattachIsDueWithTheLiveChunk() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try freshSentinel(h)
+        let live = dir(s).appendingPathComponent("sess-1.wav")
+        try Harness.headerOnlyWAV().write(to: live)
+        let began = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 - 120).rounded(.down))
+        try FileManager.default.setAttributes([.creationDate: began], ofItemAtPath: live.path)
+        h.client.isCapturingResult = true
+        await h.coordinator.recoverAtLaunch()
+        let timer = try #require(h.runner.chunkRotator?.activeTimerForTesting)
+        let chunk = TimeInterval(h.config.config.validatedChunkDuration * 60)
+        #expect(abs(timer.fireDate.timeIntervalSince(began.addingTimeInterval(chunk))) < 1, "\(timer.fireDate) vs \(began.addingTimeInterval(chunk))")
     }
 
     /// L11 review 63 (pinned; L follow-up 43 made the re-attach adopt): a later helper crash restarts the SAME
@@ -4154,5 +4251,8 @@ private struct Harness {
         try await Task.sleep(for: .milliseconds(120))
         #expect(RecordingSentinel.read(directory: h.tmp)?.lastAliveAt == stale)
         h.coordinator.recoveryInFlight = false
+        // The positive control (L review 78): with the recovery over, the timer refreshes it again.
+        await Harness.until { RecordingSentinel.read(directory: h.tmp)?.lastAliveAt != stale }
+        #expect(RecordingSentinel.read(directory: h.tmp)?.lastAliveAt != stale)
     }
 }
