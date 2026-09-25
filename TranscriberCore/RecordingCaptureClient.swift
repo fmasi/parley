@@ -124,11 +124,14 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
 
     /// Drain the helper's diagnostics, build the session's record — writing the anomaly-gated
     /// `<sessionId>.diag.jsonl` — and the transcript provenance stamp (#95). The live log stays until
-    /// `commitSessionDiagnostics`, once the transcript exists (L review 97).
+    /// `commitSessionDiagnostics`, once the transcript exists (L review 97). `drainHelper` false: the helper still holds
+    /// ANOTHER session's capture (a held one) — the record is built without draining it, its events wait for that
+    /// session (L review 198).
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,
-        recordingDirectory: URL
+        recordingDirectory: URL,
+        drainHelper: Bool
     ) async -> CaptureProvenance
 
     /// Record an XPC-retry event (a relaunch/reconnect attempt after a crash) (#95).

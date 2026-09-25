@@ -24,18 +24,44 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
     private let lock = NSLock()
     /// This log's folder's queue.
     private let io: DispatchQueue
-    /// Guards `queues`.
-    private static let queuesLock = NSLock()
-    /// One serial queue per folder, by its lexical key (`/private` stripped before the firmlinked roots, L review 168).
-    private static var queues: [String: DispatchQueue] = [:]
 
-    private static func ioQueue(for directory: URL) -> DispatchQueue {
-        let key = SessionEvidence.key(directory)
-        return queuesLock.withLock {
-            if let queue = queues[key] { return queue }
-            let queue = DispatchQueue(label: "eu.fmasi.parley.live-diagnostics.\(queues.count)", qos: .utility)
-            queues[key] = queue
-            return queue
+    /// One serial queue per folder, by its lexical key (`/private` stripped before the firmlinked roots, L review 168). The
+    /// app's logs share `shared`, which the exit's flush walks; a test that hangs a folder's queue uses its own set, so it
+    /// never holds up another test's flush (L review 205).
+    public final class Queues: @unchecked Sendable {
+        /// The app's.
+        public static let shared = Queues()
+        private let lock = NSLock()
+        private var queues: [String: DispatchQueue] = [:]
+
+        public init() {}
+
+        func queue(for directory: URL) -> DispatchQueue {
+            let key = SessionEvidence.key(directory)
+            return lock.withLock {
+                if let queue = queues[key] { return queue }
+                let queue = DispatchQueue(label: "eu.fmasi.parley.live-diagnostics.\(queues.count)", qos: .utility)
+                queues[key] = queue
+                return queue
+            }
+        }
+
+        /// Returns once every write queued on these queues — by any log, in any folder — is on disk. Blocks: the caller
+        /// bounds it (an exit runs it off the main actor under a deadline, L review 96).
+        public func flushAll() {
+            for queue in lock.withLock({ Array(queues.values) }) { queue.sync {} }
+        }
+
+        /// `flushAll`, bounded (L review 141): true when everything queued reached the disk within `seconds`; false when a
+        /// folder did not answer — its queued lines are then lost with the process.
+        @discardableResult
+        public func flushAll(within seconds: Double) -> Bool {
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.flushAll()
+                done.signal()
+            }
+            return done.wait(timeout: .now() + seconds) == .success
         }
     }
     /// Runs on the write queue before each write. Internal for tests.
@@ -85,10 +111,11 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         return d
     }()
 
-    public init(directory: URL, sessionId: String) {
+    /// `queues`: the set of per-folder queues this log's io runs on — the app's (`Queues.shared`), or a test's own.
+    public init(directory: URL, sessionId: String, queues: Queues = .shared) {
         url = directory.appendingPathComponent("\(sessionId).diag.live.jsonl")
         coverageURL = directory.appendingPathComponent("\(sessionId).diag.coverage.json")
-        io = Self.ioQueue(for: directory)
+        io = queues.queue(for: directory)
     }
 
     /// Coverage evidence is `.info`, yet it is what the record's per-track coverage is built from: kept
@@ -112,25 +139,16 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
         }
     }
 
-    /// Returns once every write queued — by any log, in any folder — is on disk. Blocks: the caller bounds it (an exit
+    /// Returns once every write the app's logs queued — in any folder — is on disk. Blocks: the caller bounds it (an exit
     /// runs it off the main actor under a deadline, L review 96).
-    public static func flushAll() {
-        for queue in queuesLock.withLock({ Array(queues.values) }) { queue.sync {} }
-    }
+    public static func flushAll() { Queues.shared.flushAll() }
 
     /// `flushAll`, bounded, for the process's last moments (L review 141): `applicationWillTerminate` and the
     /// crash-protection hand-over's `exit(0)` call it on the main thread, where nothing may wait on a hung folder for
     /// long. True when everything queued reached the disk within `seconds`; false when a folder did not answer — its
     /// queued lines are then lost with the process.
     @discardableResult
-    public static func flushAll(within seconds: Double) -> Bool {
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            flushAll()
-            done.signal()
-        }
-        return done.wait(timeout: .now() + seconds) == .success
-    }
+    public static func flushAll(within seconds: Double) -> Bool { Queues.shared.flushAll(within: seconds) }
 
     /// Returns once every write queued before it — in this log's folder — is on disk.
     public func flush() {

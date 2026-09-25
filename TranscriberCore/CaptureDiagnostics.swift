@@ -60,6 +60,9 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case diskLow
     /// A helper call hit its deadline. `.anomaly`.
     case xpcTimeout
+    /// A drain of the helper's ring failed (its XPC call errored, L review 203): the helper's events, if any, are still
+    /// with it — the record says so. `.anomaly`.
+    case helperDrainFailed
     /// `NSWorkspace.willSleep` / `didWake` while recording. `.info`; the interval becomes a `captureGap`.
     case systemSleep
     case systemWake

@@ -168,21 +168,24 @@ import Testing
     }
 
     /// L review 141: the exit's synchronous flush is bounded — a write hung on its folder never holds the exit past the
-    /// bound; a folder that answers is flushed in full.
+    /// bound; a folder that answers is flushed in full. On this test's OWN queues (L review 196): the hung one is never
+    /// waited on by any other test's flush of the app's queues.
     @Test func theExitFlushIsBoundedAndSaysWhetherItFinished() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        let queues = LiveDiagnosticsLog.Queues()
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s", queues: queues)
         log.append(retry(at: 1))
-        #expect(LiveDiagnosticsLog.flushAll(within: 2), "answered: flushed")
+        #expect(queues.flushAll(within: 2), "answered: flushed")
         #expect(FileManager.default.fileExists(atPath: log.url.path))
         let hungDir = try dir(); defer { try? FileManager.default.removeItem(at: hungDir) }
         let stuck = DispatchSemaphore(value: 0)
         defer { stuck.signal() }
-        let hung = LiveDiagnosticsLog(directory: hungDir, sessionId: "s")
+        let hung = LiveDiagnosticsLog(directory: hungDir, sessionId: "s", queues: queues)
         hung.writeObserver = { _ = stuck.wait(timeout: .now() + 10) }
         hung.append(retry(at: 2))
         let began = ContinuousClock.now
-        #expect(!LiveDiagnosticsLog.flushAll(within: 0.2), "a hung folder: not finished")
+        #expect(!queues.flushAll(within: 0.2), "a hung folder: not finished")
         #expect(ContinuousClock.now - began < .seconds(1), "and never past the bound")
+        #expect(LiveDiagnosticsLog.flushAll(within: 2), "the app's own queues never wait on this test's hung one")
     }
 }

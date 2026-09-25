@@ -290,33 +290,15 @@ final class AudioCaptureClient {
         merge(await drainHelperData())
     }
 
-    /// A drain into the ring: false when it timed out. A failed drain is said — never silent (L review 142).
+    /// A drain into the ring: false when it timed out. A failed drain is said — never silent (L review 142) — and on
+    /// record in the session's evidence (L review 203).
     private func merge(_ drain: HelperDrain) -> Bool {
-        switch drain {
-        case .timedOut:
-            Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
-            return false
-        case .failed:
-            Logger.audio.error("The capture helper's drainDiagnostics failed — its events stay with it")
-            return true
-        case .nothing:
-            return true
-        case .data(let data):
-            evidence.mergeHelperDrain(data)
-            return true
-        }
+        if case .timedOut = drain { Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s") }
+        return evidence.mergeDrain(drain)
     }
 
-    /// A drain of the helper's ring, as it came back (L review 142).
-    private enum HelperDrain: Sendable {
-        case data(Data)
-        /// No connection, or the helper had nothing: answered.
-        case nothing
-        /// The XPC call failed: the helper's events, if any, are still with it.
-        case failed
-        /// No answer within 3 s.
-        case timedOut
-    }
+    /// A drain of the helper's ring, as it came back (L reviews 142, 203).
+    private typealias HelperDrain = SessionEvidence.HelperDrain
 
     private func drainHelperData() async -> HelperDrain {
         guard let conn = connection else { return .nothing }
@@ -339,9 +321,11 @@ final class AudioCaptureClient {
     func finalizeSessionDiagnostics(
         sessionId: String,
         engine: String,
-        recordingDirectory: URL
+        recordingDirectory: URL,
+        drainHelper: Bool
     ) async -> CaptureProvenance {
-        if !(await drainHelperDiagnostics()) { recordDrainTimeout() }
+        // Not while the helper holds ANOTHER (held) session's capture (L review 198): its events wait for that session.
+        if drainHelper, !(await drainHelperDiagnostics()) { recordDrainTimeout() }
         let diagnostics = await evidence.finalize(sessionId: sessionId, directory: recordingDirectory)
 
         func formatString(_ kind: CaptureEventKind) -> String? {

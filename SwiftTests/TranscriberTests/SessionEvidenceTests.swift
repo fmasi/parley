@@ -477,13 +477,6 @@ import Testing
 
     // MARK: - L round C (139, 142, 143, 158)
 
-    /// A reader whose read named `label` hangs until released (a watchdog frees it after 10 s).
-    private func hanging(_ label: String, _ gate: DispatchSemaphore) -> FolderReads {
-        FolderReads(label: "evidence-hung-\(UUID().uuidString)", beforeEachRead: { name in
-            if name == label { _ = gate.wait(timeout: .now() + 10) }
-        })
-    }
-
     /// L review 139, CRITICAL: the decision is PROVENANCE, not binding. In production order a relaunch salvage BINDS the
     /// session (`beginCapture`, the adopt) before it builds — and the recording's own `.diag.jsonl`, written by another
     /// process, is still never overwritten: the relaunch's record goes beside it. A later relaunch never overwrites the
@@ -534,15 +527,19 @@ import Testing
             p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
         }
         LiveDiagnosticsLog.flushAll()
-        let gate = DispatchSemaphore(value: 0)
-        let evidence = SessionEvidence(folderReads: hanging("evidence: known helpers", gate))
+        let known = HungRead("evidence: known helpers"), build = Harness.Box(false)
+        defer { known.release() }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-hung-\(UUID().uuidString)", beforeEachRead: { name in
+            if name == "evidence: build" { build.value = true }
+            known.hangIfNamed(name)
+        }))
         var helperRing = CaptureDiagnostics()
         helperRing.record(captureStop(remote: 30, local: 30, helper: "1000-0", at: 50))
         let attributing = Task { await evidence.attributeHelperDrain(helperRing.snapshotData(), toOneOf: [("p", d)]) }
-        try await Task.sleep(for: .milliseconds(50))
+        await Harness.until { known.reached }   // L review 205: awaited, never a fixed sleep
         let building = Task { await evidence.finalize(sessionId: "p", directory: d) }   // the owner's salvage went ahead
-        try await Task.sleep(for: .milliseconds(50))
-        gate.signal()
+        await Harness.until { build.value }
+        known.release()
         await attributing.value
         let record = await building.value
         LiveDiagnosticsLog.flushAll()
@@ -559,10 +556,12 @@ import Testing
         defer { try? FileManager.default.removeItem(at: d); try? FileManager.default.removeItem(at: elsewhere) }
         let stuck = DispatchSemaphore(value: 0)
         defer { stuck.signal() }
-        let writer = LiveDiagnosticsLog(directory: d, sessionId: "other")
+        // Its own live-log queues (L review 205): the hung one is never walked by another test's `flushAll`.
+        let queues = LiveDiagnosticsLog.Queues()
+        let writer = LiveDiagnosticsLog(directory: d, sessionId: "other", queues: queues)
         writer.writeObserver = { _ = stuck.wait(timeout: .now() + 10) }   // a write that hangs on the folder
         writer.append(CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .app, kind: .retry, severity: .warning))
-        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", volumeOf: { $0 }))
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", volumeOf: { $0 }), logQueues: queues)
         evidence.folderDeadline = 0.3
         evidence.beginCapture(sessionId: "s", directory: d)
         evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
@@ -578,9 +577,116 @@ import Testing
         #expect(!other.events.contains { $0.kind == .folderNotAnswering })
         #expect(FileManager.default.fileExists(atPath: elsewhere.appendingPathComponent("e.diag.jsonl").path))
         stuck.signal()
-        LiveDiagnosticsLog.flushAll()
+        queues.flushAll()
         evidence.commit(sessionId: "s", directory: d)
-        LiveDiagnosticsLog.flushAll()
+        queues.flushAll()
         #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "never committed away")
+    }
+
+    // MARK: - L round E (199, 200, 203, 204)
+
+    private let anomaly = CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly)
+
+    /// Record files as production looks at them, except `stat` answers `errno` for the names in `lying`.
+    private func files(stat lying: [String: Int32] = [:], exclusive: Int32? = nil) -> SessionEvidence.RecordFiles {
+        let live = SessionEvidence.RecordFiles.live
+        return SessionEvidence.RecordFiles(
+            stat: { path in lying[URL(fileURLWithPath: path).lastPathComponent] ?? live.stat(path) },
+            renameExclusively: { from, to in exclusive ?? live.renameExclusively(from, to) })
+    }
+
+    /// L review 199: a `stat` that ERRS (EIO, ESTALE, ETIMEDOUT on a share) is not "no such file": the name is taken. The
+    /// recording's own `.diag.jsonl` is never written over — the relaunch's record goes beside it.
+    @Test func aRecordWhoseStatErrsIsTakenNeverOverwritten() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let original = Data("the recording's own record\n".utf8)
+        try original.write(to: d.appendingPathComponent("s.diag.jsonl"))
+        let evidence = SessionEvidence(recordFiles: files(stat: ["s.diag.jsonl": EIO]))
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "s", directory: d)
+        #expect(try Data(contentsOf: d.appendingPathComponent("s.diag.jsonl")) == original, "never written over")
+        #expect(try String(contentsOf: d.appendingPathComponent("s.relaunch.diag.jsonl"), encoding: .utf8).contains("xpcInterruption"))
+    }
+
+    /// … and a name a `stat` wrongly calls free (a share's stale attribute cache) is created EXCLUSIVELY: the rename that
+    /// would replace the original fails with EEXIST, and the next name is taken.
+    @Test func aRecordIsCreatedExclusivelyEvenWhenAStatSaysItIsFree() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let original = Data("the recording's own record\n".utf8)
+        try original.write(to: d.appendingPathComponent("s.diag.jsonl"))
+        let evidence = SessionEvidence(recordFiles: files(stat: ["s.diag.jsonl": ENOENT]))
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "s", directory: d)
+        #expect(try Data(contentsOf: d.appendingPathComponent("s.diag.jsonl")) == original, "never written over")
+        #expect(try String(contentsOf: d.appendingPathComponent("s.relaunch.diag.jsonl"), encoding: .utf8).contains("xpcInterruption"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: d.path).allSatisfy { !$0.hasSuffix(".tmp") }, "no temporary left")
+    }
+
+    /// … and on a volume with no exclusive rename (exFAT, SMB: ENOTSUP), a check-then-rename under a lock: still never
+    /// over a record that is there, and a free name is written.
+    @Test func aVolumeWithoutAnExclusiveRenameStillNeverOverwrites() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let original = Data("the recording's own record\n".utf8)
+        try original.write(to: d.appendingPathComponent("s.diag.jsonl"))
+        let evidence = SessionEvidence(recordFiles: files(exclusive: ENOTSUP))
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "s", directory: d)
+        #expect(try Data(contentsOf: d.appendingPathComponent("s.diag.jsonl")) == original)
+        #expect(try String(contentsOf: d.appendingPathComponent("s.relaunch.diag.jsonl"), encoding: .utf8).contains("xpcInterruption"))
+        let fresh = try dir(); defer { try? FileManager.default.removeItem(at: fresh) }
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "f", directory: fresh)
+        #expect(try String(contentsOf: fresh.appendingPathComponent("f.diag.jsonl"), encoding: .utf8).contains("xpcInterruption"))
+    }
+
+    /// L review 200: the "unwritten" mark stays until a SUCCESSFUL write — a first commit keeps the live log, and so does
+    /// every later one: the live log is the record's only copy.
+    @Test func everyCommitKeepsTheLiveLogUntilTheRecordIsWritten() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "s", directory: d)
+        let own = d.appendingPathComponent("s.diag.jsonl")
+        try FileManager.default.removeItem(at: own)
+        try FileManager.default.createDirectory(at: own, withIntermediateDirectories: true)   // unwritable now
+        _ = await evidence.finalize(sessionId: "s", directory: d)
+        evidence.commit(sessionId: "s", directory: d)
+        evidence.commit(sessionId: "s", directory: d)   // a second commit (the next pass's gate)
+        LiveDiagnosticsLog.flushAll()
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "the only copy is kept")
+    }
+
+    /// L review 203: a drain that FAILED (its XPC call errored) leaves a trace in the record — never only a log line.
+    @Test func aFailedDrainIsOnRecord() {
+        let evidence = SessionEvidence()
+        #expect(evidence.mergeDrain(.failed), "answered: not a timeout")
+        #expect(evidence.diagnostics.events.contains { $0.kind == .helperDrainFailed && $0.severity == .anomaly })
+        #expect(!evidence.mergeDrain(.timedOut))
+    }
+
+    /// L review 204: a build that timed out and writes LATER wrote this process's own record: a second build of the same
+    /// session updates it, never a misleading `.relaunch` beside it.
+    @Test func aTimedOutBuildThatLandsLaterIsThisProcesssOwnRecord() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        defer { hung.release() }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", beforeEachRead: { name in
+            guard once.value, name == hung.label else { return }
+            once.value = false   // only the first build hangs
+            hung.hangIfNamed(name)
+        }))
+        evidence.folderDeadline = 0.2
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(anomaly)
+        _ = await evidence.finalize(sessionId: "s", directory: d)   // timed out: built from the ring alone
+        hung.release()
+        await Harness.until { FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.jsonl").path) }
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.jsonl").path), "the late write landed")
+        // The late build has finished on its queue (a read behind it answered) before the next build is asked.
+        _ = await evidence.folderReads.read("settle", folder: d.path, seconds: 5) { 0 }
+        evidence.folderDeadline = 5
+        _ = await evidence.finalize(sessionId: "s", directory: d)   // the salvage builds it again
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("s.relaunch.diag.jsonl").path), "its own file, updated")
     }
 }

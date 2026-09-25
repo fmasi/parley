@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 
@@ -31,12 +32,24 @@ public final class SessionEvidence {
     /// The last finalized session and its record: a second finalize of it (a salvage after its transcript
     /// failed) continues it; any other session never sees it (L11 review 66).
     private var finalized: (directory: String, id: String, record: CaptureDiagnostics)?
-    /// Sessions whose `.diag.jsonl` could not be written: their live log is their only record, never committed away.
+    /// Sessions whose `.diag.jsonl` could not be written: their live log is their only record, never committed away. The
+    /// mark stays until a SUCCESSFUL write (L review 200) — a commit never removes it, so no later commit deletes the only
+    /// copy.
     private var unwrittenRecords: Set<String> = []
     /// The record files THIS process wrote, by path (L review 139). Whether a build may write over an existing record
     /// is decided by provenance, never by binding: only a file this process wrote is ever written again — a relaunch
     /// binds the session it salvages, and the recording's own `.diag.jsonl` (another process's) is still never touched.
-    private var ownRecordFiles: Set<String> = []
+    /// Shared with the build off the main actor: a build that timed out and writes later still registers its file, so a
+    /// later build of the session updates it — never a misleading `.relaunch` beside it (L review 204).
+    private let ownRecordFiles = OwnRecords()
+
+    /// The record files this process wrote: written from the build's queue, read by the next build.
+    final class OwnRecords: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: Set<String> = []
+        func contains(_ path: String) -> Bool { lock.withLock { paths.contains(path) } }
+        func insert(_ path: String) { lock.withLock { _ = paths.insert(path) } }
+    }
     /// Bumped whenever a session's record is built or committed, by session (L review 142): an attribution that answers
     /// after that never appends to its live log.
     private var recordEpochs: [String: Int] = [:]
@@ -47,13 +60,67 @@ public final class SessionEvidence {
     /// Where the record's build and the attribution read the recording folders: off the main actor, bounded, on the
     /// folder's volume's queue (L reviews 158, 160).
     let folderReads: FolderReads
+    /// The live logs' per-folder queues: the app's, or a test's own (L review 205).
+    let logQueues: LiveDiagnosticsLog.Queues
+    /// How a record file is looked at and created (L review 199). Tests inject a `stat` that errs.
+    let recordFiles: RecordFiles
+    /// The default bound on those reads: what a caller bounding a whole attribution adds to the drain's (L review 205).
+    public nonisolated static let folderDeadlineSeconds: Double = 5
     /// The bound on those reads, in awake seconds. Tests shorten it.
-    var folderDeadline: Double = 5
+    var folderDeadline: Double = SessionEvidence.folderDeadlineSeconds
 
     /// `maxEvents`: the ring's bound (tests shrink it).
-    public init(maxEvents: Int = 5000, folderReads: FolderReads = .shared) {
+    public init(maxEvents: Int = 5000, folderReads: FolderReads = .shared, logQueues: LiveDiagnosticsLog.Queues = .shared,
+                recordFiles: RecordFiles = .live) {
         diagnostics = CaptureDiagnostics(maxEvents: maxEvents)
         self.folderReads = folderReads
+        self.logQueues = logQueues
+        self.recordFiles = recordFiles
+    }
+
+    /// The file-system calls that decide where a record goes (L review 199).
+    public struct RecordFiles: Sendable {
+        /// `lstat`: 0 when there is something at the path, else its errno — ENOENT alone means "free".
+        var stat: @Sendable (String) -> Int32
+        /// `renamex_np(RENAME_EXCL)`: 0, or its errno (EEXIST: the name is taken; ENOTSUP/EINVAL: the volume cannot).
+        var renameExclusively: @Sendable (String, String) -> Int32
+
+        public static let live = RecordFiles(
+            stat: { path in
+                var st = Darwin.stat()
+                return lstat(path, &st) == 0 ? 0 : errno
+            },
+            renameExclusively: { from, to in renamex_np(from, to, UInt32(RENAME_EXCL)) == 0 ? 0 : errno }
+        )
+    }
+
+    /// A drain of the helper's ring, as it came back (L reviews 142, 203).
+    public enum HelperDrain: Sendable {
+        case data(Data)
+        /// No connection, or the helper had nothing: answered.
+        case nothing
+        /// The XPC call failed: the helper's events, if any, are still with it.
+        case failed
+        /// No answer within its bound.
+        case timedOut
+    }
+
+    /// A drain into the ring: false when it timed out (the caller records that into the session it concerns). A drain that
+    /// FAILED is on record — `helperDrainFailed` — never only a log line (L review 203).
+    public func mergeDrain(_ drain: HelperDrain) -> Bool {
+        switch drain {
+        case .timedOut:
+            return false
+        case .failed:
+            Logger.state.error("The capture helper's drainDiagnostics failed — its events stay with it; the record says so")
+            record(CaptureEvent(timestamp: Date(), origin: .app, kind: .helperDrainFailed, severity: .anomaly, detail: ["call": "drainDiagnostics"]))
+            return true
+        case .nothing:
+            return true
+        case .data(let data):
+            mergeHelperDrain(data)
+            return true
+        }
     }
 
     /// The folder half of a session's key: lexical (`standardized`), never a file-system lookup — a hung share must
@@ -86,7 +153,7 @@ public final class SessionEvidence {
             epoch += 1
         }
         // The same session resumed by a relaunch finds the earlier process's live log and appends to it.
-        if liveLog == nil { liveLog = LiveDiagnosticsLog(directory: directory, sessionId: sessionId) }
+        if liveLog == nil { liveLog = LiveDiagnosticsLog(directory: directory, sessionId: sessionId, queues: logQueues) }
         session = (Self.key(directory), sessionId)
     }
 
@@ -148,7 +215,7 @@ public final class SessionEvidence {
             continued.merge(ring.events)
             ring = continued
         }
-        let log = (bound ? liveLog : nil) ?? LiveDiagnosticsLog(directory: directory, sessionId: sessionId)
+        let log = (bound ? liveLog : nil) ?? LiveDiagnosticsLog(directory: directory, sessionId: sessionId, queues: logQueues)
         // The session ends NOW, before the build's first await: nothing recorded meanwhile belongs to it, and nothing
         // the build does later touches a session bound meanwhile.
         if ownsRing { diagnostics = CaptureDiagnostics(maxEvents: diagnostics.maxEvents) }
@@ -159,16 +226,15 @@ public final class SessionEvidence {
         }
         let recordKey = Self.recordKey(sessionId, directory)
         recordEpochs[recordKey, default: 0] += 1
-        let own = ownRecordFiles, taken = ring
+        let own = ownRecordFiles, taken = ring, files = recordFiles
         let built = await folderReads.read("evidence: build", folder: directory.path, key: recordKey + "#build", seconds: folderDeadline) {
-            Self.build(ring: taken, log: log, sessionId: sessionId, directory: directory, ownFiles: own)
+            Self.build(ring: taken, log: log, sessionId: sessionId, directory: directory, own: own, files: files)
         }
         var merged: CaptureDiagnostics
         if let built {
             merged = built.record
-            if let written = built.written {
-                ownRecordFiles.insert(written)
-                unwrittenRecords.remove(recordKey)
+            if built.written != nil {
+                unwrittenRecords.remove(recordKey)   // written: the record has a copy beside the live log now
             } else if built.writeFailed {
                 unwrittenRecords.insert(recordKey)
             }
@@ -194,7 +260,7 @@ public final class SessionEvidence {
 
     /// The build itself: blocking file-system work, run only through `folderReads`.
     nonisolated private static func build(ring: CaptureDiagnostics, log: LiveDiagnosticsLog, sessionId: String, directory: URL,
-                                          ownFiles: Set<String>) -> Built {
+                                          own: OwnRecords, files: RecordFiles) -> Built {
         let logged = log.events()
         // Same identity `CaptureDiagnostics` uses internally to make its counting idempotent (E2 fix round 1).
         var seen = Set(ring.events.map(CaptureEvent.dedupKey))
@@ -212,9 +278,10 @@ public final class SessionEvidence {
             }
         if !standIns.isEmpty { merged.merge(standIns) }
         guard merged.isAnomalous else { return Built(record: merged) }
-        let url = recordURL(sessionId: sessionId, directory: directory, ownFiles: ownFiles)
         do {
-            try merged.jsonlData().write(to: url, options: .atomic)
+            let url = try writeRecord(merged.jsonlData(), sessionId: sessionId, directory: directory, own: own, files: files)
+            // This process's own from now on — even when the build that wrote it timed out long before (L review 204).
+            own.insert(key(url))
             Logger.files.info("Flushed capture diagnostics: \(url.lastPathComponent, privacy: .sensitive) (\(merged.events.count) events)")
             return Built(record: merged, written: key(url))
         } catch {
@@ -227,20 +294,51 @@ public final class SessionEvidence {
         }
     }
 
-    /// Where the record goes (L review 139): `<session>.diag.jsonl`, unless it exists and this process did not write it;
-    /// then `<session>.relaunch.diag.jsonl`, `-2`, `-3`… — the first that is this process's own or free. Never over a
-    /// record another process wrote.
-    nonisolated private static func recordURL(sessionId: String, directory: URL, ownFiles: Set<String>) -> URL {
-        var candidates = [directory.appendingPathComponent("\(sessionId).diag.jsonl"),
-                          directory.appendingPathComponent("\(sessionId).relaunch.diag.jsonl")]
-        var n = 2
-        while true {
-            for url in candidates where ownFiles.contains(key(url)) || !FileManager.default.fileExists(atPath: url.path) {
+    /// How many record names a build tries before it gives up (a folder where every name errs): the write then fails, and
+    /// the live log is kept as the record.
+    nonisolated static let recordNameLimit = 100
+
+    /// Serializes the check-then-rename of a volume without an exclusive rename (L review 199): every record this process
+    /// writes goes through it, so two builds never both find one name free.
+    nonisolated private static let placingLock = NSLock()
+
+    /// Writes the record where it goes (L reviews 139, 199): `<session>.diag.jsonl`, unless it is there and this process did
+    /// not write it; then `<session>.relaunch.diag.jsonl`, `-2`, `-3`… — the first that is this process's own (updated in
+    /// place) or free. A name this process did not write is CREATED EXCLUSIVELY: a temporary file, then `renamex_np` with
+    /// `RENAME_EXCL` — EEXIST takes the next name — so a `stat` that lies (a share's stale cache) never lets it replace a
+    /// record another process wrote. A `stat` that errs with anything but ENOENT (EIO, ESTALE, ETIMEDOUT) is a name taken,
+    /// never a free one. A volume without the exclusive rename (exFAT, SMB: ENOTSUP) checks, then renames, under a lock.
+    nonisolated static func writeRecord(_ data: Data, sessionId: String, directory: URL, own: OwnRecords, files: RecordFiles) throws -> URL {
+        for n in 0..<recordNameLimit {
+            let name = n == 0 ? "\(sessionId).diag.jsonl" : n == 1 ? "\(sessionId).relaunch.diag.jsonl" : "\(sessionId).relaunch-\(n).diag.jsonl"
+            let url = directory.appendingPathComponent(name)
+            if own.contains(key(url)) {
+                try data.write(to: url, options: .atomic)   // this process's own record: updated
                 return url
             }
-            candidates = [directory.appendingPathComponent("\(sessionId).relaunch-\(n).diag.jsonl")]
-            n += 1
+            let looked = files.stat(url.path)
+            guard looked == ENOENT else {
+                if looked != 0 { Logger.files.error("A record name could not be looked at (errno \(looked, privacy: .public)) — taken as used") }
+                continue
+            }
+            let temporary = directory.appendingPathComponent(".\(name).\(UUID().uuidString).tmp")
+            try data.write(to: temporary)
+            switch files.renameExclusively(temporary.path, url.path) {
+            case 0:
+                return url
+            case EEXIST:
+                try? FileManager.default.removeItem(at: temporary)
+                Logger.files.error("A record name a look called free is taken — never written over; the next name is used")
+            case ENOTSUP, EINVAL:
+                let placed = placingLock.withLock { files.stat(url.path) == ENOENT && rename(temporary.path, url.path) == 0 }
+                if placed { return url }
+                try? FileManager.default.removeItem(at: temporary)
+            case let code:
+                try? FileManager.default.removeItem(at: temporary)
+                throw DurableFile.posixError(code)
+            }
         }
+        throw DurableFile.posixError(EEXIST)
     }
 
     nonisolated private static func recordKey(_ sessionId: String, _ directory: URL) -> String { key(directory) + "\u{0}" + sessionId }
@@ -251,11 +349,11 @@ public final class SessionEvidence {
     public func commit(sessionId: String, directory: URL) {
         let recordKey = Self.recordKey(sessionId, directory)
         recordEpochs[recordKey, default: 0] += 1
-        guard unwrittenRecords.remove(recordKey) == nil else {
+        guard !unwrittenRecords.contains(recordKey) else {
             Logger.files.error("The session's diagnostics file could not be written — its live log is kept")
             return
         }
-        LiveDiagnosticsLog(directory: directory, sessionId: sessionId).deleteQueued()
+        LiveDiagnosticsLog(directory: directory, sessionId: sessionId, queues: logQueues).deleteQueued()
     }
 
     /// A pending retry's drain of the helper it stopped (L review 98). The events belong to the pending session whose
@@ -272,17 +370,17 @@ public final class SessionEvidence {
         guard !events.isEmpty else { return }
         let helpers = Set(events.compactMap { $0.detail["helper_session"] })
         guard !helpers.isEmpty else {
-            Logger.state.info("\(events.count, privacy: .public) helper events name no helper session — not attributed")
+            Logger.state.error("\(events.count, privacy: .public) helper events name no helper session — not attributed")
             return
         }
         let epochs = recordEpochs
-        let reads = folderReads, seconds = folderDeadline
+        let reads = folderReads, seconds = folderDeadline, queues = logQueues
         let known = await withTaskGroup(of: (Int, Set<String>?).self) { group in
             for (i, session) in sessions.enumerated() {
                 group.addTask {
                     let key = Self.recordKey(session.sessionId, session.directory)
                     return (i, await reads.read("evidence: known helpers", folder: session.directory.path, key: key + "#known", seconds: seconds) {
-                        let log = LiveDiagnosticsLog(directory: session.directory, sessionId: session.sessionId)
+                        let log = LiveDiagnosticsLog(directory: session.directory, sessionId: session.sessionId, queues: queues)
                         return Set(log.coverageSnapshots().keys).union(log.events().compactMap { $0.detail["helper_session"] })
                     })
                 }
@@ -297,7 +395,7 @@ public final class SessionEvidence {
         }
         let owners = sessions.indices.filter { helpers.isSubset(of: (known[$0] ?? nil) ?? []) }
         guard owners.count == 1, let owner = owners.first.map({ sessions[$0] }) else {
-            Logger.state.info("\(events.count, privacy: .public) helper events of helper sessions no one pending recording wholly knows — not attributed")
+            Logger.state.error("\(events.count, privacy: .public) helper events of helper sessions no one pending recording wholly knows — not attributed")
             return
         }
         let ownerKey = Self.recordKey(owner.sessionId, owner.directory)
@@ -305,7 +403,7 @@ public final class SessionEvidence {
             Logger.state.error("\(events.count, privacy: .public) helper events were attributed after their recording's record was made — dropped")
             return
         }
-        let log = LiveDiagnosticsLog(directory: owner.directory, sessionId: owner.sessionId)
+        let log = LiveDiagnosticsLog(directory: owner.directory, sessionId: owner.sessionId, queues: logQueues)
         for event in events { log.append(event) }
     }
 

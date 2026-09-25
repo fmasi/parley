@@ -809,7 +809,8 @@ public final class RecordingCoordinator {
                 sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
                     sessionId: sessionState.sessionId,
                     engine: configManager.config.engine.rawValue,
-                    recordingDirectory: outputDir
+                    recordingDirectory: outputDir,
+                    drainHelper: true
                 )
                 useFolderReadsForTheTranscript()
                 let result = try await transcriptionRunner.finalize(
@@ -846,7 +847,8 @@ public final class RecordingCoordinator {
                     let provenance = await captureClient.finalizeSessionDiagnostics(
                         sessionId: sessionId,
                         engine: config.engine.rawValue,
-                        recordingDirectory: sessionOutputDir
+                        recordingDirectory: sessionOutputDir,
+                        drainHelper: true
                     )
                     result = try await recoverChunkedSession(outputDirectory: sessionOutputDir, sessionId: sessionId, config: config,
                                                              transcriber: transcriber, diarizer: diarizer, provenance: provenance)
@@ -868,7 +870,8 @@ public final class RecordingCoordinator {
                     let provenance = await captureClient.finalizeSessionDiagnostics(
                         sessionId: sid,
                         engine: configManager.config.engine.rawValue,
-                        recordingDirectory: outputDir
+                        recordingDirectory: outputDir,
+                        drainHelper: true
                     )
 
                     useFolderReadsForTheTranscript()
@@ -2161,11 +2164,13 @@ public final class RecordingCoordinator {
                 let sessions = ready.map {
                     (sessionId: stripSegmentSuffix($0.systemAudioPath), directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
                 }
-                let answered = (try? await withDeadline(seconds: 3 + Self.seconds(folderReadDeadline), label: "pending: attribute the helper's events") {
+                let answered = (try? await withDeadline(seconds: Self.attributionBound, label: "pending: attribute the helper's events") {
                     await self.attributeHelperDrain(sessions)
                 }) ?? false
                 guard answered else {
                     Logger.state.error("The capture helper's events could not be drained — the pending recordings wait for the next event")
+                    // Said, never silent while they wait (L review 201).
+                    reportStopped(RecoveryMessages.waitingForHelperDrain(count: ready.count), recovered: false)
                     applyFolderAlarm(pending: pendingSessions(), folders: folders)
                     return
                 }
@@ -2187,6 +2192,11 @@ public final class RecordingCoordinator {
         }
         applyFolderAlarm(pending: pendingSessions(), folders: folders)
     }
+
+    /// The outer bound on a pending pass's attribution of the helper's events (L review 205): the drain's own 3 s, the
+    /// evidence's bounded folder reads (`SessionEvidence.folderDeadlineSeconds`, read concurrently), and a second's margin —
+    /// so the outer bound never fires while the attribution is still within its own.
+    nonisolated static let attributionBound: Double = 3 + SessionEvidence.folderDeadlineSeconds + 1
 
     /// The bound on a folder or disk read off the main actor (L review 74, 75): a hung network share or a
     /// dying drive is named as the folder — never the audio system — and never stalls the UI. Tests shorten it.
@@ -2543,8 +2553,13 @@ public final class RecordingCoordinator {
             // delete, or a held session transcribed before its hold (L review 136). Its leftovers were cleaned up
             // (R2's `cleanupFinalized`, L review 94) and that is all: no second finalize, no rename panel, no row.
             Logger.state.info("The recovery file of an already transcribed recording lingered — its leftovers are cleaned up, nothing is transcribed again")
-            // Its transcript verified: the commit a crash cut short happens now — its live log and coverage go (L
-            // review 144).
+            // Its transcript verified: the commit a crash cut short happens now — its live log and coverage go (L review
+            // 144) — but only once its record is BUILT (L review 200): the crashed process may never have written it, and
+            // the live log may be its only copy. Built without draining: the helper's events are not this session's to take.
+            // A record that cannot be written keeps the live log (the commit's unwritten guard).
+            await captureClient.adoptSession(sessionId: sessionId, directory: outputDir, drainHelper: false)
+            _ = await captureClient.finalizeSessionDiagnostics(sessionId: sessionId, engine: configManager.config.engine.rawValue,
+                                                               recordingDirectory: outputDir, drainHelper: false)
             captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)
             forgetSession(sentinel)
             captureClient.captureEnded()
@@ -2602,10 +2617,13 @@ public final class RecordingCoordinator {
             // Drain capture diagnostics and stamp the always-present provenance into the
             // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
             // otherwise a recovered session's `sessionState.provenance` stays nil forever.
+            // Built without draining, too, while the helper holds a held session's capture (L review 198): a build's drain
+            // would pour that capture's events — its `captureStop` — into THIS session's record.
             let provenance = await captureClient.finalizeSessionDiagnostics(
                 sessionId: sessionId,
                 engine: config.engine.rawValue,
-                recordingDirectory: outputDir
+                recordingDirectory: outputDir,
+                drainHelper: drainHelper
             )
             if let result = try await recoverChunkedSession(outputDirectory: outputDir, sessionId: sessionId, config: config,
                                                             transcriber: transcriber, diarizer: diarizer, provenance: provenance) {
@@ -2636,7 +2654,10 @@ public final class RecordingCoordinator {
                     outcome = chunkCount > 0
                         ? SalvageOutcome(kind: .finalizeFailed("none of their audio could be processed"), chunkCount: chunkCount)
                         : SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
-                    // Nothing on disk at all: nothing to keep evidence for. Chunks kept untranscribed keep theirs.
+                    // Nothing on disk at all: nothing to keep evidence for. Chunks kept untranscribed keep theirs. Safe to
+                    // commit with no transcript (L review 206): the record was BUILT above (`finalizeSessionDiagnostics`), so an
+                    // anomalous session's `.diag.jsonl` is on disk — and one that could not be written keeps its live log
+                    // through the commit's unwritten guard.
                     if chunkCount == 0 { captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir) }
                 }
             }
@@ -2892,7 +2913,8 @@ public final class RecordingCoordinator {
         sessionState.provenance = await captureClient.finalizeSessionDiagnostics(
             sessionId: sessionState.sessionId,
             engine: configManager.config.engine.rawValue,
-            recordingDirectory: outputDir
+            recordingDirectory: outputDir,
+            drainHelper: true
         )
         let kind: SalvageOutcome.Kind
         do {

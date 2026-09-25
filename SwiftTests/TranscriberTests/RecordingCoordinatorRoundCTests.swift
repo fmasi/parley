@@ -648,7 +648,8 @@ final class HungRead: @unchecked Sendable {
         await h.coordinator.recoverAtLaunch()
         #expect(!h.appState.isRecording, "never re-attached")
         #expect(h.client.stopCalls == 1, "its capture stopped")
-        #expect(h.client.finalizeCalls.isEmpty && h.presented.value.isEmpty, "never finalized again")
+        // Its record is built (L review 200) — never its transcript finalized again, nor the helper drained into it.
+        #expect(h.presented.value.isEmpty && !h.client.drains.contains { $0.hasPrefix("finalize:") }, "never finalized again")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && pending(h).isEmpty)
     }
 

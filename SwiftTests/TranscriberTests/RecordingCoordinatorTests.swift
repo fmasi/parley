@@ -64,6 +64,7 @@ final class FakeCaptureClient: RecordingCaptureClient {
         sessionCalls.append("start:\(sessionId)@\(outputDirectory.standardized.path)")
         // As production's start: its drain first, then `beginCapture` — a NEW session resets what was recorded (L
         // review 146).
+        drains.append("start:\(sessionId)")
         bind(sessionId, outputDirectory)
         realEvidence?.beginCapture(sessionId: sessionId, directory: outputDirectory)
         startCalls.append(StartCall(
@@ -114,6 +115,9 @@ final class FakeCaptureClient: RecordingCaptureClient {
     var sessionCalls: [String] = []
     /// Bind, attribute, adopt, finalize (build), commit — in order (L review 97, 98, 121).
     var evidenceOrder: [String] = []
+    /// Every drain of the helper's ring, where production drains it (L review 198): a start's, an adopt's and a build's —
+    /// each unless told not to — as "<step>:<session id>". The attribution's drain is `evidenceOrder`'s "attribute:".
+    var drains: [String] = []
     /// The session the evidence is bound to. Binding a NEW one resets what was recorded, as production's
     /// `beginCapture` does (L reviews 121, 146).
     var bound: (id: String, directory: String)?
@@ -138,6 +142,7 @@ final class FakeCaptureClient: RecordingCaptureClient {
     func adoptSession(sessionId: String, directory: URL, drainHelper: Bool) async {
         sessionCalls.append("adopt:\(sessionId)@\(directory.standardized.path)")
         evidenceOrder.append(drainHelper ? "adopt:\(sessionId)" : "adopt-undrained:\(sessionId)")
+        if drainHelper { drains.append("adopt:\(sessionId)") }
         bind(sessionId, directory)
         realEvidence?.beginCapture(sessionId: sessionId, directory: directory)
         await onAdopt?()
@@ -225,11 +230,12 @@ final class FakeCaptureClient: RecordingCaptureClient {
         builtRecords.flatMap(\.events) + discardedEvents + recordedEvents
     }
     func finalizeSessionDiagnostics(
-        sessionId: String, engine: String, recordingDirectory: URL
+        sessionId: String, engine: String, recordingDirectory: URL, drainHelper: Bool
     ) async -> CaptureProvenance {
         await onFinalizeDiagnostics?()
         finalizeCalls.append((sessionId, engine, recordingDirectory))
         evidenceOrder.append("finalize:\(sessionId)")
+        if drainHelper { drains.append("finalize:\(sessionId)") }
         // As production's build: the ring is this session's when bound to it or nothing is bound — then it is taken,
         // and reset; the binding ends (L review 146).
         let ownsRing = bound == nil || isBound(sessionId, recordingDirectory)
@@ -4879,7 +4885,8 @@ struct Harness {
         let before = try Data(contentsOf: transcript)
         await h.coordinator.recoverAtLaunch()
         #expect(h.presented.value.isEmpty, "no rename panel, no auto-summary")
-        #expect(h.client.finalizeCalls.isEmpty, "nothing finalized again")
+        // Only its record is built (L review 200), without draining — its transcript is never finalized again.
+        #expect(h.client.finalizeCalls.map(\.sessionId) == ["sess"] && h.client.drains.isEmpty, "nothing finalized again")
         #expect(h.appState.activeAlarms[.recordingStopped] == nil, "no STOPPED row for a finished recording")
         #expect(try Data(contentsOf: transcript) == before, "the transcript is untouched")
         #expect(SessionState.read(directory: outDir(s), sessionId: "sess") == nil, "the leftover progress file is gone")
@@ -4962,7 +4969,7 @@ struct Harness {
         try RecoveryFixtures.writeFakeWav(at: late, seconds: 120)
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: late.path)
         await h.coordinator.recoverAtLaunch()
-        #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "the transcript itself is left as it is")
+        #expect(h.presented.value.isEmpty && h.client.drains.isEmpty, "the transcript itself is left as it is (its record is only built, L review 200)")
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
         #expect(row.contains("recorded after") && row.contains("not transcribed") && row.contains("2 min"), "\(row)")
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])

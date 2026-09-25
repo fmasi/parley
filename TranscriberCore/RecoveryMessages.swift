@@ -311,6 +311,13 @@ public enum RecoveryMessages {
         "A recording that stopped at \(clock(at)) is kept in \(folder), untranscribed: the transcription engine isn’t ready (\(why.trimmingCharacters(in: CharacterSet(charactersIn: ". ")))). Parley will transcribe it once the engine is ready — after Setup or a model download."
     }
 
+    /// A pending pass skipped its salvages because the capture helper's drain did not answer (L reviews 142, 201): the
+    /// recordings wait — said, never silent.
+    public static func waitingForHelperDrain(count: Int) -> String {
+        let what = count == 1 ? "1 earlier recording" : "\(count) earlier recordings"
+        return "Parley is waiting to finish \(what): the capture helper didn’t hand over its diagnostics. Their audio is kept, and Parley will try again at the next wake, mount or recording’s end."
+    }
+
     /// Review fix 9: the wall clock can step back across a crash/resume pair; the reported gap is
     /// clamped to ≥ 0 rather than printing a negative duration.
     public static func resumedAfterCrash(crashedAt: Date, resumedAt: Date) -> String {
