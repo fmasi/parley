@@ -154,6 +154,8 @@ public final class RecordingCoordinator {
     /// A Stop whose stopping mark did not answer, kept apart (L review 236): in memory, and in its own file, written on its
     /// own queue — never the recovery file's, which is the one not answering.
     var stopKeptApart: RecordingSentinel.StopRequest?
+    /// The held sessions whose record already says why they were held (L review 268): said once per session.
+    private var recordedWhyHeld: Set<String> = []
     /// Where the Stop kept apart is written and read: a serial queue of its own (L review 236). Tests inject one.
     var stopRequestIO = SentinelIO(label: "eu.fmasi.parley.stop-request")
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
@@ -183,10 +185,12 @@ public final class RecordingCoordinator {
     /// outside a pass. Each with the session it is about (nil: none — a note about the pending list, say). `late`: the
     /// `audioAfterTranscript` messages — their own row, never under "Recording STOPPED" (L review 219).
     private var stoppedBatch: (recovered: [(session: String?, message: String)], other: [(session: String?, message: String)],
-                               late: [(session: String?, message: String)], lists: [String])?
-    /// The sessions a pass already said are waiting for the transcription engine (L review 178): said once per run, never
-    /// again at every wake or mount while the engine is still not ready.
-    private var saidWaitingForEngine: Set<String> = []
+                               late: [(session: String?, message: String)], lists: [String],
+                               revisions: [(stale: String, message: String)])?
+    /// The sessions a pass already said are waiting for the transcription engine (L review 178), with what was said: said
+    /// once per run, never again at every wake or mount while the engine is still not ready — only when its remedy changes
+    /// (L review 255).
+    private var saidWaitingForEngine: [String: (remedy: RecoveryMessages.EngineRemedy, message: String)] = [:]
     /// The bound on the free-space read at a rotation (L11 review 70): a hung volume skips that rotation's
     /// check, never the UI. Tests shorten it.
     var rotationDiskReadDeadline: Duration = .seconds(2)
@@ -1806,7 +1810,7 @@ public final class RecordingCoordinator {
             await awaitSettled { !$0.recoveryGateHeld }
             recoveryGateHeld = true
         }
-        stoppedBatch = ([], [], [], [])
+        stoppedBatch = ([], [], [], [], [])
         if let sentinel = slotRead() {
             if await recover(sentinel) != .heldForHelper {
                 // Sessions an earlier launch could not finish (their folder away, or the helper not letting go).
@@ -1835,18 +1839,39 @@ public final class RecordingCoordinator {
 
     /// A `recordingStopped` message: into the pass's one row when a recovery pass is running, else raised and
     /// presented at once. `recovered`: a salvage's (they are counted together). `session`: the session it is about (its
-    /// key), nil for a note about no one session.
-    private func reportStopped(_ message: String, recovered: Bool, session: String? = nil) {
+    /// key), nil for a note about no one session. `replacing`: what this session's row said before, now stale (L review
+    /// 255) — replaced, never left beside the new message.
+    private func reportStopped(_ message: String, recovered: Bool, session: String? = nil, replacing stale: String? = nil) {
         if let batch = stoppedBatch {
             // Said once per pass, however many times the pass looks (L review 130) — deduplicated by SESSION, never by the
             // text alone: two sessions whose rows read the same are both said (L review 180).
             let entry = (session: session, message: message)
+            if let stale {
+                // Said by an earlier pass, its row still up: revised in place when this pass's row is raised.
+                if appState.activeAlarms[.recordingStopped]?.message.contains(stale) == true {
+                    stoppedBatch?.revisions.append((stale, message))
+                    return
+                }
+                stoppedBatch?.recovered.removeAll { $0.session == session && $0.message == stale }
+                stoppedBatch?.other.removeAll { $0.session == session && $0.message == stale }
+            }
             guard !(batch.recovered + batch.other).contains(where: { $0.session == entry.session && $0.message == entry.message }) else { return }
             if recovered { stoppedBatch?.recovered.append(entry) } else { stoppedBatch?.other.append(entry) }
             return
         }
-        appState.raiseAppAlarm(.recordingStopped, message: message)
-        presentAlarms()
+        if let stale, appState.activeAlarms[.recordingStopped]?.message.contains(stale) == true {
+            appState.reviseAppAlarm(.recordingStopped, replacing: stale, with: message)
+            presentAlarms(reshow: [.recordingStopped])
+            return
+        }
+        presentAlarms(reshow: raiseSessionRow(.recordingStopped, message: message))
+    }
+
+    /// A per-session row raised (L review 261): another recording's message, while the row is still up, is added to it —
+    /// and that row is presented again (returned, for `presentAlarms(reshow:)`), never dropped.
+    private func raiseSessionRow(_ kind: AlarmKind, message: String) -> Set<AlarmKind> {
+        let wasUp = appState.activeAlarms[kind] != nil
+        return appState.raiseAppAlarm(kind, message: message) && wasUp ? [kind] : []
     }
 
     /// Audio recorded after a finished recording's transcript (L reviews 137, 219): its own acknowledgeable row, "Audio kept
@@ -1858,8 +1883,7 @@ public final class RecordingCoordinator {
             stoppedBatch?.late.append(entry)
             return
         }
-        appState.raiseAppAlarm(.audioAfterTranscript, message: message)
-        presentAlarms()
+        presentAlarms(reshow: raiseSessionRow(.audioAfterTranscript, message: message))
     }
 
     /// A note about the pending list itself — one Parley could not read (L review 249): its own row, `pendingListUnreadable`,
@@ -1888,15 +1912,19 @@ public final class RecordingCoordinator {
             parts.append("\(batch.recovered.count) earlier recordings were recovered: " + batch.recovered.map(\.message).joined(separator: " "))
         }
         parts += batch.other.map(\.message)
+        var reshow: Set<AlarmKind> = []
+        for revision in batch.revisions where appState.reviseAppAlarm(.recordingStopped, replacing: revision.stale, with: revision.message) {
+            reshow.insert(.recordingStopped)   // L review 255: a stale remedy replaced, and said again
+        }
         if !batch.late.isEmpty {
-            appState.raiseAppAlarm(.audioAfterTranscript, message: batch.late.map(\.message).joined(separator: " "))
+            reshow.formUnion(raiseSessionRow(.audioAfterTranscript, message: batch.late.map(\.message).joined(separator: " ")))
         }
         guard !parts.isEmpty else {
-            if !batch.late.isEmpty || !batch.lists.isEmpty { presentAlarms() }
+            if !batch.late.isEmpty || !batch.lists.isEmpty || !reshow.isEmpty { presentAlarms(reshow: reshow) }
             return
         }
-        appState.raiseAppAlarm(.recordingStopped, message: parts.joined(separator: " "))
-        presentAlarms()
+        reshow.formUnion(raiseSessionRow(.recordingStopped, message: parts.joined(separator: " ")))
+        presentAlarms(reshow: reshow)
     }
 
     private enum RelaunchOutcome { case handled, heldForHelper }
@@ -2327,7 +2355,7 @@ public final class RecordingCoordinator {
             return
         }
         recoveryGateHeld = true
-        stoppedBatch = ([], [], [], [])
+        stoppedBatch = ([], [], [], [], [])
         foldersNotAnswering.removeAll()   // an event: every folder is read again (L review 127)
         await retryPendingLocked()
         releaseRecoveryGate()
@@ -2910,14 +2938,15 @@ public final class RecordingCoordinator {
     }
 
     /// The Stop could not check whether late chunks the helper may have recorded are on disk (L review 213): recorded, and
-    /// said in a row naming their files — kept there if they are, not transcribed. Its own row, "Audio kept after a
-    /// transcript" (L reviews 219, 241): nothing stopped, and it never takes the Stop's own "Recording STOPPED" row.
+    /// said in a row naming their files — kept there if they are, not transcribed. Its own row, "Possible audio after a
+    /// transcript" (L reviews 219, 241, 268): only what is certain — nothing stopped, and it never takes the Stop's own
+    /// "Recording STOPPED" row.
     private func lateChunksUnchecked(_ indices: [Int]) {
         captureClient.record(.folderNotAnswering, .anomaly, ["during": "stop", "unchecked_chunks": indices.map(String.init).joined(separator: ",")])
         guard let location = transcriptionRunner.chunkRotator?.sessionLocation else { return }
         let files = indices.map { "\(location.sessionId)-\($0).wav" }
-        reportAudioAfterTranscript(RecoveryMessages.lateChunksUnchecked(files: files, folder: abbreviatedDisplayPath(location.outputDir.path)),
-                                   session: Self.sessionKey(of: location))
+        let message = RecoveryMessages.lateChunksUnchecked(files: files, folder: abbreviatedDisplayPath(location.outputDir.path))
+        presentAlarms(reshow: raiseSessionRow(.possibleAudioAfterTranscript, message: message))
     }
 
     /// R2's hook: `session.json` could not be written — after a chunk, or (nil) a session-level change such
@@ -3021,7 +3050,7 @@ public final class RecordingCoordinator {
             return
         }
         guard stillOwnsTheSession(sentinel) else { return }
-        saidWaitingForEngine.remove(sentinel.sessionKey)
+        saidWaitingForEngine[sentinel.sessionKey] = nil
         appState.phase = .transcribing(progress: "Recovering…")
         let outcome: SalvageOutcome
         var recovered: TranscriptionResult?
@@ -3143,8 +3172,9 @@ public final class RecordingCoordinator {
 
     /// A held session's record says why it was held (L review 247): the stop failure recorded when it was held went into
     /// whatever evidence was bound then, which a later adopt reset. Recorded again, into this session's own — just bound.
+    /// Once per session (L review 268): a salvage attempt that did not finish already recorded it into the session's live log.
     private func recordWhyHeld(_ sentinel: RecordingSentinel) {
-        guard let held = sentinel.heldReason else { return }
+        guard let held = sentinel.heldReason, recordedWhyHeld.insert(sentinel.sessionKey).inserted else { return }
         var detail = ["source": "app", "held": held.rawValue]
         if let because = sentinel.heldBecause { detail["held_because"] = because }
         captureClient.record(.streamStopError, .anomaly, detail)
@@ -3220,8 +3250,11 @@ public final class RecordingCoordinator {
         keepPending(sentinel, markStopping: markStopping, cause: cause)
         let folder = abbreviatedDisplayPath(URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent().path)
         let message = RecoveryMessages.waitingForEngine(at: stoppedAt, folder: folder, why: why, remedy: remedy)
-        if saidWaitingForEngine.insert(sentinel.sessionKey).inserted {
-            reportStopped(message, recovered: false, session: sentinel.sessionKey)
+        // Said again when its remedy changed (L review 255) — the stale one replaced in the row, never left beside it.
+        let said = saidWaitingForEngine[sentinel.sessionKey]
+        if said?.remedy != remedy {
+            saidWaitingForEngine[sentinel.sessionKey] = (remedy, message)
+            reportStopped(message, recovered: false, session: sentinel.sessionKey, replacing: said?.message)
         }
         return message
     }
@@ -3340,17 +3373,28 @@ public final class RecordingCoordinator {
     /// Setup checks them: the speech engine made and ready, and the diarizer's model there too (VAD is optional: skipped
     /// without its model). Looks only, off the main actor — never a download. Nothing to recognise needs no engine: one
     /// that cannot be made then never keeps a session whose every chunk is transcribed (no asymmetry).
+    /// The bound on a salvage's readiness look (L review 254): a speech-model inventory that does not answer within it is
+    /// not ready. Tests shorten it.
+    var engineReadyDeadline: Duration = .seconds(5)
+
     private func enginesForSalvage(config: Config, toRecognise: Int) async throws -> (any TranscriptionEngine, (any DiarizationProvider)?) {
         guard toRecognise > 0 else {
             if let prepared = try? prepareEngines(config: config) { return prepared }
             return (NothingToRecognise(), nil)
         }
         let (transcriber, diarizer) = try prepareEngines(config: config)
-        let notReady = await Task.detached { () -> String? in
-            if !(await transcriber.isReady()) { return await transcriber.notReadyReason() }
-            if let diarizer, !(await diarizer.isReady()) { return "its speaker-diarization model is not downloaded" }
-            return nil
-        }.value
+        // Bounded (L review 254): a look that does not answer — the speech models' inventory — is not ready, never a wait.
+        let notReady: String?
+        do {
+            notReady = try await withDeadline(seconds: Self.seconds(engineReadyDeadline), label: "salvage: engine ready") { () -> String? in
+                if !(await transcriber.isReady()) { return await transcriber.notReadyReason() }
+                if let diarizer, !(await diarizer.isReady()) { return "its speaker-diarization model is not downloaded" }
+                return nil
+            }
+        } catch {
+            Logger.state.error("The transcription engine's readiness did not answer within its bound — not ready")
+            notReady = "whether its models are installed could not be checked in time"
+        }
         if let notReady { throw EngineNotReady(why: notReady) }
         return (transcriber, diarizer)
     }

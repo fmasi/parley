@@ -190,7 +190,7 @@ struct SlowRead: Sendable {
         config.mergeChunkedAudio = true
         config.preserveSourceWAV = false
         let state = SessionState(sessionId: "m", meetingStart: t0, engine: "fluid_audio", chunkDurationMinutes: 1, chunks: chunks)
-        let hung = HungRead("merge: sources")
+        let hung = HungRead("merge: sources loads")   // L review 252: the loads, their own step
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "merge-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })

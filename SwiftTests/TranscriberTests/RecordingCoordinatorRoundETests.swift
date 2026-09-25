@@ -532,9 +532,10 @@ import Testing
         await h.coordinator.stopRecording()
         #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["unchecked_chunks"] == "1" })
         #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "stop" })
-        // Its own row, never under "Recording STOPPED" (L review 241: 219's kind), in the singular for one chunk.
+        // Its own row, never under "Recording STOPPED" (L review 241), in the singular for one chunk — headed only by what is
+        // certain: POSSIBLE audio (L review 268).
         #expect(h.appState.activeAlarms[.recordingStopped] == nil)
-        let row = try #require(h.appState.activeAlarms[.audioAfterTranscript]?.message)
+        let row = try #require(h.appState.activeAlarms[.possibleAudioAfterTranscript]?.message)
         #expect(row.contains("\(call.sessionId)-1.wav") && row.contains("not transcribed"), "\(row)")
         #expect(row.contains("If it is in") && !row.contains("they"), "\(row)")
     }

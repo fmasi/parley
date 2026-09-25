@@ -213,11 +213,10 @@ public final class FolderReads: @unchecked Sendable {
     /// behind a hung one, and never a queue another root's reads use.
     private func volume(of folder: String, by deadline: SuspendingClock.Instant) async -> String {
         let injected = volumeOf
-        let root = root(of: folder), rest = String(Self.normalised(folder).dropFirst(root.count))
-        let fallback = "unknown:" + root
+        let root = root(of: folder), fallback = "unknown:" + root
         func volume(canonicalRoot: String) -> String {
             guard injected == nil else { return canonicalRoot }   // a test's resolver answers the volume whole
-            let path = canonicalRoot == "/" && !rest.isEmpty ? rest : canonicalRoot + rest
+            let path = Self.derivedPath(of: folder, root: root, canonicalRoot: canonicalRoot)
             return Self.lexicalVolume(of: path, mounts: Self.mountTable(), caseInsensitive: Self.bootCaseInsensitive)
         }
         if let cached = lock.withLock({ resolved[root] }) { return volume(canonicalRoot: cached) }
@@ -238,6 +237,15 @@ public final class FolderReads: @unchecked Sendable {
         }
         guard let value else { return fallback }   // a link cycle
         return volume(canonicalRoot: value)
+    }
+
+    /// `folder`, under `root`, spelled from the root's canonical path (L reviews 237, 268): the rest of its path appended
+    /// LEXICALLY — with its leading slash, a root of `/` included.
+    static func derivedPath(of folder: String, root: String, canonicalRoot: String) -> String {
+        let folder = normalised(folder)
+        let rest = root == "/" ? (folder == "/" ? "" : folder) : String(folder.dropFirst(root.count))   // "" or "/…"
+        guard canonicalRoot != "/" else { return rest.isEmpty ? "/" : rest }
+        return canonicalRoot + rest
     }
 
     /// A mounted file system as the kernel last knew it: where it is mounted, and whether it is local.

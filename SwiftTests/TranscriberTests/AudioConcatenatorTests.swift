@@ -21,7 +21,7 @@ struct AudioConcatenatorTests {
     /// Creates a stereo AAC .m4a file at `url` with a sine wave of `durationSeconds`.
     /// Uses AVAssetWriter + CMSampleBuffer to encode PCM directly to AAC without needing
     /// AVAssetExportSession (which requires sandbox entitlements unavailable in test runners).
-    private static func createTestM4a(at url: URL, durationSeconds: Double = 1.0, frequency: Double = 440.0) async throws {
+    static func createTestM4a(at url: URL, durationSeconds: Double = 1.0, frequency: Double = 440.0) async throws {
         let sampleRate: Double = 44100
         let channels: UInt32 = 2
         let frameCount = Int(sampleRate * durationSeconds)

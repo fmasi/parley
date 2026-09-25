@@ -77,6 +77,11 @@ public final class AppState {
     }
     @discardableResult
     public func raiseAppAlarm(_ kind: AlarmKind, message: String, now: Date = Date()) -> Bool { alarms.raise(kind, message: message, now: now) }
+    /// A per-session row's message revised (L review 255): see `CaptureAlarmRegistry.revise`.
+    @discardableResult
+    public func reviseAppAlarm(_ kind: AlarmKind, replacing old: String, with new: String, now: Date = Date()) -> Bool {
+        alarms.revise(kind, replacing: old, with: new, now: now)
+    }
     public func clearAppAlarm(_ kind: AlarmKind) { _ = alarms.clear(kind) }
     /// Only past events (`isAcknowledgeable`) can be dismissed; a live condition clears only when it ends. Through
     /// the registry's `acknowledge` (L review 91): a helper-owned one stays dismissed across that helper's next

@@ -67,12 +67,10 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         let localeID = SpeechAnalyzerLocale.resolve(language)
         let locale = Locale(identifier: localeID)
 
-        // The locale must be supported AND its on-device model installed, or transcription returns
-        // empty/garbage. A model that is not installed is NEVER downloaded here (L review 229): a transcription runs in a
-        // recording or a salvage, and installing is a network download only an explicit user action may start (`prepare`).
-        guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
-            throw SpeechAnalyzerError.localeNotSupported(locale.identifier(.bcp47))
-        }
+        // Its on-device model must be INSTALLED, or transcription returns empty/garbage — looked at FIRST, and alone (L review
+        // 254): an installed model is a supported one, and a model that is not installed is refused at once, never after a
+        // look at what could be downloaded. It is NEVER downloaded here (L review 229): a transcription runs in a recording or
+        // a salvage, and installing is a network download only an explicit user action may start (`prepare`).
         guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.installedLocales()) else {
             Logger.transcription.error("SpeechAnalyzer: the \(locale.identifier(.bcp47), privacy: .public) model is not installed — not transcribed, never downloaded")
             throw SpeechAnalyzerError.assetNotInstalled(locale.identifier(.bcp47))

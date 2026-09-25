@@ -50,11 +50,24 @@ public final class SessionEvidence {
         private let lock = NSLock()
         private var paths: Set<String> = []
         private var landed: [String: Int] = [:]
+        private var landedHandler: (@Sendable (String, Int) -> Void)?
         func contains(_ path: String) -> Bool { lock.withLock { paths.contains(path) } }
         func insert(_ path: String) { lock.withLock { _ = paths.insert(path) } }
-        func noteWritten(_ recordKey: String, build: Int) { lock.withLock { landed[recordKey] = max(landed[recordKey] ?? build, build) } }
+        /// A write of `build` landed — however late: registered, and handed to the handler (L review 268).
+        func noteWritten(_ recordKey: String, build: Int) {
+            let handler = lock.withLock { () -> (@Sendable (String, Int) -> Void)? in
+                landed[recordKey] = max(landed[recordKey] ?? build, build)
+                return landedHandler
+            }
+            handler?(recordKey, build)
+        }
         func writtenBuild(_ recordKey: String) -> Int? { lock.withLock { landed[recordKey] } }
+        /// Told of every write that lands (L review 268).
+        func onLanded(_ handler: @escaping @Sendable (String, Int) -> Void) { lock.withLock { landedHandler = handler } }
     }
+    /// The live logs a commit kept because their record was not written yet (L review 268), by record key: a late write that
+    /// lands after the commit lets them go then.
+    private var keptLiveLogs: [String: (sessionId: String, directory: URL)] = [:]
     /// Bumped whenever a session's record is built or committed, by session (L review 142): an attribution that answers
     /// after that never appends to its live log.
     private var recordEpochs: [String: Int] = [:]
@@ -81,6 +94,19 @@ public final class SessionEvidence {
         self.folderReads = folderReads
         self.logQueues = logQueues
         self.recordFiles = recordFiles
+        ownRecordFiles.onLanded { [weak self] key, build in
+            Task { @MainActor in self?.recordLanded(key, build: build) }
+        }
+    }
+
+    /// A record's write landed — perhaps long after its build timed out (L reviews 246, 268): the mark it left is cleared at
+    /// once, and a live log a commit kept meanwhile, because it was then the only record, goes now.
+    private func recordLanded(_ recordKey: String, build: Int) {
+        guard let marked = unwrittenRecords[recordKey], build >= marked else { return }
+        unwrittenRecords[recordKey] = nil
+        guard let kept = keptLiveLogs.removeValue(forKey: recordKey) else { return }
+        Logger.files.info("A diagnostics record landed after its session was committed — its live log goes now")
+        LiveDiagnosticsLog(directory: kept.directory, sessionId: kept.sessionId, queues: logQueues).deleteQueued()
     }
 
     /// The file-system calls that decide where a record goes (L review 199).
@@ -392,8 +418,10 @@ public final class SessionEvidence {
         }
         guard unwrittenRecords[recordKey] == nil else {
             Logger.files.error("The session's diagnostics file could not be written — its live log is kept")
+            keptLiveLogs[recordKey] = (sessionId, directory)   // until a late write lands (L review 268)
             return
         }
+        keptLiveLogs[recordKey] = nil
         LiveDiagnosticsLog(directory: directory, sessionId: sessionId, queues: logQueues).deleteQueued()
     }
 

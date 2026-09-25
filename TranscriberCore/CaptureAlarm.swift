@@ -63,6 +63,9 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// App-owned, ACKNOWLEDGEABLE (L review 219): audio of a finished recording, recorded after its transcript was written,
     /// is kept beside it untranscribed. A past event — nothing just stopped — so never under "Recording STOPPED".
     case audioAfterTranscript
+    /// App-owned, ACKNOWLEDGEABLE (L review 268): chunks the helper MAY have recorded after a Stop's transcript, which the
+    /// Stop could not check — the folder was not answering. Only what is certain is said: possibly audio, kept if it is there.
+    case possibleAudioAfterTranscript
     /// App-owned, ACKNOWLEDGEABLE (L review 249): a list of unfinished recordings Parley could not read — set aside, or left
     /// in place — and those recordings may need finishing by hand. A note about the list, not about one recording: never
     /// under "Recording STOPPED", where it would take the place of a session's own row.
@@ -93,10 +96,14 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// A past event about ONE recording (L review 261): another recording's, raised while the row is still up, is added to
+    /// it — never dropped because the kind is already up.
+    public var addsPerSession: Bool { self == .recordingStopped || self == .audioAfterTranscript || self == .possibleAudioAfterTranscript }
+
     /// Past events the user dismisses; everything else clears only when the condition clears.
     public var isAcknowledgeable: Bool {
         self == .recordingResumedWithGap || self == .recordingStopped || self == .micFollowFailed || self == .audioAfterTranscript
-            || self == .pendingListUnreadable
+            || self == .possibleAudioAfterTranscript || self == .pendingListUnreadable
     }
 
     /// The row's headline, shared by the menu's sticky rows and the alarm window (in Core, so it is tested — L review 219).
@@ -113,6 +120,7 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
         case .recordingStopped: return "Recording STOPPED"
         case .recordingFolderUnavailable: return "Recording folder unavailable"
         case .audioAfterTranscript: return "Audio kept after a transcript"
+        case .possibleAudioAfterTranscript: return "Possible audio after a transcript"
         case .pendingListUnreadable: return "A list of unfinished recordings couldn’t be read"
         case .unknownHelperAlarm: return "Parley needs an update to show a capture problem"
         }
@@ -173,14 +181,31 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
 
     public init() {}
 
-    /// True when newly raised; a repeat keeps the original alarm untouched.
+    /// True when newly raised — or, for a kind that `addsPerSession`, when another recording's message was added to its row
+    /// still up (L review 261). A repeat keeps the alarm untouched.
     @discardableResult
     public mutating func raise(_ kind: AlarmKind, message: String, now: Date) -> Bool {
-        guard alarms[kind] == nil else { return false }
+        if let existing = alarms[kind] {
+            guard kind.addsPerSession, !existing.message.contains(message) else { return false }
+            alarms[kind] = ActiveAlarm(kind: kind, raisedAt: existing.raisedAt, lastNotifiedAt: existing.lastNotifiedAt,
+                                       message: existing.message + " " + message, episode: existing.episode)
+            return true
+        }
         let episode = (episodes[kind] ?? 0) + 1
         episodes[kind] = episode
         alarms[kind] = ActiveAlarm(kind: kind, raisedAt: now, lastNotifiedAt: kind.isAcknowledgeable ? nil : lastNotified[kind],
                                    message: message, episode: episode)
+        return true
+    }
+
+    /// A per-session row's message REVISED (L review 255): `old`, one recording's, is replaced by `new` where the row still
+    /// says it — never left beside it; otherwise `new` is raised (or added). True when the row changed.
+    @discardableResult
+    public mutating func revise(_ kind: AlarmKind, replacing old: String, with new: String, now: Date) -> Bool {
+        guard let existing = alarms[kind], existing.message.contains(old) else { return raise(kind, message: new, now: now) }
+        guard old != new else { return false }
+        alarms[kind] = ActiveAlarm(kind: kind, raisedAt: existing.raisedAt, lastNotifiedAt: existing.lastNotifiedAt,
+                                   message: existing.message.replacingOccurrences(of: old, with: new), episode: existing.episode)
         return true
     }
 

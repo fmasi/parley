@@ -325,3 +325,320 @@ final class ReadLog: @unchecked Sendable {
         #expect(left == [other], "this session's stale temporary is swept, never another session's: \(left)")
     }
 }
+
+// MARK: - A second session's row is never dropped (261)
+
+@MainActor
+@Suite struct SessionRowsAppendRoundHTests {
+    /// L review 261: a per-session past event — a recording STOPPED, audio kept after a transcript — raised while its kind's
+    /// row is still up (not acknowledged) is ADDED to that row, never dropped; the same message twice is said once.
+    @Test func aSecondSessionsMessageIsAddedToTheRow() {
+        for kind in [AlarmKind.recordingStopped, .audioAfterTranscript] {
+            var registry = CaptureAlarmRegistry()
+            let first = registry.raise(kind, message: "About p.json.", now: Date())
+            let second = registry.raise(kind, message: "About q.json.", now: Date())
+            #expect(first && second, "said: \(kind)")
+            let message = registry.alarms[kind]?.message ?? ""
+            #expect(message.contains("p.json") && message.contains("q.json"), "\(message)")
+            let again = registry.raise(kind, message: "About q.json.", now: Date())
+            #expect(!again && registry.alarms[kind]?.message == message, "the same message is said once")
+        }
+        var registry = CaptureAlarmRegistry()   // a live condition's row is still raised once
+        registry.raise(.diskLow, message: "a", now: Date())
+        let repeated = registry.raise(.diskLow, message: "b", now: Date())
+        #expect(!repeated && registry.alarms[.diskLow]?.message == "a")
+    }
+
+    /// L review 261: two passes, each finishing a different session while the first row is still up — both are named, and
+    /// the second is presented again.
+    @Test func twoPassesNameBothSessions() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        try RecordingSentinel.writePending([try roundFPendingSession(h, "p")], directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains("p.json") == true)
+        let shownBefore = try #require(h.appState.activeAlarms[.recordingStopped]?.lastNotifiedAt, "presented")
+        try RecordingSentinel.writePending([try roundFPendingSession(h, "q")], directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("p.json") && row.contains("q.json"), "both sessions are named: \(row)")
+        #expect((h.appState.activeAlarms[.recordingStopped]?.lastNotifiedAt ?? .distantPast) > shownBefore, "the added session is presented")
+    }
+}
+
+// MARK: - The waiting row's remedy is never stale (255)
+
+@MainActor
+@Suite struct WaitingRemedyRoundHTests {
+    private let setup = "after Setup or a model download", another = "choose another engine in Settings"
+
+    /// L review 255: the waiting row is said again when its REMEDY changes — the engine chosen now cannot be made here — and
+    /// the stale remedy goes from the row, never left beside the new one. Acknowledged, a new remedy is said again too.
+    @Test func theWaitingRowIsSaidAgainWhenItsRemedyChanges() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let p = try roundFPendingSession(h, "p", orphan: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        h.engine.value = NotReadyEngine()
+        await h.coordinator.retryPendingSessions()
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains(setup) == true)
+        h.engineError.value = TranscriptionRunner.RunnerError.engineUnavailable("SpeechAnalyzer requires macOS 26")   // another engine chosen
+        await h.coordinator.transcriptionEngineMayBeReady()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains(another) && !row.contains(setup), "the new remedy, never the stale one: \(row)")
+        h.appState.acknowledge(.recordingStopped)
+        h.engineError.value = nil   // the model engine again: not downloaded
+        await h.coordinator.transcriptionEngineMayBeReady()
+        let again = try #require(h.appState.activeAlarms[.recordingStopped]?.message, "said again once acknowledged")
+        #expect(again.contains(setup) && !again.contains(another), "\(again)")
+        await h.coordinator.transcriptionEngineMayBeReady()
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message == again, "the same remedy is said once")
+    }
+}
+
+// MARK: - The merge's checks: blocking file work on the folder's queue, and a late check claimed once (252, 253)
+
+/// A merge's steps, run in order on one serial queue — as the folder's queue runs them — and recorded: which ran as blocking
+/// file work (`run`) and which as AVFoundation's loads (`runAsync`). `late`: the steps whose bound runs out — how, per label.
+final class MergeStepsProbe: MergeFileSteps, @unchecked Sendable {
+    enum Late { case beforeTheStep, asTheStepFinishes }
+    private let queue = DispatchQueue(label: "merge-steps-h-\(UUID().uuidString)")
+    private let lock = NSLock()
+    private var runs: [String] = [], asyncs: [String] = []
+    let late: @Sendable (String) -> Late?
+    init(late: @escaping @Sendable (String) -> Late? = { _ in nil }) { self.late = late }
+    var blocking: [String] { lock.withLock { runs } }
+    var loads: [String] { lock.withLock { asyncs } }
+    /// Returns once every step queued so far has run.
+    func settle() { queue.sync {} }
+
+    func run<T>(_ label: String, _ work: @escaping @Sendable () throws -> T) async throws -> T {
+        lock.withLock { runs.append(label) }
+        return try await onQueue(label) { try work() }
+    }
+
+    func runAsync<T>(_ label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        lock.withLock { asyncs.append(label) }
+        return try await onQueue(label) {
+            let box = Box<T>(), done = DispatchSemaphore(value: 0)
+            Task.detached { do { box.value = .success(try await work()) } catch { box.value = .failure(error) }; done.signal() }
+            done.wait()
+            return try box.value!.get()
+        }
+    }
+
+    private final class Box<T>: @unchecked Sendable { var value: Result<T, Error>? }
+
+    private func onQueue<T>(_ label: String, _ step: @escaping @Sendable () throws -> T) async throws -> T {
+        switch late(label) {
+        case .beforeTheStep?:
+            queue.async { Thread.sleep(forTimeInterval: 0.2); _ = try? step() }   // it answers after its caller gave up
+            throw AudioConcatenatorError.folderNotAnswering(label)
+        case .asTheStepFinishes?:
+            queue.sync { _ = try? step() }   // it finished — and the bound ran out in the same instant
+            throw AudioConcatenatorError.folderNotAnswering(label)
+        case nil:
+            return try queue.sync { try step() }
+        }
+    }
+}
+
+@MainActor
+@Suite(.serialized) struct MergeChecksRoundHTests {
+    private func chunks() async throws -> (dir: URL, chunks: [ChunkAudio]) {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("merge-h-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let t0 = Date()
+        var list: [ChunkAudio] = []
+        for i in 0..<2 {
+            let url = d.appendingPathComponent("m-\(i).m4a")
+            try await AudioConcatenatorTests.createTestM4a(at: url)
+            list.append(ChunkAudio(url: url, startTime: t0.addingTimeInterval(Double(i))))
+        }
+        return (d, list)
+    }
+
+    /// L review 252, IMPORTANT: the output's checks run their blocking file work — is it there, its size, its decoded length,
+    /// its removal — as blocking steps on the folder's queue; only AVFoundation's loads (the sources', the output's tracks and
+    /// played length) are asynchronous steps. Never blocking file work on the cooperative pool.
+    @Test func onlyTheLoadsAreAsynchronousSteps() async throws {
+        let (d, list) = try await chunks(); defer { try? FileManager.default.removeItem(at: d) }
+        let probe = MergeStepsProbe()
+        _ = try await AudioConcatenator.concatenate(chunks: list, outputDirectory: d, outputName: "m", deleteSources: true, steps: probe)
+        #expect(probe.loads.allSatisfy { $0.hasSuffix("loads") }, "only loads are asynchronous: \(probe.loads)")
+        #expect(probe.loads.contains("merge: sources loads") && probe.loads.contains("merge: check output loads"), "\(probe.loads)")
+        #expect(probe.blocking.contains("merge: check output") && probe.blocking.contains("merge: check output decoded"), "\(probe.blocking)")
+    }
+
+    /// L review 253: a check that FINISHES in the very instant its bound runs out is claimed once — by the check: the merge it
+    /// verified is used and listed, never left on disk unlisted.
+    @Test func aCheckThatFinishesAsItsBoundRunsOutIsItsOwn() async throws {
+        let (d, list) = try await chunks(); defer { try? FileManager.default.removeItem(at: d) }
+        let probe = MergeStepsProbe(late: { $0.hasPrefix("merge: check output") ? .asTheStepFinishes : nil })
+        let result = try await AudioConcatenator.concatenate(chunks: list, outputDirectory: d, outputName: "m", deleteSources: false, steps: probe)
+        #expect(result.outputPath.lastPathComponent == "m.m4a" && FileManager.default.fileExists(atPath: result.outputPath.path), "listed")
+    }
+
+    /// L review 253/255: a check that answers only after its caller gave up — the merge skipped, its chunk files listed —
+    /// removes nothing itself; the output it checked is removed behind it, on the folder's queue: never an unlisted merge.
+    @Test func anOutputWhoseCheckAnsweredLateIsRemoved() async throws {
+        let (d, list) = try await chunks(); defer { try? FileManager.default.removeItem(at: d) }
+        let probe = MergeStepsProbe(late: { $0 == "merge: check output decoded" ? .beforeTheStep : nil })
+        await #expect(throws: AudioConcatenatorError.self) {
+            _ = try await AudioConcatenator.concatenate(chunks: list, outputDirectory: d, outputName: "m", deleteSources: true, steps: probe)
+        }
+        await Harness.until { probe.settle(); return !FileManager.default.fileExists(atPath: d.appendingPathComponent("m.m4a").path) }
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("m.m4a").path), "removed behind the late check")
+        #expect(list.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) }, "the chunk files are the audio")
+    }
+
+    /// L review 255 (231): a `merge: delete sources` that does not answer keeps the merge: it was verified, and it is listed.
+    @Test func aTimedOutDeleteOfTheSourcesKeepsTheMerge() async throws {
+        let (d, list) = try await chunks(); defer { try? FileManager.default.removeItem(at: d) }
+        let probe = MergeStepsProbe(late: { $0 == "merge: delete sources" ? .beforeTheStep : nil })
+        let result = try await AudioConcatenator.concatenate(chunks: list, outputDirectory: d, outputName: "m", deleteSources: true, steps: probe)
+        #expect(FileManager.default.fileExists(atPath: result.outputPath.path), "the merge is kept and listed")
+        probe.settle()
+    }
+}
+
+// MARK: - SpeechAnalyzer looks at what is installed first, and a look that does not answer is not ready (254)
+
+/// A speech-model inventory that counts its looks — and whose installed-locales look can hang.
+final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
+    private let lock = NSLock()
+    private var supportedAsked = 0
+    let installed: [String]
+    let hangs: Bool
+    init(installed: [String] = [], hangs: Bool = false) { self.installed = installed; self.hangs = hangs }
+    var supportedLooks: Int { lock.withLock { supportedAsked } }
+    func installedLocales() async -> [String] {
+        if hangs { try? await Task.sleep(for: .seconds(30)) }
+        return installed
+    }
+    func supportedLocales() async -> [String] {
+        lock.withLock { supportedAsked += 1 }
+        return ["en-US"]
+    }
+    func install(locale: String) async throws { Issue.record("never an install") }
+}
+
+#if compiler(>=6.2)
+@MainActor
+@Suite struct SpeechAnalyzerLooksRoundHTests {
+    /// L review 254: a transcription looks at the INSTALLED locales first — an installed model needs no other look — and a
+    /// model that is not installed is refused without asking what is supported.
+    @Test func aTranscriptionLooksAtTheInstalledModelsFirst() async throws {
+        guard #available(macOS 26.0, *) else { return }
+        let installed = LookingSpeechInventory(installed: ["en-US"])
+        _ = try? await SpeechAnalyzerEngine(language: "en", inventory: installed)
+            .transcribe(audioPath: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString).wav"), language: nil, audioSource: .system)
+        #expect(installed.supportedLooks == 0, "installed: no other look")
+        let missing = LookingSpeechInventory()
+        await #expect(throws: SpeechAnalyzerError.self) {
+            _ = try await SpeechAnalyzerEngine(language: "en", inventory: missing)
+                .transcribe(audioPath: URL(fileURLWithPath: "/nonexistent.wav"), language: nil, audioSource: .system)
+        }
+        #expect(missing.supportedLooks == 0, "not installed: refused at once")
+    }
+
+    /// L review 254: a salvage's readiness look is bounded — an inventory that does not answer is NOT READY: the session
+    /// waits, said, within the bound.
+    @Test func aReadinessLookThatDoesNotAnswerIsNotReady() async throws {
+        guard #available(macOS 26.0, *) else { return }
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let p = try roundFPendingSession(h, "p", orphan: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        h.engine.value = SpeechAnalyzerEngine(language: "en", inventory: LookingSpeechInventory(installed: ["en-US"], hangs: true))
+        h.coordinator.engineReadyDeadline = .milliseconds(300)
+        let started = ContinuousClock.now
+        await h.coordinator.retryPendingSessions()
+        #expect(ContinuousClock.now - started < .seconds(5), "within its bound")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [p.sessionKey], "kept")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("transcription engine isn’t ready"), "\(row)")
+    }
+}
+#endif
+
+// MARK: - Small items (268)
+
+@MainActor
+@Suite struct SmallItemsRoundHTests {
+    private func dir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("small-h-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// L review 268: chunks a Stop could not check MAY hold audio — their row's headline says only what is certain, never
+    /// "Audio kept" — while audio recorded after a transcript keeps its own.
+    @Test func theUncheckedChunksRowsHeadlineIsHonest() {
+        #expect(AlarmKind.possibleAudioAfterTranscript.headline == "Possible audio after a transcript")
+        #expect(AlarmKind.possibleAudioAfterTranscript.isAcknowledgeable && AlarmKind.possibleAudioAfterTranscript.outlivesRecording)
+        #expect(AlarmKind.possibleAudioAfterTranscript.addsPerSession)
+        #expect(AlarmKind.audioAfterTranscript.headline == "Audio kept after a transcript")
+    }
+
+    /// L review 268 (246): a late write that lands AFTER the commit — which kept the live log, the record not written yet —
+    /// clears the mark at once and lets that lingering live log go.
+    @Test func aLateWriteThatLandsAfterTheCommitLetsTheLiveLogGo() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        defer { hung.release() }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-h-\(UUID().uuidString)", beforeEachRead: { name in
+            guard once.value, name == hung.label else { return }
+            once.value = false
+            hung.hangIfNamed(name)
+        }))
+        evidence.folderDeadline = 0.2
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 5), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        LiveDiagnosticsLog.flushAll()
+        _ = await evidence.finalize(sessionId: "s", directory: d)   // timed out: marked unwritten
+        evidence.commit(sessionId: "s", directory: d)               // the live log is its only record: kept
+        LiveDiagnosticsLog.flushAll()
+        let live = d.appendingPathComponent("s.diag.live.jsonl")
+        #expect(FileManager.default.fileExists(atPath: live.path), "kept while the record is not written")
+        hung.release()   // the write lands
+        await Harness.until { LiveDiagnosticsLog.flushAll(); return !FileManager.default.fileExists(atPath: live.path) }
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.jsonl").path))
+        #expect(!FileManager.default.fileExists(atPath: live.path), "the lingering live log goes once the record is on disk")
+    }
+
+    /// L review 268 (247): why a session was held is recorded once per session — never again at every salvage attempt.
+    @Test func whyASessionWasHeldIsRecordedOnce() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var p = try roundFPendingSession(h, "p")
+        p.heldReason = .relaunch
+        p.heldBecause = "its stop timed out (stop after relaunch)"
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        let hung = HungRead("transcript: chunk files")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-h-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderReadDeadline = .milliseconds(300)
+        await h.coordinator.retryPendingSessions()   // the first attempt: its folder does not answer
+        #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [p.sessionKey], "kept")
+        hung.release()
+        h.coordinator.folderReads = FolderReads(label: "rc-h-\(UUID().uuidString)")
+        h.coordinator.folderReadDeadline = .seconds(5)
+        await h.coordinator.retryPendingSessions()   // the second: finished
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "finished")
+        let said = h.client.everyRecordedEvent.filter { $0.kind == .streamStopError && $0.detail["held"] != nil }
+        #expect(said.count == 1, "\(said.map(\.detail))")
+    }
+
+    /// L review 268: a recording root of `/` derives its folders with their leading slash — so a folder on a share mounted
+    /// under it is read on the SHARE's queue, never the boot volume's.
+    @Test func aRootOfSlashKeepsItsFoldersLeadingSlash() {
+        let path = FolderReads.derivedPath(of: "/Volumes/NAS/rec", root: "/", canonicalRoot: "/")
+        #expect(path == "/Volumes/NAS/rec")
+        let mounts = [FolderReads.Mount(path: "/", isLocal: true), FolderReads.Mount(path: "/Volumes/NAS", isLocal: false)]
+        #expect(FolderReads.lexicalVolume(of: path, mounts: mounts, caseInsensitive: false) == "/Volumes/NAS")
+        #expect(FolderReads.derivedPath(of: "/", root: "/", canonicalRoot: "/") == "/")
+        #expect(FolderReads.derivedPath(of: "/Users/x/rec/2026", root: "/Users/x/rec", canonicalRoot: "/Volumes/Data/rec") == "/Volumes/Data/rec/2026")
+        #expect(FolderReads.derivedPath(of: "/Users/x/rec", root: "/Users/x/rec", canonicalRoot: "/") == "/", "a root that resolves to /")
+    }
+}
