@@ -28,7 +28,7 @@ public final class FolderReads: @unchecked Sendable {
 
     /// `read`'s answer, or nil when it did not answer within `seconds` of awake time — or when `folder` still has
     /// an earlier read outstanding. The read runs on after a timeout; its answer is then dropped.
-    func read<T>(_ label: String, folder: String, seconds: Double, _ read: @escaping @Sendable () -> T) async -> T? {
+    public func read<T>(_ label: String, folder: String, seconds: Double, _ read: @escaping @Sendable () -> T) async -> T? {
         guard lock.withLock({ outstanding.insert(folder).inserted }) else {
             Logger.state.error("A folder read was skipped: an earlier read of that folder has not answered (\(label, privacy: .public))")
             return nil

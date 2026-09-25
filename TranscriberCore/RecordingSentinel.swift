@@ -148,14 +148,18 @@ public struct RecordingSentinel: Codable, Equatable {
 
     /// Sessions a relaunch could not finish yet — their folder unreachable (an unplugged drive), or the
     /// capture helper not letting go of them — kept as a LIST beside the sentinel, so a later recording's
-    /// sentinel can never take their place. Missing → empty. Unreadable → set aside first (L review 89): moved
-    /// to `pending-sessions.unreadable-<time>.json`, never read as empty and then overwritten, which dropped
-    /// every session it named. `setAside` says where, so the caller can say so.
-    public static func loadPending(directory: URL? = nil) -> (sessions: [RecordingSentinel], setAside: URL?) {
+    /// sentinel can never take their place. Missing → empty. Unreadable — undecodable (L review 89), or there but
+    /// not readable at all, a permissions or I/O error (L review 130) → set aside first: moved to
+    /// `pending-sessions.unreadable-<time>.json`, never read as empty and then overwritten, which dropped every
+    /// session it named. `setAside` says where. When even the move fails, `keptUnreadable` says the file was LEFT
+    /// in place — and `writePending` then refuses to overwrite it.
+    public static func loadPending(directory: URL? = nil) -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?) {
         let dir = directory ?? AppPaths.dataDirectory
         let url = dir.appendingPathComponent(pendingFileName)
-        guard let data = try? Data(contentsOf: url) else { return ([], nil) }
-        if let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) { return (sessions, nil) }
+        guard FileManager.default.fileExists(atPath: url.path) else { return ([], nil, nil) }
+        if let data = try? Data(contentsOf: url), let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) {
+            return (sessions, nil, nil)
+        }
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         var aside = dir.appendingPathComponent("pending-sessions.unreadable-\(stamp).json")
         var n = 1
@@ -166,10 +170,10 @@ public struct RecordingSentinel: Codable, Equatable {
         do {
             try FileManager.default.moveItem(at: url, to: aside)
             Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable — set aside as \(aside.lastPathComponent, privacy: .sensitive)")
-            return ([], aside)
+            return ([], aside, nil)
         } catch {
             Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable and could not be set aside: \(error, privacy: .private)")
-            return ([], url)
+            return ([], nil, url)
         }
     }
 
@@ -177,10 +181,20 @@ public struct RecordingSentinel: Codable, Equatable {
         loadPending(directory: directory).sessions
     }
 
-    /// Atomically replace the list; an empty list removes the file.
+    /// A pending list there but unreadable, which could not be set aside: never overwritten (L review 130).
+    public struct UnreadablePendingList: Error, LocalizedError {
+        public var errorDescription: String? { "the list of unfinished recordings is unreadable and was left in place" }
+    }
+
+    /// Atomically replace the list; an empty list removes the file. A list that is there but cannot be read (and
+    /// could not be set aside) is never replaced or removed: it throws instead (L review 130).
     public static func writePending(_ sessions: [RecordingSentinel], directory: URL? = nil) throws {
         let dir = directory ?? AppPaths.dataDirectory
         let url = dir.appendingPathComponent(pendingFileName)
+        if FileManager.default.fileExists(atPath: url.path),
+           (try? Data(contentsOf: url)).flatMap({ try? makeDecoder().decode([RecordingSentinel].self, from: $0) }) == nil {
+            throw UnreadablePendingList()
+        }
         guard !sessions.isEmpty else {
             try? FileManager.default.removeItem(at: url)
             return

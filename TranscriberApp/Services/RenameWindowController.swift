@@ -28,6 +28,9 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// How long a panel's transcript read may take before the panel is skipped (L review 134).
+    static let parseDeadlineSeconds: Double = 10
+
     /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed.
     func enqueue(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         queue.enqueue((jsonPath, onDismiss))
@@ -48,12 +51,32 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // channelNames is read here too (once, off-main) rather than by the dialog re-reading the
         // transcript on every "Re-detect" press — the file open+parse that used to happen
         // synchronously on the main actor for the "this will clear your names" warning (#207).
+        //
+        // The parse is bounded, on the folder-read queue (L review 134): a recordings folder that does not answer
+        // skips this panel with a note — never a rename queue wedged behind it. A superseded show still ends its
+        // item, so the queue moves on.
         showTask = Task { @MainActor in
             defer { self.endPreparing(request) }
-            let (speakers, channelNames) = await Task.detached(priority: .userInitiated) {
+            let parsed = await FolderReads.shared.read("rename: transcript", folder: jsonPath.deletingLastPathComponent().path,
+                                                       seconds: Self.parseDeadlineSeconds) {
                 Self.parseSpeakersAndChannelNames(from: jsonPath)
-            }.value
-            guard !Task.isCancelled else { return }
+            }
+            guard !Task.isCancelled else {
+                onDismiss?()
+                return
+            }
+            guard let (speakers, channelNames) = parsed else {
+                Logger.files.error("Rename: the transcript could not be read in time — its panel is skipped")
+                let alert = NSAlert()
+                alert.messageText = "Speaker names can be set later"
+                alert.informativeText =
+                    "Parley couldn’t read \(jsonPath.lastPathComponent) in time — its folder didn’t answer. "
+                    + "Rename its speakers later with “Rename Speakers…” in the menu."
+                alert.alertStyle = .informational
+                alert.runModal()
+                onDismiss?()
+                return
+            }
             guard !speakers.isEmpty else {
                 Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .sensitive)")
                 let alert = NSAlert()
