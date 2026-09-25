@@ -23,6 +23,22 @@ public struct RecordingSentinel: Codable, Equatable {
     /// A deliberate quit or logout came while the stopped recording's transcript was being finished (L
     /// follow-up 42): the next launch says so, never "Parley crashed".
     public var quitDuringFinalize: Bool
+    /// Why the recording stopped, as the launch — or the session — that first kept it pending saw it (L review 147).
+    /// A session kept in one boot and salvaged in another is worded by this, never by the boot it is salvaged in. nil:
+    /// not kept yet (the slot's own sentinel), or kept by an earlier build.
+    public var stopCause: StopCause?
+
+    /// Why a recording stopped (L review 147).
+    public enum StopCause: String, Codable, Sendable, Equatable {
+        /// The Mac restarted (or lost power) while it was recording.
+        case restart
+        /// Parley itself went — a crash, a force-quit — while it was recording.
+        case appCrash
+        /// Its capture failed and could not be restarted (a failed start or restart the helper would not let go of).
+        case captureFailed
+        /// The recording folder stopped answering.
+        case folderNotAnswering
+    }
 
     public init(
         startedAt: Date,
@@ -35,7 +51,8 @@ public struct RecordingSentinel: Codable, Equatable {
         lastAliveAt: Date? = nil,
         bootSessionUUID: String? = nil,
         stopping: Bool = false,
-        quitDuringFinalize: Bool = false
+        quitDuringFinalize: Bool = false,
+        stopCause: StopCause? = nil
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -48,6 +65,7 @@ public struct RecordingSentinel: Codable, Equatable {
         self.bootSessionUUID = bootSessionUUID
         self.stopping = stopping
         self.quitDuringFinalize = quitDuringFinalize
+        self.stopCause = stopCause
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -65,6 +83,8 @@ public struct RecordingSentinel: Codable, Equatable {
         bootSessionUUID = try container.decodeIfPresent(String.self, forKey: .bootSessionUUID)
         stopping = try container.decodeIfPresent(Bool.self, forKey: .stopping) ?? false
         quitDuringFinalize = try container.decodeIfPresent(Bool.self, forKey: .quitDuringFinalize) ?? false
+        // An unknown cause (a newer build's) reads as none: the salvage then words it by its boot, as before.
+        stopCause = (try? container.decodeIfPresent(StopCause.self, forKey: .stopCause)) ?? nil
     }
 
     // MARK: - File location
@@ -152,9 +172,35 @@ public struct RecordingSentinel: Codable, Equatable {
     /// not readable at all, a permissions or I/O error (L review 130) → set aside first: moved to
     /// `pending-sessions.unreadable-<time>.json`, never read as empty and then overwritten, which dropped every
     /// session it named. `setAside` says where. When even the move fails, `keptUnreadable` says the file was LEFT
-    /// in place — and `writePending` then refuses to overwrite it.
+    /// in place — never overwritten: `writePending` then writes a NEW list, `pending-<uuid>.json`, which this reads
+    /// too (L review 166) — so a session held since is always tracked.
     public static func loadPending(directory: URL? = nil) -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?) {
         let dir = directory ?? AppPaths.dataDirectory
+        let main = loadMainPending(dir)
+        var sessions = main.sessions
+        for (_, overflow) in readableOverflowLists(dir) {
+            for session in overflow where !sessions.contains(where: { $0.sessionKey == session.sessionKey }) { sessions.append(session) }
+        }
+        return (sessions, main.setAside, main.keptUnreadable)
+    }
+
+    /// The pending lists written beside an unreadable one that could not be set aside (L review 166): `pending-<uuid>.json`.
+    /// Only the readable ones — an unreadable one is left alone, never deleted.
+    private static func readableOverflowLists(_ dir: URL) -> [(url: URL, sessions: [RecordingSentinel])] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.sorted().compactMap { name -> (URL, [RecordingSentinel])? in
+            guard name.hasPrefix("pending-"), name.hasSuffix(".json"),
+                  UUID(uuidString: String(name.dropFirst("pending-".count).dropLast(".json".count))) != nil else { return nil }
+            let url = dir.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url), let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) else {
+                Logger.state.error("A pending list \(name, privacy: .sensitive) is unreadable — left as it is")
+                return nil
+            }
+            return (url, sessions)
+        }
+    }
+
+    private static func loadMainPending(_ dir: URL) -> (sessions: [RecordingSentinel], setAside: URL?, keptUnreadable: URL?) {
         let url = dir.appendingPathComponent(pendingFileName)
         guard FileManager.default.fileExists(atPath: url.path) else { return ([], nil, nil) }
         if let data = try? Data(contentsOf: url), let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) {
@@ -181,26 +227,26 @@ public struct RecordingSentinel: Codable, Equatable {
         loadPending(directory: directory).sessions
     }
 
-    /// A pending list there but unreadable, which could not be set aside: never overwritten (L review 130).
-    public struct UnreadablePendingList: Error, LocalizedError {
-        public var errorDescription: String? { "the list of unfinished recordings is unreadable and was left in place" }
-    }
-
     /// Atomically replace the list; an empty list removes the file. A list that is there but cannot be read (and
-    /// could not be set aside) is never replaced or removed: it throws instead (L review 130).
+    /// could not be set aside) is never replaced or removed (L review 130): the sessions go to a NEW list,
+    /// `pending-<uuid>.json`, instead (L review 166). Either way, the readable overflow lists it replaces go.
     public static func writePending(_ sessions: [RecordingSentinel], directory: URL? = nil) throws {
         let dir = directory ?? AppPaths.dataDirectory
         let url = dir.appendingPathComponent(pendingFileName)
-        if FileManager.default.fileExists(atPath: url.path),
-           (try? Data(contentsOf: url)).flatMap({ try? makeDecoder().decode([RecordingSentinel].self, from: $0) }) == nil {
-            throw UnreadablePendingList()
-        }
-        guard !sessions.isEmpty else {
+        let overflows = readableOverflowLists(dir).map(\.url)
+        let mainUnreadable = FileManager.default.fileExists(atPath: url.path)
+            && (try? Data(contentsOf: url)).flatMap({ try? makeDecoder().decode([RecordingSentinel].self, from: $0) }) == nil
+        var written: URL?
+        if !sessions.isEmpty {
+            let target = mainUnreadable ? dir.appendingPathComponent("pending-\(UUID().uuidString).json") : url
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try makeEncoder().encode(sessions).write(to: target, options: .atomic)
+            written = target
+            if mainUnreadable { Logger.state.error("The pending list is unreadable and left in place — kept the sessions in \(target.lastPathComponent, privacy: .sensitive)") }
+        } else if !mainUnreadable {
             try? FileManager.default.removeItem(at: url)
-            return
         }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try makeEncoder().encode(sessions).write(to: url, options: .atomic)
+        for overflow in overflows where overflow != written { try? FileManager.default.removeItem(at: overflow) }
     }
 
     // MARK: - Instance helpers
@@ -219,7 +265,8 @@ public struct RecordingSentinel: Codable, Equatable {
             lastAliveAt: lastAliveAt,
             bootSessionUUID: bootSessionUUID,
             stopping: stopping,
-            quitDuringFinalize: quitDuringFinalize
+            quitDuringFinalize: quitDuringFinalize,
+            stopCause: stopCause
         )
     }
 }

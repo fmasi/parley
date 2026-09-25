@@ -8,6 +8,8 @@ import os
 extension RecordingCoordinator {
     /// What a re-attach needs from the session's folder, read off the main actor (L review 75).
     struct ReattachScan {
+        /// Already transcribed: never re-attached — its capture is stopped and the salvage cleans up (L review 157).
+        var finalized = false
         let persisted: SessionState?
         /// The helper's live file: the newest chunk on disk (indices only grow), never below the sentinel's.
         let liveIndex: Int
@@ -24,6 +26,7 @@ extension RecordingCoordinator {
             outputDirectory: outputDir, sessionId: sessionId, completedIndices: Set(persisted?.chunks.map(\.index) ?? []))
         let liveIndex = max(sentinel.chunkIndex, onDisk.map(\.index).max() ?? sentinel.chunkIndex)
         return ReattachScan(
+            finalized: CrashRecoveryPlanner.isFinalized(outputDirectory: outputDir, sessionId: sessionId),
             persisted: persisted, liveIndex: liveIndex,
             liveStartedAt: creationDate(outputDir.appendingPathComponent("\(sessionId)-\(liveIndex).wav")),
             orphans: onDisk.filter { $0.index != liveIndex }.map { ($0, creationDate(outputDir.appendingPathComponent($0.baseName + ".wav"))) })

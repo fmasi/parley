@@ -308,4 +308,30 @@ struct RecordingSentinelTests {
         #expect(try Data(contentsOf: aside) == garbage, "and never overwritten by the next write")
         #expect(RecordingSentinel.loadPending(directory: dir).setAside == nil, "set aside once")
     }
+
+    /// L review 166: a list that is unreadable AND cannot be moved aside is never overwritten — the sessions go to a new
+    /// list beside it, which the next load reads too; once the main list is readable again, the new list folds back in.
+    @Test func anUnmovableUnreadableListGetsANewListBesideIt() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let main = dir.appendingPathComponent("pending-sessions.json")
+        let garbage = Data("{ not a list".utf8)
+        try garbage.write(to: main)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: main.path)
+        defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: main.path) }
+        let held = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        #expect(RecordingSentinel.loadPending(directory: dir).keptUnreadable == main)
+        try RecordingSentinel.writePending([held], directory: dir)
+        #expect(try Data(contentsOf: main) == garbage, "never overwritten")
+        #expect(RecordingSentinel.loadPending(directory: dir).sessions == [held], "the new list is read")
+        let another = RecordingSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_100), sessionName: "Other",
+                                        systemAudioPath: "/tmp/other-0.wav", micAudioPath: "/tmp/other-0_mic.wav")
+        try RecordingSentinel.writePending([held, another], directory: dir)
+        let lists = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-") && $0 != "pending-sessions.json" }
+        #expect(lists.count == 1, "one new list at a time: \(lists)")
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: main.path)
+        try FileManager.default.removeItem(at: main)   // the user fixed it
+        try RecordingSentinel.writePending(RecordingSentinel.readPending(directory: dir), directory: dir)
+        #expect(RecordingSentinel.readPending(directory: dir).count == 2)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-") } == ["pending-sessions.json"])
+    }
 }

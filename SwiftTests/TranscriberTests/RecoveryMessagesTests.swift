@@ -188,4 +188,68 @@ import Testing
         let nothing = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0))
         #expect(nothing.hasSuffix("your Mac restarted during the recording. No transcript could be written: no recorded audio was found to salvage."))
     }
+
+    // MARK: - L round C (149, 150, 156, 163)
+
+    /// L review 156: the merge's untested branches. A written transcript after a failed finish, or a quit, honours the
+    /// recognition failures: all of them, or some.
+    @Test func aFailedFinishAndAQuitHonourRecognitionFailures() {
+        let all = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2, recognitionFailures: .init(wholeChunks: 2))
+        let some = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 3, recognitionFailures: .init(remoteOnly: 1, localOnly: 1))
+        #expect(RecoveryMessages.transcriptionFailed(after: all, error: "e").hasSuffix("Parley recovered the 2 chunks to m.json, but speech recognition failed on all of them."))
+        #expect(RecoveryMessages.transcriptionFailed(after: some, error: "e").hasSuffix(
+            "recovered and transcribed the 3 chunks to m.json; the other side's speech could not be recognised in 1 of them; your microphone's speech could not be recognised in 1 of them."))
+        #expect(RecoveryMessages.quitWhileFinishing(outcome: all) == "Parley was quit while finishing the transcript; it recovered 2 chunks to m.json, but speech recognition failed on all of them.")
+        #expect(RecoveryMessages.quitWhileFinishing(outcome: some).hasSuffix("it recovered 3 chunks to m.json; the other side's speech could not be recognised in 1 of them; your microphone's speech could not be recognised in 1 of them."))
+    }
+
+    /// L review 156: a restart's salvage keeps the last-chunk tail; "all failed" never fires for no chunks at all.
+    @Test func aRestartKeepsTheLastChunkTailAndNoChunksNeverAllFail() {
+        let at = Date(timeIntervalSince1970: 1_790_000_000)
+        let tail = RecoveryMessages.relaunchStoppedByRestart(at: at, outcome: SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2, lastChunkKeptOnDisk: true))
+        #expect(tail.hasSuffix("Parley recovered 2 chunks to m.json. The last chunk is kept on disk, not transcribed."))
+        let none = RecoveryMessages.outcomeSentence(SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 0, recognitionFailures: .init(wholeChunks: 1)))
+        #expect(none == "No chunks were recorded, but a transcript was written to m.json.", "never \"failed on all of them\"")
+    }
+
+    /// L review 156: a chunk with `mic_stream_absent` had no microphone side — its remote failure is the whole chunk.
+    @Test func aChunkWithoutAMicrophoneFailsWhole() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("messages-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let transcript = dir.appendingPathComponent("t.json")
+        let json: [String: Any] = ["metadata": ["processing_issues": [
+            ["chunk": 0, "code": ChunkIssue.Code.asrFailed.rawValue, "track": "remote"],
+            ["chunk": 0, "code": ChunkIssue.Code.micStreamAbsent.rawValue],
+            ["chunk": 1, "code": ChunkIssue.Code.asrFailed.rawValue, "track": "remote"],
+        ]]]
+        try JSONSerialization.data(withJSONObject: json).write(to: transcript)
+        #expect(SalvageOutcome.recognitionFailures(inTranscriptAt: transcript) == .init(wholeChunks: 1, remoteOnly: 1))
+    }
+
+    /// L review 149: a transcript that could not be read back is never called "transcribed".
+    @Test func anUncheckedTranscriptIsNeverCalledTranscribed() {
+        let unchecked = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2, recognitionChecked: false)
+        #expect(RecoveryMessages.outcomeSentence(unchecked) == "The 2 chunks recorded before it were written to m.json; it could not be read back to check them.")
+        #expect(!RecoveryMessages.transcriptionFailed(after: unchecked, error: "e").contains("transcribed"))
+        #expect(!RecoveryMessages.relaunchStoppedByRestart(at: Date(), outcome: unchecked).contains("transcribed"))
+    }
+
+    /// L review 150: a rebuild says it was REBUILT and names the damaged copy; an unreadable transcript with nothing to
+    /// rebuild from is never "could not be transcribed".
+    @Test func aRebuildAndAnUnreadableTranscriptAreSaidForWhatTheyAre() {
+        let rebuilt = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 2, rebuiltKeeping: "m.damaged.json")
+        #expect(RecoveryMessages.outcomeSentence(rebuilt) == "Its transcript could not be read back, so it was REBUILT from its 2 chunks to m.json; the damaged copy is kept as m.damaged.json.")
+        #expect(RecoveryMessages.relaunchStoppedByRestart(at: Date(), outcome: rebuilt).contains("REBUILT"))
+        #expect(RecoveryMessages.quitWhileFinishing(outcome: rebuilt).contains("REBUILT"))
+        let unreadable = SalvageOutcome(kind: .transcriptUnreadable(url), chunkCount: 1)
+        #expect(RecoveryMessages.outcomeSentence(unreadable) == "Its transcript m.json could not be read back, and no progress file was left to rebuild it from — it is kept as it is. Its audio (1 chunk) is kept on disk.")
+        #expect(RecoveryMessages.stopFailureTitle(after: unreadable, stopSucceeded: true) == "Transcription Failed")
+    }
+
+    /// L review 163: a last chunk the folder did not show is said as unchecked — never silence.
+    @Test func anUncheckedLastChunkIsSaid() {
+        let outcome = SalvageOutcome(kind: .transcriptWritten(url), chunkCount: 1, lastChunkUnchecked: true)
+        #expect(RecoveryMessages.outcomeSentence(outcome).hasSuffix("Parley couldn’t check the last chunk — the recording folder isn’t answering."))
+    }
 }

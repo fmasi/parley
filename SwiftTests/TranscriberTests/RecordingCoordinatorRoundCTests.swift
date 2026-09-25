@@ -474,3 +474,258 @@ final class HungRead: @unchecked Sendable {
         #expect(h.coordinator.implicitWakeAt == nil, "the new sleep settles the last one's implicit wake")
     }
 }
+
+// MARK: - Honest outcomes: causes, the Stop's reply, read-backs, rebuilds, folders, lists (147–150, 157, 163, 166)
+
+@MainActor
+@Suite struct RecordingCoordinatorOutcomeRoundCTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+    private func outDir(_ s: RecordingSentinel) -> URL { URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent() }
+    private func hanging(_ hung: HungRead) -> FolderReads {
+        FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+    }
+
+    /// L review 147: a session kept pending by a launch that saw a CRASH (its folder was missing) and salvaged later, in
+    /// another boot, is worded as the crash — never "your Mac restarted".
+    @Test func aCrashKeptInOneBootIsNeverWordedAsARestartInTheNext() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-3600); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        h.coordinator.folderProbe = .init(exists: { _ in false }, isWritable: { _ in false }, isVolumeRoot: { _ in false })   // the drive is away
+        await h.coordinator.recoverAtLaunch()
+        var kept = try #require(pending(h).first)
+        #expect(kept.stopCause == .appCrash, "stamped with what this launch saw")
+        kept.bootSessionUUID = "the-boot-before"   // the next launch is in ANOTHER boot
+        try RecordingSentinel.writePending([kept], directory: h.tmp)
+        h.coordinator.folderProbe = .live   // the drive is back
+        await h.coordinator.retryPendingSessions()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("Parley crashed") && !row.contains("restarted"), "\(row)")
+    }
+
+    /// … and a session kept by a failed start whose helper would not let go says its capture failed — not a crash.
+    @Test func aHeldFailedCaptureIsWordedAsTheCaptureNotACrash() throws {
+        var s = RecordingSentinel(startedAt: Date(), sessionName: "s", systemAudioPath: "/x/s-0.wav", micAudioPath: "/x/s-0_mic.wav",
+                                  bootSessionUUID: "another-boot", stopping: true, stopCause: .captureFailed)
+        let outcome = SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
+        #expect(RecoveryMessages.relaunchStopped(at: Date(), outcome: outcome, cause: .captureFailed).contains("its capture failed"))
+        #expect(RecoveryMessages.relaunchStopped(at: Date(), outcome: outcome, cause: .folderNotAnswering).contains("recording folder stopped answering"))
+        // The cause travels with the session, and an older file without one still decodes.
+        let data = try JSONEncoder().encode(s)
+        #expect(try JSONDecoder().decode(RecordingSentinel.self, from: data).stopCause == .captureFailed)
+        s.stopCause = nil
+        #expect(try JSONDecoder().decode(RecordingSentinel.self, from: try JSONEncoder().encode(s)).stopCause == nil)
+    }
+
+    /// L review 148: the user's Stop finds ANOTHER stop under way in the helper ("Refused: capture is starting or
+    /// stopping"). It waits for it — asking again — and when that outlasts the Stop's deadline, the session is HELD: the
+    /// mic stays marked, nothing is re-ingested or finalized now, and no wire text reaches the user.
+    @Test func aStopRefusedWhileAnotherStopRunsWaitsThenHolds() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        let call = try #require(h.client.startCalls.first)
+        h.client.stopError = RefusedStoppingError()
+        h.coordinator.stopDeadline = .milliseconds(300)
+        h.coordinator.stopReaskInterval = .milliseconds(50)
+        await h.coordinator.stopRecording()
+        #expect(h.client.stopCalls > 1, "asked again while the other stop ran")
+        #expect(h.recordingMic.current == .some("mic-1"), "the mic stays marked: the helper may still hold it")
+        #expect(h.client.finalizeCalls.isEmpty, "nothing finalized while its files may still be written")
+        #expect(pending(h).map(\.sessionKey) == [call.outputDirectory.appendingPathComponent(call.sessionId).path])
+        #expect(h.appState.isIdle)
+        let said = (h.appState.errorMessage ?? "") + (h.appState.activeAlarms[.recordingStopped]?.message ?? "")
+        #expect(!said.contains(CaptureReplies.refusedStopping), "never the wire text: \(said)")
+        #expect(said.contains("another stop is still under way"))
+    }
+
+    /// … and when the other stop ends while the Stop waits, the capture is over: the session is salvaged — its last chunk
+    /// re-ingested, now sealed — and said in words.
+    @Test func aStopThatOutwaitsAnotherStopSalvagesTheSession() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        try Harness.headerOnlyWAV().write(to: call.outputDirectory.appendingPathComponent(call.baseName + ".wav"))
+        h.coordinator.stopReaskInterval = .milliseconds(20)
+        let client = h.client
+        client.stopError = RefusedStoppingError()
+        client.onStop = { if client.stopCalls == 3 { client.stopError = NoCaptureError() } }   // the other stop ended
+        await h.coordinator.stopRecording()
+        #expect(h.client.stopCalls == 3)
+        #expect(h.recordingMic.current == .none, "the helper let go")
+        #expect(h.client.finalizeCalls.count == 1 && pending(h).isEmpty, "salvaged")
+        #expect(h.appState.errorMessage == "the capture had already stopped", "\(String(describing: h.appState.errorMessage))")
+        let body = h.criticals.value.last?.body ?? ""
+        #expect(!body.contains(CaptureReplies.noCaptureInProgress), "never the wire text: \(body)")
+    }
+
+    /// L review 149: a salvage whose transcript cannot be read back to count its recognition failures never calls the
+    /// chunks "transcribed": it says the transcript could not be checked.
+    @Test func aTranscriptThatCannotBeReadBackIsNeverCalledTranscribed() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let dir = h.tmp.appendingPathComponent("p")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "p", meetingStart: Date(), chunkIndices: [0])
+        try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: dir.appendingPathComponent("p-0.wav").path,
+                                                              micAudioPath: dir.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
+                                           directory: h.tmp)
+        let hung = HungRead("salvage: transcript")
+        defer { hung.release() }
+        h.coordinator.folderReads = hanging(hung)
+        h.coordinator.folderReadDeadline = .milliseconds(150)
+        await h.coordinator.retryPendingSessions()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(!row.contains("transcribed to") && row.contains("could not be read back to check them"), "\(row)")
+    }
+
+    /// A FINALIZED session whose transcript cannot be read back (L review 93b), for the rebuild tests.
+    private func damagedFinalized(_ h: Harness, keepProgress: Bool) async throws -> RecordingSentinel {
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-3600); s.bootSessionUUID = "another-boot"
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: outDir(s), sessionId: "sess", config: h.config.config,
+                                                                            transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: h.runner))
+        if keepProgress { try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0]) }
+        try Data("{ damaged".utf8).write(to: result.jsonPath)
+        return s
+    }
+
+    /// L review 150: a rebuild says the transcript was REBUILT and names the damaged copy it kept; an earlier summary is
+    /// moved aside with it (R2), so the rebuild's rename panel and auto-summary never overwrite it.
+    @Test func aRebuildSaysSoAndKeepsTheDamagedCopyAndTheSummary() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try await damagedFinalized(h, keepProgress: true)
+        let summary = Data("the earlier summary".utf8)
+        try summary.write(to: outDir(s).appendingPathComponent("sess-summary.md"))
+        await h.coordinator.recoverAtLaunch()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("REBUILT") && row.contains("sess.damaged.json"), "\(row)")
+        #expect(try Data(contentsOf: outDir(s).appendingPathComponent("sess-summary.damaged.md")) == summary, "the summary is kept aside")
+        #expect(!FileManager.default.fileExists(atPath: outDir(s).appendingPathComponent("sess-summary.md").path), "nothing for the auto-summary to overwrite")
+    }
+
+    /// … and with no progress file to rebuild from, it never claims the audio "could not be transcribed": it was.
+    @Test func anUnreadableTranscriptWithNothingToRebuildFromIsSaidAsSuch() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try await damagedFinalized(h, keepProgress: false)
+        try Harness.headerOnlyWAV().write(to: outDir(s).appendingPathComponent("sess-0.wav"))   // its audio, on disk
+        await h.coordinator.recoverAtLaunch()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(!row.contains("could not be transcribed") && row.contains("could not be read back, and no progress file"), "\(row)")
+        #expect(row.contains("Its audio (1 chunk) is kept on disk"), "\(row)")
+    }
+
+    /// L review 157: a Flow A re-attach never continues a session that was already transcribed (a held restart's helper
+    /// went on writing it): its capture is stopped and the salvage cleans up — never a second finalize over the
+    /// transcript.
+    @Test func aFinishedSessionIsNeverReattached() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        _ = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: outDir(s), sessionId: "sess", config: h.config.config,
+                                                                   transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: h.runner))
+        h.client.isCapturingResult = true
+        h.client.stopResult = AudioPaths(systemAudio: outDir(s).appendingPathComponent("sess-1.wav"), micAudio: outDir(s).appendingPathComponent("sess-1_mic.wav"))
+        await h.coordinator.recoverAtLaunch()
+        #expect(!h.appState.isRecording, "never re-attached")
+        #expect(h.client.stopCalls == 1, "its capture stopped")
+        #expect(h.client.finalizeCalls.isEmpty && h.presented.value.isEmpty, "never finalized again")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && pending(h).isEmpty)
+    }
+
+    /// L review 163: a failed crash restart whose restart-file read does not answer never finalizes without that file:
+    /// the session is kept — salvage-only — for when the folder answers, and said so.
+    @Test func aRestartFileTheFolderDoesNotShowIsKeptNotDropped() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        h.client.startError = FakeCaptureError()
+        h.client.stopResult = AudioPaths(systemAudio: call.outputDirectory.appendingPathComponent("x.wav"),
+                                         micAudio: call.outputDirectory.appendingPathComponent("x_mic.wav"))
+        let hung = HungRead("crash restart: restart file")
+        defer { hung.release() }
+        h.coordinator.folderReads = hanging(hung)
+        h.coordinator.folderReadDeadline = .milliseconds(150)
+        await h.coordinator.handleXPCCrash()
+        #expect(h.appState.isIdle)
+        #expect(h.client.finalizeCalls.isEmpty, "never a transcript written without the restart's file")
+        let kept = try #require(pending(h).first)
+        #expect(kept.stopping && kept.stopCause == .folderNotAnswering)
+        #expect(h.criticals.value.last?.body.contains("isn’t answering") == true, "\(h.criticals.value)")
+    }
+
+    /// L review 163: a Stop whose session has no recovery file left, and whose folder does not answer, is KEPT — "Parley
+    /// will finish it when the folder answers" is only ever said about something kept (the same rule serves a crash with
+    /// no recovery file).
+    @Test func aStopWithoutARecoveryFileIsKeptWhenTheFolderDoesNotAnswer() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.runner.failSetupForTesting = true   // re-attached without a pipeline: the Stop reads the folder itself
+        await h.coordinator.recoverAtLaunch()
+        RecordingSentinel.delete(directory: h.tmp)   // the recovery file is gone
+        let hung = HungRead("stop: session folder")
+        defer { hung.release() }
+        h.coordinator.folderReads = hanging(hung)
+        h.coordinator.folderReadDeadline = .milliseconds(150)
+        h.client.stopResult = AudioPaths(systemAudio: outDir(s).appendingPathComponent("sess-1.wav"), micAudio: outDir(s).appendingPathComponent("sess-1_mic.wav"))
+        await h.coordinator.stopRecording()
+        #expect(h.appState.isIdle)
+        let body = h.criticals.value.last?.body ?? ""
+        #expect(body.contains("when the folder answers"), "\(body)")
+        let kept = try #require(pending(h).first, "kept, as promised")
+        #expect(kept.sessionKey == s.sessionKey && kept.stopping && kept.stopCause == .folderNotAnswering)
+    }
+
+    /// L review 166: an unreadable pending list that cannot even be moved aside never leaves a new hold untracked: the
+    /// hold goes to a NEW list beside it, which the pending sessions include — a next Start's sentinel never takes its
+    /// place — and the row says where things are.
+    @Test func aHoldIsTrackedWhenTheListCannotBeMovedAside() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer {
+            try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: h.tmp.appendingPathComponent("pending-sessions.json").path)
+            tearDown(h)
+        }
+        let list = h.tmp.appendingPathComponent("pending-sessions.json")
+        try Data("not a list".utf8).write(to: list)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: list.path)   // cannot be moved aside
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go: HELD
+        await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
+        let held = try #require(pending(h).first, "the hold is tracked")
+        h.client.startError = nil
+        h.client.onStop = nil
+        await h.coordinator.startRecording(sessionName: "next", microphoneDeviceId: nil)   // writes the slot
+        #expect(pending(h).map(\.sessionKey) == [held.sessionKey], "still tracked after the next Start")
+        #expect(try Data(contentsOf: list) == Data("not a list".utf8), "the unreadable list is never overwritten")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("separate list"), "\(row)")
+    }
+}
