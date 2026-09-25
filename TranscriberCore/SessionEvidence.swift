@@ -39,10 +39,18 @@ public final class SessionEvidence {
         diagnostics = CaptureDiagnostics(maxEvents: maxEvents)
     }
 
-    private static func key(_ directory: URL) -> String { directory.standardizedFileURL.path }
+    /// The folder half of a session's key: lexical (`standardized`), never a file-system lookup — a hung share must
+    /// not be touched to compute it (L review 101). Internal for tests.
+    static func key(_ directory: URL) -> String { directory.standardized.path }
 
     private func isBound(to sessionId: String, in directory: URL) -> Bool {
-        session.map { $0.id == sessionId && $0.directory == Self.key(directory) } ?? false
+        guard let session else { return false }
+        let key = Self.key(directory)
+        if session.id == sessionId, session.directory != key {
+            // Two spellings of one folder, or two sessions of one name in two folders: never merged — said.
+            Logger.state.error("A session id matches the bound one, but not its folder — kept apart")
+        }
+        return session.id == sessionId && session.directory == key
     }
 
     /// A capture starts, of `sessionId`, recording into `directory`.

@@ -122,19 +122,21 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
     }
 
     /// Keep `facts` as `helperSession`'s latest coverage.
+    /// The write is queued INSIDE the lock that built its map (L review 102): two racing writes reach the queue in
+    /// the order their maps were built, so an older map is never the last one on disk.
     public func writeCoverage(helperSession: String, facts: [String: String], at date: Date) {
-        let all: [String: CoverageSnapshot] = lock.withLock {
+        let coverageURL = coverageURL
+        lock.withLock {
             var all = coverageCache ?? readCoverage()
             all[helperSession] = CoverageSnapshot(at: date, facts: facts)
             coverageCache = all
-            return all
-        }
-        guard let data = try? Self.encoder.encode(all) else { return }
-        let coverageURL = coverageURL, observer = writeObserver
-        Self.io.async {
-            observer?()
-            if (try? data.write(to: coverageURL, options: .atomic)) == nil {
-                Logger.files.error("LiveDiagnosticsLog: could not write \(coverageURL.lastPathComponent, privacy: .sensitive)")
+            guard let data = try? Self.encoder.encode(all) else { return }
+            let observer = observer
+            Self.io.async {
+                observer?()
+                if (try? data.write(to: coverageURL, options: .atomic)) == nil {
+                    Logger.files.error("LiveDiagnosticsLog: could not write \(coverageURL.lastPathComponent, privacy: .sensitive)")
+                }
             }
         }
     }

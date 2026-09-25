@@ -40,6 +40,24 @@ import Testing
         #expect(onDisk.contains("retry"))
     }
 
+    /// L review 102: two coverage writes racing never leave the OLDER map on disk: each write is queued inside the
+    /// lock that built its map, so the queue writes them in the order they were built.
+    @Test func concurrentCoverageWritesLeaveTheNewestMapOnDisk() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        for round in 0..<20 {
+            let log = LiveDiagnosticsLog(directory: d, sessionId: "s\(round)")
+            await withTaskGroup(of: Void.self) { group in
+                for i in 0..<16 {
+                    group.addTask { log.writeCoverage(helperSession: "h\(i % 4)", facts: ["n": "\(i)"], at: Date(timeIntervalSince1970: Double(i))) }
+                }
+            }
+            log.flush()
+            let cached = log.coverageSnapshots()
+            let onDisk = LiveDiagnosticsLog(directory: d, sessionId: "s\(round)").coverageSnapshots()
+            #expect(onDisk == cached, "round \(round): the file holds the last map built")
+        }
+    }
+
     @Test func aSubSecondTimestampDedupsAcrossDiskAndRing() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let log = LiveDiagnosticsLog(directory: d, sessionId: "s")

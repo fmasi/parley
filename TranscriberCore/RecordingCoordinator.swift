@@ -815,7 +815,8 @@ public final class RecordingCoordinator {
                     // anomaly-gated <sessionId>.diag.jsonl, and stamps capture_provenance (incl.
                     // recovered=true) — previously only the chunked branch did this.
                     let outputDir = systemAudio.deletingLastPathComponent()
-                    let sid = systemAudio.deletingPathExtension().lastPathComponent
+                    // The session id without its `-N` segment: the id the evidence is bound to (L review 101).
+                    let sid = stripSegmentSuffix(systemAudio.path)
                     let provenance = await captureClient.finalizeSessionDiagnostics(
                         sessionId: sid,
                         engine: configManager.config.engine.rawValue,

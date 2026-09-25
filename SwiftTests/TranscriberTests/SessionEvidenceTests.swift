@@ -56,6 +56,34 @@ import Testing
         #expect(record.events.contains { $0.kind == .rateDrift }, "the rest of the drain is kept")
     }
 
+    /// L review 99 (a pin of the `!ownsRing` branch): finalizing ANOTHER session while one is bound builds that
+    /// session from its own live log only — never the bound session's ring — and leaves the bound one bound.
+    @Test func finalizingAnotherSessionNeverTouchesTheBoundOne() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        do {   // an earlier process's session "b": its live log holds a retry
+            let earlier = SessionEvidence()
+            earlier.beginCapture(sessionId: "b", directory: d)
+            earlier.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .app, kind: .retry, severity: .warning))
+        }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "a", directory: d)
+        evidence.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 2), origin: .app, kind: .xpcInterruption, severity: .anomaly))
+        let b = evidence.finalize(sessionId: "b", directory: d)
+        #expect(provenance(b).retries == 1, "b's own facts")
+        #expect(!b.events.contains { $0.kind == .xpcInterruption }, "never the bound session's")
+        #expect(evidence.sessionId == "a", "a is still bound")
+        let a = evidence.finalize(sessionId: "a", directory: d)
+        #expect(a.events.contains { $0.kind == .xpcInterruption } && provenance(a).retries == 0, "a's ring untouched")
+    }
+
+    /// L review 101: the (folder, id) key is lexical — `standardized`, no file-system lookup (a hung share must
+    /// never be touched to compute it). `standardizedFileURL` would strip an existing `/private`.
+    @Test func theSessionKeyIsLexicalNeverTheFileSystems() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let spelled = URL(fileURLWithPath: "/private" + d.path + "/x/..")
+        #expect(SessionEvidence.key(spelled) == "/private" + d.path, "\(SessionEvidence.key(spelled))")
+    }
+
     @Test func aSecondRecordingCarriesOnlyItsOwnFacts() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let evidence = SessionEvidence()
@@ -282,6 +310,10 @@ import Testing
         let merged = evidence.finalize(sessionId: "s", directory: d)
         evidence.commit(sessionId: "s", directory: d)
         #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("s.diag.live.jsonl").path), "the live log is kept")
+        // L review 103: and the kept log itself says so — read back, after its queued writes.
+        LiveDiagnosticsLog.flushAll()
+        let kept = LiveDiagnosticsLog(directory: d, sessionId: "s").events()
+        #expect(kept.contains { $0.kind == .sessionWriteFailed && $0.detail["file"] == "diag.jsonl" }, "the failure is in the kept log")
         #expect(merged.events.contains { $0.kind == .sessionWriteFailed && $0.detail["file"] == "diag.jsonl" })
     }
 

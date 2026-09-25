@@ -61,7 +61,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         options: CaptureOptions,
         sessionId: String
     ) async throws {
-        sessionCalls.append("start:\(sessionId)")
+        sessionCalls.append("start:\(sessionId)@\(outputDirectory.standardized.path)")
         bound = (sessionId, outputDirectory.standardizedFileURL.path)
         startCalls.append(StartCall(
             outputDirectory: outputDirectory,
@@ -126,7 +126,7 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     /// Awaited inside adoptSession(): lets a test act while a re-attach adopts (L review 72).
     var onAdopt: (() async -> Void)?
     func adoptSession(sessionId: String, directory: URL) async {
-        sessionCalls.append("adopt:\(sessionId)")
+        sessionCalls.append("adopt:\(sessionId)@\(directory.standardized.path)")
         evidenceOrder.append("adopt:\(sessionId)")
         bind(sessionId, directory)
         await onAdopt?()
@@ -4371,18 +4371,21 @@ private struct Harness {
     @Test func aResumeAdoptsTheSessionBeforeTheStart() async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        _ = try freshSentinel(h)
+        let s = try freshSentinel(h)
         await h.coordinator.recoverAtLaunch()
-        #expect(h.client.sessionCalls == ["adopt:sess", "start:sess"])
+        // L review 100: the SAME session — its id and its folder — adopted, then started.
+        let at = try #require(h.client.startCalls.first).outputDirectory.standardized.path
+        #expect(at == dir(s).standardized.path)
+        #expect(h.client.sessionCalls == ["adopt:sess@\(at)", "start:sess@\(at)"])
     }
 
     @Test func aReattachAdoptsTheSession() async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        _ = try freshSentinel(h)
+        let s = try freshSentinel(h)
         h.client.isCapturingResult = true
         await h.coordinator.recoverAtLaunch()
-        #expect(h.client.sessionCalls == ["adopt:sess"])
+        #expect(h.client.sessionCalls == ["adopt:sess@\(dir(s).standardized.path)"], "the session's own folder (L review 100)")
     }
 
     /// L review 72: a crash reported while the re-attach adopts its session (an await) finds the chunk pipeline
@@ -4469,12 +4472,14 @@ private struct Harness {
     @Test func aReattachedRecordingsCrashRestartKeepsItsSession() async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        _ = try freshSentinel(h)
+        let s = try freshSentinel(h)
         h.client.isCapturingResult = true
         await h.coordinator.recoverAtLaunch()
         h.client.isCapturingResult = false
         await h.coordinator.handleXPCCrash()
-        #expect(h.client.sessionCalls == ["adopt:sess", "start:sess"])
+        let at = dir(s).standardized.path
+        #expect(h.client.startCalls.first?.outputDirectory.standardized.path == at)
+        #expect(h.client.sessionCalls == ["adopt:sess@\(at)", "start:sess@\(at)"], "the same id AND folder (L review 100)")
         #expect(h.appState.isRecording)
     }
 
@@ -5101,5 +5106,30 @@ private struct Harness {
         #expect(pending(h).first.map { $0.sessionKey == s.sessionKey && $0.stopping } == true, "kept for when the folder answers")
         let body = try #require(h.criticals.value.last?.body)
         #expect(body.contains("isn’t answering") && !body.contains("no recorded audio"), "\(body)")
+    }
+}
+
+// MARK: - L round B: evidence keys and pins (100, 101)
+
+@MainActor
+@Suite struct RecordingCoordinatorEvidenceKeyTests {
+    /// L review 101: the legacy single-file stop keys its record by the session id WITHOUT its `-N` segment — the
+    /// id the evidence is bound to — never a second, unbound id for the same recording.
+    @Test func theLegacyStopKeysTheRecordByTheBoundId() async throws {
+        let h = try Harness()
+        defer {
+            h.runner.stopChunkRotation(); h.runner.teardownChunkedPipeline()
+            try? FileManager.default.removeItem(at: h.tmp)
+        }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.runner.failSetupForTesting = true   // re-attached without a pipeline: the stop's fallback runs
+        await h.coordinator.recoverAtLaunch()
+        let dir = URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent()
+        h.client.stopResult = AudioPaths(systemAudio: dir.appendingPathComponent("sess-3.wav"), micAudio: dir.appendingPathComponent("sess-3_mic.wav"))
+        await h.coordinator.stopRecording()
+        #expect(h.client.finalizeCalls.first?.sessionId == "sess", "\(h.client.finalizeCalls.map(\.sessionId))")
     }
 }
