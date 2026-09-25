@@ -320,7 +320,11 @@ enum DurableFile {
 
     /// Test seam, OFF in production (round 4 item 4): while on, every fully synced path is recorded
     /// in order. Off, nothing is kept — the paths carry meeting names.
-    nonisolated(unsafe) static var recordsSyncsForTesting = false
+    nonisolated(unsafe) private static var recording = false
+    static var recordsSyncsForTesting: Bool {
+        get { lock.withLock { recording } }
+        set { lock.withLock { recording = newValue } }
+    }
     /// Test seam: every path fully synced while `recordsSyncsForTesting` was on, in order.
     static var syncedForTesting: [String] { lock.withLock { synced } }
 
@@ -350,7 +354,7 @@ enum DurableFile {
             }
         }
         if fcntl(fd, F_FULLFSYNC) == 0 {
-            if recordsSyncsForTesting { lock.withLock { synced.append(final.path) } }
+            lock.withLock { if recording { synced.append(final.path) } }
         } else if fsync(fd) != 0 {
             throw posixError(errno)
         }

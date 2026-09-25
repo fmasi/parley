@@ -30,9 +30,7 @@ public enum ChunkedSessionRecovery {
                 return nil
             }
             Logger.state.error("Recovery found \(sessionId, privacy: .sensitive) finalized but its transcript unreadable (\(state.chunks.count, privacy: .public) chunks) — rebuilding it")
-            if FileManager.default.fileExists(atPath: transcript.path) {
-                try moveDamagedAside(transcript)
-            }
+            try moveDamagedRecordAside(transcript)
             rebuilding = true
         }
         let existingState = SessionState.read(directory: outputDirectory, sessionId: sessionId)
@@ -94,17 +92,25 @@ public enum ChunkedSessionRecovery {
         return try await runner.finalize(sessionState: state, outputDirectory: outputDirectory, config: config)
     }
 
-    /// A damaged transcript is kept, never overwritten by its rebuild (round 4 item 2):
-    /// `<id>.damaged.json`, or `<id>.damaged-<uuid>.json` when that name is taken.
-    private static func moveDamagedAside(_ transcript: URL) throws {
+    /// The damaged record is kept, never overwritten by its rebuild (round 4 item 2, round 6 item 2):
+    /// the transcript and its companions — the TXT/SRT and the summary, possibly the only readable
+    /// copies, renames included — move to `<id>.damaged.json`, `<id>.damaged.txt`,
+    /// `<id>.damaged.srt` and `<id>-summary.damaged.md` (a unique suffix when a name is taken).
+    private static func moveDamagedRecordAside(_ transcript: URL) throws {
         let base = transcript.deletingPathExtension().lastPathComponent
         let directory = transcript.deletingLastPathComponent()
-        var aside = directory.appendingPathComponent("\(base).damaged.json")
-        if FileManager.default.fileExists(atPath: aside.path) {
-            aside = directory.appendingPathComponent("\(base).damaged-\(UUID().uuidString).json")
+        let companions = [("\(base).json", "\(base).damaged", "json"), ("\(base).txt", "\(base).damaged", "txt"),
+                          ("\(base).srt", "\(base).damaged", "srt"), ("\(base)-summary.md", "\(base)-summary.damaged", "md")]
+        for (name, asideBase, ext) in companions {
+            let file = directory.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: file.path) else { continue }
+            var aside = directory.appendingPathComponent("\(asideBase).\(ext)")
+            if FileManager.default.fileExists(atPath: aside.path) {
+                aside = directory.appendingPathComponent("\(asideBase)-\(UUID().uuidString).\(ext)")
+            }
+            try FileManager.default.moveItem(at: file, to: aside)
+            Logger.state.error("Kept the damaged record's \(ext, privacy: .public) as \(aside.lastPathComponent, privacy: .sensitive)")
         }
-        try FileManager.default.moveItem(at: transcript, to: aside)
-        Logger.state.error("Kept the unreadable transcript as \(aside.lastPathComponent, privacy: .sensitive)")
     }
 
     /// When an orphan chunk began: its WAV's creation date (the helper created it at the rotation).

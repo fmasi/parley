@@ -436,14 +436,22 @@ public final class TranscriptionRunner {
         var chunkOffsets = perChunkOffsets
         // A finalize RE-RUN after the first run merged the chunks and deleted them: the surviving
         // `<session>.m4a` is the recording's audio — list it, say so, and let the quota protect it.
+        // A chunk whose own file still exists is NOT in it (a rebuild ingested it after the merge):
+        // it is listed too, in time order with its offset, so every segment has audio behind it
+        // (round 6 item 1). Not re-merged: the merged file is the only copy of the chunks it holds.
         let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
-        let sourcesGone = !chunkAudioPaths.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
+        let present = chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
+        let sourcesGone = present.contains(false)
         if chunkAudioPaths.count > 1, sourcesGone, TranscriptAssembler.duration(of: mergedURL) > 0 {
-            Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it")
-            audioPaths = [mergedURL]
-            chunkOffsets = [perChunkOffsets.min() ?? 0]
+            let mergedOffset = zip(perChunkOffsets, present).filter { !$0.1 }.map(\.0).min() ?? (perChunkOffsets.min() ?? 0)
+            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present).filter(\.1).map(\.0)
+            let listed = ([(mergedURL, mergedOffset)] + alongside).sorted { $0.1 < $1.1 }
+            Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it, with \(alongside.count, privacy: .public) chunk file(s) not in it")
+            audioPaths = listed.map(\.0)
+            chunkOffsets = listed.map(\.1)
             var previous = Self.previousMergedAudio(transcriptAt: outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")) ?? [:]
             previous["reused_existing"] = true
+            if !alongside.isEmpty { previous["chunks_not_in_merge"] = alongside.count }
             mergedAudio = previous
         } else if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
             do {

@@ -703,3 +703,22 @@ struct TranscriptRewritesAreDurableTests {
     }
 }
 
+/// Round 6 item 4: a rebuilt record's capture facts come from the recovery run. The summary header
+/// carries that caveat.
+struct MeetingSummarizerReconstructedTests {
+    @Test func aReconstructedRecordSaysSoInTheHeader() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("reconstructed-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let provenance = CaptureProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil,
+                                           routeChanges: 0, retries: 0, recovered: true, anomalyCount: 0).markedReconstructed()
+        try TranscriptAssembler.write(TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: 0, end: 1, speaker: "A", text: "hi", source: "")], audioPaths: [], outputFormat: "json",
+            language: "en", numSpeakers: nil, diarization: false, dualStream: false, provenance: provenance), to: url)
+        let (_, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(metadata.captureReconstructed)
+        #expect(SummaryPromptBuilder.captureLine(metadata)?.contains("Capture facts were reconstructed after a crash and may be incomplete") == true)
+        #expect(SummaryPromptBuilder.captureLine(SummaryMetadata(sessionName: "s", date: Date(), durationSeconds: 1, speakers: [])) == nil,
+                "no caveat for a record that was not rebuilt")
+    }
+}
+

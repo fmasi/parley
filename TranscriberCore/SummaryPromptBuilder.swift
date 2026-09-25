@@ -40,8 +40,8 @@ enum SummaryPromptBuilder {
     }
 
     /// The header line(s) about what was captured, newline-joined, or nil when there is nothing to
-    /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, "coverage
-    /// not recorded", segments with no recorded time, recording gaps.
+    /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, the
+    /// reconstructed caveat, "coverage not recorded", segments with no recorded time, recording gaps.
     static func captureLine(_ metadata: SummaryMetadata) -> String? {
         let lines = captureLines(metadata).map(\.text)
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
@@ -130,6 +130,10 @@ enum SummaryPromptBuilder {
             metadata.remoteCapture.flatMap { sideLine("Remote audio", $0, isRemote: true) },
             metadata.localCapture.flatMap { sideLine("Your microphone", $0, isRemote: false) },
         ].compactMap { $0 }
+        if metadata.captureReconstructed {
+            lines.append(CaptureHeaderLine(
+                text: "Capture facts were reconstructed after a crash and may be incomplete", warrantsBanner: false))
+        }
         if metadata.coverageNotRecorded {
             lines.append(CaptureHeaderLine(text: "Capture coverage was not recorded", warrantsBanner: false))
         }

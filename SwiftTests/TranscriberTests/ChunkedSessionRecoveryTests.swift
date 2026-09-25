@@ -481,4 +481,69 @@ struct ChunkedSessionRecoveryTests {
             outputDirectory: dir, config: .default)
         #expect(stale.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
     }
+
+    // MARK: - Round 6
+
+    /// Item 1 (IMPORTANT): a default-config rebuild (merge ON) reused the earlier `<id>.m4a` as the
+    /// only audio, so an ingested orphan's segments sat past the end of every listed file. Every file
+    /// that backs a segment is listed, in time order, with its offset.
+    @Test(.timeLimit(.minutes(1)))
+    func aRebuildListsEveryFileThatBacksASegment() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let config = Config.default   // merge on, preserve_source_wav off
+        let start = Date().addingTimeInterval(-60)
+        let processor = await ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "m", meetingStart: start, engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        for i in 0...1 {
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-\(i).wav"), seconds: 1)
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: i, systemPath: dir.appendingPathComponent("m-\(i).wav").path,
+                                                                         micPath: dir.appendingPathComponent("m-\(i)_mic.wav").path,
+                                                                         startTime: start.addingTimeInterval(Double(i))))
+        }
+        let state = await processor.getSessionState()
+        let runner = await TranscriptionRunner()
+        let first = try await runner.finalize(sessionState: state, outputDirectory: dir, config: config)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m.m4a").path), "merged")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.m4a").path), "and the chunk files deleted")
+
+        // The transcript is damaged; session.json lingers; chunk 2 never reached it (a failed write).
+        try SessionState.write(state, directory: dir)
+        try Data("{".utf8).write(to: first.jsonPath)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                                           transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["audio_files"] as? [String] == ["m.m4a", "m-2.m4a"], "the merged file AND the orphan's own audio")
+        let offsets = try #require(metadata["chunk_offsets"] as? [Double])
+        #expect(offsets.count == 2 && offsets[0] == 0 && offsets[1] > offsets[0])
+        #expect((metadata["chunk_durations"] as? [Double])?.count == 2)
+        #expect((json["segments"] as? [[String: Any]])?.count == 3, "every chunk's words, the orphan's included")
+    }
+
+    /// Item 2: a rebuild re-writes `<id>.txt`/`.srt`, and through the app `-summary.md` — possibly the
+    /// only readable copies of the damaged record, renames included. They are moved aside with it.
+    @Test(.timeLimit(.minutes(1)))
+    func aRebuildKeepsTheDamagedRecordsCompanions() async throws {
+        let (dir, transcript, config, runner) = try await finalizedSession(format: "txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1,
+                                 chunks: [ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                                                         segments: [.init(start: 0, end: 5, text: "rebuilt", speaker: "Speaker 1", source: "remote")],
+                                                         speakerDatabase: ["Speaker 1": [1, 0, 0]])])
+        try SessionState.write(state, directory: dir)
+        let txt = dir.appendingPathComponent("m.txt"), summary = dir.appendingPathComponent("m-summary.md")
+        try Data("[00:00:00] Alice: renamed words\n".utf8).write(to: txt)
+        try Data("# The old summary\n".utf8).write(to: summary)
+        try Data("{".utf8).write(to: transcript)
+        _ = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                     transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        #expect(try String(contentsOf: dir.appendingPathComponent("m.damaged.txt"), encoding: .utf8) == "[00:00:00] Alice: renamed words\n")
+        #expect(try String(contentsOf: dir.appendingPathComponent("m-summary.damaged.md"), encoding: .utf8) == "# The old summary\n")
+        #expect(try String(contentsOf: txt, encoding: .utf8).contains("rebuilt"), "the new TXT is the rebuilt record's")
+        #expect(!FileManager.default.fileExists(atPath: summary.path), "no summary claims to describe the rebuilt record")
+    }
 }
+

@@ -266,7 +266,8 @@ public enum MeetingSummarizer {
             coverageNotRecorded: metadata_raw?["processing_issues"] != nil && capture?["remote"] == nil && capture?["local"] == nil,
             gapCount: gaps.count,
             gapSeconds: gaps.reduce(0) { $0 + (validSeconds($1["seconds"]) ?? 0) },
-            untimedSegmentCount: rawSegments.filter { !TranscriptAssembler.hasUsableTime($0) }.count
+            untimedSegmentCount: rawSegments.filter { !TranscriptAssembler.hasUsableTime($0) }.count,
+            captureReconstructed: provenance?["reconstructed"] as? Bool == true
         )
 
         return (segments, metadata)
