@@ -1,4 +1,5 @@
 // RED-FIRST-EXEMPT: characterization tests of merged cross-stream behaviour (streams C, F, D, E, H, R); each test was proven able to fail by temporarily breaking the production line it pins (task XI report). The R2c changes (the two re-enabled BUG tests, the neutral muted-remote line in (e), the mid-call denial in (c′)) were run red first (task R2c report)
+// RED-FIRST-EXEMPT: characterization of the Incident-B chain at HEAD (final review E-I2); the red-first proof for HF-1 lives in TapRecoveryLadderTests/TapHealerTests
 import Foundation
 import Testing
 @testable import TranscriberCore
@@ -779,6 +780,48 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.count(.systemAudioUnrecovered) == 0 && r.count(.tapRecoveryGivenUp) == 0)
         let p = r.diagnostics.makeProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect(!p.systemAudioUnrecovered)
+    }
+
+    /// Incident B end to end (final review E-I2): the tap never delivers from t = 0 while the call plays.
+    /// Every rebuild "succeeds" and nothing ever arrives. The monitor says never-delivered at 5 s, the
+    /// ladder climbs its four rungs and gives up ONCE — `remoteNotDelivering` only, no rebuild threw — and
+    /// the slow retry after it raises nothing new. The record says not captured, and unrecovered.
+    @Test func neverDeliveredFromStartClimbsTheLadderAndAlarmsOnce() {
+        let r = Rig()
+        r.delivering = false
+        r.rebuildRestoresDelivery = false
+        r.rebuildOutcome = { _, _ in true }
+        r.run(until: 30)
+        let at = HelperShaped.at
+        // Judged 5 s after the start. The second verdict is the re-armed monitor's on the LAST rung's
+        // generation (rebuilt at 16 s), which the exhausted ladder ignores: recorded, never re-raised.
+        let neverDelivered = r.diagnostics.events.filter { $0.kind == .neverDelivered }.map(\.timestamp)
+        #expect(neverDelivered == [at(5), at(21)])
+        #expect(r.diagnostics.events.filter { $0.kind == .tapRecoveryRung }.map { $0.detail["rung"] }
+                == ["rebuildAggregate", "rebuildAggregate", "rebuildTap", "rebuildTap"])
+        let givenUp = r.diagnostics.events.filter { $0.kind == .tapRecoveryGivenUp }.map(\.timestamp)
+        #expect(givenUp.count == 1 && givenUp[0] <= at(25))
+        #expect(r.newlyRaised == [.remoteNotDelivering])
+        #expect(r.alarms.alarms[.remoteNotDelivering]?.episode == 1)
+        #expect(r.giveUps == [false], "no rebuild threw: not delivering, never 'could not restart'")
+        #expect(r.count(.systemAudioUnrecovered) == 1)
+
+        r.run(until: 100)
+        #expect(r.count(.tapRecoveryRung) == 5, "the 60 s slow retry")
+        #expect(r.giveUps == [false, false] && r.newlyRaised.count == 1, "which gives up again and raises nothing new")
+        #expect(r.count(.neverDelivered) == 3 && r.count(.systemAudioUnrecovered) == 1)
+
+        // The record, as `incidentBNeverDeliveredSaysNotCaptured` builds it: the helper's ring and its
+        // `captureStop` through the XPC drain into the app's ring, then the provenance.
+        let helperRing = LockedDiagnostics()
+        ([HelperShaped.event(.captureStart, .info, at: 0)] + r.diagnostics.events + [
+            HelperShaped.captureStop(at: 100, remote: HelperShaped.side(expected: 100, delivered: 0, rebuilds: 5),
+                                     local: HelperShaped.side(expected: 100, delivered: 100, callbacks: 10_000)),
+        ]).forEach(helperRing.record)
+        var appRing = CaptureDiagnostics()
+        appRing.merge(CaptureDiagnostics.events(from: helperRing.drainData()))
+        let p = appRing.makeProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.remoteStatus == "neverDelivered" && p.systemAudioUnrecovered)
     }
 
     /// Final review H-I1, mirrored through the chain: recording started before the call, and the grant
