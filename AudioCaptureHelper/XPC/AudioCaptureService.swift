@@ -252,9 +252,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                               tapZeros: tapActive ? tapGuard.exactZeroFrames : nil)
     }
 
-    /// The last counts read on the audio queue: refreshed every tick (asynchronously), and at every seal
-    /// and rotation. What `.captureStop` falls back to when the seal timed out (round 4 N2).
-    private let lastCoverageCounts = OSAllocatedUnfairLock<CoverageCounts?>(initialState: nil)
+    /// The last counts read on the audio queue, refreshed every tick (asynchronously): what `.captureStop`
+    /// falls back to when the seal timed out (round 4 N2). Keyed by the session's start token, so a refresh
+    /// queued before a stall that lands after the next start is ignored (round 5 item 3).
+    private let lastCoverageCounts = OSAllocatedUnfairLock(initialState: SessionScopedCache<CoverageCounts>())
 
     /// Per-track coverage as `remote_*` / `local_*` detail keys, for `.captureStop` and every rotation's
     /// `.trackCoverage`, from counts read on the audio queue plus the lock-only counters. Any queue: no
@@ -470,10 +471,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Refresh the coverage cache for a Stop whose seal times out (round 4 N2): asynchronously, so a
         // stalled audio queue never holds the tick either.
         let tapActive = tap != nil
+        let session = stateLock.sync { lifecycle.session }
         audioQueue.async { [weak self, weak h] in
             guard let self, let h else { return }
             let counts = self.coverageCountsOnAudioQueue(h, tapActive: tapActive)
-            self.lastCoverageCounts.withLock { $0 = counts }
+            self.lastCoverageCounts.withLock { $0.update(session: session, value: counts) }
         }
         // Tap: its callback heartbeat. SCK: the arrival stamp, as the liveness watchdog uses.
         let systemHeartbeat = tap?.lastHeartbeatNanos() ?? h.lastSystemBufferArrivalNanos()
@@ -603,7 +605,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // the out-of-ring dedup keys, which otherwise grow for the helper's lifetime (council B-M14a).
         diagnostics.resetSession()
         coverage.withLock { $0 = [.mic: TrackAccounting(), .system: TrackAccounting()] }
-        lastCoverageCounts.withLock { $0 = nil }
+        lastCoverageCounts.withLock { $0.reset(session: token) }
         lastGateTickNanos.withLock { $0 = 0 }
         gaps.withLock { $0 = GapTracker() }
         let options: CaptureOptions = stateLock.sync {
@@ -807,9 +809,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // sees the stop at commit time — so we mark stopping before we read the stream, guaranteeing we
         // stop whatever stream is (or is about to be) live (council F1). A stop during a START aborts
         // it (B-I2): the lifecycle keeps this reply, and the start's teardown answers it.
-        let (decision, captureStream, micSess, tapSess, h) = stateLock.sync {
-            () -> (Lifecycle.StopDecision, SCStream?, MicCaptureSession?, SystemTapSession?, AudioOutputHandler?) in
-            (lifecycle.requestStop(reply), stream, micSession, tapSession, handler)
+        let (decision, captureStream, micSess, tapSess, h, session) = stateLock.sync {
+            () -> (Lifecycle.StopDecision, SCStream?, MicCaptureSession?, SystemTapSession?, AudioOutputHandler?, Int) in
+            (lifecycle.requestStop(reply), stream, micSession, tapSession, handler, lifecycle.session)
         }
         switch decision {
         case .notCapturing:
@@ -830,8 +832,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Seal FIRST (bounded, reading the coverage in the same audio-queue block), stop the sources
         // bounded, END the session whatever they did (`StopSequence`). No unbounded wait anywhere (N2).
         var paths: (String?, String?) = (nil, nil)
-        let counts = runStopSequence(handler: h, mic: micSess, tap: tapSess) { paths = self.endStoppedSession() }
-        recordCaptureStop(counts, mic: micSess, tap: tapSess)
+        // `.captureStop` is recorded BEFORE the session ends, while it is still the current one (round 5 item 4).
+        runStopSequence(handler: h, mic: micSess, tap: tapSess) { counts in
+            self.recordCaptureStop(counts, session: session, mic: micSess, tap: tapSess)
+            paths = self.endStoppedSession()
+        }
         // The files are sealed and the session is over: reply NOW. An SCStream's stop is async and
         // unbounded, so it runs after the reply, in the background (round 2 item 5).
         reply(paths.0, paths.1, nil)
@@ -849,14 +854,13 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// the sources did (B-I1, A-I6, round 2 item 4). A source whose teardown blocks is abandoned: it was
     /// told to stop, so it drops any late completion itself (its `isStopping`), and the WAVs are already
     /// sealed. Blocks up to `sourceStopTimeoutSeconds`: never call it on the audio queue or under `stateLock`.
-    /// Returns the coverage counts the seal read on the audio queue — nil when there was no handler or the
-    /// seal timed out. No handler, no seal: nothing waits on the audio queue (round 4 M4).
-    @discardableResult
+    /// `end` gets the coverage counts the seal read on the audio queue — nil when there was no handler or
+    /// the seal timed out. No handler, no seal: nothing waits on the audio queue (round 4 M4).
     private func runStopSequence(handler h: AudioOutputHandler?, mic: MicCaptureSession?, tap: SystemTapSession?,
-                                 end: () -> Void) -> CoverageCounts? {
+                                 end: (CoverageCounts?) -> Void) {
         let limit = Lifecycle.sourceStopTimeoutSeconds
         let tapActive = tap != nil
-        let (outcome, counts) = StopSequence.run(
+        let (outcome, _) = StopSequence.run(
             sealing: { [weak self] () -> CoverageCounts? in
                 guard let self, let h else { return nil }
                 return self.audioQueue.sync {
@@ -867,7 +871,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             },
             stopMic: mic.map { mic in { mic.stop() } },
             stopTap: tap.map { tap in { tap.stop() } },
-            timeout: limit, end: end)
+            timeout: limit, end: { end($0 ?? nil) })
         if outcome.sealAbandoned {
             // The audio queue is wedged (a disk stall): the session ended anyway. Its writers are never
             // reused, and whatever reaches them before the late seal runs is dropped (round 3 E).
@@ -883,13 +887,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             Logger.audio.error("System tap stop did not return within \(Int(limit), privacy: .public)s (a rebuild is stuck) — abandoned; the recording is already sealed")
             record(.streamStopError, .anomaly, ["source": "system-tap", "reason": "stop timed out — abandoned"])
         }
-        return counts ?? nil
     }
 
     /// `.captureStop` with the seal's counts, or — when the seal timed out on a stalled audio queue — the
     /// last cached ones, marked `coverage_incomplete` (round 4 N2).
-    private func recordCaptureStop(_ counts: CoverageCounts?, mic: MicCaptureSession?, tap: SystemTapSession?) {
-        let fallback = counts == nil ? lastCoverageCounts.withLock { $0 } : nil
+    private func recordCaptureStop(_ counts: CoverageCounts?, session: Int, mic: MicCaptureSession?, tap: SystemTapSession?) {
+        let fallback = counts == nil ? lastCoverageCounts.withLock { $0.value(for: session) } : nil
         record(.captureStop, .info, coverageFacts(counts ?? fallback, mic: mic, tap: tap, incomplete: counts == nil))
     }
 
@@ -955,7 +958,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         guard stateLock.sync(execute: { lifecycle.isLive }) else { return }
         switch kind {
         case "sleep":
-            enterSleep(source: "app")
+            enterSleep(from: .app)
         case "wake":
             livenessWatchdog.wake()   // idempotent: a no-op if IOKit's full wake or the expiry got there first
         default:
@@ -965,9 +968,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     /// Sleep, from the app or from IOKit's will-sleep (idempotent): nothing is judged, healed or deadlined
     /// until the pause ends. A pending mic reopen's deadline goes with it (round 2 item 11).
-    private func enterSleep(source: String) {
-        Logger.audio.info("System sleep (\(source, privacy: .public)): liveness paused")
-        livenessWatchdog.pause(expiryStartsNow: !(powerObserver?.isRegistered ?? false))
+    /// Only IOKit's will-sleep starts a new cycle; the app's "sleep" starts one only if none is running
+    /// (round 5 item 2).
+    private func enterSleep(from source: SleepPauseClock.SleepSource) {
+        Logger.audio.info("System sleep (\(source == .system ? "IOKit" : "app", privacy: .public)): liveness paused")
+        livenessWatchdog.pause(expiryStartsNow: !(powerObserver?.isRegistered ?? false), from: source)
         tapHealer.cancelAll()   // paired with trigger(.wake) in resumeAfterSleep (C4)
         livenessWatchdog.queue.async { [weak self] in self?.micHealPolicy.slept() }
     }
@@ -988,7 +993,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private func handlePowerEvent(_ event: SystemPowerObserver.Event) {
         guard stateLock.sync(execute: { lifecycle.isLive }) else { return }
         switch event {
-        case .willSleep: enterSleep(source: "IOKit")
+        case .willSleep: enterSleep(from: .system)
         case .poweredOn(let fullWake): livenessWatchdog.poweredOn(fullWake: fullWake)
         }
     }
@@ -1068,10 +1073,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             var oldPaths: (systemPath: String, micPath: String)?
             var counts: CoverageCounts?
             let (mic, tap) = stateLock.sync { (micSession, tapSession) }
-            audioQueue.sync {
+            // Bounded (round 5 item 1): a swap stuck behind a stalled audio queue must not hold this XPC
+            // connection — and a Stop queued behind it — past 3 s. Abandoned means it never applies late.
+            let swap = AbandonableStep.run(timeout: AbandonableStep.rotationTimeoutSeconds, on: audioQueue) { () -> Bool in
                 guard self.stateLock.sync(execute: {
                     self.lifecycle.allowsRotation(of: session) && self.handler === currentHandler
-                }) else { return }
+                }) else { return false }
                 oldPaths = currentHandler.swapWriters(
                     newSystemWriter: newSystemWriter,
                     newMicWriter: newMicWriter
@@ -1082,6 +1089,26 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.systemPath = newSysPath
                     self.micPath = newMicPath
                 }
+                return true
+            }
+            switch swap {
+            case .done:
+                break
+            case .abandoned:
+                // Never ran, never will: the current chunk keeps recording; its would-be successor goes.
+                Logger.audio.error("Chunk rotation timed out on a stalled audio queue — abandoned; the current chunk keeps recording")
+                newSystemWriter.finalize()
+                newMicWriter.finalize()
+                try? FileManager.default.removeItem(atPath: newSysPath)
+                try? FileManager.default.removeItem(atPath: newMicPath)
+                reply(nil, nil, CaptureReplies.rotationTimedOut)
+                return
+            case .overran:
+                // The swap started but has not finished (a disk stall inside it): it may still complete, and
+                // then Stop returns the new chunk's paths — the old chunk is sealed on disk, not handed over.
+                Logger.audio.error("Chunk rotation started but did not finish in time — it may complete late; the old chunk stays on disk")
+                reply(nil, nil, CaptureReplies.rotationTimedOut)
+                return
             }
             guard let oldPaths else {
                 // A stop began after the gate above: nobody will write these, so leave no stub behind.
@@ -1233,9 +1260,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // (council F1), mirroring stopCapture. A disconnect during a start aborts it (B-I2): the start
         // tears down what it built, so no capture is left running without a client. Nobody waits for an
         // answer, so the lifecycle's pending reply is a no-op.
-        let (decision, captureStream, micSess, tapSess, h) = stateLock.sync {
-            () -> (Lifecycle.StopDecision, SCStream?, MicCaptureSession?, SystemTapSession?, AudioOutputHandler?) in
-            (lifecycle.requestStop({ _, _, _ in }), stream, micSession, tapSession, handler)
+        let (decision, captureStream, micSess, tapSess, h, session) = stateLock.sync {
+            () -> (Lifecycle.StopDecision, SCStream?, MicCaptureSession?, SystemTapSession?, AudioOutputHandler?, Int) in
+            (lifecycle.requestStop({ _, _, _ in }), stream, micSession, tapSession, handler, lifecycle.session)
         }
         switch decision {
         case .abortStart:
@@ -1252,8 +1279,10 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // sources bounded; end the session; then the SCStream, in the background (round 2 item 5). Same
         // coverage as a clean stop, so a recording the app crashed out of still reports how much of each
         // side was captured (and, on the tap, how much of it was exact zeros, #220).
-        let counts = runStopSequence(handler: h, mic: micSess, tap: tapSess) { _ = self.endStoppedSession() }
-        recordCaptureStop(counts, mic: micSess, tap: tapSess)
+        runStopSequence(handler: h, mic: micSess, tap: tapSess) { counts in
+            self.recordCaptureStop(counts, session: session, mic: micSess, tap: tapSess)
+            _ = self.endStoppedSession()
+        }
         if let captureStream { stopStreamInBackground(captureStream) }
         Logger.audio.info("Capture finalized after client disconnect")
     }
@@ -1282,7 +1311,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             registryResets += 1
             return snapshot
         }
-        runStopSequence(handler: h, mic: micSess, tap: tapSess) {}
+        runStopSequence(handler: h, mic: micSess, tap: tapSess) { _ in }
         // A stream the start had already committed and started (the abort came after it).
         if let captureStream { stopStreamInBackground(captureStream) }
         if let sys { try? FileManager.default.removeItem(atPath: sys) }
@@ -1363,7 +1392,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return true
         }
         if !proceed {
-            runStopSequence(handler: nil, mic: mic, tap: nil) {}
+            runStopSequence(handler: nil, mic: mic, tap: nil) { _ in }
             throw CancellationError()   // the start aborts; its teardown owns the rest (B-I2)
         }
         return (mic, mic.resolvedDeviceId)
@@ -1432,7 +1461,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return true
         }
         if !proceed {
-            runStopSequence(handler: nil, mic: nil, tap: tap) {}
+            runStopSequence(handler: nil, mic: nil, tap: tap) { _ in }
             throw CancellationError()   // the start aborts; its teardown owns the rest (B-I2)
         }
     }

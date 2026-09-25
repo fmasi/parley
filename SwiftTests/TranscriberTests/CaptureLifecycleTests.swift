@@ -208,8 +208,8 @@ import Testing
         #expect(CaptureReplies.noCaptureInProgress == "No capture in progress", "the string the app has always matched")
         #expect(CaptureReplies.alreadyInProgress == "Capture already in progress", "the string the app has always matched")
         let others = [CaptureReplies.refusedStopping, CaptureReplies.alreadyInProgress, CaptureReplies.startCancelled,
-                      CaptureReplies.startTimedOut, CaptureReplies.cancelledWhileStarting]
-        #expect(Set(others + [CaptureReplies.noCaptureInProgress]).count == 6)
+                      CaptureReplies.startTimedOut, CaptureReplies.cancelledWhileStarting, CaptureReplies.rotationTimedOut]
+        #expect(Set(others + [CaptureReplies.noCaptureInProgress]).count == 7)
         #expect(others.allSatisfy { !$0.contains(CaptureReplies.noCaptureInProgress) && !$0.isEmpty })
     }
 }
@@ -280,20 +280,29 @@ import Testing
         let start = DispatchTime.now()
         let (outcome, read) = StopSequence.run(
             sealing: { audio.sync { 42 } }, stopMic: nil, stopTap: nil,
-            timeout: 0.2, end: { log.add("end") })
+            timeout: 0.2, end: { read in log.add(read == nil ? "end without a reading" : "end") })
         let waited = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
         #expect(outcome.sealAbandoned)
         #expect(read == nil)
-        #expect(log.entries == ["end"])
+        #expect(log.entries == ["end without a reading"])
         #expect(waited < 1.5)
     }
 
     @Test func aSealHandsBackWhatItReadOnTheAudioQueue() {
         let audio = DispatchQueue(label: "free-audio")
         let (outcome, read) = StopSequence.run(
-            sealing: { audio.sync { 42 } }, stopMic: nil, stopTap: nil, timeout: 1, end: {})
+            sealing: { audio.sync { 42 } }, stopMic: nil, stopTap: nil, timeout: 1, end: { _ in })
         #expect(!outcome.sealAbandoned)
         #expect(read == 42)
+    }
+
+    /// Round 5 item 4: `end` gets the seal's reading, so Stop records `.captureStop` BEFORE the session
+    /// ends — while it is still the current one.
+    @Test func endReceivesTheSealsReadingBeforeTheSessionEnds() {
+        let log = Log()
+        _ = StopSequence.run(sealing: { 42 }, stopMic: nil, stopTap: nil, timeout: 1,
+                             end: { read in log.add("record \(read ?? -1)"); log.add("end session") })
+        #expect(log.entries == ["record 42", "end session"])
     }
 
     @Test func aSealThatReturnsIsNotAbandoned() {
@@ -339,5 +348,48 @@ import Testing
             if once.claim() { wins.withLock { $0 += 1 } }
         }
         #expect(wins.withLock { $0 } == 1)
+    }
+}
+
+/// Round 5 item 1: a rotation's writer swap on a stalled audio queue must not hold the XPC connection
+/// (and a Stop queued behind it) past its bound. Abandoned means abandoned: the swap never applies late.
+@Suite struct AbandonableStepTests {
+    @Test func aStepOnAFreeQueueRunsAndReturns() {
+        let queue = DispatchQueue(label: "free")
+        let outcome = AbandonableStep.run(timeout: 1, on: queue) { 7 }
+        #expect(outcome == .done(7))
+    }
+
+    @Test func aStepOnAStalledQueueIsAbandonedAndNeverRunsLate() {
+        let queue = DispatchQueue(label: "stalled")
+        let release = DispatchSemaphore(value: 0)
+        queue.async { release.wait() }
+        let ran = OSAllocatedUnfairLock(initialState: false)
+        let start = DispatchTime.now()
+        let outcome = AbandonableStep.run(timeout: 0.2, on: queue) { ran.withLock { $0 = true }; return 7 }
+        let waited = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+        #expect(outcome == .abandoned)
+        #expect(waited < 1.5)
+        release.signal()
+        queue.sync {}   // the queue drains: the abandoned step has had its chance to run
+        #expect(!ran.withLock { $0 }, "no writer swap applies late")
+    }
+
+    @Test func theRotationBoundIsThreeSeconds() {
+        #expect(AbandonableStep.rotationTimeoutSeconds == 3)
+    }
+}
+
+/// Round 5 item 3: the coverage cache belongs to one session; a refresh queued before a stall that
+/// lands after the next start must not become that session's coverage.
+@Suite struct SessionScopedCacheTests {
+    @Test func aRefreshForAnotherSessionIsIgnored() {
+        var cache = SessionScopedCache<Int>()
+        cache.reset(session: 2)
+        cache.update(session: 1, value: 10)     // the late refresh from session 1
+        #expect(cache.value(for: 2) == nil)
+        cache.update(session: 2, value: 20)
+        #expect(cache.value(for: 2) == 20)
+        #expect(cache.value(for: 1) == nil, "never handed to another session")
     }
 }

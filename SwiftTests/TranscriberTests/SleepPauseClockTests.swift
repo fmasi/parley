@@ -251,4 +251,31 @@ import Testing
         _ = app.wake()
         #expect(app.lastWakeReason == .appWake)
     }
+
+    // MARK: - Round 5 item 2: only the system's will-sleep starts a new cycle
+
+    /// The app's "sleep" handled after IOKit's power-on must not wipe the running clock.
+    @Test func aLateAppSleepDuringAPauseIsIgnored() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 0, from: .system)
+        _ = c.poweredOn(fullWake: false, nowNanos: 100 * s)
+        c.pause(nowNanos: 150 * s, from: .app)                 // late: must not reset the clock
+        let due = c.tick(nowNanos: 400 * s, fullWake: false)   // 300 s after the power-on
+        #expect(due != nil)
+    }
+
+    @Test func theAppsSleepStartsACycleWhenNoneIsRunning() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 0, from: .app)
+        #expect(c.isPaused)
+    }
+
+    @Test func theSystemsWillSleepAlwaysStartsANewCycle() {
+        var c = SleepPauseClock()
+        c.pause(nowNanos: 0, from: .app)
+        _ = c.poweredOn(fullWake: false, nowNanos: 100 * s)
+        c.pause(nowNanos: 150 * s, from: .system)              // back to sleep: a new cycle
+        let old = c.tick(nowNanos: 400 * s, fullWake: false)
+        #expect(old == nil, "the first cycle's clock is gone")
+    }
 }

@@ -19,4 +19,8 @@ public enum CaptureReplies {
     /// `stopCapture`'s reply when that stop arrived during a start that then ended (aborted, failed or
     /// timed out): nothing was recorded, the files are gone, the session is free.
     public static let startCancelled = "Capture start cancelled"
+    /// `rotateChunk`'s reply when the writer swap did not run within its bound (a stalled audio queue): the
+    /// rotation was abandoned — the current chunk keeps recording, nothing swaps late (round 5 item 1).
+    /// Not a dead capture.
+    public static let rotationTimedOut = "Rotation timed out"
 }

@@ -169,18 +169,19 @@ public enum StopSequence {
         timeout: Double,
         end: () -> Void
     ) -> Outcome {
-        run(sealing: seal, stopMic: stopMic, stopTap: stopTap, timeout: timeout, end: end).outcome
+        run(sealing: seal, stopMic: stopMic, stopTap: stopTap, timeout: timeout, end: { _ in end() }).outcome
     }
 
     /// As `run(seal:…)`, and the seal hands back what it read in the same audio-queue block — Stop's
     /// coverage (round 4 N2), so Stop never needs an `audioQueue.sync` of its own. `read` is nil when the
-    /// seal did not return within its bound: the caller falls back to a cached reading.
+    /// seal did not return within its bound: the caller falls back to a cached reading. `end` gets it
+    /// too, so the caller records it while the session is still the current one (round 5 item 4).
     public static func run<Read>(
         sealing seal: @escaping () -> Read,
         stopMic: (() -> Void)?,
         stopTap: (() -> Void)?,
         timeout: Double,
-        end: () -> Void
+        end: (Read?) -> Void
     ) -> (outcome: Outcome, read: Read?) {
         let sealed = DispatchSemaphore(value: 0)
         let box = ReadBox<Read>()
@@ -210,7 +211,7 @@ public enum StopSequence {
         }
         _ = group.wait(timeout: .now() + timeout)
         let done = finished.withLock { $0 }
-        end()
+        end(read)
         return (Outcome(sealAbandoned: sealAbandoned, micAbandoned: !done.mic, tapAbandoned: !done.tap), read)
     }
 
@@ -235,3 +236,67 @@ public final class OnceFlag: @unchecked Sendable {
         }
     }
 }
+
+/// One step on a queue that may be stalled — a rotation's writer swap on the audio queue (round 5 item 1):
+/// it runs within `timeout`, or it is ABANDONED and never runs at all, so nothing applies late. A step
+/// that started just as the bound passed is waited for (it is running, so the queue moved) for one more
+/// bound; past that it is `overran`: it may still complete.
+public enum AbandonableStep {
+    public enum Outcome<T: Equatable>: Equatable {
+        case done(T)
+        /// Never ran, and never will.
+        case abandoned
+        /// Started, but did not finish within a second bound.
+        case overran
+    }
+
+    public static let rotationTimeoutSeconds: Double = 3
+
+    /// Blocks up to 2 × `timeout`: never call it on `queue`.
+    public static func run<T: Equatable>(timeout: Double, on queue: DispatchQueue, _ step: @escaping () -> T) -> Outcome<T> {
+        let claim = OnceFlag()
+        let done = DispatchSemaphore(value: 0)
+        let box = ResultBox<T>()
+        queue.async {
+            guard claim.claim() else { return }   // abandoned before it could start
+            box.value = step()
+            done.signal()
+        }
+        if done.wait(timeout: .now() + timeout) == .success, let value = box.value { return .done(value) }
+        if claim.claim() { return .abandoned }   // it had not started: now it never will
+        if done.wait(timeout: .now() + timeout) == .success, let value = box.value { return .done(value) }
+        return .overran
+    }
+
+    /// Written before the semaphore signals, read after a successful wait.
+    private final class ResultBox<T>: @unchecked Sendable {
+        var value: T?
+    }
+}
+
+/// A value that belongs to one capture session (round 5 item 3): the coverage counts cached on each tick.
+/// A refresh for another session — queued before a stall, landing after the next start — is ignored, and
+/// the value is only ever handed to its own session.
+public struct SessionScopedCache<Value> {
+    private var session: Int?
+    private var value: Value?
+
+    public init() {}
+
+    /// A new session: forget the previous one's value.
+    public mutating func reset(session: Int) {
+        self.session = session
+        value = nil
+    }
+
+    public mutating func update(session: Int, value: Value) {
+        guard session == self.session else { return }
+        self.value = value
+    }
+
+    public func value(for session: Int) -> Value? {
+        session == self.session ? value : nil
+    }
+}
+
+extension SessionScopedCache: Sendable where Value: Sendable {}

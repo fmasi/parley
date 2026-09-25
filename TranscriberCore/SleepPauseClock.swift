@@ -6,9 +6,11 @@ import Foundation
 ///
 /// | event                          | effect                                                          |
 /// |--------------------------------|-----------------------------------------------------------------|
-/// | `pause`                        | a NEW cycle: `sawDark = false`, `poweredOn = false`, no clock — |
+/// | `pause(from: .system)`         | a NEW cycle: `sawDark = false`, `poweredOn = false`, no clock — |
 /// |                                | also when already paused: each sleep is bounded on its own, so  |
 /// |                                | Power Naps never add up (round 4 N1); deferred mic work stays   |
+/// | `pause(from: .app)`            | a new cycle only if none is running; else ignored — the app's   |
+/// |                                | message can land after IOKit's power-on (round 5 item 2)        |
 /// | tick reading full wake         | wake ONLY IF `sawDark || poweredOn` since the pause (a real     |
 /// |                                | dark-to-full promotion); else ignored — the ~5 s "darkwakelinger"|
 /// |                                | before a clamshell sleep reads full-wake while going TO sleep   |
@@ -28,6 +30,14 @@ public struct SleepPauseClock: Equatable, Sendable {
     public enum MicWork: Hashable, Sendable {
         /// coreaudiod restarted: re-register the mic's listeners and reopen it.
         case serviceRestart
+    }
+
+    /// Who says the machine is going to sleep (round 5 item 2).
+    public enum SleepSource: Equatable, Sendable {
+        /// IOKit's will-sleep: always the start of a sleep.
+        case system
+        /// The app's "sleep" message: may arrive late, after the system's own messages.
+        case app
     }
 
     /// What ended the last pause — for the log, and the X1 check (round 4 M3).
@@ -56,12 +66,12 @@ public struct SleepPauseClock: Equatable, Sendable {
 
     public var isPaused: Bool { paused }
 
-    /// Sleep (the app's, or IOKit's will-sleep). Always a NEW cycle (round 4 N1): a will-sleep while
-    /// already paused — the machine going back to sleep after a Power Nap — resets the cycle's state and
+    /// Sleep. IOKit's will-sleep always starts a NEW cycle (round 4 N1): a will-sleep while already paused — the machine going back to sleep after a Power Nap — resets the cycle's state and
     /// clock, so every wake is bounded on its own. Mic work deferred in an earlier nap still waits for
-    /// the wake. `expiryStartsNow`: power notifications are unavailable, so the only bound is uptime
-    /// from here.
-    public mutating func pause(nowNanos: UInt64, expiryStartsNow: Bool = false) {
+    /// the wake. The app's "sleep" starts one only if none is running (round 5 item 2). `expiryStartsNow`:
+    /// power notifications are unavailable, so the only bound is uptime from here.
+    public mutating func pause(nowNanos: UInt64, expiryStartsNow: Bool = false, from source: SleepSource = .system) {
+        if source == .app, paused { return }   // late: never wipe the running cycle (round 5 item 2)
         if !paused { pendingMicWork = [] }
         paused = true
         sawDark = false

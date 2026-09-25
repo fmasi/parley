@@ -75,11 +75,11 @@ final class LivenessWatchdogDriver {
     /// `SleepPauseClock`). The tick keeps running (an owed `.cleared(.gateClosed)` is still delivered);
     /// the OS pauses it with the machine. `expiryStartsNow`: no power notifications, so the only exit
     /// besides the app's wake is 30 s of awake uptime from here (round 1's behaviour).
-    func pause(expiryStartsNow: Bool) {
+    func pause(expiryStartsNow: Bool, from source: SleepPauseClock.SleepSource) {
         let now = DispatchTime.now().uptimeNanoseconds
         queue.async { [weak self] in
             guard let self else { return }
-            self.sleepPause.pause(nowNanos: now, expiryStartsNow: expiryStartsNow)
+            self.sleepPause.pause(nowNanos: now, expiryStartsNow: expiryStartsNow, from: source)
             for track in CaptureTrack.allCases { self.monitors[track]?.pause() }
         }
     }
