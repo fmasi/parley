@@ -35,7 +35,7 @@ final class SystemEventObserver {
             // Synchronous, never in a Task (L review 85): the process can end right after this handler returns.
             MainActor.assumeIsolated {
                 AppTerminationDelegate.powerOffSeenAt = Date()
-                coordinator?.markExitDuringFinalize()
+                coordinator?.markPowerOffDuringFinalize()   // time-boxed: a cancelled logout withdraws it (L review 174)
             }
         })
     }

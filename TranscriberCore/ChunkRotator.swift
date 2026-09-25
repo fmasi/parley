@@ -213,9 +213,10 @@ public final class ChunkRotator {
     /// audio. Called before every rotation, by Stop (after the helper's stop) and by a crash recovery.
     /// Returns whether it reconciled; an attempt that did not complete (yet) stays pending — and so does every one
     /// when the folder does not answer the look (L review 158). `announce`: `onRotated` runs — only before a rotation,
-    /// never at Stop or at a crash, which are not rotations (L review 118).
+    /// never at Stop or at a crash, which are not rotations (L review 118). Off unless asked for (L review 172): only
+    /// `performRotation` announces, through its own reconcile.
     @discardableResult
-    public func reconcileLateRotation(announce: Bool = true) async -> Bool {
+    public func reconcileLateRotation(announce: Bool = false) async -> Bool {
         guard !lateAttempts.isEmpty, let look = await look(freeAfterCurrent: false, includeLate: true, "reconcile") else { return false }
         return applyReconcile(look, announce: announce)
     }
@@ -238,30 +239,45 @@ public final class ChunkRotator {
     }
 
     /// The Stop's last chunk (L review 113): the one the helper's stop reply NAMES — never one chunk's audio under
-    /// another's index. A late rotation is reconciled first. A reply naming a later chunk of this session than the
-    /// current one (a rotation completed that no file check showed) emits the current chunk — and any late attempt
-    /// before the named one — from their own files, through `onChunkFinalized`; the named chunk is returned, for the
-    /// caller to process last. A name that is not this session's keeps the current index (logged).
+    /// another's index. The reply is read FIRST (L review 169): it says which chunk the helper sealed, while a late
+    /// attempt's files on disk only say that a swap BEGAN — an overrun swap abandoned at the Stop leaves its files, yet the
+    /// helper sealed the chunk it was writing all along.
+    /// - It names the current chunk: the late attempts never took over — dropped without a file check.
+    /// - It names a later chunk of this session (late attempt k): the current chunk, and every late attempt below k whose
+    ///   file the helper opened, are emitted from their own files through `onChunkFinalized`; k is returned, for the
+    ///   caller to process last.
+    /// - It names an earlier chunk of this session: that chunk, with its own file's start.
+    /// - Only a name that is not this session's falls back to the file check (a late rotation reconciled from its
+    ///   files); the current index is kept (logged).
     /// The folder is looked at off the main actor, bounded (L review 158); one that does not answer reconciles nothing,
-    /// and the named chunk starts where the current one did.
+    /// and the named chunk starts where the last one emitted did.
     public func lastChunkAtStop(systemPath: String, micPath: String) async -> FinalizedChunk {
         let sealed = URL(fileURLWithPath: systemPath).lastPathComponent
-        let named = chunkIndex(named: sealed)
-        let look = await look(freeAfterCurrent: false, includeLate: true, extra: named.map { [$0] } ?? [], "stop")
-        if let look { applyReconcile(look, announce: false) }
-        guard sealed != currentBaseName + ".wav" else {
-            return FinalizedChunk(index: currentChunkIndex, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
-        }
-        guard let named, named != currentChunkIndex else {
+        guard let named = chunkIndex(named: sealed) else {
+            let look = await look(freeAfterCurrent: false, includeLate: true, "stop")
+            if let look { applyReconcile(look, announce: false) }
             Logger.audio.error("ChunkRotator: the stop sealed a file this session does not name — kept as chunk \(self.currentChunkIndex, privacy: .public)")
             return FinalizedChunk(index: currentChunkIndex, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
         }
+        guard named != currentChunkIndex else {
+            if !lateAttempts.isEmpty {
+                Logger.audio.info("ChunkRotator: the stop sealed chunk \(named, privacy: .public) — the timed-out rotation(s) to \(self.lateAttempts, privacy: .public) never took over; dropped without a file check")
+            }
+            lateAttempts = []
+            return FinalizedChunk(index: named, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
+        }
         Logger.audio.error("ChunkRotator: the stop sealed chunk \(named, privacy: .public) while chunk \(self.currentChunkIndex, privacy: .public) was named — each labelled by its own index")
-        var start = currentChunkStartTime
+        // The named chunk's file — and a late attempt's below it — say when each began: one look, bounded.
+        let look = await look(freeAfterCurrent: false, includeLate: true, extra: [named], "stop")
+        let created = look?.created ?? [:]
+        let start: Date
         if named > currentChunkIndex {
             let between = lateAttempts.filter { $0 < named && look?.opened.contains($0) == true }
-            emitSealed(between[...], last: nil, created: look?.created ?? [:])
-            start = max(look?.created[named] ?? start, start)
+            let lastEmitted = emitSealed(between[...], last: nil, created: created)
+            start = max(created[named] ?? lastEmitted, lastEmitted)
+        } else {
+            // An earlier chunk than the one named: its own file's creation, never the current chunk's start.
+            start = min(created[named] ?? currentChunkStartTime, currentChunkStartTime)
         }
         currentChunkIndex = named
         currentChunkStartTime = start
@@ -278,9 +294,10 @@ public final class ChunkRotator {
 
     /// Emits the current chunk from its own files, then each chunk in `between` (opened and sealed by late
     /// rotations) from its own files, then — when the helper's reply names it — `last` from the reply. `created`: the
-    /// chunk files' creation dates, as a look at the folder found them.
+    /// chunk files' creation dates, as a look at the folder found them. Returns the last emitted chunk's start.
+    @discardableResult
     private func emitSealed(_ between: ArraySlice<Int>, last: (index: Int, paths: (systemPath: String, micPath: String))?,
-                            created: [Int: Date]) {
+                            created: [Int: Date]) -> Date {
         var start = currentChunkStartTime
         onChunkFinalized(ownFiles(index: currentChunkIndex, startTime: start))
         for index in between {
@@ -291,6 +308,7 @@ public final class ChunkRotator {
             start = max(created[last.index] ?? start, start)
             onChunkFinalized(FinalizedChunk(index: last.index, systemPath: last.paths.systemPath, micPath: last.paths.micPath, startTime: start))
         }
+        return start
     }
 
     private func ownFiles(index: Int, startTime: Date) -> FinalizedChunk {

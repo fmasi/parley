@@ -23,6 +23,9 @@ public struct RecordingSentinel: Codable, Equatable {
     /// A deliberate quit or logout came while the stopped recording's transcript was being finished (L
     /// follow-up 42): the next launch says so, never "Parley crashed".
     public var quitDuringFinalize: Bool
+    /// `quitDuringFinalize` came from `willPowerOff` only — a logout that may still be cancelled — so it is withdrawn if
+    /// the app outlives the power-off window (L review 174). A quit's own mark clears it.
+    public var quitMarkedByPowerOff: Bool
     /// Why the recording stopped, as the launch — or the session — that first kept it pending saw it (L review 147).
     /// A session kept in one boot and salvaged in another is worded by this, never by the boot it is salvaged in. nil:
     /// not kept yet (the slot's own sentinel), or kept by an earlier build.
@@ -52,7 +55,8 @@ public struct RecordingSentinel: Codable, Equatable {
         bootSessionUUID: String? = nil,
         stopping: Bool = false,
         quitDuringFinalize: Bool = false,
-        stopCause: StopCause? = nil
+        stopCause: StopCause? = nil,
+        quitMarkedByPowerOff: Bool = false
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -66,6 +70,7 @@ public struct RecordingSentinel: Codable, Equatable {
         self.stopping = stopping
         self.quitDuringFinalize = quitDuringFinalize
         self.stopCause = stopCause
+        self.quitMarkedByPowerOff = quitMarkedByPowerOff
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -85,6 +90,7 @@ public struct RecordingSentinel: Codable, Equatable {
         quitDuringFinalize = try container.decodeIfPresent(Bool.self, forKey: .quitDuringFinalize) ?? false
         // An unknown cause (a newer build's) reads as none: the salvage then words it by its boot, as before.
         stopCause = (try? container.decodeIfPresent(StopCause.self, forKey: .stopCause)) ?? nil
+        quitMarkedByPowerOff = try container.decodeIfPresent(Bool.self, forKey: .quitMarkedByPowerOff) ?? false
     }
 
     // MARK: - File location
@@ -266,7 +272,8 @@ public struct RecordingSentinel: Codable, Equatable {
             bootSessionUUID: bootSessionUUID,
             stopping: stopping,
             quitDuringFinalize: quitDuringFinalize,
-            stopCause: stopCause
+            stopCause: stopCause,
+            quitMarkedByPowerOff: quitMarkedByPowerOff
         )
     }
 }

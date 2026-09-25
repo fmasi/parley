@@ -1234,7 +1234,7 @@ struct Harness {
             guard !fired.value else { return }
             fired.value = true
             client.onServiceCrash?()                      // the helper dies while start() is awaited
-            await Harness.until { h.coordinator.crashDuringStart }   // noted, the phase still .idle
+            await Harness.until { h.coordinator.crashBeforeRecording }   // noted, the phase still .idle
         }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         for _ in 0..<50 where client.startCalls.count < 2 { await Task.yield() }
@@ -1257,7 +1257,7 @@ struct Harness {
         client.onStartAsync = {
             guard client.startCalls.count == 1 else { return }
             client.onServiceCrash?()
-            await Harness.until { h.coordinator.crashDuringStart }
+            await Harness.until { h.coordinator.crashBeforeRecording }
         }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         client.startError = nil
@@ -3575,7 +3575,7 @@ struct Harness {
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
         #expect(ContinuousClock.now - began < .milliseconds(600))
         #expect(h.client.stopCalls == 1, "the Stop in flight asks the helper — never a second stop")
-        #expect(h.client.droppedConnections >= 1, "dropped at the bound")
+        #expect(h.client.droppedConnections == 1, "dropped at the bound, once")
         #expect(RecordingSentinel.read(directory: h.tmp).map { $0.stopping && $0.quitDuringFinalize } == true)
         await stopping.value
     }
@@ -3619,7 +3619,8 @@ struct Harness {
         await starting.value
         await terminating.value
         #expect(h.client.stopCalls == 1)
-        #expect(ContinuousClock.now - releasedAt < .milliseconds(100), "awaited, not polled (L review 109)")
+        // CI-safe (L review 173): well under the bound a poll would have to wait out, never a tight 100 ms.
+        #expect(ContinuousClock.now - releasedAt < .milliseconds(500), "awaited, not polled (L review 109)")
     }
 
     /// A termination while the transcript is being finished: nothing left to stop — the sentinel is marked,
@@ -5357,6 +5358,7 @@ struct Harness {
     /// shortens it. The window's clock is injectable; the streak resets exactly when it has run out.
     @Test func theConfirmationWindowCountsAwakeTime() async throws {
         let h = try Harness()
+        defer { tearDown(h) }
         _ = try h.writeSentinel()
         h.appState.phase = .recording(since: Date())
         let clock = ManualTestClock()
@@ -5372,7 +5374,6 @@ struct Harness {
         clock.advance(by: .seconds(1))
         await Harness.until { h.coordinator.xpcRetryCount == 0 }
         #expect(h.coordinator.xpcRetryCount == 0, "60 s awake: confirmed")
-        h.runner.stopChunkRotation(); h.runner.teardownChunkedPipeline()
     }
 
     /// L review 138: a Quit during the launch's brief probe of a previous recording is not a Quit during a start —

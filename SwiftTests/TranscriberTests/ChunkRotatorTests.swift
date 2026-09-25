@@ -484,4 +484,86 @@ struct ChunkRotatorTests {
         let plan = await r.recoverFromCrash()
         #expect(plan.recoveryIndex == 2 && ContinuousClock.now - began < .seconds(2))
     }
+
+    // MARK: - L round D (169, 172)
+
+    /// A helper whose writer swap creates the next chunk's files and then overruns (H2's `.overran`): the app hears
+    /// "Rotation timed out", the files stay on disk — and at the Stop the swap is abandoned, so the helper seals the
+    /// chunk it was writing all along.
+    private final class OverranHelper: ChunkRotationClient {
+        struct TimedOut: Error, LocalizedError { var errorDescription: String? { CaptureReplies.rotationTimedOut } }
+        let dir: URL
+        /// Which rotations create their files before they overrun (by call, from 1); the others are abandoned unstarted.
+        var createsFiles: (Int) -> Bool = { _ in true }
+        var calls = 0
+        init(dir: URL) { self.dir = dir }
+        func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+            calls += 1
+            if createsFiles(calls) {
+                for s in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(newBaseName + s)) }
+            }
+            throw TimedOut()
+        }
+    }
+
+    /// L review 169: at Stop the helper's reply is read FIRST. It names the chunk the rotator names — the overrun swap
+    /// to chunk 1 never took over, though its files are on disk — so the late attempt is dropped without a file check:
+    /// chunk 0 is the Stop's last chunk, emitted exactly once, with its own start (never chunk 1's).
+    @Test func aStopReplyNamingTheCurrentChunkIsTrustedOverTheLateAttemptsFiles() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(OverranHelper(dir: dir), dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()   // "Rotation timed out": meeting-1's files are on disk, the helper still writes meeting-0
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-1.wav").path))
+        let last = await r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-0.wav").path,
+                                           micPath: dir.appendingPathComponent("meeting-0_mic.wav").path)
+        #expect(finalized.value.isEmpty, "chunk 0 is not emitted before the Stop hands it over: \(finalized.value)")
+        #expect(last.index == 0 && URL(fileURLWithPath: last.systemPath).lastPathComponent == "meeting-0.wav")
+        #expect(last.startTime == Date(timeIntervalSince1970: 0), "its own start, never chunk 1's file's")
+        #expect(r.currentChunkInfo.index == 0)
+    }
+
+    /// … and a reply naming late attempt k emits the current chunk and the attempts below k that the helper opened, each
+    /// from its own files, then hands back k. An attempt below k that never opened its file is not emitted.
+    @Test func aStopReplyNamingALateAttemptEmitsTheChunksBeforeItFromTheirOwnFiles() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = OverranHelper(dir: dir)
+        helper.createsFiles = { $0 == 2 }   // the swap to meeting-1 was abandoned unstarted; the one to meeting-2 overran
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()
+        await r.rotateForTesting()
+        #expect(finalized.value.isEmpty && r.currentChunkInfo.index == 0)
+        let last = await r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-2.wav").path,
+                                           micPath: dir.appendingPathComponent("meeting-2_mic.wav").path)
+        #expect(finalized.value.map(\.index) == [0] && finalized.value.map(\.system) == ["meeting-0.wav"])
+        #expect(last.index == 2 && URL(fileURLWithPath: last.systemPath).lastPathComponent == "meeting-2.wav")
+        #expect(last.startTime > Date(timeIntervalSince1970: 0), "chunk 2 starts when its file was made")
+        #expect(r.currentChunkInfo.index == 2)
+    }
+
+    /// … and only a name that is not this session's falls back to the file check (the late attempt's file says where
+    /// the helper was).
+    @Test func aStopReplyNotNamingThisSessionFallsBackToTheFileCheck() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = DiskHelper(dir: dir, writing: "meeting-0", lateOnce: true)
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()   // timed out; the helper completed it and writes meeting-1
+        let last = await r.lastChunkAtStop(systemPath: dir.appendingPathComponent("other-5.wav").path,
+                                           micPath: dir.appendingPathComponent("other-5_mic.wav").path)
+        #expect(finalized.value.map(\.index) == [0], "reconciled from the files")
+        #expect(last.index == 1 && r.currentChunkInfo.index == 1)
+    }
+
+    /// L review 172: a reconcile is a rotation only when the rotation itself says so — `announce` defaults to false.
+    @Test func aReconcileAnnouncesNothingByDefault() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = DiskHelper(dir: dir, writing: "meeting-0", lateOnce: true)
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()
+        #expect(await r.reconcileLateRotation())
+        #expect(rotated.value == 0, "not a rotation")
+    }
 }

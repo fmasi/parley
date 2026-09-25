@@ -127,6 +127,12 @@ public final class RecordingCoordinator {
     /// The bound on the live-log flush of the Quit and the termination preparation (L review 96), never past their own
     /// deadline (L review 145). Tests shorten it.
     var evidenceFlushBound: Duration = .seconds(1)
+    /// How long `willPowerOff`'s quit mark on a transcript being finished stands (L review 174): a logout or shutdown ends
+    /// the app well within it, and one the user cancelled leaves the app running past it — the mark then goes, so a later
+    /// crash is said as a crash. As `TerminationPolicy.powerOffWindow`. Tests shorten it.
+    var powerOffMarkWindow: Duration = .seconds(TerminationPolicy.powerOffWindow)
+    /// The pending expiry of `willPowerOff`'s quit mark.
+    var powerOffMarkExpiry: Task<Void, Never>?
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
     /// two quit events) joins it instead of stopping twice.
     var terminationPrep: Task<Void, Never>?
@@ -219,16 +225,23 @@ public final class RecordingCoordinator {
     /// 112, 129).
     var userStartInFlight: Bool { startAnnounced || startRunning }
     private var relaunchProbing = false
+    /// The relaunch's ping answered `.capturing` (Flow A): a capture is running while the relaunch settles it (L review
+    /// 170). Meaningful only while `relaunchProbing`.
+    private var probeFoundCapture = false
+    /// A Quit now would leave a running capture behind (L review 170): the relaunch found one and has not settled it yet —
+    /// not re-attached (then it is a recording), not stopped.
+    var relaunchFoundCapture: Bool { relaunchProbing && probeFoundCapture }
     /// A pending retry is asking the helper to let go (L review 161).
     private var pendingHelperStopInFlight = false
     private var startAnnounced = false
     private var startRunning = false
     /// A start refused because the helper is busy with an earlier capture: the pending retry runs once it is over.
     private var retryAfterStart = false
-    /// The helper crashed (or failed fatally) while a start awaited it: the phase was still `.idle`, and
-    /// the client reports a crash once per capture generation, so dropping it would leave a dead
-    /// recording. Handled as soon as the recording is up; moot if the start fails.
-    private(set) var crashDuringStart = false
+    /// The helper crashed (or failed fatally) before the recording was up: while a start awaited it, while the relaunch
+    /// probed a capture it may re-attach to (L review 124), or while a resume started it (L review 182: named for all
+    /// three). The phase was still `.idle`, and the client reports a crash once per capture generation, so dropping it
+    /// would leave a dead recording. Handled as soon as the recording is up; moot if it never is.
+    private(set) var crashBeforeRecording = false
 
     /// The UI committed to a Start (the session dialog closed): in flight from this very turn. The
     /// caller's Task always reaches `startRecording`, which takes it over at its first line — even
@@ -400,7 +413,7 @@ public final class RecordingCoordinator {
             startRunning = false
             // A crash reported during this start — even during its failure path's helper stop — is this
             // start's, handled or moot by now: never inherited (L follow-up 29).
-            crashDuringStart = false
+            crashBeforeRecording = false
             if retryAfterStart {
                 retryAfterStart = false
                 Task { await self.retryPendingSessions() }
@@ -493,7 +506,7 @@ public final class RecordingCoordinator {
         resetRecoveryConfirmation()
         // Wired before the helper starts, so nothing it reports in its first seconds is lost.
         wireCaptureCallbacks()
-        crashDuringStart = false
+        crashBeforeRecording = false
         // Set once the helper's capture is running: every failure after that stops it (§8.6).
         var captureStarted = false
         // The helper was asked to start: a start that timed out may still commit, so it is stopped too.
@@ -549,8 +562,8 @@ public final class RecordingCoordinator {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
             presentCarriedAlarmsAtRecordingStart()
-            if crashDuringStart {
-                crashDuringStart = false
+            if crashBeforeRecording {
+                crashBeforeRecording = false
                 Logger.state.warning("The helper crashed while the recording was starting — crash recovery now")
                 Task {
                     guard self.appState.isRecording else { return }
@@ -558,7 +571,7 @@ public final class RecordingCoordinator {
                 }
             }
         } catch {
-            crashDuringStart = false   // moot: this failure path ends the recording
+            crashBeforeRecording = false   // moot: this failure path ends the recording
             // Said first, at the deadline — not after the stop below, which may take its own bound (L9 review
             // 47). The start stays in flight until that stop returns: no new Start races it. The helper's own
             // replies are said in words, never as the wire text (L review 91).
@@ -1010,7 +1023,7 @@ public final class RecordingCoordinator {
         guard appState.isRecording else {
             // A start in flight, or the relaunch probing a capture it may re-attach to (L review 124): the crash is
             // that recording's, handled once it is up.
-            if startRunning || relaunchProbing { crashDuringStart = true }
+            if startRunning || relaunchProbing { crashBeforeRecording = true }
             return
         }
         await handleXPCCrash()
@@ -1739,10 +1752,12 @@ public final class RecordingCoordinator {
         // Until the helper's state is settled, Record is disabled (L review 112) — and no longer (L review 159): each
         // decision below clears it once the helper has let go, or is capturing the re-attached recording.
         relaunchProbing = true
-        if !startRunning { crashDuringStart = false }
+        probeFoundCapture = false
+        if !startRunning { crashBeforeRecording = false }
         defer {
             relaunchProbing = false
-            if !appState.isRecording, !startRunning { crashDuringStart = false }   // moot: nothing re-attached
+            probeFoundCapture = false
+            if !appState.isRecording, !startRunning { crashBeforeRecording = false }   // moot: nothing re-attached
         }
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         // Off the main actor, bounded (L review 75): a folder that does not answer is unreachable here — the
@@ -1761,6 +1776,9 @@ public final class RecordingCoordinator {
         // A Start pressed during the ping owns the app now (L follow-up 38): this session waits for the
         // next idle, and nothing here touches that start (not even its crash detection).
         guard stillOwnsTheSession(sentinel) else { return .handled }
+        // A capture is running from here until it is re-attached or stopped: a Quit meanwhile is a Quit of a recording (L
+        // review 170) — asked, and the recording stopped within its bound — never an exit that leaves it running.
+        probeFoundCapture = helperState == .capturing
         // A helper that did not answer may still be capturing (L9 review 49): never re-attached to, and
         // stopped — bounded — before any salvage or resume. One that will not stop keeps the session.
         if helperState == .unknown {
@@ -1826,8 +1844,8 @@ public final class RecordingCoordinator {
             guard !recoveryInFlight else { return .handled }
             // A crash reported before the phase was `.recording` — during the probe or the folder read (L review
             // 124) — was queued: recovered now, on the pipeline just built.
-            if crashDuringStart {
-                crashDuringStart = false
+            if crashBeforeRecording {
+                crashBeforeRecording = false
                 Logger.state.warning("The helper crashed while the recording was being re-attached — crash recovery now")
                 Task {
                     guard self.appState.isRecording else { return }
@@ -1966,7 +1984,11 @@ public final class RecordingCoordinator {
         var kept = (slotIsThisSession ? slot : nil) ?? sentinel
         kept.stopCause = kept.stopCause ?? sentinel.stopCause ?? cause ?? Self.relaunchCause(sentinel)
         kept.stopping = kept.stopping || sentinel.stopping || markStopping
-        kept.quitDuringFinalize = kept.quitDuringFinalize || sentinel.quitDuringFinalize
+        // A quit's own mark wins over `willPowerOff`'s time-boxed one (L review 174).
+        let quit = kept.quitDuringFinalize || sentinel.quitDuringFinalize
+        let onlyPowerOff = (!kept.quitDuringFinalize || kept.quitMarkedByPowerOff) && (!sentinel.quitDuringFinalize || sentinel.quitMarkedByPowerOff)
+        kept.quitDuringFinalize = quit
+        kept.quitMarkedByPowerOff = quit && onlyPowerOff
         var pending = pendingSessions().filter { $0.sessionKey != sentinel.sessionKey }
         pending.append(kept)
         do {
@@ -2218,7 +2240,7 @@ public final class RecordingCoordinator {
         // disabled, a user Start is ignored, and a crash reported meanwhile is handled once it is up (L5).
         startRunning = true
         defer { startRunning = false }
-        crashDuringStart = false
+        crashBeforeRecording = false
         // Wired (before the ping) and armed BEFORE the start, as every start site: first frames reported
         // during `start()` are the resume's, and "Resumed" waits for them (§8.4).
         wireCaptureCallbacks()
@@ -2257,7 +2279,7 @@ public final class RecordingCoordinator {
             Logger.state.error("Resume after a crash failed: \(error, privacy: .private)")
             transcriptionRunner.teardownChunkedPipeline()
             resetRecoveryConfirmation()
-            crashDuringStart = false
+            crashBeforeRecording = false
             // Never a capturing helper behind an idle app — a start that timed out may still commit (L9 review
             // 44); its sealed file joins the salvage below. A helper that will not stop keeps the session: a file
             // still being written is never salvaged (27, 40).
@@ -2290,8 +2312,8 @@ public final class RecordingCoordinator {
         appState.raiseAppAlarm(.recordingResumedWithGap, message: RecoveryMessages.resumedAfterCrash(crashedAt: gapStart, resumedAt: now))
         presentAlarms()
         if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
-        if crashDuringStart {
-            crashDuringStart = false
+        if crashBeforeRecording {
+            crashBeforeRecording = false
             Logger.state.warning("The helper crashed while the recording was resuming — crash recovery now")
             Task {
                 guard self.appState.isRecording else { return }
@@ -2896,7 +2918,7 @@ public final class RecordingCoordinator {
         // A timed-out rotation the helper completed late: the orphan is the chunk it was really writing, and
         // the chunk it sealed goes through the pipeline from its own files (L9 review 46). Not a rotation (118).
         // The folder is looked at off the main actor, bounded (L review 158).
-        await rotator.reconcileLateRotation(announce: false)
+        await rotator.reconcileLateRotation()
         let orphan = rotator.currentChunkInfo
         let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
         processor.processChunk(Self.orphanChunk(
