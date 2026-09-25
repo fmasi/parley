@@ -830,7 +830,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         case .abortStart:
             Logger.audio.info("Stop during start — the start aborts, then answers this stop")
             return
-        case .notOwner:   // only a disconnect asks by owner
+        case .notOwner:
+            // Unreachable: only a disconnect asks by owner. Still answered — Stop always replies — and as a
+            // refusal ("did not let go": the app keeps its sentinel), never as released (final review H-M2).
+            assertionFailure("stopCapture never asks by owner")
+            reply(nil, nil, "Stop refused: not the owning connection")
             return
         case .stop:
             break
