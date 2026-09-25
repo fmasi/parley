@@ -255,11 +255,13 @@ import Testing
     }
 
     /// L review 218 (as 178): a Stop with no pipeline whose transcription engine cannot be made keeps the session PENDING,
-    /// says so, and finishes it once the engine is ready — never "could not be transcribed" and forgotten.
+    /// says so, and finishes it once the engine is ready — never "could not be transcribed" and forgotten. With audio to
+    /// recognise: the chunk the Stop sealed (L review 232 — with none, no engine is needed).
     @Test func aNoPipelineStopWhoseEngineCannotBeMadeKeepsTheSession() async throws {
         let h = try Harness()
         defer { tearDown(h) }
         let s = try await reattachedWithoutPipeline(h)
+        try RecoveryFixtures.writeFakeWav(at: outDir(s).appendingPathComponent("sess-1.wav"), seconds: 1)
         h.engineError.value = TranscriptionRunner.RunnerError.engineUnavailable("SpeechAnalyzer")
         await h.coordinator.stopRecording()
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey], "kept, never forgotten")

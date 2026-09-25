@@ -401,11 +401,12 @@ struct NotReadyEngine: TranscriptionEngine {
         #expect(pending(h).isEmpty && h.presented.value.map(\.lastPathComponent) == ["p.json"])
     }
 
-    /// … an engine that cannot even be made (not on this macOS) keeps it pending too …
+    /// … an engine that cannot even be made (not on this macOS) keeps it pending too — when there is audio to recognise
+    /// (L review 232: with none, no engine is needed) …
     @Test func aSalvageWhoseEngineCannotBeMadeWaitsForIt() async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        let p = try pendingSession(h, "p", in: "p")
+        let p = try pendingSession(h, "p", in: "p", orphan: true)
         try RecordingSentinel.writePending([p], directory: h.tmp)
         h.engineError.value = TranscriptionRunner.RunnerError.engineUnavailable("SpeechAnalyzer")
         await h.coordinator.retryPendingSessions()

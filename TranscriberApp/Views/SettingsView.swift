@@ -662,7 +662,9 @@ struct SettingsView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
-                await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady()   // L review 178
+                // Recordings kept waiting for the engine are transcribed now (L review 178) — in their own task (L review
+                // 233): the retry is never cancelled with this download task.
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

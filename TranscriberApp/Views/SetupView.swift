@@ -247,6 +247,8 @@ struct SetupView: View {
                         checkingFolder = false
                         onReady()
                     }
+                    // Setup is complete: recordings kept waiting for the engine are transcribed now (L review 230).
+                    Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -276,6 +278,9 @@ struct SetupView: View {
                         downloadTask?.cancel()
                         downloadTask = nil
                         downloadState = .idle
+                        // Another engine, maybe one ready now: recordings kept waiting for the engine are retried (L review
+                        // 230) — a session kept for an engine this macOS cannot make is finished with the new one.
+                        Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
                         // Switching to an engine with an uncached model makes
                         // modelReady false, which the footer prioritizes over
                         // a stale folder denial — hiding it behind "Download
@@ -398,8 +403,9 @@ struct SetupView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
-                // Recordings kept waiting for the engine are transcribed now (L review 178).
-                await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady()
+                // Recordings kept waiting for the engine are transcribed now (L review 178) — in their own task (L review
+                // 233): the retry is never cancelled with this download task (an engine change cancels it).
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

@@ -129,6 +129,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         return DiarizationResult(segments: segments, speakerDatabase: speakerDatabase)
     }
 
+    /// Its diarization model is cached — VAD is optional: the quality gate skips it (L review 232). A look, never a download.
+    public nonisolated func isReady() async -> Bool { Self.isDiarizationCached() }
+
     /// Returns true if all diarization model files are present in the local cache.
     /// Used by ensureLoaded() — does NOT require VAD so existing installs keep working.
     public static func isDiarizationCached() -> Bool {

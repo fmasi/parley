@@ -852,18 +852,14 @@ public final class RecordingCoordinator {
                 }) else { throw FolderNotAnswering() }
                 if look.recoverable {
                     let config = configManager.config
-                    // The engine first, as a launch salvage checks it (L reviews 178, 218): one that cannot be made — or whose
-                    // speech model is not there while there is audio to recognise — keeps the session pending, never "could not
-                    // be transcribed" and forgotten.
+                    // The engine first, as a launch salvage checks it (L reviews 178, 218, 232): one that cannot be made — or
+                    // whose models are not there while there is audio to recognise — keeps the session pending, never "could
+                    // not be transcribed" and forgotten.
                     let transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?
                     do {
-                        (transcriber, diarizer) = try prepareEngines(config: config)
-                        if look.toRecognise > 0 {
-                            let engine = transcriber
-                            guard await Task.detached(operation: { engine.isReady() }).value else { throw EngineNotReady() }
-                        }
+                        (transcriber, diarizer) = try await enginesForSalvage(config: config, toRecognise: look.toRecognise)
                     } catch {
-                        throw EngineUnavailable(why: error.localizedDescription)
+                        throw EngineUnavailable(why: error.localizedDescription, remedy: Self.engineRemedy(for: error, engine: config.engine))
                     }
                     // Drain capture diagnostics and stamp the always-present provenance into the
                     // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
@@ -974,7 +970,7 @@ public final class RecordingCoordinator {
             // pending, said, and finished after Setup, a model download or a Settings save.
             if let waiting = error as? EngineUnavailable {
                 transcriptionRunner.teardownChunkedPipeline()
-                keepForTheEngine(sentinel: sentinel, location: location, why: waiting.why)
+                keepForTheEngine(sentinel: sentinel, location: location, why: waiting.why, remedy: waiting.remedy)
                 appState.phase = .idle
                 return
             }
@@ -2784,16 +2780,13 @@ public final class RecordingCoordinator {
         let stoppedAt = scan.stoppedAt, chunkCount = scan.chunkCount
         let config = configManager.config
         // The engine, before anything is bound, drained or written (L review 178). One that is not there — it cannot be
-        // made on this macOS, or its speech model is not downloaded while there is audio to recognise — is not the audio's
-        // failure: the session stays pending, said so, and is finished once the engine is ready. A session whose every
-        // chunk is already transcribed needs no engine.
+        // made on this macOS, or its speech or diarization model is not downloaded (or installed) while there is audio to
+        // recognise (L reviews 229, 232) — is not the audio's failure: the session stays pending, said so with what makes the
+        // engine ready (L review 230), and is finished once it is. A session whose every chunk is already transcribed needs
+        // no engine.
         let transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?
         do {
-            (transcriber, diarizer) = try prepareEngines(config: config)
-            if scan.orphanCount > 0 {
-                let engine = transcriber
-                guard await Task.detached(operation: { engine.isReady() }).value else { throw EngineNotReady() }
-            }
+            (transcriber, diarizer) = try await enginesForSalvage(config: config, toRecognise: scan.orphanCount)
         } catch {
             Logger.state.error("The transcription engine is not ready — the session waits for it: \(error, privacy: .private)")
             // A Start during the engine check owns the app now: the session waits all the same, and nothing touches that start.
@@ -2801,7 +2794,8 @@ public final class RecordingCoordinator {
             keepPending(sentinel)
             if saidWaitingForEngine.insert(sentinel.sessionKey).inserted {
                 reportStopped(RecoveryMessages.waitingForEngine(at: stoppedAt, folder: abbreviatedDisplayPath(outputDir.path),
-                                                                why: error.localizedDescription),
+                                                                why: error.localizedDescription,
+                                                                remedy: Self.engineRemedy(for: error, engine: config.engine)),
                               recovered: false, session: sentinel.sessionKey)
             }
             captureClient.captureEnded()
@@ -2973,14 +2967,15 @@ public final class RecordingCoordinator {
     }
 
     /// A stopped recording whose transcript must wait for its engine (L review 218): pending, salvage-only, and said once.
-    private func keepForTheEngine(sentinel: RecordingSentinel?, location: (outputDir: URL, sessionId: String)?, why: String) {
+    private func keepForTheEngine(sentinel: RecordingSentinel?, location: (outputDir: URL, sessionId: String)?, why: String,
+                                  remedy: RecoveryMessages.EngineRemedy) {
         guard let kept = slotRead() ?? sentinel ?? location.map({ Self.keptSentinel(for: $0, cause: .userStopped) }) else {
             Logger.state.error("A stopped recording waits for its engine but has no recovery file and no known folder")
             return
         }
         keepPending(kept, markStopping: true, cause: .userStopped)
         let folder = abbreviatedDisplayPath(URL(fileURLWithPath: kept.systemAudioPath).deletingLastPathComponent().path)
-        let message = RecoveryMessages.waitingForEngine(at: Date(), folder: folder, why: why)
+        let message = RecoveryMessages.waitingForEngine(at: Date(), folder: folder, why: why, remedy: remedy)
         appState.errorMessage = message
         if saidWaitingForEngine.insert(kept.sessionKey).inserted {
             reportStopped(message, recovered: false, session: kept.sessionKey)
@@ -3094,6 +3089,32 @@ public final class RecordingCoordinator {
         if let engineFactory { return try engineFactory(config) }
         let prepared = try transcriptionRunner.prepareEngine(config: config)
         return (prepared.transcriber, prepared.diarizer)
+    }
+
+    /// The engines a salvage — or a Stop's rebuild — transcribes `toRecognise` chunks with (L reviews 178, 218, 229, 232), as
+    /// Setup checks them: the speech engine made and ready, and the diarizer's model there too (VAD is optional: skipped
+    /// without its model). Looks only, off the main actor — never a download. Nothing to recognise needs no engine: one
+    /// that cannot be made then never keeps a session whose every chunk is transcribed (no asymmetry).
+    private func enginesForSalvage(config: Config, toRecognise: Int) async throws -> (any TranscriptionEngine, (any DiarizationProvider)?) {
+        guard toRecognise > 0 else {
+            if let prepared = try? prepareEngines(config: config) { return prepared }
+            return (NothingToRecognise(), nil)
+        }
+        let (transcriber, diarizer) = try prepareEngines(config: config)
+        let notReady = await Task.detached { () -> String? in
+            if !(await transcriber.isReady()) { return await transcriber.notReadyReason() }
+            if let diarizer, !(await diarizer.isReady()) { return "its speaker-diarization model is not downloaded" }
+            return nil
+        }.value
+        if let notReady { throw EngineNotReady(why: notReady) }
+        return (transcriber, diarizer)
+    }
+
+    /// What makes the engine ready (L review 230): an engine that cannot be made on this macOS — or one Parley's model
+    /// download does not make ready — needs another engine chosen in Settings; else Setup or a model download.
+    nonisolated static func engineRemedy(for error: Error, engine: EngineID) -> RecoveryMessages.EngineRemedy {
+        if case TranscriptionRunner.RunnerError.engineUnavailable = error { return .chooseAnotherEngine }
+        return engine.descriptor.requiresModelDownload ? .setupOrDownload : .chooseAnotherEngine
     }
 
     /// Best-effort finalize a live chunked session being abandoned after an unrecoverable crash, so
@@ -3292,9 +3313,11 @@ struct SessionAlreadyFinalized: Error, LocalizedError {
     var errorDescription: String? { "it was already transcribed to \(transcript), and Parley never writes over a finished transcript" }
 }
 
-/// The transcription engine is there, but not ready — its speech model is not downloaded (L review 178).
+/// The transcription engine is there, but not ready — its speech model is not downloaded (L review 178), or not installed
+/// (L review 229): why, as the engine says it.
 struct EngineNotReady: Error, LocalizedError {
-    var errorDescription: String? { "its speech model is not downloaded" }
+    let why: String
+    var errorDescription: String? { why }
 }
 
 /// The recovery file in Application Support did not answer a write within its bound (L review 217).
@@ -3302,10 +3325,23 @@ struct RecoveryFileNotAnswering: Error, LocalizedError {
     var errorDescription: String? { "Parley couldn’t write its recovery file — its Application Support folder isn’t answering" }
 }
 
-/// The Stop's rebuild could not get its transcription engine (L review 218): why, in words.
+/// The Stop's rebuild could not get its transcription engine (L review 218): why, in words, and what makes it ready (L
+/// review 230).
 struct EngineUnavailable: Error, LocalizedError {
     let why: String
+    var remedy: RecoveryMessages.EngineRemedy = .setupOrDownload
     var errorDescription: String? { why }
+}
+
+/// The engine of a salvage with nothing to recognise (L review 232): never asked to transcribe — if it is, it says so.
+struct NothingToRecognise: TranscriptionEngine {
+    struct NoEngine: Error, LocalizedError {
+        var errorDescription: String? { "no transcription engine could be made, and this chunk was not expected to need one" }
+    }
+    let name = "none"
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] { throw NoEngine() }
+    func isReady() -> Bool { false }
+    func prepare() async throws { throw NoEngine() }
 }
 
 /// Whether the repair path has answered, shared by the capped wait and the answer (main actor).

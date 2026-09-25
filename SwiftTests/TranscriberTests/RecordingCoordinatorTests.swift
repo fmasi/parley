@@ -314,6 +314,8 @@ struct Harness {
     /// The engine a launch salvage transcribes with, and an error its preparation throws instead (L review 178).
     let engine: Box<any TranscriptionEngine> = Box(FakeEngine())
     let engineError: Box<Error?> = Box(nil)
+    /// The diarizer a launch salvage diarizes with (L review 232).
+    let diarizer: Box<any DiarizationProvider> = Box(FakeDiarizer())
     let repairRequests: Box<Int> = Box(0)
     /// What the repair path answers: true = its window presented (L round 4, item 4).
     let repairPresents: Box<Bool> = Box(true)
@@ -342,7 +344,7 @@ struct Harness {
         let repairRequests = repairRequests
         let repairPresents = repairPresents
         let freeBytes = freeBytes, diskReadHook = diskReadHook
-        let engine = engine, engineError = engineError
+        let engine = engine, engineError = engineError, diarizer = diarizer
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -355,7 +357,7 @@ struct Harness {
             onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
             engineFactory: { _ in
                 if let error = engineError.value { throw error }
-                return (engine.value, FakeDiarizer())
+                return (engine.value, diarizer.value)
             },
             recordingMicrophone: recordingMic,
             freeBytesProvider: { _ in diskReadHook.value?(); return freeBytes.value },
@@ -2460,7 +2462,8 @@ struct Harness {
     }
 
     /// Item 8, as L review 178 rules it: the engine cannot even be prepared — not the audio's failure. The chunk stays on
-    /// disk, the session is kept pending (out of the slot) for when the engine is ready, and the row says so.
+    /// disk, the session is kept pending (out of the slot) for when the engine is ready, and the row says so. With audio to
+    /// recognise — its chunk 1 (L review 232: with none, no engine is needed).
     @Test func launchSalvageWithoutAnEngineKeepsTheSession() async throws {
         let h = try Harness()
         let coordinator = RecordingCoordinator(
@@ -2474,9 +2477,12 @@ struct Harness {
             chunks: [ProcessedChunk(index: 0, startTime: Date(), audioPath: outDir.appendingPathComponent("sess-0.m4a").path,
                                     segments: [], speakerDatabase: [:])]
         ), directory: outDir)
+        let orphan = outDir.appendingPathComponent("sess-1.wav")
+        try RecoveryFixtures.writeFakeWav(at: orphan, seconds: 1)
+        let stoppedAt = try #require(try FileManager.default.attributesOfItem(atPath: orphan.path)[.modificationDate] as? Date)
         await coordinator.salvageAtLaunch(sentinel: sentinel, outputDir: outDir)
         #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.waitingForEngine(
-            at: sentinel.startedAt, folder: abbreviatedDisplayPath(outDir.path), why: FakeCaptureError().localizedDescription))
+            at: stoppedAt, folder: abbreviatedDisplayPath(outDir.path), why: FakeCaptureError().localizedDescription))
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [sentinel.sessionKey], "kept for the engine")
     }
