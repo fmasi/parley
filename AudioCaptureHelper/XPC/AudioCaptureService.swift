@@ -454,7 +454,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Every 1 Hz tick, on the watchdog queue: the mic reopen deadline (A-C2) and each track's write
     /// progress (A-I3). Lock-only reads — the heartbeats and the handler's written-frame counters.
     private func checkProgress(nowNanos: UInt64, gateOpen: Bool) {
-        let (mic, tap, h) = stateLock.sync { (micSession, tapSession, handler) }
+        // One lock section (final review H3 #3): the session the coverage refresh is cached under is the
+        // one whose handler it reads.
+        let (mic, tap, h, session) = stateLock.sync { (micSession, tapSession, handler, lifecycle.session) }
         guard let mic, let h else { return }
         let micHeartbeat = mic.lastHeartbeatNanos()
         let deadline = Int(MicHealPolicy.reopenDeadlineSeconds)
@@ -476,7 +478,6 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // Refresh the coverage cache for a Stop whose seal times out (round 4 N2): asynchronously, so a
         // stalled audio queue never holds the tick either.
         let tapActive = tap != nil
-        let session = stateLock.sync { lifecycle.session }
         audioQueue.async { [weak self, weak h] in
             guard let self, let h else { return }
             let counts = self.coverageCountsOnAudioQueue(h, tapActive: tapActive)
