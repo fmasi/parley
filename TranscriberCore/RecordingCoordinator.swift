@@ -124,6 +124,11 @@ public final class RecordingCoordinator {
     var quitFeedbackDelay: Duration = .seconds(2)
     /// The user's Quit is stopping the recording: the menu says "Quitting…".
     public internal(set) var isQuitting = false
+    /// The Quit left a session HELD — the helper would not stop it (L review 223): the LaunchAgent stays installed, so the
+    /// next launch finishes it.
+    public internal(set) var keepsLaunchAgentOnQuit = false
+    /// A session was held while the Quit waited (L review 223).
+    var quitLeftAHeldSession = false
     /// An exit's flush of the live logs ran out of its bound (L review 195): the folder is not answering, and the app's own
     /// last flush (`applicationWillTerminate`) is skipped — it would only hold the exit past its bound again.
     public internal(set) var exitFlushTimedOut = false
@@ -136,6 +141,9 @@ public final class RecordingCoordinator {
     var powerOffMarkWindow: Duration = .seconds(TerminationPolicy.powerOffWindow)
     /// The pending expiry of `willPowerOff`'s quit mark.
     var powerOffMarkExpiry: Task<Void, Never>?
+    /// The session THIS process's `willPowerOff` marked (L review 221): the only mark its withdraw clears — a mark a dead
+    /// earlier process left is final.
+    var powerOffMarkedSession: String?
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
     /// two quit events) joins it instead of stopping twice.
     var terminationPrep: Task<Void, Never>?
@@ -2143,6 +2151,8 @@ public final class RecordingCoordinator {
         setHelperMic(sentinel.micDeviceUID)
         keepPending(sentinel, markStopping: true, cause: cause, held: reason)
         reportStopped(message, recovered: false, session: sentinel.sessionKey)
+        // Held during a confirmed Quit (L review 223): the Quit says so, and keeps the LaunchAgent for the next launch.
+        if isQuitting { quitLeftAHeldSession = true }
     }
 
     /// `recordingFolderUnavailable` while any pending session's folder cannot be written, cleared otherwise.

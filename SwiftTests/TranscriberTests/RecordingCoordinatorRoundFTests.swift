@@ -365,6 +365,106 @@ struct NotReadyDiarizer: DiarizationProvider {
     }
 }
 
+// MARK: - A mounted read-only share is not a missing one (225)
+
+@MainActor
+@Suite struct MountedShareRoundFTests {
+    /// L review 225 (179): a share that IS mounted — its mount point a real file system, not an automount trigger — whose
+    /// day folder is not there, below a root-owned read-only ancestor, is a permissions problem: the mount check has passed.
+    /// Never "not reachable".
+    @Test func aMountedReadOnlyShareWithoutTheDayFolderIsNotWritable() {
+        for (folder, mountPoint) in [("/Network/Servers/nas/share/Rec/2026-09-25", "/Network/Servers/nas/share"),
+                                     ("/net/nas/export/Rec/2026-09-25", "/net/nas/export"),
+                                     ("/mnt/data/Rec/2026-09-25", "/mnt/data")] {
+            let existing = Set(URL(fileURLWithPath: mountPoint).pathComponents.indices.map { i in
+                "/" + URL(fileURLWithPath: mountPoint).pathComponents.dropFirst().prefix(i).joined(separator: "/")
+            })
+            let probe = RecordingCoordinator.FolderProbe(exists: { existing.contains($0.path) }, isWritable: { _ in false },
+                                                         isVolumeRoot: { $0.path == mountPoint }, ownerIsRoot: { _ in true },
+                                                         isMountedShare: { $0.path == mountPoint })
+            #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: folder), probe: probe) == .notWritable, "\(folder)")
+        }
+    }
+
+    /// … while an automount trigger alone — the share not mounted behind it — is still a share that is not there.
+    @Test func anAutomountTriggerAloneIsStillUnreachable() {
+        let probe = RecordingCoordinator.FolderProbe(exists: { ["/", "/net", "/net/nas"].contains($0.path) }, isWritable: { _ in false },
+                                                     isVolumeRoot: { ["/net", "/net/nas"].contains($0.path) }, ownerIsRoot: { _ in true },
+                                                     isMountedShare: { _ in false })
+        #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/net/nas/export/Rec"), probe: probe) == .unreachable)
+    }
+}
+
+// MARK: - A Quit that leaves a held session says so, and keeps the LaunchAgent (223)
+
+@MainActor
+@Suite struct QuitWithAHeldSessionRoundFTests {
+    /// L review 223 (170): a confirmed Quit during a relaunch that then HOLDS the session — the helper will not stop it —
+    /// tells the user it is still being stopped and will be finished next time, and keeps the LaunchAgent installed.
+    @Test func aQuitThatLeavesAHeldSessionSaysSoAndKeepsTheLaunchAgent() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(300)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go
+        let coordinator = h.coordinator
+        let launch = Task { await coordinator.recoverAtLaunch() }
+        await Harness.until { coordinator.relaunchFoundCapture }
+        #expect(coordinator.relaunchFoundCapture)
+        let quit = await coordinator.prepareForQuit(confirm: { true })
+        await launch.value
+        #expect(quit, "Parley quits")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason != nil, "held")
+        #expect(coordinator.keepsLaunchAgentOnQuit, "the LaunchAgent stays, so the next launch finishes it")
+        #expect(h.notified.value.contains { $0.body.contains("A previous recording is still being stopped; Parley will finish it next time") },
+                "\(h.notified.value)")
+    }
+
+    /// … while a Quit that leaves nothing held removes it as before.
+    @Test func aPlainQuitKeepsNoLaunchAgent() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(!h.coordinator.keepsLaunchAgentOnQuit)
+    }
+}
+
+// MARK: - The power-off mark's withdraw is this process's own (221)
+
+@MainActor
+@Suite struct PowerOffWithdrawRoundFTests {
+    /// L review 221 (174): the withdraw clears only the mark THIS process set — from the slot, or from the pending entry its
+    /// session moved to. A mark a dead earlier process left on another pending session is final: that power-off happened.
+    @Test func theWithdrawClearsOnlyThisProcesssOwnMark() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var older = try roundFPendingSession(h, "older")
+        older.quitDuringFinalize = true
+        older.quitMarkedByPowerOff = true   // a dead earlier process's willPowerOff: its process ended — final
+        var s = try h.writeSentinel()
+        s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        try RecordingSentinel.writePending([older], directory: h.tmp)
+        h.coordinator.powerOffMarkWindow = .milliseconds(150)
+        h.coordinator.markPowerOffDuringFinalize()
+        // Its session moves from the slot to the pending list, the mark with it.
+        var marked = try #require(RecordingSentinel.read(directory: h.tmp))
+        #expect(marked.quitMarkedByPowerOff)
+        marked.stopping = true
+        try RecordingSentinel.writePending([older, marked], directory: h.tmp)
+        RecordingSentinel.delete(directory: h.tmp)
+        let key = s.sessionKey
+        await Harness.until { RecordingSentinel.readPending(directory: h.tmp).first { $0.sessionKey == key }?.quitDuringFinalize == false }
+        let pending = RecordingSentinel.readPending(directory: h.tmp)
+        #expect(pending.first { $0.sessionKey == key }?.quitDuringFinalize == false, "this process's own mark is withdrawn from the pending entry")
+        #expect(pending.first { $0.sessionKey == older.sessionKey }?.quitDuringFinalize == true, "the dead process's mark is final")
+        #expect(pending.first { $0.sessionKey == older.sessionKey }?.quitMarkedByPowerOff == true)
+    }
+}
+
 // MARK: - The pipeline's own file work: the seed's read and the progress file's writes (234)
 
 /// A rotation client that is never asked: the tests below never rotate.

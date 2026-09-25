@@ -206,6 +206,7 @@ extension RecordingCoordinator {
             guard await confirm() else { return false }
         }
         isQuitting = true
+        quitLeftAHeldSession = false
         defer { isQuitting = false }
         // A long quit says so: the menu shows it, and a notification once it outlasts `quitFeedbackDelay`.
         let delay = quitFeedbackDelay
@@ -217,6 +218,12 @@ extension RecordingCoordinator {
         defer { feedback.cancel() }
         await stopForExit(bound: quitStopBound)
         markExitDuringFinalize()
+        // The Quit left a session HELD — the helper would not stop it (L review 223): said, never a silent exit, and the
+        // LaunchAgent is kept so the next launch finishes it.
+        if quitLeftAHeldSession {
+            keepsLaunchAgentOnQuit = true
+            notify("Quitting Parley", "A previous recording is still being stopped; Parley will finish it next time.")
+        }
         return true
     }
 
@@ -321,6 +328,7 @@ extension RecordingCoordinator {
             Logger.state.error("Could not mark the recovery file as quit during finalize: \(error, privacy: .private)")
             return
         }
+        powerOffMarkedSession = sentinel.sessionKey
         powerOffMarkExpiry?.cancel()
         let window = powerOffMarkWindow
         powerOffMarkExpiry = Task { [weak self] in
@@ -330,10 +338,13 @@ extension RecordingCoordinator {
     }
 
     /// The logout or shutdown did not come within its window: `willPowerOff`'s quit mark is withdrawn — from the slot and
-    /// from a pending entry that carried it — and a quit's own mark is left alone (L review 174).
+    /// from a pending entry that carried it — and a quit's own mark is left alone (L review 174). Only the mark THIS process
+    /// set, on the session it marked (L review 221): one a dead earlier process left is final — its power-off happened.
     func withdrawPowerOffMark() {
         powerOffMarkExpiry = nil
-        if var sentinel = slotRead(), sentinel.quitMarkedByPowerOff {
+        guard let marked = powerOffMarkedSession else { return }
+        powerOffMarkedSession = nil
+        if var sentinel = slotRead(), sentinel.sessionKey == marked, sentinel.quitMarkedByPowerOff {
             sentinel.quitDuringFinalize = false
             sentinel.quitMarkedByPowerOff = false
             do {
@@ -344,11 +355,11 @@ extension RecordingCoordinator {
             }
         }
         let pending = pendingLoad().sessions
-        guard pending.contains(where: \.quitMarkedByPowerOff) else { return }
+        guard pending.contains(where: { $0.sessionKey == marked && $0.quitMarkedByPowerOff }) else { return }
         do {
             try pendingWrite(pending.map {
                 var entry = $0
-                if entry.quitMarkedByPowerOff { entry.quitDuringFinalize = false; entry.quitMarkedByPowerOff = false }
+                if entry.sessionKey == marked, entry.quitMarkedByPowerOff { entry.quitDuringFinalize = false; entry.quitMarkedByPowerOff = false }
                 return entry
             })
         } catch {

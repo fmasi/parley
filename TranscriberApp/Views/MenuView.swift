@@ -37,6 +37,13 @@ private func terminateAfterUninstallingLaunchAgent() {
         NSApplication.shared.terminate(nil)
         return
     }
+    // The Quit left a recording held — the capture helper would not stop it (L review 223): the LaunchAgent stays, so the
+    // next launch finishes it.
+    if TranscriberApp.busyCoordinator?.keepsLaunchAgentOnQuit == true {
+        Logger.state.info("Quit with a recording still being stopped — leaving the LaunchAgent in place")
+        NSApplication.shared.terminate(nil)
+        return
+    }
     // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never blocks on it.
     // (On a launchd-spawned instance, `unload` SIGTERMs this process before these lines finish —
     // expected, see LaunchAgentManager.)

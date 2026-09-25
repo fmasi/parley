@@ -1254,7 +1254,8 @@ struct Harness {
             await Harness.until { h.coordinator.crashBeforeRecording }   // noted, the phase still .idle
         }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        for _ in 0..<50 where client.startCalls.count < 2 { await Task.yield() }
+        // A deadline, never a count of yields: the restart's reads hop through dispatch queues (it failed 3 runs in 6 alone at 1425b37).
+        await Harness.until { client.startCalls.count >= 2 }
         #expect(client.startCalls.count == 2, "the recording's start, then the crash restart")
         #expect(client.retryEvents.count == 1)
         #expect(h.appState.isRecording)

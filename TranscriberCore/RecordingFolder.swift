@@ -46,13 +46,23 @@ extension RecordingCoordinator {
         var symlinkDestination: @Sendable (URL) -> String? = { _ in nil }
         /// Whether the item at this path belongs to root (L review 179): an automount point's.
         var ownerIsRoot: @Sendable (URL) -> Bool = { _ in false }
+        /// Whether a share is MOUNTED at this path (L review 225): a volume root whose file system is a real one — never an
+        /// automount trigger (autofs), which is there whether or not the share behind it is.
+        var isMountedShare: @Sendable (URL) -> Bool = { _ in false }
 
         static let live = FolderProbe(
             exists: { FileManager.default.fileExists(atPath: $0.path) },
             isWritable: { FileManager.default.isWritableFile(atPath: $0.path) },
             isVolumeRoot: { (try? $0.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true },
             symlinkDestination: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0.path) },
-            ownerIsRoot: { ((try? FileManager.default.attributesOfItem(atPath: $0.path))?[.ownerAccountID] as? NSNumber)?.intValue == 0 }
+            ownerIsRoot: { ((try? FileManager.default.attributesOfItem(atPath: $0.path))?[.ownerAccountID] as? NSNumber)?.intValue == 0 },
+            isMountedShare: { url in
+                guard (try? url.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true else { return false }
+                var fs = statfs()
+                guard statfs(url.path, &fs) == 0 else { return false }
+                let type = withUnsafeBytes(of: fs.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+                return type != "autofs"
+            }
         )
     }
 
@@ -78,7 +88,8 @@ extension RecordingCoordinator {
     /// check has passed, an unwritable nearest ancestor is a permissions problem — a read-only volume is not a
     /// missing drive (L review 126) — except under an automount root (`/Network`, `/net`, `/mnt`): there a folder that
     /// is not there, below an ancestor that is root's and cannot be written, is a share that is not mounted —
-    /// unreachable (L review 179).
+    /// unreachable (L review 179) — unless a share IS mounted on the way to that ancestor (L review 225): its mount
+    /// check has passed, and a read-only share is a permissions problem too.
     nonisolated static func folderStatus(_ dir: URL, probe: FolderProbe = .live) -> FolderStatus {
         let (resolved, cycle) = resolution(dir, probe: probe)
         guard !cycle else { return .unreachable }
@@ -90,12 +101,23 @@ extension RecordingCoordinator {
         if probe.exists(resolved) { return probe.isWritable(resolved) ? .reachable : .notWritable }
         let ancestor = nearestExistingDirectory(resolved, probe: probe)
         if probe.isWritable(ancestor) { return .reachable }
-        if parts.count >= 3, parts[0] == "/", automountRoots.contains(parts[1]), probe.ownerIsRoot(ancestor) { return .unreachable }
+        if parts.count >= 3, parts[0] == "/", automountRoots.contains(parts[1]), probe.ownerIsRoot(ancestor),
+           !shareIsMounted(on: ancestor, probe: probe) { return .unreachable }
         return .notWritable
     }
 
     /// Where macOS mounts network shares on demand (autofs): `/Network/Servers`, `/net/<host>`, and the conventional `/mnt`.
     nonisolated static let automountRoots: Set<String> = ["Network", "net", "mnt"]
+
+    /// Whether a share is mounted at `ancestor` or on the way to it below its automount root (L review 225).
+    nonisolated static func shareIsMounted(on ancestor: URL, probe: FolderProbe) -> Bool {
+        var candidate = ancestor
+        while candidate.pathComponents.count > 2 {
+            if probe.isMountedShare(candidate) { return true }
+            candidate = candidate.deletingLastPathComponent()
+        }
+        return false
+    }
 
     nonisolated static func folderReachable(_ dir: URL, probe: FolderProbe = .live) -> Bool {
         folderStatus(dir, probe: probe) == .reachable

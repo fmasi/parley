@@ -253,15 +253,15 @@ public final class ChunkRotator {
     /// from ITS OWN files, in order, and the helper's index adopted — each chunk processed once, from its own
     /// audio. Called before every rotation, by Stop (after the helper's stop) and by a crash recovery.
     /// Returns whether it reconciled; an attempt that did not complete (yet) stays pending — and so does every one
-    /// when the folder does not answer the look (L review 158). `announce`: `onRotated` runs — only before a rotation,
-    /// never at Stop or at a crash, which are not rotations (L review 118). Off unless asked for (L review 172): only
-    /// `performRotation` announces, through its own reconcile.
+    /// when the folder does not answer the look (L review 158). Never announced: `onRotated` runs only before a rotation,
+    /// never at Stop or at a crash, which are not rotations (L reviews 118, 172) — `performRotation` announces through its
+    /// own reconcile.
     @discardableResult
-    public func reconcileLateRotation(announce: Bool = false) async -> Bool {
+    public func reconcileLateRotation() async -> Bool {
         guard !lateAttempts.isEmpty || !uncheckedLate.isEmpty,
               let look = await look(freeAfterCurrent: false, includeLate: true, "reconcile") else { return false }
         settleUnchecked(look)
-        return applyReconcile(look, announce: announce)
+        return applyReconcile(look, announce: false)
     }
 
     /// The reconcile, from a look taken at the folder. Only attempts still pending count: the look may be older than
@@ -293,8 +293,9 @@ public final class ChunkRotator {
     /// - It names an earlier chunk of this session: that chunk, with its own file's start.
     /// - Only a name that is not this session's falls back to the file check (a late rotation reconciled from its
     ///   files); the current index is kept (logged).
-    /// The folder is looked at off the main actor, bounded (L review 158); one that does not answer reconciles nothing,
-    /// and the named chunk starts where the last one emitted did.
+    /// The folder is looked at off the main actor, bounded (L review 158); one that does not answer reconciles nothing, and
+    /// the named chunk starts no earlier than it was asked for — its late attempt's asked-at time (L reviews 212, 222) —
+    /// and no earlier than the last chunk emitted; an earlier chunk named, never later than the current chunk began.
     public func lastChunkAtStop(systemPath: String, micPath: String) async -> FinalizedChunk {
         let sealed = URL(fileURLWithPath: systemPath).lastPathComponent
         guard let named = chunkIndex(named: sealed) else {
@@ -333,8 +334,9 @@ public final class ChunkRotator {
             let lastEmitted = emitSealed(between[...], last: nil, created: created)
             start = chunkStart(of: named, created: created, after: lastEmitted)
         } else {
-            // An earlier chunk than the one named: its own file's creation, never the current chunk's start.
-            start = min(created[named] ?? currentChunkStartTime, currentChunkStartTime)
+            // An earlier chunk than the one named: its own file's creation — or, the look not answering, when it was asked
+            // for (L review 222) — never the current chunk's start.
+            start = min(created[named] ?? lateAskedAt[named] ?? currentChunkStartTime, currentChunkStartTime)
         }
         currentChunkIndex = named
         currentChunkStartTime = start

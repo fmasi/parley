@@ -633,6 +633,31 @@ struct ChunkRotatorTests {
         #expect(last.startTime > Date(timeIntervalSince1970: 0), "no earlier than it was asked for, never chunk 0's start")
     }
 
+    /// L review 222 (169's third branch): the Stop's reply names an EARLIER chunk than the rotator's current one — an
+    /// overrun swap left its files, a look adopted it, yet the helper sealed the chunk before. Its start is its own: when the
+    /// look does not answer, when it was asked for (L review 212), never the current chunk's start.
+    @Test func aStopNamingAnEarlierChunkStartsItWhenItWasAskedFor() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = OverranHelper(dir: dir)
+        helper.createsFiles = { $0 <= 2 }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()   // meeting-1 asked for: overran, its files on disk
+        await r.rotateForTesting()   // the look adopts meeting-1; meeting-2 asked for: overran, its files on disk
+        await r.rotateForTesting()   // the look adopts meeting-2; meeting-3 asked for: overran, nothing on disk
+        let current = r.currentChunkInfo
+        #expect(current.index == 2)
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        r.folderReads = hanging(hung)
+        r.folderProbeSeconds = 0.2
+        let last = await r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-1.wav").path,
+                                           micPath: dir.appendingPathComponent("meeting-1_mic.wav").path)
+        #expect(last.index == 1 && r.currentChunkInfo.index == 1)
+        #expect(last.startTime < current.startTime, "its own start, never the current chunk's: \(last.startTime) vs \(current.startTime)")
+        #expect(last.startTime >= Date(timeIntervalSince1970: 0))
+    }
+
     /// L review 213: late chunks between the current chunk and the one the Stop's reply names, which a look that did not
     /// answer could not check, are never dropped silently: said, by index.
     @Test func lateChunksTheStopCouldNotCheckAreSaid() async throws {
