@@ -47,7 +47,7 @@ L's rulings, so check the wording against the merged build and correct this file
    click the window) saved into the item's folder.
 
 The transcript is `<recordings>/<date>/<id>.json`, the audio `<id>.m4a`, the event log `<id>.diag.jsonl`.
-The alarm rows are: "The other side may not be recorded", "Your microphone isn’t being recorded",
+The alarm rows (L — verify wording after the L merge) are: "The other side may not be recorded", "Your microphone isn’t being recorded",
 "Recording to disk is in trouble", "The capture helper stopped answering", "Crash protection is off",
 "Recording resumed after a crash", "Recording STOPPED", "Recording folder unavailable".
 
@@ -177,7 +177,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - PASS: the row stays until Stop. `meta` shows `capture.remote.status` not `healthy`, and the summary header says the permission "was not granted for part of the call".
 
 - [ ] **P-07 ScreenCaptureKit is unaffected, and switching to the tap asks at once.**
-  - Do: set Capture Method to Screen Recording (legacy) and Save.
+  - Do: set Capture Method to Screen Recording (legacy, until #221) and Save.
   - PASS: Setup and Settings show the **Screen Recording** row, and a recording works with no System Audio prompt.
   - Do: `tccutil reset AudioCapture eu.fmasi.parley`, switch back to Core Audio Tap, and Save.
   - PASS: the system prompt appears immediately, not at the next meeting.
@@ -218,7 +218,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 - [ ] **D-15 First-frame latency (M-J).**
   - Do: for each `tap_auto_start` setting, 10 recordings started with audio ALREADY playing. Under `true` the tap waits for audio by design.
   - Measure:
-    - start latency = the log time of "System audio (tap): normalized 48000Hz, 1ch, Int16" minus "Capture started — mic AVCaptureSession + system source …; awaiting frames";
+    - start latency = the log time of "System audio (tap): normalized" (the rate prints as <private> in `log stream`; match the prefix, not "48000Hz") minus "Capture started — mic AVCaptureSession + system source …; awaiting frames";
     - rebuild latency = in the `diag` of D-04, D-10, D-13, D-14 and D-16, each `tapRecoveryRung` or `restartInPlace` to the next system `firstFrames`.
 
     Take the p99 (with 10 samples, the maximum) per setting. X3 sets the 5 s / 3 s thresholds from it.
@@ -230,7 +230,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 - [ ] **D-17 An HDMI display sleep with the LG as the output (M-H).**
   - Do: default output = the LG over HDMI, playing audio. Record 1 min, then `pmset displaysleepnow`, wait 2 min, and wake the display. Record 1 more minute, then Stop.
   - PASS: the right channel has audio after the wake (or it moved to another output and was recorded there). Any stall healed ≤ 10 s after the wake, or an alarm stayed up. There is no silent stretch without an alarm after the display woke.
-  - Record for X3: whether the IOProc stalled while the display slept, and whether `goin` or `gone` fired.
+  - Record for X3: whether the IOProc stalled while the display slept, and whether `goin` or `agrp` fired (the registered listeners are goin, stpd, diff, agrp).
 
 ## P2 — honest record
 
@@ -268,7 +268,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: record A (2 min) and Stop. Run `md5 <A>.json`. Record B, talk for 1 min, `kill -SEGV $(pgrep -x Parley)`, let it resume, talk 1 min more, and Stop.
   - PASS: B's transcript has only B's speech (before and after the crash), and none of A's segments. A's `.json` has the same md5 as before.
 
-- [ ] **D-27 exFAT and SMB recording folders (R2 round 3).**
+- [ ] **D-27 exFAT and SMB recording folders (R2 round 3).** (L — verify wording after the L merge)
   - Do:
     ```zsh
     hdiutil create -size 2g -fs ExFAT -volname ParleyExFAT ~/Desktop/parley-x1/exfat.dmg && hdiutil attach ~/Desktop/parley-x1/exfat.dmg && mkdir -p /Volumes/ParleyExFAT/Recordings
@@ -296,7 +296,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 - [ ] **D-33 Sleep 2 min mid-call (M-L4).** (L — verify wording after the L merge)
   - Do: Record with audio. Apple menu → Sleep (or close the lid with no external display). Wake after 2 min, play 1 more minute, and Stop.
   - PASS:
-    - log: "System going to sleep while recording" and "System sleep (…): liveness paused", then at the wake "System woke while recording (~120 s asleep)" and ONE "Resuming after sleep (…)" line, with the reason `wake` or `implicit wake: fullWakePowerOn`;
+    - log: "System going to sleep while recording" and "System sleep (…): liveness paused", then at the wake "System woke while recording (~120 s asleep)" and ONE "Resuming after sleep (…)" line, with the reason `wake` or `implicit wake: a full-wake power-on` (the log prints the reason text, e.g. "Resuming after sleep (implicit wake: a full-wake power-on): …");
     - no line containing "implicit wake" (any case) within 5 s after "System sleep (IOKit): liveness paused";
     - a new chunk starts at the wake, frames resume, and "Resumed" appears only after frames;
     - `capture.gaps` has a `sleep` entry ≈ 120 s;
@@ -359,7 +359,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - PASS:
     - no line containing "implicit wake" (any case) within 5 s after any "System sleep (IOKit): liveness paused";
     - at each `DarkWake` line in `pmset.txt`, the helper logs nothing, or "Power-on while paused for sleep (DarkWake) — pause kept", never a "Resuming after sleep (…)";
-    - "Implicit wake — expired" happens at most once, and only after a DarkWake longer than 5 min;
+    - "Implicit wake — the bound expired — resuming liveness" happens at most once, and only after a DarkWake longer than 5 min;
     - every "Resuming after sleep (…)" matches a `Wake` line in `pmset.txt` (a real full wake, including "DarkWake to FullWake"). If one of those came overnight with the lid closed, the transcript and the alarm rows show what happened then; note it;
     - the app's "No wake arrived … waking implicitly" does not fire during the night. If it did, the morning wake still records the rest of the night;
     - `capture.gaps` has `sleep` entries covering lid-close → lid-open (±60 s);
