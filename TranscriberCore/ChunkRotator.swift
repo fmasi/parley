@@ -39,9 +39,16 @@ public final class ChunkRotator {
     public var folderReads: FolderReads = .shared
     /// The bound on one look at the folder. Tests shorten it.
     var folderProbeSeconds: Double = 2
+    /// The client's bound on one rotate (§8.8): what a rotation already sent may still take.
+    public nonisolated static let rotateCallSeconds: Double = 10
+    /// The longest a rotation in flight can take (L review 208): its look, the rotate, and the look on a late reply — what a
+    /// Stop waits for, with a second's margin.
+    public var rotationBoundSeconds: Double { Self.rotateCallSeconds + 2 * folderProbeSeconds + 1 }
     /// A look at the folder did not answer: its file checks were skipped, and the step went on from the counter (L
     /// review 158). The coordinator records it. The argument names the step.
     public var onFolderNotAnswering: (@MainActor (String) -> Void)?
+    /// Late chunks the Stop could not check — a look did not answer — by index (L review 213): said, never dropped silently.
+    public var onLateChunksUnchecked: (@MainActor ([Int]) -> Void)?
 
     /// - Parameter startIndex: the index of the chunk being recorded now. A resumed session starts
     ///   past its settled chunks; restarting at 0 made the last chunk collide with the seeded
@@ -130,16 +137,22 @@ public final class ChunkRotator {
         // A timed-out rotation the helper completed late is settled first: the orphan is the chunk the
         // helper was really writing (L9 review 46). Not a rotation (L review 118).
         let look = await look(freeAfterCurrent: true, includeLate: false, "crash recovery")
-        if let look { applyReconcile(look, announce: false) }
+        if let look {
+            applyReconcile(look, announce: false)
+            settleUnchecked(look)
+        }
         let planned = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
-        // The recovery segment's name must not be a file already on disk (same rule as rotate()).
-        let recoveryIndex = max(look?.nextFree ?? planned.recoveryIndex, planned.recoveryIndex)
+        // The recovery segment's name must not be a file already on disk (same rule as rotate()) — nor, when the look did
+        // not answer, any name ever asked for (L review 207): the shared counter is past them all.
+        let counter = max(counterNext, planned.recoveryIndex)
+        let recoveryIndex = max(look?.nextFree ?? counter, counter)
         let plan = recoveryIndex == planned.recoveryIndex ? planned : ChunkRecoveryPlan(
             orphanIndex: planned.orphanIndex, recoveryIndex: recoveryIndex,
             orphanBaseName: planned.orphanBaseName, recoveryBaseName: "\(sessionBaseName)-\(recoveryIndex)")
         currentChunkIndex = plan.recoveryIndex
         currentChunkStartTime = now ?? clock.now()
         lateAttempts = []   // the crashed helper completes nothing more
+        lateAskedAt = [:]
         Logger.audio.info("ChunkRotator recovered: orphan chunk \(plan.orphanIndex, privacy: .public), resuming at \(plan.recoveryIndex, privacy: .public)")
         return plan
     }
@@ -147,6 +160,7 @@ public final class ChunkRotator {
     /// Start the rotation timer. The first rotation is one chunk from now — or at `firstRotationAt`: a re-attach
     /// rotates the live chunk when IT is due, at once when that has passed (L review 77).
     public func start(firstRotationAt: Date? = nil) {
+        stopped = false
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .sensitive)")
         let firstFire = firstRotationAt ?? Date().addingTimeInterval(chunkDuration)
         let newTimer = Timer(fire: firstFire, interval: chunkDuration, repeats: true) { [weak self] timer in
@@ -167,8 +181,10 @@ public final class ChunkRotator {
         timer = newTimer
     }
 
-    /// Stop the timer. Does NOT finalize the current chunk.
+    /// Stop the timer. Does NOT finalize the current chunk. A rotation in flight that has not sent its rotate yet never
+    /// sends it (L review 208): it checks after each look.
     public func stop() {
+        stopped = true
         timer?.invalidate()
         timer = nil
         Logger.audio.info("ChunkRotator stopped at chunk \(self.currentChunkIndex, privacy: .public)")
@@ -182,9 +198,34 @@ public final class ChunkRotator {
     /// then writes that chunk while this rotator names the old one — so they are settled before the next
     /// rotation, at Stop and at a crash (L9 review 46).
     private var lateAttempts: [Int] = []
+    /// When each late attempt was asked for (L review 212): a chunk the helper opened no earlier — the floor of its start
+    /// when its file's creation cannot be read, so chunks never overlap.
+    private var lateAskedAt: [Int: Date] = [:]
+    /// The highest index ever asked for, whatever the rotate answered (L review 207): the helper may have created it.
+    private var highestAsked: Int?
+    /// Late attempts a look could not check — below a chunk the helper sealed later, so opened and sealed if the helper got
+    /// to them (L review 213). Settled at the next look that answers: emitted from their own files, or dropped when the helper
+    /// never opened them. At a Stop that cannot look, said.
+    private var uncheckedLate: [Int] = []
+    /// `stop()` was called and no `start()` since (L review 208).
+    private var stopped = false
     /// Bumped by a crash recovery: a rotation still in flight to the dead helper answers for a helper that is gone
     /// — its timeout is never remembered, its reply never applied (L review 115).
     private var generation = 0
+
+    /// The next index when no look answers (L review 207): past the current chunk, past every late attempt, and past EVERY
+    /// index ever asked for — whatever the error. A crash recovery and a rotation share it, so the two fallbacks agree, and
+    /// neither ever names a chunk the helper may have created (its `createFile` would truncate that chunk's audio).
+    private var counterNext: Int {
+        max(currentChunkIndex, lateAttempts.max() ?? currentChunkIndex, highestAsked ?? currentChunkIndex) + 1
+    }
+
+    /// When chunk `index` began, no earlier than `previous` (L review 212): its file's creation when a look read it, else —
+    /// a late attempt — when it was asked for; never before the chunk emitted before it.
+    private func chunkStart(of index: Int, created: [Int: Date], after previous: Date) -> Date {
+        let asked = lateAskedAt[index]
+        return max(created[index] ?? asked ?? previous, asked ?? previous, previous)
+    }
 
     private func rotate() {
         let previous = rotation
@@ -217,7 +258,9 @@ public final class ChunkRotator {
     /// `performRotation` announces, through its own reconcile.
     @discardableResult
     public func reconcileLateRotation(announce: Bool = false) async -> Bool {
-        guard !lateAttempts.isEmpty, let look = await look(freeAfterCurrent: false, includeLate: true, "reconcile") else { return false }
+        guard !lateAttempts.isEmpty || !uncheckedLate.isEmpty,
+              let look = await look(freeAfterCurrent: false, includeLate: true, "reconcile") else { return false }
+        settleUnchecked(look)
         return applyReconcile(look, announce: announce)
     }
 
@@ -230,8 +273,9 @@ public final class ChunkRotator {
         Logger.audio.error("ChunkRotator: a timed-out rotation of chunk \(self.currentChunkIndex, privacy: .public) completed late — the helper is writing \(writing, privacy: .public)")
         emitSealed(opened.dropLast(), last: nil, created: look.created)
         currentChunkIndex = writing
-        // When the helper opened it: the file's creation, never before the chunk it sealed began.
-        currentChunkStartTime = max(look.created[writing] ?? clock.now(), currentChunkStartTime)
+        // When the helper opened it: the file's creation — or when it was asked for — never before the chunk it sealed began.
+        currentChunkStartTime = look.created[writing] == nil && lateAskedAt[writing] == nil
+            ? max(clock.now(), currentChunkStartTime) : chunkStart(of: writing, created: look.created, after: currentChunkStartTime)
         // Attempts made after the one that opened `writing` would seal IT if they complete: still pending.
         lateAttempts = lateAttempts.filter { $0 > writing }
         if announce { onRotated?() }
@@ -255,8 +299,14 @@ public final class ChunkRotator {
         let sealed = URL(fileURLWithPath: systemPath).lastPathComponent
         guard let named = chunkIndex(named: sealed) else {
             let look = await look(freeAfterCurrent: false, includeLate: true, "stop")
-            if let look { applyReconcile(look, announce: false) }
+            if let look {
+                settleUnchecked(look)
+                applyReconcile(look, announce: false)
+            } else {
+                uncheckedLate += lateAttempts   // never checked, never silently dropped (L review 213)
+            }
             Logger.audio.error("ChunkRotator: the stop sealed a file this session does not name — kept as chunk \(self.currentChunkIndex, privacy: .public)")
+            reportUnchecked()
             return FinalizedChunk(index: currentChunkIndex, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
         }
         guard named != currentChunkIndex else {
@@ -264,17 +314,24 @@ public final class ChunkRotator {
                 Logger.audio.info("ChunkRotator: the stop sealed chunk \(named, privacy: .public) — the timed-out rotation(s) to \(self.lateAttempts, privacy: .public) never took over; dropped without a file check")
             }
             lateAttempts = []
+            lateAskedAt = [:]
+            // Chunks an earlier rotation could not check are settled now — or said (L review 213).
+            if !uncheckedLate.isEmpty, let look = await look(freeAfterCurrent: false, includeLate: false, "stop") { settleUnchecked(look) }
+            reportUnchecked()
             return FinalizedChunk(index: named, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
         }
         Logger.audio.error("ChunkRotator: the stop sealed chunk \(named, privacy: .public) while chunk \(self.currentChunkIndex, privacy: .public) was named — each labelled by its own index")
         // The named chunk's file — and a late attempt's below it — say when each began: one look, bounded.
         let look = await look(freeAfterCurrent: false, includeLate: true, extra: [named], "stop")
+        if let look { settleUnchecked(look) }
         let created = look?.created ?? [:]
         let start: Date
         if named > currentChunkIndex {
-            let between = lateAttempts.filter { $0 < named && look?.opened.contains($0) == true }
+            let below = lateAttempts.filter { $0 < named }
+            if look == nil { uncheckedLate += below }   // could not be checked: said, never dropped (L review 213)
+            let between = below.filter { look?.opened.contains($0) == true }
             let lastEmitted = emitSealed(between[...], last: nil, created: created)
-            start = max(created[named] ?? lastEmitted, lastEmitted)
+            start = chunkStart(of: named, created: created, after: lastEmitted)
         } else {
             // An earlier chunk than the one named: its own file's creation, never the current chunk's start.
             start = min(created[named] ?? currentChunkStartTime, currentChunkStartTime)
@@ -282,7 +339,33 @@ public final class ChunkRotator {
         currentChunkIndex = named
         currentChunkStartTime = start
         lateAttempts = []
+        lateAskedAt = [:]
+        reportUnchecked()
         return FinalizedChunk(index: named, systemPath: systemPath, micPath: micPath, startTime: start)
+    }
+
+    /// The late chunks no look could check, emitted from their own files when this look found them — the helper opened
+    /// them — and dropped when it did not (L review 213). Each starts no earlier than it was asked for (L review 212).
+    private func settleUnchecked(_ look: FolderLook) {
+        guard !uncheckedLate.isEmpty else { return }
+        for index in uncheckedLate.sorted() {
+            if look.uncheckedOpened.contains(index) {
+                Logger.audio.error("ChunkRotator: late chunk \(index, privacy: .public), unchecked until now, is on disk — processed from its own files")
+                onChunkFinalized(ownFiles(index: index, startTime: look.created[index] ?? lateAskedAt[index] ?? currentChunkStartTime))
+            } else {
+                Logger.audio.info("ChunkRotator: late chunk \(index, privacy: .public) was never opened — nothing to process")
+            }
+        }
+        uncheckedLate = []
+    }
+
+    /// At a Stop, the late chunks still unchecked are said (L review 213): the caller records and shows them.
+    private func reportUnchecked() {
+        guard !uncheckedLate.isEmpty else { return }
+        let indices = uncheckedLate.sorted()
+        uncheckedLate = []
+        Logger.audio.error("ChunkRotator: late chunk(s) \(indices, privacy: .public) could not be checked — the folder did not answer")
+        onLateChunksUnchecked?(indices)
     }
 
     /// `<session>-<n>.wav` → n; nil for any other name.
@@ -301,11 +384,11 @@ public final class ChunkRotator {
         var start = currentChunkStartTime
         onChunkFinalized(ownFiles(index: currentChunkIndex, startTime: start))
         for index in between {
-            start = max(created[index] ?? start, start)
+            start = chunkStart(of: index, created: created, after: start)
             onChunkFinalized(ownFiles(index: index, startTime: start))
         }
         if let last {
-            start = max(created[last.index] ?? start, start)
+            start = chunkStart(of: last.index, created: created, after: start)
             onChunkFinalized(FinalizedChunk(index: last.index, systemPath: last.paths.systemPath, micPath: last.paths.micPath, startTime: start))
         }
         return start
@@ -318,6 +401,10 @@ public final class ChunkRotator {
 
     private func performRotation() async {
         let generation = self.generation
+        guard !stopped else {
+            Logger.audio.info("ChunkRotator: stopped — the rotation is dropped")
+            return
+        }
         // One look at the folder, off the main actor and bounded (L review 158): the late attempts to settle, and the
         // next free name. A folder that does not answer is skipped — the counter names the next chunk — never waited on.
         let look = await look(freeAfterCurrent: true, includeLate: true, "rotation")
@@ -325,15 +412,27 @@ public final class ChunkRotator {
             Logger.audio.info("ChunkRotator: a crash recovery ran while the rotation looked at its folder — the rotation is dropped")
             return
         }
-        if let look { applyReconcile(look, announce: true) }
+        // Stopped while it looked (L review 208): a Stop owns the helper now — this rotation never sends its rotate.
+        guard !stopped else {
+            Logger.audio.info("ChunkRotator: stopped while the rotation looked at its folder — no rotate is sent")
+            return
+        }
+        if let look {
+            settleUnchecked(look)
+            applyReconcile(look, announce: true)
+        }
         let oldIndex = currentChunkIndex
         let oldStartTime = currentChunkStartTime
-        // Past every timed-out attempt's name too: the helper may still create it (L9 review 46).
-        let counter = max(oldIndex, lateAttempts.max() ?? oldIndex) + 1
+        // Past every timed-out attempt's name and every name ever asked for: the helper may still create it (L9 review 46,
+        // L review 207).
+        let counter = counterNext
         let nextIndex = max(look?.nextFree ?? counter, counter)
         let nextBaseName = "\(sessionBaseName)-\(nextIndex)"
 
         Logger.audio.info("Rotating chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public)")
+        // Asked for from here, whatever the answer (L reviews 207, 212).
+        highestAsked = max(highestAsked ?? nextIndex, nextIndex)
+        let askedAt = clock.now()
 
         do {
             let paths = try await captureClient.rotateChunk(
@@ -353,6 +452,7 @@ public final class ChunkRotator {
                 // unanswered, only the current chunk and the reply's are emitted.
                 let attempts = lateAttempts
                 let again = await self.look(freeAfterCurrent: false, includeLate: true, "rotation reply")
+                if let again { settleUnchecked(again) } else { uncheckedLate += attempts[..<late] }   // L review 213
                 let between = attempts[..<late].filter { again?.opened.contains($0) == true }
                 emitSealed(between[...], last: (attempts[late], paths), created: again?.created ?? [:])
             } else {
@@ -360,6 +460,7 @@ public final class ChunkRotator {
                                                 startTime: oldStartTime))
             }
             lateAttempts = []
+            lateAskedAt = [:]
             self.currentChunkIndex = nextIndex
             self.currentChunkStartTime = clock.now()
             self.onRotated?()
@@ -374,6 +475,7 @@ public final class ChunkRotator {
             // next rotation. A refusal, not a dead capture.
             if error is CaptureCallTimeout || error.localizedDescription == CaptureReplies.rotationTimedOut {
                 lateAttempts.append(nextIndex)
+                lateAskedAt[nextIndex] = askedAt
             }
             onRotationFailed?(error)
         }
@@ -385,6 +487,8 @@ public final class ChunkRotator {
     struct FolderLook: Sendable {
         /// The late attempts whose chunk file is on disk: the helper opened them.
         var opened: [Int] = []
+        /// The unchecked late chunks (L review 213) whose file is on disk.
+        var uncheckedOpened: Set<Int> = []
         /// The creation dates of the chunk files looked at (the opened attempts, and any asked for).
         var created: [Int: Date] = [:]
         /// The first index past the current chunk — once the opened attempts are settled, and past every attempt still
@@ -396,10 +500,10 @@ public final class ChunkRotator {
     /// One look at the folder, off the main actor and bounded (L review 158); nil — said through
     /// `onFolderNotAnswering` — when it did not answer.
     private func look(freeAfterCurrent: Bool, includeLate: Bool, extra: [Int] = [], _ step: String) async -> FolderLook? {
-        let dir = outputDirectory, base = sessionBaseName, current = currentChunkIndex, late = lateAttempts
+        let dir = outputDirectory, base = sessionBaseName, current = currentChunkIndex, late = lateAttempts, unchecked = uncheckedLate
         let answer = await folderReads.read("rotation: chunk files", folder: dir, key: dir + "#chunk-rotator", seconds: folderProbeSeconds) {
-            Self.look(dir: dir, base: base, current: current, late: late, extra: extra, freeAfterCurrent: freeAfterCurrent,
-                      includeLate: includeLate)
+            Self.look(dir: dir, base: base, current: current, late: late, extra: extra, unchecked: unchecked,
+                      freeAfterCurrent: freeAfterCurrent, includeLate: includeLate)
         }
         if answer == nil {
             Logger.audio.error("ChunkRotator: the recording folder did not answer (\(step, privacy: .public)) — its file checks are skipped")
@@ -409,14 +513,15 @@ public final class ChunkRotator {
     }
 
     /// The look itself: blocking file-system work, run only through `folderReads`.
-    nonisolated static func look(dir: String, base: String, current: Int, late: [Int], extra: [Int],
+    nonisolated static func look(dir: String, base: String, current: Int, late: [Int], extra: [Int], unchecked: [Int] = [],
                                  freeAfterCurrent: Bool, includeLate: Bool) -> FolderLook {
         let folder = URL(fileURLWithPath: dir)
         func path(_ index: Int, _ suffix: String) -> String { folder.appendingPathComponent("\(base)-\(index)").path + suffix }
         func exists(_ index: Int, _ suffix: String) -> Bool { FileManager.default.fileExists(atPath: path(index, suffix)) }
         var look = FolderLook()
         look.opened = late.filter { exists($0, ".wav") }
-        for index in Set(look.opened + extra) {
+        look.uncheckedOpened = Set(unchecked.filter { exists($0, ".wav") })
+        for index in Set(look.opened + extra + look.uncheckedOpened) {
             look.created[index] = (try? FileManager.default.attributesOfItem(atPath: path(index, ".wav")))?[.creationDate] as? Date
         }
         guard freeAfterCurrent else { return look }

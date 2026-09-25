@@ -347,6 +347,14 @@ public enum RecoveryMessages {
         "A recording that stopped at \(clock(at)) is kept in \(folder), untranscribed: the transcription engine isn’t ready (\(why.trimmingCharacters(in: CharacterSet(charactersIn: ". ")))). Parley will transcribe it once the engine is ready — after Setup or a model download."
     }
 
+    /// Chunks the helper may have recorded during a rotation that timed out, which the Stop could not check because the
+    /// recording folder was not answering (L review 213): said — kept on disk if they are there, not transcribed.
+    public static func lateChunksUnchecked(files: [String], folder: String) -> String {
+        let named = files.joined(separator: ", ")
+        let what = files.count == 1 ? "a chunk" : "\(files.count) chunks"
+        return "Parley couldn’t check \(what) the capture helper may have recorded during a rotation that timed out (\(named)) — the recording folder wasn’t answering. If they are in \(folder), their audio is kept there, not transcribed."
+    }
+
     /// A pending pass skipped its salvages because the capture helper's drain did not answer (L reviews 142, 201): the
     /// recordings wait — said, never silent.
     public static func waitingForHelperDrain(count: Int) -> String {

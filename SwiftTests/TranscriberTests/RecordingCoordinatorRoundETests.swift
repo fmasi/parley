@@ -473,3 +473,59 @@ import Testing
         }
     }
 }
+
+// MARK: - The rotator at a Stop (208, 213)
+
+@MainActor
+@Suite struct RecordingCoordinatorRotationRoundETests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    /// L review 208: a Stop during a rotation whose look at its folder has not answered never lets that rotation send its
+    /// rotate: the stopped rotator checks after the look, and the Stop's wait covers the look.
+    @Test func aStopDuringAHungLookSendsNoRotate() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        rotator.folderProbeSeconds = 0.3
+        rotator.rotateNow()
+        await Harness.until { hung.reached }
+        await h.coordinator.stopRecording()
+        #expect(h.client.rotateCalls == 0, "a stopped rotator never sends the rotate it was looking for")
+        #expect(h.appState.isIdle)
+    }
+
+    /// L review 213, the coordinator's side: late chunks the Stop could not check are on record and said in a row naming
+    /// their files — and a look that did not answer is recorded as the folder not answering (L review 216: the wiring).
+    @Test func lateChunksTheStopCouldNotCheckAreSaidInARow() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        let rotator = try #require(h.runner.chunkRotator)
+        h.client.rotateError = CaptureCallTimeout(call: "rotateChunk", seconds: 10)
+        await rotator.rotateForTesting()   // chunk 1 asked for: timed out
+        await rotator.rotateForTesting()   // chunk 2 asked for: timed out
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        rotator.folderProbeSeconds = 0.2
+        // The helper's stop reply names chunk 2: the rotation to it completed after all.
+        h.client.stopResult = AudioPaths(systemAudio: call.outputDirectory.appendingPathComponent("\(call.sessionId)-2.wav"),
+                                         micAudio: call.outputDirectory.appendingPathComponent("\(call.sessionId)-2_mic.wav"))
+        await h.coordinator.stopRecording()
+        #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["unchecked_chunks"] == "1" })
+        #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "stop" })
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("\(call.sessionId)-1.wav") && row.contains("not transcribed"), "\(row)")
+    }
+}

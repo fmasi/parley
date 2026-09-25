@@ -778,7 +778,9 @@ public final class RecordingCoordinator {
         // No rotation may race the helper's stop (council B-I3): the timer stops, and a rotation already in
         // flight completes — bounded, as the client bounds a rotate at 10 s — before the helper is asked.
         transcriptionRunner.stopChunkRotation()
-        _ = try? await withDeadline(seconds: 10, label: "rotation before stop") { await self.awaitRotationInFlight() }
+        // Its looks included (L review 208): a rotation that has not sent its rotate never will, now the rotator is stopped.
+        let rotationBound = transcriptionRunner.chunkRotator?.rotationBoundSeconds ?? ChunkRotator.rotateCallSeconds
+        _ = try? await withDeadline(seconds: rotationBound, label: "rotation before stop") { await self.awaitRotationInFlight() }
         var stoppedPaths: AudioPaths?
         do {
             // Bounded (§8.8): a helper that never answers is salvaged from disk in the catch below. A stop already under
@@ -2485,6 +2487,8 @@ public final class RecordingCoordinator {
         transcriptionRunner.chunkRotator?.onFolderNotAnswering = { [weak self] step in
             self?.captureClient.record(.folderNotAnswering, .anomaly, ["during": step])
         }
+        // Late chunks the Stop could not check (L review 213): on record, and said — never dropped silently.
+        transcriptionRunner.chunkRotator?.onLateChunksUnchecked = { [weak self] indices in self?.lateChunksUnchecked(indices) }
         transcriptionRunner.chunkProcessor?.onSessionWriteFailure = { [weak self] index in self?.sessionWriteFailed(chunk: index) }
         // The progress file is written again: its alarm is over (L follow-up 26, R2's hook).
         transcriptionRunner.chunkProcessor?.onSessionWriteSucceeded = { [weak self] in self?.appState.clearAppAlarm(.sessionWriteFailed) }
@@ -2596,6 +2600,16 @@ public final class RecordingCoordinator {
             guard self.appState.isRecording else { return }
             await self.handleXPCCrash()
         }
+    }
+
+    /// The Stop could not check whether late chunks the helper may have recorded are on disk (L review 213): recorded, and
+    /// said in a row naming their files — kept there if they are, not transcribed.
+    private func lateChunksUnchecked(_ indices: [Int]) {
+        captureClient.record(.folderNotAnswering, .anomaly, ["during": "stop", "unchecked_chunks": indices.map(String.init).joined(separator: ",")])
+        guard let location = transcriptionRunner.chunkRotator?.sessionLocation else { return }
+        let files = indices.map { "\(location.sessionId)-\($0).wav" }
+        reportStopped(RecoveryMessages.lateChunksUnchecked(files: files, folder: abbreviatedDisplayPath(location.outputDir.path)),
+                      recovered: false)
     }
 
     /// R2's hook: `session.json` could not be written — after a chunk, or (nil) a session-level change such
