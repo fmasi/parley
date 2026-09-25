@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — in an XPC service. System audio comes from ScreenCaptureKit by default, or a Core Audio output process tap (`system_audio_source: core_audio_tap`) that also captures Continuity/VoIP calls ScreenCaptureKit misses. During recording, audio is written in time-bounded chunks (default: configurable minutes) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
+Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — in an XPC service. System audio comes from a Core Audio output process tap by default (`system_audio_source: core_audio_tap`, which also captures Continuity/VoIP calls ScreenCaptureKit misses), or from ScreenCaptureKit (`sck`, legacy until #221). During recording, audio is written in time-bounded chunks (default: configurable minutes) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
 
 ---
 
@@ -13,8 +13,8 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 │  RECORDING (continuous)                                         │
 │                                                                 │
 │  Capture (XPC) — two independent sources:                       │
-│    system audio: ScreenCaptureKit (default) or Core Audio tap   │
-│                  (system_audio_source=core_audio_tap)           │
+│    system audio: Core Audio tap (default) or ScreenCaptureKit   │
+│                  (system_audio_source=sck, legacy)              │
 │      → WavFileWriter → chunk-N.wav                              │
 │    mic: MicCaptureSession (AVCaptureSession, #96)               │
 │      → AudioConverter → WavFileWriter → chunk-N_mic.wav         │
@@ -90,7 +90,7 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 
 ### Stage 1 — Audio Capture
 
-**What it does:** the XPC service captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. System audio is captured by ScreenCaptureKit (default) or a Core Audio output process tap (`system_audio_source: core_audio_tap`, `SystemTapSession.swift`), which captures Continuity/VoIP call audio ScreenCaptureKit misses; the mic is captured independently (`MicCaptureSession.swift`). The XPC service (`AudioCaptureHelperXPC` target) runs in-process within the app bundle and is the only process that holds Screen Recording permission.
+**What it does:** the XPC service captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. System audio is captured by a Core Audio output process tap (`system_audio_source: core_audio_tap`, the default, `SystemTapSession.swift`), which captures Continuity/VoIP call audio ScreenCaptureKit misses, or by ScreenCaptureKit (`sck`, legacy); the mic is captured independently (`MicCaptureSession.swift`). The XPC service (`AudioCaptureHelperXPC` target) runs in-process within the app bundle and is the only process that holds Screen Recording permission.
 
 **Input:** None (live capture). Output: `<baseName>.wav` (system, 48 kHz, auto-detected Float32 or Int16) and `<baseName>_mic.wav` (mic, normalized to 48 kHz mono Int16 via `AudioConverter`).
 
@@ -129,7 +129,8 @@ Notes:
 **Input:** WAV file URL, `AudioSourceType` (`.system` / `.microphone`). Output: `[TranscriptSegment]` (start, end, text, language?, confidence?).
 
 **Key code path:**
-- `TranscriberCore/FluidAudioEngine.swift` — `transcribe(audioPath:language:audioSource:)` → `mgr.transcribe()` → `groupTokensIntoSegments()` → ITN via `TextNormalizer` → `SpeakerAssignment.deduplicate()`
+- `TranscriberCore/FluidAudioEngine.swift` — `transcribe(audioPath:language:audioSource:)` → `mgr.transcribe()` → `groupTokensIntoSegments()` → ITN via `TextNormalizer`
+- `SpeakerAssignment.deduplicate()` runs after the engine, in `ChunkProcessor` / `TranscriptionRunner`'s `transcribeStream`, so its counts land in the chunk's `issues`: an abutting repeat (same text, starting ≤ 0.25 s after the previous segment ends) is kept and flagged `duplicate: true` (`duplicates_flagged`); a zero-duration segment is dropped (`zero_length_dropped`)
 - `TranscriberCore/SpeechAnalyzerEngine.swift` — `transcribe()` (wrapped in `#if compiler(>=6.2)`)
 
 Notes:
@@ -175,7 +176,7 @@ Notes:
 | High | High | Assign speaker |
 | High | Low | Assign "Unknown" |
 | Low | High | Assign speaker (trust diarizer) |
-| Low | Low | Filter (drop segment) |
+| Low | Low | Filter: keep the segment, speaker `Unknown`, flagged `filtered: true` |
 
 **Input:** `[TranscriptSegment]`, `[DiarizedSegment]`, `[SpeechRegion]?`. Output: `[LabeledSegment]` with `source` tag ("local" / "remote").
 
@@ -187,9 +188,9 @@ Defaults: `vadSpeechThreshold = 0.5`, `qualityScoreThreshold = 0.3`.
 
 ### Stage 7 — Echo Deduplication
 
-**What it does:** Removes local (mic) segments that are mic bleed of the remote speaker — i.e., the local microphone picked up audio playing through the speakers. See Section 4 for a full deep dive.
+**What it does:** Flags local (mic) segments that are mic bleed of the remote speaker — i.e., the local microphone picked up audio playing through the speakers. A flagged segment is kept in the JSON (`echo: true`) and hidden from TXT, SRT, the summary prompt and the rename samples; nothing is deleted. See Section 4 for a full deep dive.
 
-**Input:** `[LabeledSegment]` (combined local+remote), local speaker embeddings, remote speaker embeddings. Output: `EchoDeduplicator.DeduplicationResult(segments, removedCount)`.
+**Input:** `[LabeledSegment]` (combined local+remote), local speaker embeddings, remote speaker embeddings. Output: `EchoDeduplicator.DeduplicationResult(segments, flaggedCount)` — every input segment, echoes flagged; the chunk records an `echo_flagged` issue with the count.
 
 **Key code path:**
 - `TranscriberCore/EchoDeduplicator.swift` — `deduplicate(segments:localSpeakerDatabase:remoteSpeakerDatabase:...)`
@@ -206,7 +207,9 @@ Defaults: `vadSpeechThreshold = 0.5`, `qualityScoreThreshold = 0.3`.
 
 Notes:
 - Channel convention: L = mic (local), R = system (remote). `AudioSourceResolver` reads this back for re-transcription.
-- Source WAVs are only deleted after verification (non-empty file with at least one audio track). On a genuine archive failure the WAV is kept as a last-resort fallback (never delete a WAV that has no `.m4a` replacement).
+- Source WAVs are only deleted after verification: the encoded duration is compared against the sources (not merely "non-empty with an audio track"). On a genuine archive failure the WAV is kept as a last-resort fallback (never delete a WAV that has no `.m4a` replacement).
+- A chunk whose mic WAV is empty but whose system WAV has audio goes through `archiveSystemOnly`; the mirror case (system empty, mic has audio) goes through `archiveMicOnly`, which keeps the mic in the LEFT channel.
+- In the chunked path the WAVs are deleted only once `session.json` holds the chunk with its `.m4a`, so a crash in between never loses the chunk. An ASR-failed chunk keeps its WAVs next to the `.m4a` (re-transcribable), and `preserve_source_wav` keeps them for every chunk (diagnostics only; the quota never evicts them).
 
 ### Stage 9 — Transcript Assembly
 
@@ -223,6 +226,40 @@ Notes:
 - Reconciler threshold default: 0.65 cosine similarity.
 - Unmatched local speakers in a chunk get new global IDs (`spk_0`, `spk_1`, ...).
 - Merger output is `MergeResult(segments: [MergedSegment], meetingStart, chunkCount)`.
+
+#### Capture provenance and metadata
+
+What the record states about how the recording was captured and processed (spec §7). Every key below is written by `TranscriptAssembler.assemble` unless noted; an unmeasured value is left out, never written as 0.
+
+**`metadata.capture_provenance`** (`CaptureProvenance.asMetadataDictionary`, always present for a recording made by the app):
+- `engine`, `route_changes`, `retries`, `recovered`, `anomaly_count`, `quality_anomaly_count`, `system_audio_unrecovered`, `system_permission_denied_confirmed`; `system_format`, `mic_format`, `mic_device`, `system_delivered_seconds`, `system_exact_zero_seconds` when known.
+- `events_dropped` — how many diagnostic-ring events were evicted before the stamp was built: the ring's own admission that it does not hold the whole session. Always written (0 when none).
+- `local_coverage` / `remote_coverage` — per-track coverage summed over every helper session (`TrackAccounting.asMetadataDictionary`): `status` (`healthy` | `idle` | `neverDelivered` | `compromised`), `expected_seconds`, `delivered_seconds`, `padded_seconds`, `longest_gap_seconds`, `gap_count`, `rebuilds`, and when measured `exact_zero_seconds`, `heartbeat_callbacks` (with `*_is_lower_bound: true` when a measured and an unmeasured helper session were summed), plus `content_anomaly_count`. The status is computed once from the coverage and that side's content anomalies, and recomputed (fail closed, never defaulted to healthy) when a stored status is missing or unreadable.
+- `reconstructed: true` + `reconstructed_note` when the transcript was rebuilt by a recovery run and these facts come from that run.
+
+In `session.json` the same stamp is persisted under `provenance`, with the per-side status in separate `local_status` / `remote_status` keys.
+
+**`metadata.capture`**:
+- `local` / `remote` — the same dictionaries as `capture_provenance.local_coverage` / `remote_coverage`. `capture.remote.status` is the authority on whether the remote side was captured; `dual_stream` is only the capture-time flag that a mic stream was recorded next to it.
+- `gaps` — `[{start, end, seconds, reason}]`, periods with no capture: `reason` is `"app relaunch"` or `"sleep"`. Written even when no coverage was stamped.
+
+**Processing issues** (`ChunkIssue`, the full code list is in spec §7.2):
+- `metadata.processing_issues` — `[{chunk?, code, track?, count?, detail?}]`: every chunk's `issues`, plus the session's own (`session.json` `issues`) and those finalize adds (a skipped merge, unreadable audio lengths). Always written for a tracked (app) session, `[]` when clean; absent from the CLI `run()` path, which does not track issues, so absence never reads as "clean".
+- `metadata.processing_issue_count` — content-affecting issues only (`asr_failed`, `diarization_failed`, `vad_failed`, `stream_missing`, `archive_failed`, `session_write_failed`, `chunk_index_collision`, `seed_mismatch`).
+- `metadata.processing_problem_chunks` — distinct chunks with a content-affecting issue (a session-level one counts as one more). The completion notice uses this.
+
+**Merged audio and timeline**:
+- `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
+- `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
+- `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
+- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`.
+
+**Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`).
+
+**Files beside the recording**:
+- `<session>.diag.live.jsonl` — every non-`info` capture event plus the coverage-carrying ones (`captureStop`, `trackCoverage`), appended as it happens, with ms-precision dates (`LiveDiagnosticsLog`). The record's build merges it, deduplicated, into the ring, and so into `<session>.diag.jsonl`. It is deleted only once the session's transcript exists.
+- `<session>.diag.coverage.json` — the latest per-track coverage of each helper session, rewritten on every status pull; stands in for the `captureStop` a crashed helper never wrote.
+- `session.json` — besides `chunks` (each with its `issues`) and `provenance`: `gaps` (`CaptureGap`, as above) and `issues` (`SessionIssue` `{chunk?, issue}`: issues that could not be stored on a chunk, such as a failed write after the chunk was appended, or a session-level issue).
 
 ### Stage 10 — Summary Generation
 
@@ -265,7 +302,7 @@ Thresholds: `defaultEmbeddingThreshold = 0.8`, `defaultTemporalThreshold = 0.5`,
 
 Segment boundaries from independent ASR runs may not align. Two fallbacks handle this:
 
-1. **Containment check:** If Jaccard fails but `textContainment(local, remote) > 0.7` (most words from the short local segment appear in a longer remote segment), the local segment is removed. This handles short local excerpts of long remote utterances.
+1. **Containment check:** If Jaccard fails but `textContainment(local, remote) > 0.7` (most words from the short local segment appear in a longer remote segment), the local segment is flagged as echo. This handles short local excerpts of long remote utterances.
 
 2. **Window concatenation:** If multiple remote segments overlap with the local segment, their texts are concatenated and Jaccard is re-evaluated against the window. This handles one long local segment that covers what the remote side split into several shorter segments.
 
@@ -372,7 +409,7 @@ python3 scripts/dev.py --debug
 | `TranscriberCore` | Library | All business logic (engines, pipeline, CLI) |
 | `AudioCaptureHelperXPC` | Executable | XPC service for audio capture |
 | `AudioCaptureProtocol` | Library | `@objc` XPC protocol + service name constant |
-| `TranscriberTests` | Test | 384 tests across 38 suites (Swift Testing, not XCTest) |
+| `TranscriberTests` | Test | 2321 tests across 261 suites (Swift Testing, not XCTest) |
 
 Test path: `SwiftTests/TranscriberTests/` (not `Tests/` — APFS case-collision workaround).
 

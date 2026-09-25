@@ -1,9 +1,11 @@
 # Capture reliability overhaul — design spec
 
 **Date:** 2026-09-24
-**Status:** v2 (2026-09-24) — amended after the preflight conflict scan at §4.2, §5, §6.1, §6.2, §7.2,
-§7.3, §8.3, §8.8, §8.10, §10 and §11 (each amendment is marked "v2" with the scan item that showed the
-spec was wrong or incomplete); implementation plan (v2) at
+**Status:** v3 (2026-09-25) — v2 amended the spec after the preflight conflict scan at §4.2, §5, §6.1,
+§6.2, §7.2, §7.3, §8.3, §8.8, §8.10, §10 and §11 (each amendment is marked "v2" with the scan item that
+showed the spec was wrong or incomplete). v3 brings the text in line with the merged code where review
+rulings changed the design (C2–C11, F2, R, L): §4.1, §4.2, §5, §6.1, §6.2, §6.3, §7.1, §7.2, §7.4, §8.2,
+§8.3, §8.4, §8.7, §8.11 and §8.12, each marked "v3" with the ruling. Implementation plan (v2) at
 `docs/superpowers/plans/2026-09-24-capture-reliability.md`
 **Branch:** `fix/capture-reliability`, stacked on `fix/permission-readiness` (PR #222, not merged)
 **Closes / advances:** #220 (root cause + the class around it), #192/#193/#194/#195/#196 follow-ups,
@@ -162,7 +164,7 @@ must not live there.
 | **heartbeat** | `captureOutput` entry | `handleTapBuffers` entry, before any guard | monotonic ns, `OSAllocatedUnfairLock<UInt64>` |
 | **delivery** | `appendAlignedMic` (existing `micBufferArrival`) | `appendSystemSamples` (existing `systemBufferArrival`) | after the writer accepted the frames |
 | **content** | `ExactZeroRunMonitor` 12 s (existing) | `TapPermissionGuard.samples` 12 s (existing) | on real samples only |
-| **expected** | always while capturing, except during a mic rebuild generation | `OutputActivityProbe`: any process with `pid != getpid()` and `kAudioProcessPropertyIsRunningOutput == 1` | 1 Hz poll + `'prs#'` listener as accelerator; fails OPEN |
+| **expected** | always while capturing, except during a mic rebuild generation | `OutputActivityProbe`: any process with `pid != getpid()` and `kAudioProcessPropertyIsRunningOutput == 1` | 1 Hz poll on the watchdog tick, no listener (*v3, C3 round 1*: the gate debounce counts ticks; an accelerator reads the probe once for its own check but never feeds the debounce); fails OPEN |
 | **generation** | bumped on every `buildAndStart` | bumped on every `buildAggregateAndStart` | tells the monitor "judge from here" |
 
 Heartbeat is distinct from delivery on purpose (gotcha #63): heartbeat means "the OS is calling
@@ -185,13 +187,27 @@ Inputs per tick: `now`, `lastHeartbeat` (0 = never), `gateOpen`, plus the arm ti
 Both clocks count only time during which the gate was open: the never-delivered clock starts at
 max(arm, gate open), the stall clock at max(last heartbeat, gate open). Each gate-open period that
 lasts at least the threshold over a silent track is one episode, reported once; the gate closing
-ends the open episode (`.cleared(.gateClosed)`); a 1 Hz flap never reaches a threshold and reports
-nothing. *(v2, scan C5: v1 said "a flap can re-report an old gap once", which allowed a spurious
-`.stalled(<idle seconds>)` on the first tick after a call app resumed its output under
-`tap_auto_start = true`.)* An accelerator (§5) may open an episode early; the monitor then does not
-report the same stall again. This closes hole H1 (`guard lastArrivalNanos != 0`), L2, and retires
-`PadRatioMonitor.finish()` / `trackNeverDelivered` (L-N2: dead in production, tested with impossible
-input).
+ends the open episode (`.cleared(.gateClosed)`). *(v2, scan C5: v1 said "a flap can re-report an old
+gap once", which allowed a spurious `.stalled(<idle seconds>)` on the first tick after a call app
+resumed its output under `tap_auto_start = true`.)* An accelerator (§5) may open an episode early;
+the monitor then does not report the same stall again. This closes hole H1
+(`guard lastArrivalNanos != 0`), L2, and retires `PadRatioMonitor.finish()` / `trackNeverDelivered`
+(L-N2: dead in production, tested with impossible input).
+
+*(v3, C3 round 1 ruling, owner rule "never silent".)* v2 said "a 1 Hz flap never reaches a threshold
+and reports nothing", which let a dead tap behind a flapping gate stay silent. The gate is now
+DEBOUNCED: it counts as closed only after `TrackLivenessMonitor.gateCloseTicks` (2) consecutive closed
+ticks. A one-tick dropout neither clears an open episode nor restarts a clock, so a dead tap behind a
+1 Hz flap is reported ONCE per episode, never once per flap, and never left silent; a genuine close
+clears one tick later than before. `arm` or `pause` over an open episode ends it without a verdict,
+and the monitor then owes a `.cleared(.gateClosed)` on the next closed tick, so the alarm it carried
+cannot outlive the call. An accelerator opens an episode on the heartbeat it judged
+(`openEpisodeExternally(stamp:)`), so only a NEWER heartbeat ends it. The accelerator is refused
+before the generation's `.firstFrames`, because the never-delivered path owns the track until then.
+Because the debounce counts ticks, the gate is sampled at exactly 1 Hz: the watchdog calls `check`
+on every tick whether or not a monitor is armed, and nothing else feeds the gate to a monitor
+(`LivenessWatchdogDriver`, `OutputActivityProbe`). An accelerator reads the probe once for its own
+"is the track expected" check, but that reading never reaches the debounce.
 
 ### 4.3 The gate and the owner scenarios
 
@@ -242,6 +258,35 @@ result. When the gate closes, the episode ends and an exhausted ladder is un-exh
 tap gets a fresh fast episode (rungs, then alarm within ~15 s) when the gate reopens, instead of
 waiting for the next 60 s slow retry.
 
+*(v3, C4 round 1 rulings; H review rounds 1–2.)* The ladder as merged (`TapRecoveryLadder`, driven by
+`TapHealer`, both in `TranscriberCore`; the healer runs on its own serial queue) differs from the two
+paragraphs above in five ways:
+
+- **The heartbeat deadline is tokened.** A rung that returns success yields
+  `.awaitHeartbeat(seconds: 3, token:)`, and the miss is `heartbeatDeadlineMissed(token:now:)`. A deadline
+  left over from a replaced rung can never cut a newer rung's window short.
+- **A heartbeat ends the SILENCE, not the episode.** `heartbeatObserved(now:)` (the monitor's
+  `.firstFrames` or `.cleared(.heartbeat)`) cancels what is in flight or awaited and clears
+  `remoteNotDelivering`. The budget is refunded only after `sustainedHealthSeconds` (30 s) of continuous
+  health. A stall sooner continues the same episode up the ladder, with its budget as it stands and a
+  fresh 15 s fast window. This stops an endless heal–blip loop that never alarms.
+- **Heal first, then alarm.** An intermediate failed rung raises nothing. The ladder's give-up raises
+  `remoteNotDelivering`, and also `remoteRecoveryFailed` when a rebuild threw since the tap last
+  delivered. A rung that has not returned within `TapHealer.stuckSeconds` (5 s) raises
+  `remoteRecoveryFailed`. Any successful rebuild clears it.
+- **The dead state is REMEMBERED across a gate close.** v2 said a still-dead tap gets a fresh fast
+  episode when the gate reopens. Instead, a gate close over an episode the tap had not healed from
+  arms a "last chance": the reopen gets one immediate tap rung, and if that fails the ladder gives up
+  (re-alarm in ~3–4 s) instead of starting a new four-rung episode per gate blip. A gate that closes
+  again before that rung's verdict counts as its failure. An episode that had healed keeps its
+  budget through a gate blip until the heal has held for 30 s.
+- **Wake never rebuilds blind.** `.wake` makes the ladder forget its episode and returns `.none`; the
+  re-armed liveness monitor is the heartbeat check. Sleep suspends the healer (`cancelAll()`). A
+  liveness verdict that arrives while it is suspended proves the machine is awake, so it acts as an
+  implicit wake. A coreaudiod restart or a permission grant that arrives while asleep is kept and
+  runs at the wake. Stop ends the session (`endSession()`), and nothing but the next
+  `startSession(tap:)` revives the healer.
+
 `TapAutoStart`: becomes a `SystemTapSession` init parameter backed by config key `tap_auto_start`
 (diagnostic knob, default `true`). The default flips to `false` only if measurement M-B passes
 (§10). With `false` the IOProc runs continuously, "no callbacks" is unambiguous, the autostart
@@ -263,10 +308,11 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
 
 | Kind | Owner | Raised when | Cleared when |
 |---|---|---|---|
-| `micNotDelivering` | helper | `.neverDelivered`/`.stalled` on mic after `MicCaptureSession.attemptRecover()` did not restore a heartbeat within 5 s, or the recover loop reported its restart budget exhausted (`onUnavailable`; v2, scan C11) | `.recovered` |
+| `micNotDelivering` | helper | `.neverDelivered`/`.stalled` on mic after `MicCaptureSession.attemptRecover()` did not restore a heartbeat within 5 s, or the recover loop reported its restart budget exhausted (`onUnavailable`; v2, scan C11). *v3:* per `MicHealPolicy`, the first silence verdict of an episode heals and a repeat heals and alarms; a reopen with no newer heartbeat within 8 s alarms; the track is called but writes nothing for 5 s (`WriteProgressMonitor`) | `.firstFrames` / `.cleared(.heartbeat)`, or write progress for a write-bound alarm *(v3: was "`.recovered`", which does not exist)* |
 | `micDigitalSilence` | helper | `ExactZeroRunMonitor` 12 s (existing) | first non-zero mic sample |
-| `remoteNotDelivering` | helper | ladder fast budget exhausted | `.recovered` |
-| `remoteRecoveryFailed` | helper | a rung threw or got stuck | next successful rung |
+| `micFollowFailed` *(v3, H2 round 2)* | helper, acknowledgeable | switching to a new microphone failed while the previous one still records | a later successful follow, the end of the recording, or the user's acknowledgement |
+| `remoteNotDelivering` | helper | ladder gave up (§5); SCK: a silence verdict at once (no ladder); *v3:* the track is called but writes nothing for 5 s | `.firstFrames` / `.cleared(.heartbeat)` (the healer's recovery), the gate closing (no longer expected), or write progress for a write-bound alarm *(v3: was "`.recovered`")* |
+| `remoteRecoveryFailed` | helper | *v3:* a rung stuck for 5 s, or a give-up after a rebuild threw (never an intermediate failed rung); SCK: the stream restart budget exhausted | any successful rebuild, or first frames |
 | `remotePermissionDenied` | helper | `TapPermissionGuard.reportDenied(.denied/.notDetermined)` (existing) | real audio (existing `reportRestored`) |
 | `remoteCantConfirm` | helper | `TapPermissionGuard.reportDenied(nil)` (existing) | real audio |
 | `diskWriteFailure` | helper | `WavFileWriter.onWriteFailure` | next successful write on that writer |
@@ -274,10 +320,20 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
 | `rotationFailed` | app | `rotateChunk` threw | next successful rotation |
 | `sessionWriteFailed` | app | `session.json` could not be written after a chunk | next successful write |
 | `helperUnresponsive` | app | 3 consecutive `captureStatus` polls time out | a poll answers |
-| `crashProtectionOff` | app | `LaunchAgentHealth` ≠ healthy after repair | verified healthy |
+| `crashProtectionOff` | app | `LaunchAgentHealth` ≠ healthy after repair. *v3:* never for `loadedButNotThisProcess` while a hand-over is possible (§8.2). Raised when the hand-over is impossible or failed, when the single-instance lock is unavailable, or when open windows have deferred it for 15 min | verified healthy |
 | `recordingResumedWithGap` | app | relaunch/restart resumed the session | user acknowledges |
 | `recordingStopped` | app | relaunch could not resume | user acknowledges |
 | `recordingFolderUnavailable` | app | sentinel folder unreachable at relaunch, or rotation dir missing | folder reachable |
+| `unknownHelperAlarm` *(v3, F2 ruling)* | app | a helper snapshot carries an alarm kind this build cannot decode (a newer helper) | a snapshot that no longer carries one |
+| `audioAfterTranscript` *(v3, L review 219)* | app, acknowledgeable | audio of a finished recording, recorded after its transcript was written, is kept beside it untranscribed | user acknowledges |
+| `possibleAudioAfterTranscript` *(v3, L review 268)* | app, acknowledgeable | chunks the helper may have recorded after a Stop's transcript, which the Stop could not check (the folder did not answer) | user acknowledges |
+| `pendingListUnreadable` *(v3, L review 249)* | app, acknowledgeable | a list of unfinished recordings could not be read (set aside or left in place) | user acknowledges |
+
+*(v3.)* Acknowledgeable kinds are past events: `recordingResumedWithGap`, `recordingStopped`,
+`micFollowFailed`, `audioAfterTranscript`, `possibleAudioAfterTranscript`, `pendingListUnreadable`.
+Each is presented once, with no re-notify, and keeps its row until acknowledged. A kind that outlives
+the recording (`AlarmKind.outlivesRecording`) is `crashProtectionOff`, `recordingFolderUnavailable`, or
+any acknowledgeable kind except `micFollowFailed`. Everything else is cleared when the recording ends.
 
 ### 6.2 Transport
 
@@ -297,6 +353,33 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
   track's first frames). A same-helper snapshot replaces helper-owned kinds but preserves the
   2-minute notify clock of a kind that is still active in the same episode, so the 5 s poll never
   re-notifies.
+- *(v3, F2 rounds 1–2 rulings; supersedes the v2 bullet above where they differ.)* As merged:
+  - **The snapshot.** `CaptureStatusSnapshot` is
+    `{helperSessionId, sequence, isCapturing, alarms, tracks, coverage?}`. `coverage` is a status
+    pull's cumulative per-track coverage for the helper session, in `captureStop`'s detail keys (L11).
+    It is nil in a push, when not capturing, and from an older helper.
+  - **Ordered helper ids.** `helperSessionId` is ORDERED: `"<CLOCK_MONOTONIC ms at process start>-<registryResets>"`
+    (`HelperSessionId`). The counter increments on every registry reset. A strictly newer id makes
+    it the current helper and turns the previous helper's helper-owned alarms stale. An older id is a
+    late message and is ignored. A same-helper snapshot whose `sequence` is not newer than the last
+    one applied (a pull reply overtaken by a push) is ignored. The helper takes the sequence, the id
+    and the alarms in ONE critical section.
+  - **Evidence-specific clears.** A stale alarm clears only on evidence about the thing it claims,
+    which the helper sends on the reverse channel (`@objc optional`, each carrying the sender's
+    `helperSessionId`, so evidence from a new helper that arrives before its first snapshot is never
+    lost):
+    - `captureDidDeliverFirstFrames(track:helperSessionId:)` clears the delivery kinds
+      (`micNotDelivering`, `micFollowFailed`, `remoteNotDelivering`, `remoteRecoveryFailed`) on that
+      track.
+    - `captureDidDeliverRealAudio(track:helperSessionId:)` (the first non-zero sample) clears the
+      content kinds (`micDigitalSilence`, `remotePermissionDenied`, `remoteCantConfirm`) on that
+      track. A denied tap delivers frames on time, all of them zero, so first frames cannot disprove
+      a content alarm.
+    - `captureDidWriteSuccessfully(helperSessionId:)` clears `diskWriteFailure`.
+  - **Strict decode.** An alarm kind this build does not know is skipped and reported
+    (`unknownAlarmKinds`, which raises `unknownHelperAlarm`). Any other malformed element fails the
+    whole decode: a failed poll, never an all-clear.
+  - **Notify clock.** The notify clock is per KIND and is never reset by a poll (§6.3).
 
 ### 6.3 Presentation (`AlarmPresenter`, app target, thin)
 
@@ -308,6 +391,19 @@ is active: re-notify; reopen the window if "Later" was pressed ≥ 3 min ago
 keeps its existing repair window; the rest share the new panel. Benign notices keep the transient
 `interruptionWarning` slot and can never touch an alarm. `.critical` interruption level is not
 used (gotcha #51).
+
+*(v3, F2 ruling; L2/L4 rulings.)* "On raise: … notification" is governed by a **per-KIND notify floor**
+(`AlarmRealarmPolicy.notifyInterval`, 120 s). A kind notifies at once only if it has not notified
+within 2 min. That clock is carried across episodes and clears, so a flapping condition cannot notify
+faster than every 2 min. The menu rows update immediately whatever the floor. Acknowledgeable kinds
+(§6.1) are exempt: each notifies once, at once, and never re-notifies. While NOT recording, a live
+alarm backs off: it is presented at once, then after 2 min, 10 min, and at most hourly after that
+(`idleRenotifyInterval`). A new permission kind goes to its repair window first. If that window
+declines to present, the alarm window presents it. If it has not answered within a 3 s cap, the
+alarm's own notification goes out. There is no separate `AlarmPresenter`
+type: `RecordingCoordinator.presentAlarms` (Core) decides when, `AlarmRealarmPolicy.presentation`
+decides what, and `CaptureAlarmWindowController` / `CaptureAlarmView` (app) show it. Each kind has one
+stable notification identifier, so a re-notify replaces that kind's banner and never stacks another.
 
 ---
 
@@ -327,6 +423,23 @@ excluding pad, as Double), `exactZeroSeconds`, `paddedSeconds`, `longestGapSecon
   `writeFailure`, `sustainedFormatDrop`);
 - `healthy` otherwise.
 
+*(v3, C6 round 1 ruling; E1/R rulings.)* `neverDelivered` is `expectedSeconds ≥ 1` and
+`deliveredSeconds == 0`, on BOTH tracks, not "expected ≥ 5 s". The 5 s debounce belongs to the live
+alarm, not to the after-the-fact record. The check runs BEFORE the content-anomaly rule, so a side
+that captured nothing is never merely `compromised`. Order in `TrackAccounting.status`:
+1. tap `idle` (expected < 1 s and nothing delivered);
+2. `neverDelivered`;
+3. `compromised` on a content anomaly;
+4. tap `idle` again when expected < 1 s and everything delivered was measured exact zero (C-M12);
+5. the deficit rule;
+6. `healthy`.
+
+There is no `neverDelivered` counter: it is a status. `heartbeatCallbacks` and `exactZeroSeconds` are
+nil when unmeasured (SCK), never a claimed 0, and a sum across measured and unmeasured helper
+sessions is flagged `*_is_lower_bound`. `longestGapSeconds` is the real gap (`GapTracker`: from the last
+heartbeat or the arm until frames return, one still open included), never the ~3 s it took to detect
+it.
+
 Emitted as a `trackCoverage` event at every rotation (with the chunk index) and inside
 `captureStop` (session totals). `CaptureProvenance` gains `local_coverage` / `remote_coverage`
 dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for compatibility.
@@ -340,12 +453,49 @@ dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for 
 - `metadata.capture = {local: coverage, remote: coverage, gaps: [{start, end, seconds, reason}]}`.
 - `metadata.processing_issues = [{chunk, code, track?, count?}]` and `processing_issue_count`,
   from `ProcessedChunk.issues` (codes: `asr_failed`, `diarization_failed`, `vad_unavailable`,
-  `stream_empty`, `archive_failed`, `session_write_failed`, `duplicates_dropped`,
-  `segments_filtered`, `clusters_absorbed`, `echo_flagged`).
+  `stream_empty`, `archive_failed`, `session_write_failed`, `duplicates_flagged` *(v3: was
+  `duplicates_dropped`)*, `segments_filtered`, `clusters_absorbed`, `echo_flagged`; the complete v3
+  list is below).
 - *(v2, scan C13.)* `stream_empty` is informational — an idle side is not a processing problem
   (§9). `processing_issue_count` counts content-affecting issues only (`asr_failed`,
   `diarization_failed`, `archive_failed`, `session_write_failed`) and `processing_problem_chunks`
   the distinct chunks that have one; the completion notice uses the latter.
+- *(v3, R0/R2/R3 and R round 3–8 rulings; the code list is `ChunkIssue.Code` in `ChunkSession.swift`.)*
+  `duplicates_dropped` is gone: repeats are kept and flagged (`duplicates_flagged`, §7.4). An issue
+  is `{chunk?, code, track?, count?, detail?}`; `chunk` is absent for a session-level issue (e.g. a
+  failed write after a capture gap). The complete list of codes:
+
+  | Code | Kind | Meaning |
+  |---|---|---|
+  | `asr_failed` | content-affecting | speech recognition threw for the chunk's track |
+  | `diarization_failed` | content-affecting | diarization threw |
+  | `vad_failed` | content-affecting | VAD threw at runtime |
+  | `stream_missing` | content-affecting | the stream's WAV does not exist at all |
+  | `archive_failed` | content-affecting | the archive encode failed |
+  | `session_write_failed` | content-affecting | `session.json` could not be written |
+  | `chunk_index_collision` | content-affecting | a chunk arrived under an index already held by a different file; it was processed under a fresh index (`count` = the index it collided with), never skipped |
+  | `seed_mismatch` | content-affecting | a resume was offered another session's `session.json`; refused, the session started fresh |
+  | `vad_unavailable` | informational | the VAD model is not cached: the gate ran without a speech map |
+  | `stream_empty` | informational | the stream's WAV is a header only (an idle side) |
+  | `duplicates_flagged` | informational | abutting repeats kept, flagged `duplicate` |
+  | `zero_length_dropped` | informational | zero-duration segments (no audio behind them) dropped |
+  | `segments_filtered` | informational | segments that failed the VAD/quality gate, kept and flagged `filtered` |
+  | `clusters_absorbed` | informational | minority diarization clusters absorbed into the dominant speaker |
+  | `echo_flagged` | informational | local segments flagged `echo` (mic bleed) |
+  | `duplicate_source_other_index` | informational | a file already processed under one index arrived again under another and was skipped (`count` = the incoming index); nothing lost |
+  | `seed_engine_changed` | informational | a resumed session's seed was transcribed with another engine |
+  | `session_file_displaced` | informational | the day folder's `session.json` held another session and was moved aside (`session-<id>.json`) |
+  | `transcribed_from_archive` | informational | the chunk's WAVs were gone and its words came from its `.m4a` |
+  | `mic_stream_absent` | informational | the chunk had no microphone stream; processed remote-only |
+  | `merge_skipped_implausible_timing` | informational | chunk start times were implausible for one timeline (a gap over 12 h, a non-real start, one before the first chunk): not merged, each chunk's own audio is listed |
+  | `merge_skipped_folder_not_answering` | informational | a merge step on the recording folder did not answer within its bound: not merged, `detail` names the step |
+  | `quota_exceeded_by_current_session` | informational | the storage quota could not be met without deleting this session's own audio, which is never done |
+  | `audio_lengths_unknown` | informational | the listed audio's lengths could not be read within their bound; `chunk_durations` left out |
+
+  `processing_issue_count` and `processing_problem_chunks` count the content-affecting codes only
+  (`ChunkIssue.Code.contentAffecting`). A content-affecting issue with no `chunk` counts as one more
+  problem chunk, so the notice is never silent about it. A code written by a newer build decodes as
+  itself and is not counted.
 - `metadata.diarization` = diarizer present and no chunk has `diarization_failed`.
 - `metadata.merged_audio = {passthrough: Bool, gaps_inserted_seconds}` when concatenated.
 
@@ -370,7 +520,10 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
 - **Text dedup (P2):** `SpeakerAssignment.deduplicate` drops a repeat only when it abuts the
   previous segment (`start ≤ prev.end + 0.25 s`). The call moves out of the engines
   (`FluidAudioEngine.swift:123`, `SpeechAnalyzerEngine.swift:141`) into both `transcribeStream`s
-  so the count lands in `issues`.
+  so the count lands in `issues`. *(v3, R3 ruling, consistent with P10/P11 below.)* The abutting
+  repeat is not deleted: it is kept, flagged `duplicate: true`, labelled like the segment it repeats,
+  and hidden from TXT/SRT/summary/rename samples (`duplicates_flagged`). Zero-duration segments are
+  dropped and counted (`zero_length_dropped`).
 - **Chunk issues (P3):** every swallowed failure in `ChunkProcessor.transcribeStream` becomes an
   issue. An ASR-failed chunk's WAVs are kept alongside its `.m4a` (re-transcribable).
 - **Salvage (P6):** `salvageAbandonedSession` returns `SalvageOutcome`; the alert says
@@ -379,7 +532,9 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
   `recordingStopped`.
 - **Re-detect (P5):** refuse when a listed chunk is missing; pad `.skip` chunks with silence of
   their `chunk_durations` length (refuse if unknown); `speechMap: nil` (already gated once);
-  write `<transcript>.rediarize-backup.json` before overwrite; show the `Outcome` in the dialog.
+  write a backup before overwrite; show the `Outcome` in the dialog. *(v3, R6 ruling.)* The backup
+  is `<transcript>.json.bak` (`TranscriptRediarizer.backupURL`), written only before the FIRST
+  re-detect and never replaced, so it always holds the original transcript.
 - **Minority absorption (P7):** count into `clusters_absorbed`; rename-dialog hint.
 - **Session id (P12):** `SessionState.read(directory:sessionId:)` returns nil on mismatch.
 - **Quota (P13):** enforcement moves out of the archive `catch`; the day-folder scope is NOT
@@ -403,6 +558,36 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    `bootstrap gui/<uid>` when missing or stale, check exit status, raise `crashProtectionOff` when
    it still fails. Quit removes the plist **before** `bootout` (today's orphaned-plist ordering).
    The single-instance guard still absorbs the bootstrap-time duplicate (gotcha #54).
+   *(v3, C2 rounds 1–5 and L3 rulings.)* The states gain `loadedButNotThisProcess`: the job is loaded
+   and points at this binary, but its `pid` is not this process's. That is the NORMAL state after
+   a Finder or Sparkle launch, and right after the first install (bootstrap starts the job as its own
+   process). A crash of this process would not be relaunched. Its action is `handOverToJob`:
+   - **The hand-over.** Persist `lastHandOverAt` in `UserDefaults`, then run
+     `launchctl kickstart -k gui/<uid>/eu.fmasi.parley`. If this process is still idle after that,
+     it flushes the live logs (bounded), releases the single-instance lock and exits 0 at once.
+   - **launchd's copy waits.** launchd's copy is recognised by `XPC_SERVICE_NAME == eu.fmasi.parley`
+     in its environment. It WAITS up to 10 s for the lock (`SingleInstancePolicy.lockWaitTimeout`)
+     instead of yielding, and exits 0 if the wait times out (never non-zero, which KeepAlive would
+     respawn). Every other duplicate still yields at once.
+   - **The gate.** `LaunchAgentHealth.crashProtectionAction` decides whether to hand over, and when:
+     - never while busy (a recording, a start in flight, transcription, post-recording work, or a
+       panel still preparing), which defers it to the transition to idle;
+     - never by the launchd job itself;
+     - never without the single-instance lock;
+     - a 30 s `handOverCooldown` between attempts;
+     - at most `maxHandOverAttempts` (3) failed kickstarts per process;
+     - a visible Parley window defers it, for at most `windowDeferralLimit` (15 min), after which
+       the row says why.
+
+     CLI mode exits before any of this runs.
+   - **When the row shows.** `crashProtectionOff` is raised only when the hand-over is impossible or
+     failed, the lock is unavailable, or repair failed. It is not raised for the normal
+     `loadedButNotThisProcess` state.
+   - **Verbs.** Every `bootstrap` is preceded by `launchctl enable` (a job disabled by `unload -w`
+     cannot be bootstrapped until it is enabled). The job whose `pid` is this process is never booted
+     out: a pid match takes a quiet plist rewrite with no launchctl verb. Every destructive or
+     restarting verb requires the single-instance lock. Quit uninstalls only while holding the lock
+     (`shouldUninstallOnQuit`). `launchctl` runs through the injectable `LaunchctlRunning` seam.
 3. **Honest relaunch (L1).** The helper keeps `stopAndFinalize` on disconnect: sealed WAV headers
    are the only guarantee we have. The "helper keeps capturing 120 s" idea is unsafe until
    measurement M-L1 shows the helper survives the app's pid domain. `RelaunchDecision` (pure):
@@ -417,8 +602,24 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    `TranscriberApp.init` and injected into `MenuView`, and `recoverIfNeeded` becomes
    `RecordingCoordinator.recoverAtLaunch()` in Core (testable). This also settles the `@State`
    lifetime doubt.
+   *(v3, C7 and C9 rulings; L follow-up 37; L review 236.)* The rules as merged in
+   `RelaunchDecision.decide`:
+   - **Crash time.** The relaunch alert's times come from the LAST-ALIVE time, never `startedAt`
+     while anything better exists (`RecordingCoordinator.crashTime`). That is the newest orphan chunk
+     WAV's modification time when one exists (the helper sealed it on disconnect), even over a newer
+     `lastAliveAt`, which vouches for the app, not the capture. Else `lastAliveAt`, which can be up to
+     60 s early. Else `startedAt`. Never later than now.
+   - **Stopping.** `wasStopping` is checked BEFORE `helperCapturing` (a stop-in-flight race never
+     resumes or re-attaches; the coordinator stops the helper itself, bounded, before the salvage).
+     It does not beat an unreachable folder: that still waits (`.waitForFolder`), even mid-stop. A
+     Stop whose mark never landed also counts as `stopping`: `stopRequestedAt`, kept apart from the
+     sentinel, no earlier than `lastAliveAt`.
+   - **The window.** It is strictly `age < 180 s` (`RelaunchDecision.resumeWindow`); the boundary
+     salvages. A negative age (the wall clock stepped back after `lastAliveAt` was written) is as
+     untrustworthy as no liveness, and salvages.
 4. **First-frame probe and honest "Resumed" (L2).** Helper arms both monitors at start / restart /
-   rebuild / wake and calls `captureDidDeliverFirstFrames(track:)`. The app says "Recording
+   rebuild / wake and calls `captureDidDeliverFirstFrames(track:)` *(v3, F2: now
+   `(track:helperSessionId:)`, §6.2)*. The app says "Recording
    Resumed" only on it; "Restarted, waiting for audio…" meanwhile; a miss raises the track's
    `NotDelivering` alarm.
 5. **Retry cap (L9).** `xpcRetryCount` resets only after 60 s of confirmed frames following a
@@ -436,7 +637,9 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    refuse to start below 2 chunks + 200 MB; `diskLow` alarm below 1 chunk at a rotation. Rotation
    failure, `session.json` write failure and a `"No capture in progress"` rotate reply become
    alarms/provenance events (the last one is a dead capture → crash path). The "preserved" wording
-   is replaced by what is actually on disk.
+   is replaced by what is actually on disk. *(v3, C8 ruling.)* `DiskSpaceCheck.freeBytes` reads
+   `volumeAvailableCapacityForImportantUsage`, which reads 0 on non-APFS volumes (exFAT, HFS+). A 0
+   there falls back to the plain `volumeAvailableCapacity`, so a non-APFS drive is never "full".
 8. **Deadlines (L13).** Every `AudioCaptureClient` call gets a `ResumeOnce` deadline (start 15 s,
    stop 20 s, rotate 10 s, mic 10 s, drain 3 s, status 3 s); Stop marks the sentinel `stopping`
    before it asks the helper, and the sentinel is deleted only after `finalize` returns (or salvage
@@ -458,8 +661,19 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
     in-place restart; `LiveDiagnosticsLog` appends every anomaly to `<session>.diag.live.jsonl` as
     it happens and finalize merges it (deduplicated) into `<session>.diag.jsonl`; `retryCount`,
     `launchRecovery`, and `eventsDropped` are counters outside the ring and land in provenance.
+    *(v3, C11 ruling; L11 rulings.)* The live log encodes dates at millisecond precision (JSON's
+    built-in ISO-8601 drops sub-seconds, so a disk round-trip never matched its ring twin). It is
+    deduplicated on a key built from the ms-rounded timestamp, origin, kind and detail
+    (`CaptureEvent.dedupKey`). It keeps every non-`info` event plus the coverage-carrying kinds
+    (`captureStop`, `trackCoverage`) whatever their severity, so a crash never loses the pre-crash
+    coverage. Beside it, `<session>.diag.coverage.json` keeps each helper session's latest pulled
+    coverage, which stands in for a `captureStop` a crashed helper never wrote. The live log is
+    deleted only once the session's transcript exists.
 12. **Clocks (L15).** Chunk `startTime` comes from `MonotonicWallClock` (wall-clock at session start
-    + `ContinuousClock` elapsed); wall clock is for display only.
+    + `ContinuousClock` elapsed); wall clock is for display only. *(v3, C10 ruling.)* A
+    `ContinuousClock` instant cannot be persisted, so on a resume the clock is re-anchored at the
+    current time. The chunk pipeline builds its `ChunkRotator` with `startTime: Date()`, never the
+    seeded `meetingStart`.
 13. **Helper wedge.** Three missed `captureStatus` polls raise `helperUnresponsive` (the
     `pkill -STOP` checklist case).
 

@@ -130,8 +130,9 @@ last:  X (after every stream is merged) → device protocol → X3 decisions
 ```
 
 - Streams start in this order: **C and F at t=0**; **H, E, R, L, D the moment F merges**. Within each stream, a task that "waits for" a Ci/Ej/Rk must not start until that task has merged into the integration branch; rebase the stream on the integration head at that point (it is a fast-forward for everyone else's files).
-- Merge order among the parallel streams does not matter (disjoint files). Recommended: merge C-tasks as they finish (they unblock the most), then E1 early (unblocks R1), then R0 early (unblocks L7/L9/L10).
-- **Interim behaviour between merges** (state it, do not "fix" it ad hoc): between H2 and L3 merging, the SCK give-up sticky row is carried by either the old `noteSystemAudioLost` (before L3) or the helper's `remoteRecoveryFailed` alarm (after H2) — both are present only once both merged. Between F4 and H2, `captureStatus` answers an empty snapshot (no alarms), which the app treats as "no helper alarms". Between H1 and H4, system-track liveness verdicts are recorded and alarmed directly (no ladder). All of these are on the feature branch only; nothing ships before X.
+- Merge order among the parallel streams does not matter (disjoint files), with one exception. Recommended: merge C-tasks as they finish (they unblock the most), then E1 early (unblocks R1), then R0 early (unblocks L7/L9/L10).
+- *(X2 amendment, controller ruling during execution.)* **Stream H (with H2) merges before, or together with, stream L.** L2 removes the #220 sticky row, and until H2's helper alarms arrive nothing replaces it. No integration build is installed between the two merges. This is how it ran: `cr/h` merged at `dd8d3a4`, before `cr/l`.
+- **Interim behaviour between merges** (state it, do not "fix" it ad hoc): between H2 and L3 merging, the SCK give-up sticky row is carried by either the old `noteSystemAudioLost` (before L3) or the helper's `remoteRecoveryFailed` alarm (after H2) — both are present only once both merged. *(X2 amendment: H merged before L, and L's tasks, L2 and L3 included, merged in one step. So the dangerous state, L2's app alarms without H2's helper alarms and therefore no sticky row at all, never existed on the integration branch.)* Between F4 and H2, `captureStatus` answers an empty snapshot (no alarms), which the app treats as "no helper alarms". Between H1 and H4, system-track liveness verdicts are recorded and alarmed directly (no ladder). All of these are on the feature branch only; nothing ships before X.
 
 ### Task index (v1 → v2)
 
@@ -6519,7 +6520,7 @@ Diagnostic knobs in `config.json` (docs/parameters.md → Debugging): `tap_auto_
 ## P2 — honest record
 - [ ] **D-20 Coverage on a real call.** 2-chunk call: `metadata.capture.remote.status healthy`, `expected_seconds ≈ delivered_seconds`, `processing_issues: []`, `dual_stream: true`.
 - [ ] **D-21 Mic-empty chunk.** Unplug a USB mic for a whole chunk: that chunk archives system-only, the merged `.m4a` keeps R = remote, L silent for that stretch; no WAV left behind unless `preserve_source_wav`.
-- [ ] **D-22 Re-detect timeline.** On a recording with a mic-only chunk, re-detect the remote channel: speaker turns land at the same timestamps as before; a `.rediarize-backup.json` exists.
+- [ ] **D-22 Re-detect timeline.** On a recording with a mic-only chunk, re-detect the remote channel: speaker turns land at the same timestamps as before; a `<transcript>.json.bak` exists *(X2 amendment: the code names it `.json.bak`, written before the first re-detect only; was `.rediarize-backup.json`)*.
 - [ ] **D-23 Summary honesty.** Re-summarise `2026-09-24/160032-….json` after stamping `capture.remote.status: neverDelivered`: the summary opens by stating the remote side was not captured.
 - [ ] **D-24 Engine preflight.** Settings → Engine → Apple Speech — not yet usable (#223) → Save: "Not saved — this engine cannot transcribe on this Mac: …" and the engine stays FluidAudio.
 
