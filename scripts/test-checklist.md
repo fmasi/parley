@@ -51,7 +51,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 
 - [ ] **D-01 An idle-exit does not disarm crash detection.**
   - Do: launch Parley and don't record for 12 min. Check `pgrep -fl audio-capture-helper-xpc` prints nothing. Start a recording with audio playing. After 30 s, `pkill -9 -f audio-capture-helper-xpc`. Stop after 1 more minute.
-  - PASS: around the 10-min mark the log shows "XPC interrupted while idle — helper idle-exit, ignored", and no helper process is started again until you record. After the kill, the menu shows "Recording restarted — waiting for audio…", and the "Recording Resumed" notification comes only after audio frames arrive (never at the instant of the restart). After Stop, `diag <id>.diag.jsonl` lists `xpcInterruption` and `retry`, and `rch` shows audio after the kill.
+  - PASS: around the 10-min mark the log shows "XPC interrupted while idle — helper idle-exit, ignored", and no helper process is started again until you record. After the kill, the menu shows "Recording restarted — waiting for audio…", and the "Recording Resumed" notification comes only after audio frames arrive (never at the instant of the restart); it says "Some audio may have been lost". After Stop, `diag <id>.diag.jsonl` lists `xpcInterruption`, `retry` and a `captureGap` with reason `helper restart`; `meta` shows `capture.gaps` with `{reason: "helper restart", seconds ≈ the restart's few seconds}` (final review R-I1); and `rch` shows audio after the kill.
   - Capture: the log lines, `diag` output, `rch` output.
 
 - [ ] **D-02a LaunchAgent: Quit removes it.**
@@ -88,6 +88,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Capture: shot of the row.
   - Optional (15 min): on a non-job instance (the D-02e trick), leave Settings open 15 min. PASS: the row reads "Crash protection is waiting for you to close Parley’s windows…".
 
+- [ ] **D-02h Crash protection during a recording (final review A-I2).**
+  - Do: make Parley a non-job instance whose hand-over is deferred: launch it from Finder with the Setup/repair window open (or the D-02e cooldown trick), or click Record within a second of launch. Record 5 min with audio, then Stop and let the transcript finish.
+  - PASS: when the recording starts, the row "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it…" appears with ONE notification, and no further notification for the rest of the call (not every 2 min). After Stop, once Parley is idle (no panel open): the hand-over runs (one icon blink) and the row clears.
+  - Capture: shot of the row, the log line "Crash-protection hand-over deferred…" if any.
+
 - [ ] **D-03 A crash relaunches and resumes within 5 s.**
   - Do: check that Parley is launchd's job (D-02b). Record a call or a looping `afplay`, talk for 1 min, then `date +%T; kill -SEGV $(pgrep -x Parley)`. Keep talking for 1 more minute, then Stop.
   - PASS:
@@ -106,9 +111,10 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - PASS (the ladder, from `diag` after Stop): within ~10 s, `neverDelivered` (track system); then up to 4 `tapRecoveryRung` (rung `rebuildAggregate`, `rebuildAggregate`, `rebuildTap`, `rebuildTap`) inside ~15 s; then `tapRecoveryGivenUp`.
   - PASS (the alarm): the floating window, a sound, a notification, and the red row "The other side may not be recorded" appear, while typing in another app keeps working. Click **Later**: the row stays. A second notification comes 2 min after the first. The window returns 3 min after Later. A `tapRecoveryRung` with `rebuildTap` runs every 60 s (the slow retry).
   - PASS (the dead-gate memory): stop `afplay` for ≥ 3 s. `livenessRecovered` with reason `gateClosed` appears, and the row goes away (nothing is expected to play). Start `afplay` again: ONE `tapRecoveryRung rebuildTap`, then `tapRecoveryGivenUp` and the row again within ~4 s, not a fresh 4-rung episode. A notification comes only if ≥ 2 min have passed since the last one (the notify floor).
-  - PASS (the record): after Stop, `meta` shows `capture.remote.status == "neverDelivered"`. The completion notice is NOT the plain "Transcription Complete". `-summary.md` (with an LLM endpoint) opens with a banner saying "Remote audio: not captured (0 s delivered of N s expected)".
+  - PASS (the record): after Stop, `meta` shows `capture.remote.status == "neverDelivered"`. The completion notice reads "Transcription Complete — the other side was not captured" (it reads the per-side verdict, final review R-I2), never the plain "Transcription Complete". `-summary.md` (with an LLM endpoint) opens with a banner saying "Remote audio: not captured (0 s delivered of N s expected)".
   - Cleanup (required): Quit, `cfg debug_drop_tap_frames null`, and open Parley.
   - Note: the knob can't be removed mid-recording, because config is read only at launch. Healing that clears the row is checked in D-10, D-13 and D-16 instead.
+  - Note: the Core test rig now drives the Incident-B chain (the helper's HF-4); this device item stays for the HAL half — the real tap, aggregate and IOProc.
   - Capture: `diag`, `meta`, shots of the window and the row.
 
 - [ ] **D-05 A wedged helper is noticed, and does not freeze the app.**
@@ -184,6 +190,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: mic = AirPods (HFP), default output = AirPods, clock anchor = built-in speaker, Safari playing to the AirPods. Record, and wait 15 s past the mic start. In a second Terminal, watch `log stream --process audio-capture-helper-xpc | grep -E 'PauseIO|ResumeIO'`. Try 3 times. Control run: a wired mic.
   - PASS: if callbacks stop (a `PauseIO` with no `ResumeIO`), then `tapRecoveryRung` events come in order and frames are back within 10 s (a system `firstFrames` after the rung), with no alarm left up. If callbacks never stop in 3 tries, write "not reproduced".
   - Record for X3: which `rung` and `token` restored callbacks, how long each rung took, and whether any `recoveryStuck` appeared (a rung that did not return in 5 s means `AudioDeviceStop` blocked).
+  - If `recoveryStuck` appears: ALSO Stop, then start a second recording WITHOUT relaunching the helper, and check its remote side is captured — `sweepOrphanedAggregates` on an abandoned stop's aggregate is unverified (final review, helper M6).
   - Capture: `diag`, the PauseIO/ResumeIO lines.
 
 - [ ] **D-11 Aggregate listeners (M-E), during D-10.**
@@ -412,6 +419,7 @@ notification. The "muted" cells are also M-A census cells: fill the matrix row b
 - [ ] **N-08 Stop 5 min after hanging up.** PASS: the completion notice is "Transcription Complete", not "Transcription Complete — capture anomalies" (`CaptureQualityNotice.swift`; the frame check counts only expected time).
 - [ ] **N-09 Nothing playing for 60 s,** with the permission on. PASS: no repair window, and `capture.remote.status` is `idle` (the summary says nothing was playing, not a fault).
 - [ ] **N-10 True alarms still fire.** Close the lid on the built-in mic in clamshell mode (or use a USB mic's hardware mute) during a recording. PASS: the row "Your microphone isn’t being recorded" appears within ~15 s (12 s of exact-zero samples plus presentation). Its message is the static "The microphone has delivered Ns of pure digital silence — it may be hardware-muted (e.g. the lid is closed on the built-in mic)." — it does NOT name the actual mic device, even for the USB-mute case; that clause is only an example.
+- [ ] **N-11 Grant System Audio Recording while nothing is playing** (final review, helper HF-1). Start a recording with no call and nothing playing, with the permission denied (`tccutil reset AudioCapture eu.fmasi.parley`, **Don't Allow**); then grant it in System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only. PASS: no new row and no notification while nothing plays. Join the call: the remote is captured. If the tap is dead, ONE tap rung, then `remoteNotDelivering` within ~10 s of audio starting. (D-07 grants with audio playing and cannot see this.)
 
 ## Measurement runs (they feed X3; the decisions are in the measurements file)
 

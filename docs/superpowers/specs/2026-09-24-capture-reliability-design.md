@@ -112,7 +112,8 @@ Afterwards the saved record states truthfully how much of each side was captured
 
 **What you will experience.**
 
-- A real fault (Incident A or B) produces, within about 10 s: a floating window over the call that
+- A real fault (Incident A or B) produces, within about 20 s of the fault (5 s to judge a track that
+  never delivered, or 3 s for a stall, then a 15 s healing window before the alarm): a floating window over the call that
   does not steal focus, a sound, a notification, and a red row in the menu. Every 2 minutes it
   reminds you until it is fixed or you stop. If Parley fixed it itself, the row clears and a quiet
   banner says so — only after real frames arrived.
@@ -320,7 +321,7 @@ capture alarms; the app owns lifecycle alarms. Both kinds land in `AppState.acti
 | `rotationFailed` | app | `rotateChunk` threw | next successful rotation |
 | `sessionWriteFailed` | app | `session.json` could not be written after a chunk | next successful write |
 | `helperUnresponsive` | app | 3 consecutive `captureStatus` polls time out | a poll answers |
-| `crashProtectionOff` | app | `LaunchAgentHealth` ≠ healthy after repair. *v3:* never for `loadedButNotThisProcess` while a hand-over is possible (§8.2). Raised when the hand-over is impossible or failed, when the single-instance lock is unavailable, or when open windows have deferred it for 15 min | verified healthy |
+| `crashProtectionOff` | app | `LaunchAgentHealth` ≠ healthy after repair. *v3:* never for `loadedButNotThisProcess` while a hand-over is possible (§8.2). Raised when the hand-over is impossible or failed, when the single-instance lock is unavailable, when open windows have deferred it for 15 min, or *(final review A-I2)* while a recording runs under a process that has not handed over — re-checked when a recording starts; while recording it notifies once per raise, never every 2 min | verified healthy |
 | `recordingResumedWithGap` | app | relaunch/restart resumed the session | user acknowledges |
 | `recordingStopped` | app | relaunch could not resume | user acknowledges |
 | `recordingFolderUnavailable` | app | sentinel folder unreachable at relaunch, or rotation dir missing | folder reachable |
@@ -450,7 +451,10 @@ dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for 
 
 - `metadata.dual_stream` = `chunks.contains(where: \.isDualStream)` — the capture-time flag the
   writer persisted, never re-derived from segments (`TranscriptionRunner.swift:397`).
-- `metadata.capture = {local: coverage, remote: coverage, gaps: [{start, end, seconds, reason}]}`.
+- `metadata.capture = {local: coverage, remote: coverage, gaps: [{start, end, seconds, reason}]}`;
+  `reason` is `app relaunch`, `sleep`, or *(final review R-I1)* `helper restart` (from the dead helper's
+  last write to the restart's start). A side's coverage carries `coverage_incomplete: true` when a stop's
+  seal timed out: its seconds are lower bounds *(final review R-M1)*.
 - `metadata.processing_issues = [{chunk, code, track?, count?}]` and `processing_issue_count`,
   from `ProcessedChunk.issues` (codes: `asr_failed`, `diarization_failed`, `vad_unavailable`,
   `stream_empty`, `archive_failed`, `session_write_failed`, `duplicates_flagged` *(v3: was
@@ -501,10 +505,14 @@ dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for 
 
 ### 7.3 Completion notice and summary
 
-`CaptureQualityNotice.completionTitle(anomalyCount:problemChunkCount:segmentCount:)` picks exactly
-one of "Transcription Complete", "— capture anomalies", "— N chunks had processing problems",
-"— no speech was transcribed", with precedence no speech > capture anomalies > processing
-problems; the body names every non-zero count *(v2, scan C14: v1 left the combination undefined)*.
+`CaptureQualityNotice.completionTitle(anomalyCount:problemChunkCount:segmentCount:remoteStatus:localStatus:)`
+picks exactly one of "Transcription Complete", "— the other side was not captured" / "— your microphone
+was not captured", "— capture compromised", "— capture anomalies", "— N chunks had processing
+problems", "— no speech was transcribed", with precedence no speech > a side not captured > a side
+partly captured > capture anomalies > processing problems; the body names each side and every non-zero
+count *(v2, scan C14: v1 left the combination undefined; final review R-I2: the per-side verdict,
+`capture_provenance.<side>_coverage.status`, is read — a side that delivered nothing may carry no ring
+anomaly)*.
 `MeetingSummarizer.parseTranscript` reads `metadata.capture`; `SummaryPromptBuilder`
 adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expected)") and a rule
 ("state it in the Summary section when a side was not captured").
@@ -582,7 +590,11 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
      CLI mode exits before any of this runs.
    - **When the row shows.** `crashProtectionOff` is raised only when the hand-over is impossible or
      failed, the lock is unavailable, or repair failed. It is not raised for the normal
-     `loadedButNotThisProcess` state.
+     `loadedButNotThisProcess` state — except during a recording *(final review A-I2)*: the hand-over
+     (an exit) cannot happen under one, so a recording under a process that has not handed over says
+     "Crash protection is off for this recording" (`LaunchAgentHealth.recordingUnprotectedMessage`),
+     re-checked on the transition into a recording (`RecordingCoordinator.onRecordingStarted`), one
+     notification; the hand-over runs once the app is idle again.
    - **Verbs.** Every `bootstrap` is preceded by `launchctl enable` (a job disabled by `unload -w`
      cannot be bootstrapped until it is enabled). The job whose `pid` is this process is never booted
      out: a pid match takes a quiet plist rewrite with no launchctl verb. Every destructive or
@@ -621,7 +633,9 @@ adds a header line ("Remote audio: not captured (0 s delivered of 2736 s expecte
    rebuild / wake and calls `captureDidDeliverFirstFrames(track:)` *(v3, F2: now
    `(track:helperSessionId:)`, §6.2)*. The app says "Recording
    Resumed" only on it; "Restarted, waiting for audio…" meanwhile; a miss raises the track's
-   `NotDelivering` alarm.
+   `NotDelivering` alarm. Every restart lost audio, so "Resumed" says "Some audio may have been
+   lost", and a helper-crash restart records its gap (`captureGap`, reason `helper restart`) as the
+   relaunch does *(final review R-I1)*.
 5. **Retry cap (L9).** `xpcRetryCount` resets only after 60 s of confirmed frames following a
    restart (`RecordingCoordinator.confirmRecoveryHealthy()`), never on `start()` returning.
    `RecordingCoordinatorTests.swift:795` enshrines the bug and changes red-first. The launch-time

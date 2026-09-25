@@ -6,9 +6,11 @@ public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case lmstudio
 }
 
-/// Which mechanism captures system (remote) audio. `screenCaptureKit` is the shipped default;
-/// `coreAudioTap` selects the Core Audio output process tap (#103) — a strict superset that also
-/// captures Continuity/telephony + VoIP that SCK misses. Behind a flag during phase 2 rollout.
+/// Which mechanism captures system (remote) audio. `coreAudioTap` — the Core Audio output process tap
+/// (#103) — is the default for new installs (`Config.default`): a strict superset that also captures
+/// Continuity/telephony + VoIP that SCK misses. `screenCaptureKit` is the retiring legacy path (#221):
+/// still selectable, and what a pre-existing config without the key decodes to, but not a fallback —
+/// nothing switches to it on its own.
 public enum SystemAudioSource: String, Codable, Equatable, Sendable {
     case screenCaptureKit = "sck"
     case coreAudioTap = "core_audio_tap"

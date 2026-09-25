@@ -241,7 +241,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 **`metadata.capture`**:
 - `local` / `remote` — the same dictionaries as `capture_provenance.local_coverage` / `remote_coverage`. `capture.remote.status` is the authority on whether the remote side was captured; `dual_stream` is only the capture-time flag that a mic stream was recorded next to it.
-- `gaps` — `[{start, end, seconds, reason}]`, periods with no capture: `reason` is `"app relaunch"` or `"sleep"`. Written even when no coverage was stamped.
+- `gaps` — `[{start, end, seconds, reason}]`, periods with no capture: `reason` is `"app relaunch"`, `"sleep"` or `"helper restart"` (a capture-helper crash restarted mid-recording: from its last write to the restart). Written even when no coverage was stamped.
 
 **Processing issues** (`ChunkIssue`, the full code list is in spec §7.2):
 - `metadata.processing_issues` — `[{chunk?, code, track?, count?, detail?}]`: every chunk's `issues`, plus the session's own (`session.json` `issues`) and those finalize adds (a skipped merge, unreadable audio lengths). Always written for a tracked (app) session, `[]` when clean; absent from the CLI `run()` path, which does not track issues, so absence never reads as "clean".
