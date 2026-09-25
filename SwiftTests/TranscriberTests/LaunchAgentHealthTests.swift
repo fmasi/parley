@@ -218,3 +218,44 @@ import Testing
     }
 
 }
+
+/// Final review AF-10: one crash-protection check at a time, and a check asked for while one runs is never DROPPED. The
+/// recording's start re-check (A-I2) can arrive while a check is inside the hand-over's kickstart; dropped, that check
+/// would find the app busy, stay, and the recording would run unprotected with no row.
+@MainActor
+@Suite struct CrashProtectionSerialCheckTests {
+    @Test func aCheckAskedForWhileOneRunsRunsOnceAfterIt() async {
+        let checks = LaunchAgentHealth.SerialCheck()
+        var runs = 0, concurrent = 0
+        await checks.run {
+            runs += 1
+            guard runs == 1 else { return }
+            // Two asks arrive while the first check is still running (the hook, a cooldown retry): neither runs now.
+            await checks.run { concurrent += 1 }
+            await checks.run { concurrent += 1 }
+            #expect(checks.isRunning)
+        }
+        #expect(concurrent == 0, "never two checks at once")
+        #expect(runs == 2, "the asks were not dropped: the check ran ONCE more after the running one, however many asked")
+        #expect(!checks.isRunning)
+    }
+
+    @Test func aCheckWithNoAskMeanwhileRunsOnce() async {
+        let checks = LaunchAgentHealth.SerialCheck()
+        var runs = 0
+        await checks.run { runs += 1 }
+        await checks.run { runs += 1 }
+        #expect(runs == 2 && !checks.isRunning, "each ends; the next runs on its own")
+    }
+
+    /// A failed hand-over decides again (one retry after the cooldown, or the capped row) — from inside the running check.
+    @Test func theRunningCheckCanAskToRunAgain() async {
+        let checks = LaunchAgentHealth.SerialCheck()
+        var runs = 0
+        await checks.run {
+            runs += 1
+            if runs < 3 { checks.runAgainAfterThis() }
+        }
+        #expect(runs == 3 && !checks.isRunning)
+    }
+}

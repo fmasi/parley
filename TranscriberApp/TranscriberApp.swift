@@ -286,8 +286,9 @@ struct TranscriberApp: App {
     private static let lastHandOverKey = "LaunchAgent.lastHandOverAt"
     /// Kickstarts that failed in this process; capped by `LaunchAgentHealth.maxHandOverAttempts`.
     private static var failedHandOvers = 0
-    /// One check at a time: the idle watch and the cooldown retry can both fire.
-    private static var crashProtectionCheckRunning = false
+    /// One check at a time — the idle watch, the cooldown retry and a recording's start can all fire — and one asked for
+    /// meanwhile runs once after it, never dropped (final review AF-10).
+    private static let crashProtectionChecks = LaunchAgentHealth.SerialCheck()
     /// Waits for the transition to idle before re-checking (never a blind timer).
     private static var idleWatch: IdleWatch?
     /// Since when open windows alone have deferred the hand-over (bounded: `windowDeferralLimit`).
@@ -329,10 +330,11 @@ struct TranscriberApp: App {
 
     @MainActor
     static func verifyCrashProtection(appState: AppState) async {
-        guard !crashProtectionCheckRunning else { return }
-        crashProtectionCheckRunning = true
-        defer { crashProtectionCheckRunning = false }
+        await crashProtectionChecks.run { await checkCrashProtection(appState: appState) }
+    }
 
+    @MainActor
+    private static func checkCrashProtection(appState: AppState) async {
         let health = await LaunchAgentManager.verifyAndRepair(holdsInstanceLock: holdsInstanceLock)
         let defaults = UserDefaults.standard
         let now = Date()
@@ -387,8 +389,7 @@ struct TranscriberApp: App {
             guard await LaunchAgentManager.handOverToJob() else {
                 failedHandOvers += 1
                 Logger.state.error("LaunchAgent hand-over failed (\(failedHandOvers, privacy: .public) of \(LaunchAgentHealth.maxHandOverAttempts, privacy: .public))")
-                crashProtectionCheckRunning = false
-                await verifyCrashProtection(appState: appState)   // decides: one retry after the cooldown, or the capped row
+                crashProtectionChecks.runAgainAfterThis()   // decides: one retry after the cooldown, or the capped row
                 return
             }
             // Re-checked AFTER the kickstart returned: a recording, a transcript or a panel may have

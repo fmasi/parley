@@ -195,6 +195,36 @@ public enum LaunchAgentHealth {
         }
     }
 
+    // MARK: - One check at a time, none dropped (final review AF-10)
+
+    /// Runs the crash-protection check one at a time. A check asked for while one runs is never dropped: it runs ONCE
+    /// after the running one ends, however many asked meanwhile. The recording's start re-check (A-I2) can arrive while a
+    /// check awaits the hand-over's kickstart; dropped, the running check would find the app busy, stay, and the recording
+    /// would run unprotected with no row. The re-run is the running call's own check — every ask is the same check.
+    @MainActor
+    public final class SerialCheck {
+        public private(set) var isRunning = false
+        private var runAgain = false
+
+        public nonisolated init() {}
+
+        public func run(_ check: () async -> Void) async {
+            guard !isRunning else {
+                runAgain = true
+                return
+            }
+            isRunning = true
+            defer { isRunning = false }
+            repeat {
+                runAgain = false
+                await check()
+            } while runAgain
+        }
+
+        /// From inside the running check: run it once more when it ends (a failed hand-over decides again).
+        public func runAgainAfterThis() { runAgain = true }
+    }
+
     // MARK: - Hand-over cooldown (owner-ruled robustness gap, fix round 1, item 4)
 
     /// Minimum time between two `.handOverToJob` attempts, to avoid a kickstart loop. The rest of the
