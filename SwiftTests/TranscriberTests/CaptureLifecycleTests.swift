@@ -114,6 +114,48 @@ import Testing
         #expect(l.isCurrentStart(new) && !l.isCurrentStart(old), "whose files it must not delete either")
     }
 
+    // MARK: - Round 5 item 5: a dropped connection stops only the capture it owns
+
+    private final class Connection {}
+
+    /// The app drops a connection on a stop timeout and starts again on a NEW one: the old connection's
+    /// late invalidation must not stop the new connection's capture.
+    @Test func aDroppedConnectionStopsOnlyTheCaptureItOwns() throws {
+        let a = Connection(), b = Connection()
+        var l = Lifecycle()
+        let claim = l.claimStart(owner: ObjectIdentifier(a))
+        let t = try #require(claim)
+        _ = l.commitStart(t)
+        let fromB = l.requestStop("b", disconnectOf: ObjectIdentifier(b))
+        #expect(fromB == .notOwner)
+        #expect(l.phase == .capturing, "untouched")
+        let fromA = l.requestStop("a", disconnectOf: ObjectIdentifier(a))
+        #expect(fromA == .stop)
+    }
+
+    /// A start in flight when its own connection drops is aborted — never committed with no client.
+    @Test func aStartInFlightWhenItsConnectionDropsIsAbortedNeverCommitted() throws {
+        let a = Connection()
+        var l = Lifecycle()
+        let claim = l.claimStart(owner: ObjectIdentifier(a))
+        let t = try #require(claim)
+        let drop = l.requestStop("a", disconnectOf: ObjectIdentifier(a))
+        #expect(drop == .abortStart)
+        let committed = l.commitStart(t)
+        #expect(!committed)
+    }
+
+    /// An explicit stop is the app's, from whichever connection it has now: never refused for ownership.
+    @Test func anExplicitStopFromAnotherConnectionStillStops() throws {
+        let a = Connection()
+        var l = Lifecycle()
+        let claim = l.claimStart(owner: ObjectIdentifier(a))
+        let t = try #require(claim)
+        _ = l.commitStart(t)
+        let stop = l.requestStop("explicit")
+        #expect(stop == .stop)
+    }
+
     @Test func theStartDeadlineOutlastsTheAppsStartDeadline() {
         #expect(Lifecycle.startTimeoutSeconds == 20)
         #expect(Lifecycle.sourceStopTimeoutSeconds == 3)

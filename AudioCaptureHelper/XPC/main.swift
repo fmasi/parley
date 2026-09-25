@@ -50,10 +50,13 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
             send.async { client?.captureDidWriteSuccessfully?(helperSessionId: helperSessionId) }
         }
 
+        // By identity, not by reference (a strong one would be a retain cycle): the connection is alive while
+        // its own invalidation handler runs, so no other connection can share the identity meanwhile.
+        let connectionID = ObjectIdentifier(newConnection)
         newConnection.invalidationHandler = { [weak self] in
             guard let self else { return }
-            Logger.audio.warning("XPC client disconnected — stopping capture and finalizing")
-            self.service.stopAndFinalize()
+            Logger.audio.warning("XPC client disconnected — stopping the capture it owns, if any, and finalizing")
+            self.service.stopAndFinalize(disconnectOf: connectionID)
         }
 
         newConnection.resume()

@@ -566,7 +566,9 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     ) {
         // A CLAIM, not only a check (B-I2): a second start while this one is still coming up is refused
         // too, instead of overwriting the handler, the paths and the tap and orphaning the first session.
-        guard let token = stateLock.sync(execute: { lifecycle.claimStart() }) else {
+        // The calling connection owns what this start builds: only its invalidation stops it (round 5 item 5).
+        let owner = NSXPCConnection.current().map(ObjectIdentifier.init)
+        guard let token = stateLock.sync(execute: { lifecycle.claimStart(owner: owner) }) else {
             reply(false, CaptureReplies.alreadyInProgress)
             return
         }
@@ -822,6 +824,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         case .abortStart:
             Logger.audio.info("Stop during start — the start aborts, then answers this stop")
+            return
+        case .notOwner:   // only a disconnect asks by owner
             return
         case .stop:
             break
@@ -1255,18 +1259,23 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
     }
 
-    func stopAndFinalize() {
+    /// `connection` was invalidated. Stops only the capture (or start) it owns (round 5 item 5): the app
+    /// drops a connection on a stop timeout and may already be recording through a new one.
+    func stopAndFinalize(disconnectOf connection: ObjectIdentifier) {
         // Claim the stop before snapshotting the stream so an in-flight restart bails / is torn down
         // (council F1), mirroring stopCapture. A disconnect during a start aborts it (B-I2): the start
         // tears down what it built, so no capture is left running without a client. Nobody waits for an
         // answer, so the lifecycle's pending reply is a no-op.
         let (decision, captureStream, micSess, tapSess, h, session) = stateLock.sync {
             () -> (Lifecycle.StopDecision, SCStream?, MicCaptureSession?, SystemTapSession?, AudioOutputHandler?, Int) in
-            (lifecycle.requestStop({ _, _, _ in }), stream, micSession, tapSession, handler, lifecycle.session)
+            (lifecycle.requestStop({ _, _, _ in }, disconnectOf: connection), stream, micSession, tapSession, handler, lifecycle.session)
         }
         switch decision {
         case .abortStart:
             Logger.audio.info("Client disconnected during start — the start aborts and tears down")
+            return
+        case .notOwner:
+            Logger.audio.info("A connection that does not own the current capture was invalidated — capture left running")
             return
         case .notCapturing, .alreadyStopping:
             return

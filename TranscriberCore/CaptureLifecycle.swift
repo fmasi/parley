@@ -17,6 +17,9 @@ import os
 ///   start's own failure path wins `beginEndingStart`, tears down, and replies. The stale start can
 ///   never commit into, or end, a later session.
 /// - A stop always ends `idle`, whatever its sources did, so the next Record is never refused.
+/// - A dropped connection stops only the capture (or start) it OWNS (round 5 item 5): the app drops a
+///   connection on a stop timeout and starts again on a new one, and the old one's late invalidation
+///   must not stop that. An explicit stop is the app's, from whatever connection it has, and always acts.
 /// - A rotation during a start or a stop is refused with a reply that is NOT "No capture in progress",
 ///   which the app treats as a dead capture (§8.7), and a rotation is checked against its own session.
 public struct CaptureLifecycle<StopReply> {
@@ -30,6 +33,8 @@ public struct CaptureLifecycle<StopReply> {
         /// A stop is already tearing it down.
         case alreadyStopping
         case notCapturing
+        /// A dropped connection that does not own the current capture: nothing to do.
+        case notOwner
     }
 
     public enum RotationGate: Equatable, Sendable { case allowed, refusedStopping, notCapturing }
@@ -48,17 +53,28 @@ public struct CaptureLifecycle<StopReply> {
     /// A failure or the deadline has begun tearing the start down.
     private var startEnding = false
     private var pendingStops: [StopReply] = []
+    /// The connection whose start claimed the session; nil = unknown (not started over XPC).
+    private var owner: ObjectIdentifier?
 
     public init() {}
 
-    /// `startCapture`: claim the session. nil = a start or a capture is already in flight.
-    public mutating func claimStart() -> Int? {
+    /// `startCapture`: claim the session for `owner` (the calling connection). nil = a start or a
+    /// capture is already in flight.
+    public mutating func claimStart(owner: ObjectIdentifier? = nil) -> Int? {
         guard phase == .idle else { return nil }
+        self.owner = owner
         phase = .starting
         session += 1
         startAborted = false
         startEnding = false
         return session
+    }
+
+    /// A stop because `connection` was invalidated: acts only when that connection owns the current
+    /// capture or start (an unknown owner is anyone's). A start in flight is aborted, never committed.
+    public mutating func requestStop(_ reply: StopReply, disconnectOf connection: ObjectIdentifier) -> StopDecision {
+        if phase != .idle, let owner, owner != connection { return .notOwner }
+        return requestStop(reply)
     }
 
     /// A `.abortStart` keeps `reply` until the start has torn down (`startEnded`).
