@@ -741,15 +741,9 @@ public final class RecordingCoordinator {
             if let rotator = transcriptionRunner.chunkRotator,
                let processor = transcriptionRunner.chunkProcessor {
                 // A rotation that timed out may have completed in the helper: the chunk it sealed is processed
-                // from its own files, and the last chunk is the one the helper was writing (L9 review 46).
-                rotator.reconcileLateRotation()
-                // Process the last chunk via the chunked pipeline
-                let lastChunk = ChunkRotator.FinalizedChunk(
-                    index: rotator.currentChunkInfo.index,
-                    systemPath: paths.systemAudio.path,
-                    micPath: paths.micAudio.path,
-                    startTime: rotator.currentChunkInfo.startTime
-                )
+                // from its own files (L9 review 46). The last chunk is the one the stop's reply NAMES, labelled
+                // by its own index — never another chunk's (L review 113).
+                let lastChunk = rotator.lastChunkAtStop(systemPath: paths.systemAudio.path, micPath: paths.micAudio.path)
                 await processor.processLastChunk(lastChunk)
 
                 // Wait for any background chunks still processing
@@ -1561,11 +1555,13 @@ public final class RecordingCoordinator {
         recoveryGateHeld = true
         stoppedBatch = ([], [])
         if let sentinel = RecordingSentinel.read(directory: sentinelDirectory) {
-            // The helper just refused to let go: asking it again now would only wait out another bound. The
-            // next event (a mount, a wake, a recording's end) retries.
             if await recover(sentinel) != .heldForHelper {
                 // Sessions an earlier launch could not finish (their folder away, or the helper not letting go).
                 await retryPendingLocked()
+            } else {
+                // The helper just refused to let go of THIS session: asking it again now would only wait out another
+                // bound — but the OTHER pending sessions are not its capture, and are finished now (L review 118).
+                await retryPendingLocked(helperHolds: sentinel.sessionKey)
             }
         } else {
             await retryPendingLocked()
@@ -1904,7 +1900,9 @@ public final class RecordingCoordinator {
     }
 
     /// The retry itself, under the recovery gate.
-    private func retryPendingLocked() async {
+    /// `helperHolds`: the session whose capture the helper just refused to let go of at this launch — left held,
+    /// and the helper not asked again; every other ready session is finished (L review 118).
+    private func retryPendingLocked(helperHolds heldKey: String? = nil) async {
         retryPendingWhenIdle = false
         let pending = pendingSessions()
         guard !pending.isEmpty else {
@@ -1913,34 +1911,39 @@ public final class RecordingCoordinator {
         }
         // Off the main actor, bounded (L review 75): folders that do not answer are not ready.
         let statuses = await pendingFolderStatuses(pending)
-        let ready = pending.filter { statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable }
+        let ready = pending.filter {
+            $0.sessionKey != heldKey && statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
+        }
         if !ready.isEmpty {
             // Re-checked after the read (L follow-up 38): a start pressed meanwhile owns the app.
-            guard appState.isIdle, !isStartInFlight else {
+            guard appState.isIdle, !userStartInFlight else {
                 retryPendingWhenIdle = true
                 return
             }
-            // While idle, a capture the helper still holds is a previous recording's that did not stop. Only the
-            // helper's stop answer releases a session — "No capture in progress" counts — never a ping, which can
-            // read a slow helper as not capturing (L review 84).
-            guard await boundedHelperStop("stop a pending session") else {
-                applyFolderAlarm(pending: pendingSessions(), statuses: statuses)
-                return   // still not letting go: the next event tries again
+            if heldKey == nil {
+                // While idle, a capture the helper still holds is a previous recording's that did not stop. Only the
+                // helper's stop answer releases a session — "No capture in progress" counts — never a ping, which
+                // can read a slow helper as not capturing (L review 84).
+                guard await boundedHelperStop("stop a pending session") else {
+                    applyFolderAlarm(pending: pendingSessions(), statuses: statuses)
+                    return   // still not letting go: the next event tries again
+                }
+                guard appState.isIdle, !userStartInFlight else {
+                    retryPendingWhenIdle = true
+                    return
+                }
+                clearHelperMic()   // the helper let go of the mic a held session kept marked (L review 88)
             }
-            guard appState.isIdle, !isStartInFlight else {
-                retryPendingWhenIdle = true
-                return
+            // The helper's events — the capture it held, sealed — go to the pending session that knows its helper
+            // session (the held one included), or to none; drained ONCE, before any salvage binds (L review 98).
+            let sessions = (ready + pending.filter { $0.sessionKey == heldKey }).map {
+                (sessionId: stripSegmentSuffix($0.systemAudioPath), directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent())
             }
-            clearHelperMic()   // the helper let go of the mic a held session kept marked (L review 88)
-            // The helper just stopped: its events — the capture it held, sealed — go to the pending session that knows
-            // its helper session, or to none; drained ONCE, before any salvage binds (L review 98). Bounded.
-            let sessions = ready.map { (sessionId: stripSegmentSuffix($0.systemAudioPath),
-                                        directory: URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent()) }
             _ = try? await withDeadline(seconds: Self.seconds(folderReadDeadline), label: "pending: attribute the helper's events") {
                 await self.attributeHelperDrain(sessions)
             }
             for sentinel in ready {
-                guard appState.isIdle, !isStartInFlight else {
+                guard appState.isIdle, !userStartInFlight else {
                     retryPendingWhenIdle = true
                     break
                 }
@@ -2787,8 +2790,8 @@ public final class RecordingCoordinator {
         rotator: ChunkRotator, processor: ChunkProcessor, outputDir: URL
     ) -> (index: Int, baseName: String) {
         // A timed-out rotation the helper completed late: the orphan is the chunk it was really writing, and
-        // the chunk it sealed goes through the pipeline from its own files (L9 review 46).
-        rotator.reconcileLateRotation()
+        // the chunk it sealed goes through the pipeline from its own files (L9 review 46). Not a rotation (118).
+        rotator.reconcileLateRotation(announce: false)
         let orphan = rotator.currentChunkInfo
         let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
         processor.processChunk(Self.orphanChunk(

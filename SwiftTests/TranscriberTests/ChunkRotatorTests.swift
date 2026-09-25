@@ -321,9 +321,130 @@ struct ChunkRotatorTests {
         var rotator: ChunkRotator? = makeRotator()
         rotator?.start()
         let timer = try #require(rotator?.activeTimerForTesting)
+        #expect(timer.isValid, "live while its rotator is")
         rotator = nil
+        #expect(!timer.isValid, "the rotator's deinit took it — before any fire (L review 118)")
         timer.fire()
         for _ in 0..<20 { await Task.yield() }
         #expect(!timer.isValid)
+    }
+
+    // MARK: - L round B (113, 115, 118)
+
+    private func rotator(_ client: any ChunkRotationClient, dir: URL, startIndex: Int = 0,
+                         finalized: Box<[(index: Int, system: String)]>, rotated: Box<Int>) -> ChunkRotator {
+        let r = ChunkRotator(captureClient: client, outputDirectory: dir.path, sessionBaseName: "meeting",
+                             chunkDurationMinutes: 10, startIndex: startIndex, startTime: Date(timeIntervalSince1970: 0),
+                             onChunkFinalized: { finalized.value.append(($0.index, URL(fileURLWithPath: $0.systemPath).lastPathComponent)) })
+        r.onRotated = { rotated.value += 1 }
+        return r
+    }
+
+    /// L review 113: the Stop's last chunk is the one the helper's stop reply NAMES — never one chunk's audio under
+    /// another's index. A reply naming a later chunk than the rotator's current one (a rotation completed that no
+    /// file check showed) emits the current chunk from its own files first.
+    @Test func theStopsLastChunkIsTheOneItsReplyNames() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(FakeChunkRotationClient(), dir: dir, finalized: finalized, rotated: rotated)
+        let last = r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-1.wav").path,
+                                     micPath: dir.appendingPathComponent("meeting-1_mic.wav").path)
+        #expect(last.index == 1 && URL(fileURLWithPath: last.systemPath).lastPathComponent == "meeting-1.wav")
+        #expect(finalized.value.map(\.index) == [0] && finalized.value.first?.system == "meeting-0.wav", "chunk 0 from its own files")
+        #expect(r.currentChunkInfo.index == 1)
+        let same = rotator(FakeChunkRotationClient(), dir: dir, finalized: Box([]), rotated: rotated)
+        #expect(same.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-0.wav").path,
+                                     micPath: dir.appendingPathComponent("meeting-0_mic.wav").path).index == 0)
+        #expect(rotated.value == 0, "settling at Stop is not a rotation (L review 118)")
+    }
+
+    /// L review 118: a reconcile at Stop or at a crash is not a rotation — `onRotated` (liveness, the disk check)
+    /// fires only for a rotation.
+    @Test func aReconcileAtACrashIsNotARotation() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = DiskHelper(dir: dir, writing: "meeting-0", lateOnce: true)
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()   // times out; completed late
+        r.recoverFromCrash()
+        #expect(finalized.value.map(\.index) == [0], "reconciled")
+        #expect(rotated.value == 0, "not announced as a rotation")
+    }
+
+    /// L review 115: a rotation still in flight when a crash recovery runs belongs to the dead helper: its late
+    /// timeout is never remembered, so the recovery chunk the NEW helper writes is never taken for its completion.
+    @Test func aStaleAttemptDoesNotSurviveACrashRecovery() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = DiskHelper(dir: dir, writing: "meeting-2")
+        let released = Box(false), gated = Box(true)
+        helper.gate = { if gated.value { while !released.value { await Task.yield() } } }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(helper, dir: dir, startIndex: 2, finalized: finalized, rotated: rotated)
+        helper.lateOnce = true
+        r.rotateNow()   // asks for meeting-3; the helper dies before answering
+        for _ in 0..<20 { await Task.yield() }
+        let plan = r.recoverFromCrash()
+        #expect(plan.recoveryIndex == 3)
+        gated.value = false
+        helper.writing = "meeting-3"   // the NEW helper records the recovery chunk
+        released.value = true
+        await r.awaitRotationInFlight()   // the dead helper's attempt times out now
+        await r.rotateForTesting()
+        #expect(finalized.value.map(\.index) == [3], "chunk 3 once, from the reply — never early, never twice")
+        #expect(r.currentChunkInfo.index == 4)
+    }
+
+    /// L review 118: the reply names a late attempt's chunk (it completed between the check and the next rotate):
+    /// the chunks are emitted in order, each from its own files, the late one from the reply.
+    @Test func aReplyNamingALateChunkEmitsEachFromItsOwnFiles() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        final class LateBetween: ChunkRotationClient {
+            let dir: URL
+            var calls = 0
+            init(dir: URL) { self.dir = dir }
+            func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+                calls += 1
+                if calls == 1 { throw CaptureCallTimeout(call: "rotateChunk", seconds: 10) }   // not created (yet)
+                // The first attempt completes now, just before this one: the helper was writing meeting-1.
+                for s in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent("meeting-1" + s)) }
+                for s in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(newBaseName + s)) }
+                return (dir.appendingPathComponent("meeting-1.wav").path, dir.appendingPathComponent("meeting-1_mic.wav").path)
+            }
+        }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(LateBetween(dir: dir), dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()
+        await r.rotateForTesting()
+        #expect(finalized.value.map(\.index) == [0, 1])
+        #expect(finalized.value.map(\.system) == ["meeting-0.wav", "meeting-1.wav"])
+        #expect(r.currentChunkInfo.index == 2)
+    }
+
+    /// L review 118: two consecutive rotations time out, and both completed late: every chunk is emitted once, in
+    /// order, from its own files.
+    @Test func twoConsecutiveLateAttemptsAreEachEmittedOnce() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        final class TwiceLate: ChunkRotationClient {
+            let dir: URL
+            var calls = 0
+            var writing = "meeting-0"
+            init(dir: URL) { self.dir = dir }
+            func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+                calls += 1
+                let sealed = writing
+                writing = newBaseName
+                for s in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(newBaseName + s)) }
+                if calls <= 2 { throw CaptureCallTimeout(call: "rotateChunk", seconds: 10) }
+                return (dir.appendingPathComponent(sealed + ".wav").path, dir.appendingPathComponent(sealed + "_mic.wav").path)
+            }
+        }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let r = rotator(TwiceLate(dir: dir), dir: dir, finalized: finalized, rotated: rotated)
+        await r.rotateForTesting()   // meeting-1: timed out, completed
+        await r.rotateForTesting()   // the reconcile adopts 1; meeting-2: timed out, completed
+        await r.rotateForTesting()   // the reconcile adopts 2; meeting-3 answered
+        #expect(finalized.value.map(\.index) == [0, 1, 2])
+        #expect(finalized.value.map(\.system) == ["meeting-0.wav", "meeting-1.wav", "meeting-2.wav"])
+        #expect(r.currentChunkInfo.index == 3)
     }
 }

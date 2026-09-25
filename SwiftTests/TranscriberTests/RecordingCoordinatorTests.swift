@@ -186,9 +186,12 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         return stopResult
     }
 
+    /// Awaited inside the record's build, before the transcript is written: a test reads the session there.
+    var onFinalizeDiagnostics: (() async -> Void)?
     func finalizeSessionDiagnostics(
         sessionId: String, engine: String, recordingDirectory: URL
     ) async -> CaptureProvenance {
+        await onFinalizeDiagnostics?()
         finalizeCalls.append((sessionId, engine, recordingDirectory))
         evidenceOrder.append("finalize:\(sessionId)")
         bound = nil
@@ -3067,9 +3070,17 @@ private struct Harness {
         }
         h.client.stopResult = AudioPaths(systemAudio: outDir.appendingPathComponent(next + ".wav"),
                                          micAudio: outDir.appendingPathComponent(next + "_mic.wav"))
+        let runner = h.runner
+        let chunks = Harness.Box<[ProcessedChunk]>([])
+        h.client.onFinalizeDiagnostics = { chunks.value = await runner.chunkProcessor?.getSessionState().chunks ?? [] }
         await h.coordinator.stopRecording()
         #expect(rotator.currentChunkInfo.index == 1, "the stop's last chunk is the helper's chunk 1")
         #expect(h.presented.value.count == 1)
+        // L review 118: which files each chunk came from — chunk i from its own `-i` audio.
+        #expect(chunks.value.map(\.index).sorted() == [0, 1])
+        for chunk in chunks.value {
+            #expect(URL(fileURLWithPath: chunk.audioPath).deletingPathExtension().lastPathComponent.hasSuffix("-\(chunk.index)"), "\(chunk.audioPath)")
+        }
     }
 
     /// R2's hook: a session.json write that fails (here a capture gap's) is a sticky alarm and a
@@ -5260,5 +5271,108 @@ private struct Harness {
         }
         await h.coordinator.recoverAtLaunch()
         #expect(answered.value == true)
+    }
+}
+
+// MARK: - L round B: rotation and the retry after a hold (113, 118)
+
+@MainActor
+@Suite struct RecordingCoordinatorRotationRoundBTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+
+    /// L review 113: at Stop, the helper's reply names the chunk it sealed. With no late attempt on record, a reply
+    /// naming chunk 1 while the rotator still names chunk 0 labels that audio 1 — and chunk 0 goes from its own files.
+    @Test func theStopsReplyNamesTheLastChunk() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let base = String(rotator.currentBaseName.dropLast(2))
+        for name in [base + "-0", base + "-1"] {
+            for suffix in [".wav", "_mic.wav"] { try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(name + suffix)) }
+        }
+        h.client.stopResult = AudioPaths(systemAudio: outDir.appendingPathComponent(base + "-1.wav"),
+                                         micAudio: outDir.appendingPathComponent(base + "-1_mic.wav"))
+        let runner = h.runner
+        let chunks = Harness.Box<[ProcessedChunk]>([])
+        h.client.onFinalizeDiagnostics = { chunks.value = await runner.chunkProcessor?.getSessionState().chunks ?? [] }
+        await h.coordinator.stopRecording()
+        #expect(chunks.value.map(\.index).sorted() == [0, 1], "\(chunks.value.map(\.index))")
+        for chunk in chunks.value {
+            #expect(URL(fileURLWithPath: chunk.audioPath).deletingPathExtension().lastPathComponent.hasSuffix("-\(chunk.index)"), "\(chunk.audioPath)")
+        }
+    }
+
+    /// L review 118: a failed restart whose helper let go, with the restart's own file on disk: that file (sealed by
+    /// the stop) joins the salvage.
+    @Test func aFailedRestartsOwnFileJoinsTheSalvage() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let base = String(rotator.currentBaseName.dropLast(2))
+        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(base + "-0.wav"))
+        // The restart captured into chunk 1, then failed; the stop lets it go.
+        h.client.onStart = { try? Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(base + "-1.wav")) }
+        h.client.startError = FakeCaptureError()
+        h.client.onStartAsync = nil
+        h.client.stopResult = AudioPaths(systemAudio: outDir.appendingPathComponent(base + "-1.wav"),
+                                         micAudio: outDir.appendingPathComponent(base + "-1_mic.wav"))
+        h.coordinator.helperStopDeadline = .seconds(5)
+        let runner = h.runner
+        let chunks = Harness.Box<[ProcessedChunk]>([])
+        h.client.onFinalizeDiagnostics = { chunks.value = await runner.chunkProcessor?.getSessionState().chunks ?? [] }
+        await h.coordinator.handleXPCCrash()
+        #expect(h.appState.isIdle)
+        #expect(chunks.value.map(\.index).sorted() == [0, 1], "the orphan and the restart's own file: \(chunks.value.map(\.index))")
+    }
+
+    /// L review 118: the pending retry's stop that the helper does not answer — the connection is dropped, and the
+    /// session stays pending: never salvaged while its file may still be written.
+    @Test func aPendingRetryWhoseStopIsUnansweredKeepsTheSession() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try h.writeSentinel()
+        try RecordingSentinel.writePending([s], directory: h.tmp)
+        RecordingSentinel.delete(directory: h.tmp)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.retryPendingSessions()
+        #expect(h.client.droppedConnections == 1)
+        #expect(pending(h).map(\.sessionKey) == [s.sessionKey] && h.client.finalizeCalls.isEmpty)
+    }
+
+    /// L review 118: a hold at launch (the helper would not let go of one session) does not make the OTHER pending
+    /// sessions wait for another event: they are finished now — without asking the stuck helper a second time.
+    @Test func aHoldDoesNotDelayTheOtherPendingSessions() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let other = h.tmp.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: other, sessionId: "old", meetingStart: Date(), chunkIndices: [0])
+        let older = RecordingSentinel(startedAt: Date(), sessionName: "Old", systemAudioPath: other.appendingPathComponent("old-0.wav").path,
+                                      micAudioPath: other.appendingPathComponent("old-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true)
+        try RecordingSentinel.writePending([older], directory: h.tmp)
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go of `s`
+        await h.coordinator.recoverAtLaunch()
+        #expect(pending(h).map(\.sessionKey) == [s.sessionKey], "held; the older one finished")
+        #expect(h.presented.value.count == 1 && h.presented.value.first?.lastPathComponent == "old.json")
+        #expect(h.client.stopCalls == 1, "the stuck helper was asked once")
     }
 }

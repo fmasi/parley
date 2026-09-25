@@ -114,8 +114,8 @@ public final class ChunkRotator {
     @discardableResult
     public func recoverFromCrash(now: Date? = nil) -> ChunkRecoveryPlan {
         // A timed-out rotation the helper completed late is settled first: the orphan is the chunk the
-        // helper was really writing (L9 review 46).
-        reconcileLateRotation()
+        // helper was really writing (L9 review 46). Not a rotation (L review 118).
+        reconcileLateRotation(announce: false)
         let planned = chunkRecoveryPlan(sessionBaseName: sessionBaseName, currentChunkIndex: currentChunkIndex)
         // The recovery segment's name must not be a file already on disk (same rule as rotate()).
         let recoveryIndex = nextFreeIndex(after: currentChunkIndex)
@@ -125,6 +125,7 @@ public final class ChunkRotator {
         currentChunkIndex = plan.recoveryIndex
         currentChunkStartTime = now ?? clock.now()
         lateAttempts = []   // the crashed helper completes nothing more
+        generation += 1     // …nor does a rotation still in flight to it (L review 115)
         Logger.audio.info("ChunkRotator recovered: orphan chunk \(plan.orphanIndex, privacy: .public), resuming at \(plan.recoveryIndex, privacy: .public)")
         return plan
     }
@@ -167,6 +168,9 @@ public final class ChunkRotator {
     /// then writes that chunk while this rotator names the old one — so they are settled before the next
     /// rotation, at Stop and at a crash (L9 review 46).
     private var lateAttempts: [Int] = []
+    /// Bumped by a crash recovery: a rotation still in flight to the dead helper answers for a helper that is gone
+    /// — its timeout is never remembered, its reply never applied (L review 115).
+    private var generation = 0
 
     private func rotate() {
         let previous = rotation
@@ -193,9 +197,10 @@ public final class ChunkRotator {
     /// disk, the helper sealed the current chunk and is writing that one. Then every sealed chunk is emitted
     /// from ITS OWN files, in order, and the helper's index adopted — each chunk processed once, from its own
     /// audio. Called before every rotation, by Stop (after the helper's stop) and by a crash recovery.
-    /// Returns whether it reconciled; an attempt that did not complete (yet) stays pending.
+    /// Returns whether it reconciled; an attempt that did not complete (yet) stays pending. `announce`: `onRotated`
+    /// runs — only before a rotation, never at Stop or at a crash, which are not rotations (L review 118).
     @discardableResult
-    public func reconcileLateRotation() -> Bool {
+    public func reconcileLateRotation(announce: Bool = true) -> Bool {
         let opened = lateAttempts.filter { fileExists(index: $0, suffix: ".wav") }
         guard let writing = opened.last else { return false }
         Logger.audio.error("ChunkRotator: a timed-out rotation of chunk \(self.currentChunkIndex, privacy: .public) completed late — the helper is writing \(writing, privacy: .public)")
@@ -205,8 +210,43 @@ public final class ChunkRotator {
         currentChunkStartTime = max(creationDate(index: writing) ?? clock.now(), currentChunkStartTime)
         // Attempts made after the one that opened `writing` would seal IT if they complete: still pending.
         lateAttempts = lateAttempts.filter { $0 > writing }
-        onRotated?()
+        if announce { onRotated?() }
         return true
+    }
+
+    /// The Stop's last chunk (L review 113): the one the helper's stop reply NAMES — never one chunk's audio under
+    /// another's index. A late rotation is reconciled first. A reply naming a later chunk of this session than the
+    /// current one (a rotation completed that no file check showed) emits the current chunk — and any late attempt
+    /// before the named one — from their own files, through `onChunkFinalized`; the named chunk is returned, for the
+    /// caller to process last. A name that is not this session's keeps the current index (logged).
+    public func lastChunkAtStop(systemPath: String, micPath: String) -> FinalizedChunk {
+        reconcileLateRotation(announce: false)
+        let sealed = URL(fileURLWithPath: systemPath).lastPathComponent
+        guard sealed != currentBaseName + ".wav" else {
+            return FinalizedChunk(index: currentChunkIndex, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
+        }
+        guard let named = chunkIndex(named: sealed), named != currentChunkIndex else {
+            Logger.audio.error("ChunkRotator: the stop sealed a file this session does not name — kept as chunk \(self.currentChunkIndex, privacy: .public)")
+            return FinalizedChunk(index: currentChunkIndex, systemPath: systemPath, micPath: micPath, startTime: currentChunkStartTime)
+        }
+        Logger.audio.error("ChunkRotator: the stop sealed chunk \(named, privacy: .public) while chunk \(self.currentChunkIndex, privacy: .public) was named — each labelled by its own index")
+        var start = currentChunkStartTime
+        if named > currentChunkIndex {
+            let between = lateAttempts.filter { $0 < named && fileExists(index: $0, suffix: ".wav") }
+            emitSealed(between[...], last: nil)
+            start = max(creationDate(index: named) ?? start, start)
+        }
+        currentChunkIndex = named
+        currentChunkStartTime = start
+        lateAttempts = []
+        return FinalizedChunk(index: named, systemPath: systemPath, micPath: micPath, startTime: start)
+    }
+
+    /// `<session>-<n>.wav` → n; nil for any other name.
+    private func chunkIndex(named file: String) -> Int? {
+        let prefix = "\(sessionBaseName)-", suffix = ".wav"
+        guard file.hasPrefix(prefix), file.hasSuffix(suffix) else { return nil }
+        return Int(file.dropFirst(prefix.count).dropLast(suffix.count))
     }
 
     /// Emits the current chunk from its own files, then each chunk in `between` (opened and sealed by late
@@ -236,6 +276,7 @@ public final class ChunkRotator {
 
     private func performRotation() async {
         reconcileLateRotation()
+        let generation = self.generation
         let oldIndex = currentChunkIndex
         let oldStartTime = currentChunkStartTime
         // Past every timed-out attempt's name too: the helper may still create it (L9 review 46).
@@ -249,6 +290,10 @@ public final class ChunkRotator {
                 outputDirectory: outputDirectory,
                 newBaseName: nextBaseName
             )
+            guard generation == self.generation else {
+                Logger.audio.error("ChunkRotator: a rotation answered after a crash recovery — the dead helper's reply is dropped")
+                return
+            }
             // The helper answered, so every earlier attempt is settled. It sealed the chunk it was writing:
             // normally the current one — but if a timed-out attempt completed just before (after the check
             // above), the reply names that attempt's chunk, and the chunks before it come from their own files.
@@ -265,6 +310,10 @@ public final class ChunkRotator {
             self.currentChunkStartTime = clock.now()
             self.onRotated?()
         } catch {
+            guard generation == self.generation else {
+                Logger.audio.info("ChunkRotator: a rotation to the helper a crash recovery replaced failed — not remembered")
+                return
+            }
             Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .private)")
             // Timed out — the client's deadline, or the helper's own "Rotation timed out" (its writer swap overran
             // and may land late; L review 91b): the helper may still complete it — remembered, settled before the

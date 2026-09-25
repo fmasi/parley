@@ -124,13 +124,14 @@ final class AudioCaptureClient {
                 }
             }
         }
-        let connectionId = ObjectIdentifier(conn)
-        conn.invalidationHandler = { [weak self] in
+        conn.invalidationHandler = { [weak self, weak conn] in
             Task { @MainActor in
                 guard let self else { return }
                 // An older connection's invalidation (one `dropConnection` already replaced) is not this
-                // connection's news: it must not clear a newer connection, nor count as its crash.
-                if let current = self.connection, ObjectIdentifier(current) != connectionId { return }
+                // connection's news: it must not clear a newer connection, nor count as its crash. Compared by
+                // identity (`===`) through a weak reference, never an `ObjectIdentifier`, which a freed
+                // connection's address can hand to a new one (L review 114).
+                if let current = self.connection, current !== conn { return }
                 self.connection = nil
                 switch self.interruptionPolicy.onInvalidation() {
                 case .crash:
