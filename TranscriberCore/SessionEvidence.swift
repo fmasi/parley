@@ -10,8 +10,8 @@ import os
 ///   id (L11 review 66): ids are `HHmmss-<name>` with no date, so a recurring meeting started at the same
 ///   second on another day has the same id in another day folder. The SAME session — an in-session restart,
 ///   or a relaunch that resumes it — keeps it all; a finalized one is never continued.
-/// - Every event is also appended to `<session>.diag.live.jsonl` as it happens (queued: an app crash loses only
-///   the lines still queued, and every exit flushes them first — L review 96); building the record merges it
+/// - Every event is also appended to `<session>.diag.live.jsonl` as it happens (queued: a crash or a force-quit loses
+///   the lines still queued; an orderly exit flushes them first, bounded — L reviews 96, 141); building the record merges it
 ///   back, deduplicated. It is deleted only when the session is COMMITTED, once its transcript exists (L review
 ///   97): a crash while the transcript is written is salvaged with all of it.
 /// - Every status pull's coverage is kept per helper session (council A-I4 / C-I1). At finalize a helper

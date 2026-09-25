@@ -108,6 +108,9 @@ public final class RecordingCoordinator {
     /// Where the watchdog's implicit wake ended the sleep's gap: a REAL didWake after it, with no sleep in between,
     /// records the rest of the sleep and restarts monitoring again — never swallowed (L review 104).
     var implicitWakeAt: Date?
+    /// The capture's mic frames came back after the implicit wake: a real didWake then records no second gap — that
+    /// audio was captured (L review 162).
+    var framesSinceImplicitWake = false
     /// `ProcessInfo` activity that keeps the Mac from idle-sleeping from a recording's start until its
     /// transcript is finished — every phase but `.idle` (L10 review 59). Follows the phase, so every path in
     /// and out is covered. A lid close or a user sleep still sleeps: that is the user's call — recorded as a
@@ -121,7 +124,8 @@ public final class RecordingCoordinator {
     var quitFeedbackDelay: Duration = .seconds(2)
     /// The user's Quit is stopping the recording: the menu says "Quitting…".
     public internal(set) var isQuitting = false
-    /// The bound on the live-log flush at every exit (L review 96). Tests shorten it.
+    /// The bound on the live-log flush of the Quit and the termination preparation (L review 96), never past their own
+    /// deadline (L review 145). Tests shorten it.
     var evidenceFlushBound: Duration = .seconds(1)
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
     /// two quit events) joins it instead of stopping twice.
@@ -207,13 +211,16 @@ public final class RecordingCoordinator {
     /// turn in between counts as idle — L round 7), or running in `startRecording`, whatever the
     /// outcome. The phase is still `.idle` meanwhile, and a crash-protection hand-over (an exit) must
     /// wait; the Record control is disabled (§8.6, mirrors `stopInFlight`).
-    /// The relaunch probing the helper — its ping, and the stops it may need — counts too (L review 112): Record is
-    /// disabled until the helper's state is settled.
-    public var isStartInFlight: Bool { startAnnounced || startRunning || relaunchProbing }
+    /// The relaunch probing the helper — its wait for the recovery gate, its ping, and the stops it may need — counts too
+    /// (L reviews 112, 159, 161): Record is disabled until the helper's state is settled, and no longer — a salvage that
+    /// follows is not a start. So does a pending retry's own helper stop (L review 161).
+    public var isStartInFlight: Bool { startAnnounced || startRunning || relaunchProbing || pendingHelperStopInFlight }
     /// A start that is not the relaunch's own: what every relaunch step yields to after an await (L reviews 38,
     /// 112, 129).
     var userStartInFlight: Bool { startAnnounced || startRunning }
     private var relaunchProbing = false
+    /// A pending retry is asking the helper to let go (L review 161).
+    private var pendingHelperStopInFlight = false
     private var startAnnounced = false
     private var startRunning = false
     /// A start refused because the helper is busy with an earlier capture: the pending retry runs once it is over.
@@ -1221,6 +1228,7 @@ public final class RecordingCoordinator {
         presentAlarms(now: now)
         // A Stop pressed during the restart: the recording is ending — nothing "resumed" (item 2).
         guard track == .mic, awaitingRecoveryFrames, !stopRequestedDuringRecovery else { return }
+        if implicitWakeAt != nil { framesSinceImplicitWake = true }
         awaitingRecoveryFrames = false
         recoveryFramesAt = now
         lastMicAlarmAt = nil
@@ -1324,9 +1332,11 @@ public final class RecordingCoordinator {
     private func flushEvidence() async { await captureClient.flushEvidence() }
 
     /// Every queued live-log write reaches the disk before the process ends (L review 96) — bounded: a stuck disk
-    /// never holds an exit longer than `evidenceFlushBound`.
-    func flushEvidenceForExit() async {
-        _ = try? await withDeadline(seconds: Self.seconds(evidenceFlushBound), label: "exit: evidence flush") { await self.flushEvidence() }
+    /// never holds an exit longer than `evidenceFlushBound`, nor past the exit's own `deadline` (L review 145). Whatever
+    /// is left unflushed is flushed again, bounded, when the app terminates (`LiveDiagnosticsLog.flushAll(within:)`).
+    func flushEvidenceForExit(by deadline: SuspendingClock.Instant? = nil) async {
+        let bound = deadline.map { min(evidenceFlushBound, max(.zero, $0 - .now)) } ?? evidenceFlushBound
+        _ = try? await withDeadline(seconds: max(0.001, Self.seconds(bound)), label: "exit: evidence flush") { await self.flushEvidence() }
     }
 
     /// A bounded helper stop on a path that ends a capture (§8.6). True once the helper has let go: it
@@ -1582,6 +1592,8 @@ public final class RecordingCoordinator {
     /// and an unreachable folder waits (the sentinel is never deleted before its salvage ran). Formerly
     /// `TranscriberApp.recoverIfNeeded`; here so every crash path is owned — and testable — in one place.
     public func recoverAtLaunch() async {
+        // Busy from here, the gate's wait included (L review 161): Record stays disabled until the helper is settled.
+        relaunchProbing = true
         if gateReservedForLaunch {
             gateReservedForLaunch = false   // held for this since the coordinator was made (L review 131)
         } else {
@@ -1600,6 +1612,7 @@ public final class RecordingCoordinator {
                 await retryPendingLocked(helperHolds: sentinel.sessionKey)
             }
         } else {
+            relaunchProbing = false   // nothing to probe
             await retryPendingLocked()
         }
         releaseRecoveryGate()
@@ -1646,10 +1659,11 @@ public final class RecordingCoordinator {
 
     private enum RelaunchOutcome { case handled, heldForHelper }
 
-    /// After every await of a relaunch step (L follow-up 38, L reviews 112, 129): a Start that got in meanwhile owns
-    /// the app, so the session waits for the next idle — pending, retried then — and nothing here touches that start
-    /// (not its phase, not its crash detection). False when it yielded.
-    private func yieldsToAStart(_ sentinel: RecordingSentinel) -> Bool {
+    /// After every await of a relaunch step (L follow-up 38, L reviews 112, 129, 161): a Start that got in meanwhile — the
+    /// user's, announced or running — owns the app, so the session waits for the next idle — pending, retried then — and
+    /// nothing here touches that start (not its phase, not its crash detection). Checked BEFORE anything disarms or arms
+    /// crash detection. False when it yielded.
+    private func stillOwnsTheSession(_ sentinel: RecordingSentinel) -> Bool {
         guard !appState.isIdle || userStartInFlight else { return true }
         Logger.state.info("A recording start is in flight — the relaunch session waits")
         keepPending(sentinel)
@@ -1659,7 +1673,8 @@ public final class RecordingCoordinator {
 
     private func recover(_ sentinel: RecordingSentinel) async -> RelaunchOutcome {
         Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
-        // Until the helper's state is settled, Record is disabled (L review 112).
+        // Until the helper's state is settled, Record is disabled (L review 112) — and no longer (L review 159): each
+        // decision below clears it once the helper has let go, or is capturing the re-attached recording.
         relaunchProbing = true
         if !startRunning { crashDuringStart = false }
         defer {
@@ -1671,6 +1686,8 @@ public final class RecordingCoordinator {
         // session waits, never salvaged as "no recorded audio".
         let probe = folderProbe
         let folderStatus = await readOffMain("relaunch: recording folder", folder: outputDir) { Self.folderStatus(outputDir, probe: probe) } ?? .unreachable
+        // A Start pressed during the read owns the app: checked BEFORE anything is armed or pinged (L review 161).
+        guard stillOwnsTheSession(sentinel) else { return .handled }
 
         // The callbacks are wired and crash detection armed BEFORE the ping (no start() in this process,
         // C1): a crash reported during it is heard (L round 5). Every path below that ends without a
@@ -1680,12 +1697,12 @@ public final class RecordingCoordinator {
         let helperState = await captureClient.captureState()
         // A Start pressed during the ping owns the app now (L follow-up 38): this session waits for the
         // next idle, and nothing here touches that start (not even its crash detection).
-        guard yieldsToAStart(sentinel) else { return .handled }
+        guard stillOwnsTheSession(sentinel) else { return .handled }
         // A helper that did not answer may still be capturing (L9 review 49): never re-attached to, and
         // stopped — bounded — before any salvage or resume. One that will not stop keeps the session.
         if helperState == .unknown {
             let letGo = await boundedHelperStop("stop an unanswering helper at relaunch")
-            guard yieldsToAStart(sentinel) else { return .handled }   // L review 112: after every await
+            guard stillOwnsTheSession(sentinel) else { return .handled }   // L review 112: after every await
             if !letGo {
                 holdForHelper(sentinel)
                 return .heldForHelper
@@ -1704,11 +1721,12 @@ public final class RecordingCoordinator {
             // The session's folder, read off the main actor BEFORE the recording is re-attached (L review 75).
             let scan = await readOffMain("re-attach: session folder", folder: outputDir) { Self.scanForReattach(sentinel: sentinel, outputDir: outputDir) }
             // A Start pressed during the read owns the app now (as after the ping).
-            guard yieldsToAStart(sentinel) else { return .handled }
+            guard stillOwnsTheSession(sentinel) else { return .handled }
             // From here to the adopt, all synchronous (L review 72): a crash or a Stop can only arrive once the
             // chunk pipeline exists — the crash path then names its restart from the live rotator, and a Stop
             // finishes the recording once, on the live pipeline (the orphans are already queued in it).
             appState.phase = .recording(since: sentinel.startedAt)
+            relaunchProbing = false   // the recording is re-attached: the phase says it from here (L review 159)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
             // Bound NOW (L review 121): what the pipeline's setup records — a re-attach that cannot rotate — is this
             // session's, and the adopt below, finding it bound, only drains.
@@ -1742,6 +1760,7 @@ public final class RecordingCoordinator {
             // Restore the helper's alarm state now: the pull on connect ran before anything listened.
             Task { await pollHelperStatus() }
         case .resumeSameSession(let lastAlive):
+            relaunchProbing = false   // the helper is not capturing: the resume's own start is in flight from its start
             return await resumeSameSession(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive)
         case .salvageAndStop(let reason):
             // A stop-in-flight race: the helper may still be capturing (C7 round 1 — the decision only says
@@ -1752,27 +1771,30 @@ public final class RecordingCoordinator {
             if reason == .wasStopping {
                 let letGo = await boundedHelperStop("stop after relaunch")
                 // A Start that got in during the stop owns the app now (L review 112): the session waits.
-                guard yieldsToAStart(sentinel) else { return .handled }
+                guard stillOwnsTheSession(sentinel) else { return .handled }
                 if !letGo {
                     holdForHelper(sentinel)
                     return .heldForHelper
                 }
             }
+            relaunchProbing = false   // the helper let go: a salvage is no start (L review 159)
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
         case .salvageStale:
+            relaunchProbing = false
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
         case .waitForFolder:
             // A stopping session's helper may still be capturing: stopped first, bounded, as a salvage does (L review
             // 128) — never `captureEnded` while it may still write. One that will not stop is held.
             if sentinel.stopping {
                 let letGo = await boundedHelperStop("stop before waiting for the folder")
-                guard yieldsToAStart(sentinel) else { return .handled }
+                guard stillOwnsTheSession(sentinel) else { return .handled }
                 if !letGo {
                     holdForHelper(sentinel)
                     return .heldForHelper
                 }
             }
             // Never deleted: the recording data may be on the missing drive (§8.9). No capture: disarmed.
+            relaunchProbing = false
             captureClient.captureEnded()
             keepPending(sentinel)
             await updateFolderAlarm()
@@ -1913,7 +1935,7 @@ public final class RecordingCoordinator {
     /// detection disarmed (L review 129).
     private func waitForUnansweringFolder(_ sentinel: RecordingSentinel) async {
         foldersNotAnswering.insert(sentinel.sessionKey)
-        guard yieldsToAStart(sentinel) else { return }
+        guard stillOwnsTheSession(sentinel) else { return }
         captureClient.captureEnded()
         keepPending(sentinel)
         await updateFolderAlarm()
@@ -1986,7 +2008,11 @@ public final class RecordingCoordinator {
                 // While idle, a capture the helper still holds is a previous recording's that did not stop. Only the
                 // helper's stop answer releases a session — "No capture in progress" counts — never a ping, which
                 // can read a slow helper as not capturing (L review 84).
-                guard await boundedHelperStop("stop a pending session") else {
+                // Busy while it asks (L review 161): Record is disabled, an exit waits for the answer.
+                pendingHelperStopInFlight = true
+                let letGo = await boundedHelperStop("stop a pending session")
+                pendingHelperStopInFlight = false
+                guard letGo else {
                     applyFolderAlarm(pending: pendingSessions(), folders: folders)
                     return   // still not letting go: the next event tries again
                 }
@@ -2092,6 +2118,9 @@ public final class RecordingCoordinator {
             await waitForUnansweringFolder(sentinel)
             return .handled
         }
+        // A Start that got in during the scan owns the app — announced or running — before anything here disarms or
+        // starts: never raced, never its flag cleared, never its crash detection disarmed (L follow-up 38, L review 161).
+        guard stillOwnsTheSession(sentinel) else { return .handled }
         // A finalized session is finished (L review 93): never resumed into — the salvage cleans up its leftovers.
         if scan.finalized {
             Logger.state.info("The session to resume was already transcribed — never resumed")
@@ -2102,12 +2131,6 @@ public final class RecordingCoordinator {
         let plan = scan.plan, gapStart = scan.crashedAt
         let seed = seedState(for: sentinel, persisted: scan.persisted)
         Logger.state.info("Resuming the crashed session at chunk \(plan.index, privacy: .public) (\(scan.orphans.count, privacy: .public) orphan chunks)")
-
-        // A user Start already running owns the helper: never race it, never clear its flag (L follow-up 38).
-        guard !startRunning else {
-            keepPending(sentinel)
-            return .handled
-        }
         // A start in flight: the phase stays `.idle` until the capture is up, so the Record control is
         // disabled, a user Start is ignored, and a crash reported meanwhile is handled once it is up (L5).
         startRunning = true
@@ -2380,7 +2403,7 @@ public final class RecordingCoordinator {
         }
         // A Start during the read owns the app now (L review 129): never `.transcribing` over it, never its crash
         // detection disarmed — the session waits.
-        guard yieldsToAStart(sentinel) else { return }
+        guard stillOwnsTheSession(sentinel) else { return }
         if scan.finalized == .cleanedUp {
             // Already transcribed: the recovery file lingered — a crash between the transcript and the sentinel's
             // delete, or a held session transcribed before its hold (L review 136). Its leftovers were cleaned up

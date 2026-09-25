@@ -37,4 +37,16 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
             return .terminateLater
         }
     }
+
+    /// Every `NSApp.terminate` ends here — the idle `.terminateNow` too, and the quit or termination whose preparation
+    /// already flushed (L review 141): the live logs' queued lines reach the disk, bounded — a hung folder never holds
+    /// the exit longer than this.
+    func applicationWillTerminate(_ notification: Notification) {
+        if !LiveDiagnosticsLog.flushAll(within: Self.exitFlushBound) {
+            Logger.state.error("A recording folder did not answer the exit's flush — its last queued diagnostic lines are lost")
+        }
+    }
+
+    /// The bound on the exit's synchronous flush (the main thread waits on it).
+    static let exitFlushBound: Double = 1
 }

@@ -166,4 +166,23 @@ import Testing
         #expect(LiveDiagnosticsLog(directory: d, sessionId: "s").coverageSnapshots()["1000-0"] != nil)
         #expect(seen.onMain == [false, false])
     }
+
+    /// L review 141: the exit's synchronous flush is bounded — a write hung on its folder never holds the exit past the
+    /// bound; a folder that answers is flushed in full.
+    @Test func theExitFlushIsBoundedAndSaysWhetherItFinished() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let log = LiveDiagnosticsLog(directory: d, sessionId: "s")
+        log.append(retry(at: 1))
+        #expect(LiveDiagnosticsLog.flushAll(within: 2), "answered: flushed")
+        #expect(FileManager.default.fileExists(atPath: log.url.path))
+        let hungDir = try dir(); defer { try? FileManager.default.removeItem(at: hungDir) }
+        let stuck = DispatchSemaphore(value: 0)
+        defer { stuck.signal() }
+        let hung = LiveDiagnosticsLog(directory: hungDir, sessionId: "s")
+        hung.writeObserver = { _ = stuck.wait(timeout: .now() + 10) }
+        hung.append(retry(at: 2))
+        let began = ContinuousClock.now
+        #expect(!LiveDiagnosticsLog.flushAll(within: 0.2), "a hung folder: not finished")
+        #expect(ContinuousClock.now - began < .seconds(1), "and never past the bound")
+    }
 }

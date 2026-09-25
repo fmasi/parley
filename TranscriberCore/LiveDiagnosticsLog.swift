@@ -2,9 +2,11 @@ import Foundation
 import os
 
 /// Append-as-you-go anomaly log (§8.11): `<session>.diag.live.jsonl` next to the recording. Written line by line,
-/// queued (below): an app crash loses only the lines still queued — normally none, each write takes a moment —
-/// and every exit flushes the queue first (L review 96). Merged into the ring when the record is built, and
-/// deleted only once the session's transcript exists (L review 97).
+/// queued (below): an app crash, a force-quit or a kill loses the lines still queued — normally none, each write takes a
+/// moment. An orderly exit flushes them first, bounded (L reviews 96, 141): the Quit and the termination preparation,
+/// every `NSApp.terminate` (`applicationWillTerminate`), and the crash-protection hand-over's `exit(0)`; a folder that
+/// does not answer within the bound keeps its queued lines, and they go with the process. Merged into the ring when the
+/// record is built, and deleted only once the session's transcript exists (L review 97).
 ///
 /// Beside it, `<session>.diag.coverage.json` keeps the LATEST coverage of each helper session (council
 /// A-I4 / C-I1): coverage otherwise lives only in `captureStop`, which a crashed helper never writes. One
@@ -114,6 +116,20 @@ public final class LiveDiagnosticsLog: @unchecked Sendable {
     /// runs it off the main actor under a deadline, L review 96).
     public static func flushAll() {
         for queue in queuesLock.withLock({ Array(queues.values) }) { queue.sync {} }
+    }
+
+    /// `flushAll`, bounded, for the process's last moments (L review 141): `applicationWillTerminate` and the
+    /// crash-protection hand-over's `exit(0)` call it on the main thread, where nothing may wait on a hung folder for
+    /// long. True when everything queued reached the disk within `seconds`; false when a folder did not answer — its
+    /// queued lines are then lost with the process.
+    @discardableResult
+    public static func flushAll(within seconds: Double) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            flushAll()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + seconds) == .success
     }
 
     /// Returns once every write queued before it — in this log's folder — is on disk.

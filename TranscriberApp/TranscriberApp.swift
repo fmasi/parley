@@ -397,6 +397,11 @@ struct TranscriberApp: App {
             // exit NOW (no NSApp.terminate, nothing awaited) — lingering past that window would leave
             // no instance at all (C2 round 5, item 4).
             Logger.state.info("Handed over to launchd's own job — this process exits now")
+            // `exit(0)` skips `applicationWillTerminate`: the live logs' queued lines are flushed here, bounded (L review
+            // 141) — before the lock goes, so launchd's copy never reads a log still being written.
+            if !LiveDiagnosticsLog.flushAll(within: AppTerminationDelegate.exitFlushBound) {
+                Logger.state.error("A recording folder did not answer the hand-over's flush — its last queued diagnostic lines are lost")
+            }
             releaseInstanceLock()
             exit(0)
         }

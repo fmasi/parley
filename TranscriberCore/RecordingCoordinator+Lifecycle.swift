@@ -18,7 +18,10 @@ extension RecordingCoordinator {
         }
         // The recording ended between a sleep and its wake: the helper still gets its "wake" (L10 review 57).
         if !appState.isRecording, sleptAt != nil { closeSleepPairing() }
-        if !appState.isRecording { implicitWakeAt = nil }
+        if !appState.isRecording {
+            implicitWakeAt = nil
+            framesSinceImplicitWake = false
+        }
         if !appState.isIdle, idleSleepActivity == nil {
             idleSleepActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Recording a meeting")
         } else if appState.isIdle, let activity = idleSleepActivity {
@@ -41,6 +44,7 @@ extension RecordingCoordinator {
         Logger.state.info("System going to sleep while recording")
         sleptAt = date
         implicitWakeAt = nil   // a new sleep: the last one's implicit wake is settled
+        framesSinceImplicitWake = false
         captureClient.record(.systemSleep, .info, [:])
         if !stopInFlight {
             stopStatusPoll()
@@ -72,9 +76,18 @@ extension RecordingCoordinator {
     /// again. The helper already had its "wake": one sleep, one wake.
     func realWakeAfterImplicit(since: Date, at date: Date) {
         implicitWakeAt = nil
+        let framesBack = framesSinceImplicitWake
+        framesSinceImplicitWake = false
         guard appState.isRecording else { return }
         let end = max(since, date)
-        Logger.state.info("The real wake arrived after the implicit one (\(Int(end.timeIntervalSince(since)), privacy: .public) s later)")
+        // The capture's frames came back after the implicit wake: that audio WAS captured — no second gap over it, and
+        // nothing to redo (L review 162).
+        guard !framesBack else {
+            Logger.state.info("The real wake arrived after the implicit one, once audio was back — no second gap")
+            captureClient.record(.systemWake, .info, ["after_implicit": "true", "frames_back": "true"])
+            return
+        }
+        Logger.state.info("The real wake arrived after the implicit one (\(Int(end.timeIntervalSince(since)), privacy: .public) s after its gap's end)")
         captureClient.record(.systemWake, .info, ["seconds": "\(Int(end.timeIntervalSince(since)))", "after_implicit": "true"])
         let gap = CaptureGap(start: since, end: end, reason: "sleep")
         Task { await self.transcriptionRunner.recordCaptureGap(gap) }
@@ -149,7 +162,8 @@ extension RecordingCoordinator {
                 Logger.state.info("Awake with the display asleep (a DarkWake) — still waiting for the real wake")
             }
             guard let self else { return }
-            Logger.state.error("No wake arrived \(Self.seconds(timeout), privacy: .public) s of awake time after the sleep — waking implicitly")
+            // Every re-arm counted (L review 162): the awake time since the sleep is the timeout plus the dark stretches.
+            Logger.state.error("No wake arrived \(Self.seconds(timeout + dark), privacy: .public) s of awake time after the sleep — waking implicitly")
             // Awake for `timeout` since the wake that never came: it was about that long ago.
             self.systemDidWake(at: Date().addingTimeInterval(-Self.seconds(timeout)), implicit: true)
         }
@@ -263,7 +277,7 @@ extension RecordingCoordinator {
         // Again: a restart or a start may have rewritten the sentinel meanwhile.
         markSentinelStopping()
         markExitDuringFinalize()
-        await flushEvidenceForExit()
+        await flushEvidenceForExit(by: deadline)   // within what is left of the bound (L review 145)
     }
 
     /// The app is ending NOW (L review 85): SYNCHRONOUSLY — the process can exit in the same turn, before any
@@ -309,7 +323,7 @@ extension RecordingCoordinator {
             Logger.state.error("A recording start was still running when the quit's bound ran out — its recovery file is marked for salvage")
             markSentinelStopping()
         }
-        await flushEvidenceForExit()
+        await flushEvidenceForExit(by: deadline)
     }
 
     func stopUntilIdle() async {
