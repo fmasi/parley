@@ -213,6 +213,46 @@ extension RecordingCoordinator {
         let legacyAudio: Bool
         /// When that older-format recording was last written: the later of its two files (L review 86).
         let legacyLastWrite: Date?
+        /// A finalized session's audio written after its transcript, which the transcript does not list (L review
+        /// 137): its length, in seconds.
+        var lateAudioSeconds: Double = 0
+    }
+
+    /// Chunk audio of a FINALIZED session written after its transcript — later than the transcript file, and not
+    /// among the files it lists — is noted in the record (`metadata.audio_after_transcript`), once (L review 137).
+    /// Returns its length in seconds (0: none). Blocking file work: only through the bounded folder reader.
+    nonisolated static func noteAudioAfterTranscript(outputDir: URL, sessionId: String) -> Double {
+        let transcriptURL = outputDir.appendingPathComponent("\(sessionId).json")
+        guard let written = (try? FileManager.default.attributesOfItem(atPath: transcriptURL.path))?[.modificationDate] as? Date,
+              let data = try? Data(contentsOf: transcriptURL),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var metadata = json["metadata"] as? [String: Any] else { return 0 }
+        let listed = Set(metadata["audio_files"] as? [String] ?? [])
+        let prefix = "\(sessionId)-"
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: outputDir.path)) ?? []).filter { name in
+            name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") && (name.hasSuffix(".wav") || name.hasSuffix(".m4a"))
+                && Int(name.dropFirst(prefix.count).dropLast(4)) != nil && !listed.contains(name)
+        }
+        let late = names.filter { name in
+            let modified = (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent(name).path))?[.modificationDate] as? Date
+            return (modified ?? .distantPast) > written
+        }.sorted()
+        guard !late.isEmpty else { return 0 }
+        let seconds = late.reduce(0.0) { $0 + TranscriptAssembler.duration(of: outputDir.appendingPathComponent($1)) }
+        if (metadata["audio_after_transcript"] as? [String: Any])?["files"] as? [String] != late {
+            metadata["audio_after_transcript"] = [
+                "files": late,
+                "seconds": seconds,
+                "note": "Audio recorded after this transcript was written is kept beside it, not transcribed.",
+            ] as [String: Any]
+            json["metadata"] = metadata
+            do {
+                try TranscriptAssembler.write(json, to: transcriptURL)
+            } catch {
+                Logger.files.error("Could not note the audio recorded after the transcript: \(error, privacy: .private)")
+            }
+        }
+        return max(seconds, 1)
     }
 
     nonisolated static func scanForSalvage(sentinel: RecordingSentinel, outputDir: URL) -> SalvageScan {
@@ -221,7 +261,8 @@ extension RecordingCoordinator {
         if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDir, sessionId: sessionId) {
             // Verified: cleaned up here (no rename, no summary) and done. Unreadable: rebuilt by the salvage (93b).
             if CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDir, sessionId: sessionId) {
-                return SalvageScan(finalized: .cleanedUp, stoppedAt: Date(), chunkCount: 0, legacyAudio: false, legacyLastWrite: nil)
+                return SalvageScan(finalized: .cleanedUp, stoppedAt: Date(), chunkCount: 0, legacyAudio: false, legacyLastWrite: nil,
+                                   lateAudioSeconds: noteAudioAfterTranscript(outputDir: outputDir, sessionId: sessionId))
             }
             finalized = .damaged
         }

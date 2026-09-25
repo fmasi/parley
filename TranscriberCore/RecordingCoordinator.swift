@@ -1535,6 +1535,22 @@ public final class RecordingCoordinator {
             // start timed out and may still commit, is stopped (bounded) before the salvage.
             let helperLetGo = await stopAfterFailedStart(captureStarted: captureStarted, startIssued: startIssued,
                                                          error: error, label: "stop after failed restart")
+            guard helperLetGo else {
+                // It may still be capturing — the restart's own capture, into THIS session — and hold the mic: HELD
+                // (L review 81), salvage-only, never resumed. Nothing is transcribed now (L review 137): a transcript
+                // written while the helper still writes would leave its later audio out. The chunks processed so far
+                // are in session.json; the salvage, once the helper lets go, transcribes everything once.
+                await settleAbandonedPipeline()
+                appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). Its audio is kept; Parley will transcribe the recording once the capture helper lets go."
+                appState.phase = .idle
+                stopStatusPoll()
+                keepMicMarked = true
+                Logger.state.error("A failed restart left the capture helper unanswered — holding its session, untranscribed")
+                holdForHelper(RecordingSentinel.read(directory: sentinelDirectory) ?? sentinel,
+                              message: "Parley couldn’t stop the capture after the failed restart — its audio is kept, and Parley will transcribe it once the capture helper lets go.")
+                notifyCritical("Recording Failed", appState.criticalError ?? "")
+                return
+            }
             // council F3: the orphan was already re-ingested above, so just finalize what's been processed
             // rather than abandoning the whole session. The restart's own file (the rotator's current chunk
             // now) holds audio only if the restart captured: sealed by the stop, it joins the salvage — never
@@ -1548,16 +1564,7 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            if helperLetGo {
-                finishSentinel(after: outcome, sentinel: sentinel)
-            } else {
-                // It may still be capturing, and hold the mic: HELD (L review 81) — salvage-only, never resumed,
-                // out of the slot the next Start writes — and finished once the helper's stop says it let go.
-                keepMicMarked = true
-                Logger.state.error("A failed restart left the capture helper unanswered — holding its session")
-                holdForHelper(RecordingSentinel.read(directory: sentinelDirectory) ?? sentinel,
-                              message: "Parley couldn’t stop the capture after the failed restart — its audio is kept, and Parley will finish it once the capture helper lets go.")
-            }
+            finishSentinel(after: outcome, sentinel: sentinel)
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
         }
     }
@@ -2327,6 +2334,13 @@ public final class RecordingCoordinator {
             Logger.state.info("The recovery file of an already transcribed recording lingered — its leftovers are cleaned up, nothing is transcribed again")
             forgetSession(sentinel)
             captureClient.captureEnded()
+            // Audio written AFTER the transcript, which it does not list, is never silent (L review 137): the scan
+            // noted it in the record; the row says where it is kept.
+            if scan.lateAudioSeconds > 0 {
+                let minutes = max(1, Int((scan.lateAudioSeconds / 60).rounded()))
+                reportStopped("Recording STOPPED — \(minutes) min of audio recorded after its transcript was written \(minutes == 1 ? "is" : "are") kept in \(abbreviatedDisplayPath(outputDir.path)), not transcribed.",
+                              recovered: false)
+            }
             return
         }
         let stoppedAt = scan.stoppedAt, chunkCount = scan.chunkCount
@@ -2404,6 +2418,15 @@ public final class RecordingCoordinator {
         // are said on their own — never counted in "N earlier recordings were recovered".
         if case .transcriptWritten = outcome.kind { reportStopped(message, recovered: true) } else { reportStopped(message, recovered: false) }
         captureClient.captureEnded()
+    }
+
+    /// The live pipeline of a session that is NOT finalized now (L review 137): the chunks already queued are
+    /// processed — each persisted to session.json — then the rotation stops and the pipeline goes. A later salvage
+    /// finishes the session from there.
+    private func settleAbandonedPipeline() async {
+        transcriptionRunner.stopChunkRotation()
+        if let processor = transcriptionRunner.chunkProcessor { await processor.awaitAllProcessed() }
+        transcriptionRunner.teardownChunkedPipeline()
     }
 
     /// A recording ended on a failure path: its recovery file goes — unless its folder did not answer, when nothing

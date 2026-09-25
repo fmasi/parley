@@ -4861,10 +4861,11 @@ private struct Harness {
         #expect(FileManager.default.fileExists(atPath: outDir(s).appendingPathComponent("sess.damaged.json").path))
     }
 
-    /// 136: an in-session restart failed and its helper would not stop — the session was transcribed, then
-    /// HELD. When the helper lets go, the retry finds it finalized: no second transcript, no rename panel,
-    /// no "crashed" row.
-    @Test func aHeldSessionAlreadyTranscribedIsNeverTranscribedAgain() async throws {
+    /// 136 / 137: an in-session restart failed and its helper would not stop — it may still be writing the
+    /// session (the restart's own capture). Nothing is transcribed then: the session is HELD, and once the helper
+    /// lets go the retry transcribes it ONCE, the audio recorded after the failure included — never a transcript
+    /// with later audio silently left out, never a second transcript, rename panel or "crashed" row.
+    @Test func aHeldRestartIsTranscribedOnceWithItsLateAudio() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
@@ -4872,23 +4873,44 @@ private struct Harness {
         let rotator = try #require(h.runner.chunkRotator)
         let outDir = try #require(h.client.startCalls.first).outputDirectory
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(rotator.currentBaseName + ".wav"))
+        let base = String(rotator.currentBaseName.dropLast(2))
+        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(base + "-0.wav"))
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
         h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
         await h.coordinator.handleXPCCrash()
-        let transcript = try #require(h.appState.lastJsonPath)
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "held")
-        let finalizes = h.client.finalizeCalls.count
-        h.appState.acknowledge(.recordingStopped)   // the hold's row, read: anything raised from here is new
-        h.client.onStop = nil   // the helper lets go
+        #expect(h.client.finalizeCalls.isEmpty && h.appState.lastJsonPath == nil, "nothing transcribed while the helper may still write")
+        #expect(h.criticals.value.last?.body.contains("once the capture helper lets go") == true, "\(h.criticals.value)")
+        // The helper went on writing the restart's chunk after the failure; then it lets go.
+        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(base + "-1.wav"))
+        h.appState.acknowledge(.recordingStopped)
+        h.client.onStop = nil
         h.coordinator.helperStopDeadline = .seconds(5)
         await h.coordinator.retryPendingSessions()
         #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "finished")
-        #expect(h.presented.value.isEmpty, "no rename panel for a transcript already written")
-        #expect(h.client.finalizeCalls.count == finalizes, "nothing finalized again")
-        #expect(h.appState.activeAlarms[.recordingStopped] == nil, "no new row — above all no \"crashed\" one")
-        #expect(FileManager.default.fileExists(atPath: transcript))
+        #expect(h.presented.value.count == 1 && h.client.finalizeCalls.count == 1, "one transcript, once")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("The 2 chunks recorded before it were transcribed"), "chunk 0 and the late chunk 1: \(row)")
+    }
+
+    /// L review 137: a finalized session whose folder holds audio written AFTER its transcript, which the
+    /// transcript does not list, is never silent — a row, and a note in the record.
+    @Test func audioRecordedAfterTheTranscriptIsNeverSilent() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 3600, boot: "another-boot")
+        let transcript = try await finalizedWithLeftovers(h, s)
+        let late = outDir(s).appendingPathComponent("sess-7.wav")
+        try RecoveryFixtures.writeFakeWav(at: late, seconds: 120)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: late.path)
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "the transcript itself is left as it is")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("recorded after") && row.contains("not transcribed") && row.contains("2 min"), "\(row)")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])
+        let note = (json["metadata"] as? [String: Any])?["audio_after_transcript"] as? [String: Any]
+        #expect((note?["files"] as? [String]) == ["sess-7.wav"], "\(String(describing: note))")
     }
 
     /// 69 (R2 follow-up 1): a stale-boot salvage names the restart, never a crash.
