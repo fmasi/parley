@@ -3,6 +3,20 @@ import Foundation
 import os
 
 public enum TranscriptAssembler {
+    /// `metadata.transcript_written_at` (L review 220): when finalize wrote the transcript, to the millisecond — the fixed
+    /// reference late audio is judged from, never moved by a later rewrite (a rename, the disclosure's stamp).
+    public static let writtenAtKey = "transcript_written_at"
+
+    private static func writtenAtFormatter() -> ISO8601DateFormatter {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }
+
+    static func formatWrittenAt(_ date: Date) -> String { writtenAtFormatter().string(from: date) }
+
+    /// The stamp's time; nil when it is not one.
+    public static func parseWrittenAt(_ stamp: String) -> Date? { writtenAtFormatter().date(from: stamp) }
 
     public static func assemble(
         segments: [LabeledSegment],
@@ -19,7 +33,8 @@ public enum TranscriptAssembler {
         processingIssues: [[String: Any]]? = nil,
         mergedAudio: [String: Any]? = nil,
         chunkDurations: [Double]? = nil,
-        chunkOffsets: [Double]? = nil
+        chunkOffsets: [Double]? = nil,
+        writtenAt: Date? = nil
     ) -> [String: Any] {
         var metadata: [String: Any] = [
             "audio_files": audioPaths.map { $0.lastPathComponent },
@@ -91,6 +106,7 @@ public enum TranscriptAssembler {
         // re-detect needs to rebuild the same timeline (R6).
         if let chunkDurations { metadata["chunk_durations"] = chunkDurations }
         if let chunkOffsets { metadata["chunk_offsets"] = chunkOffsets }
+        if let writtenAt { metadata[writtenAtKey] = formatWrittenAt(writtenAt) }
         // Disclosure (#138): the transcript testifies whether its contents left the machine.
         // A transcript is airgapped at assembly time — summaries are generated later (and only
         // on explicit user opt-in against a configured endpoint), so MeetingSummarizer updates

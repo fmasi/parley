@@ -40,6 +40,20 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
     /// it — said so, after the cause that salvage first saw (`stopCause`, stamped with it) — never "quit while finishing".
     public var salvageBegan: Bool
 
+    /// Why the session was KEPT, apart from why it stopped (L review 228): its salvage's transcript write did not answer
+    /// within its bound — and may land later. What that salvage knew, so the pass that finds the transcript says it as the
+    /// salvage's own row. nil: not kept while writing.
+    public var keptWhileWriting: KeptWhileWriting?
+
+    /// What a salvage whose write did not answer knew (L review 228).
+    public struct KeptWhileWriting: Codable, Equatable, Sendable {
+        /// When the recording stopped, as that salvage found it.
+        public var stoppedAt: Date
+        /// The chunks it was transcribing.
+        public var chunkCount: Int
+        public init(stoppedAt: Date, chunkCount: Int) { self.stoppedAt = stoppedAt; self.chunkCount = chunkCount }
+    }
+
     /// Why a session was held (L review 177).
     public enum HeldReason: String, Codable, Sendable, Equatable {
         /// A start failed, and the helper would not stop the capture it may have begun.
@@ -85,7 +99,8 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         stopCause: StopCause? = nil,
         quitMarkedByPowerOff: Bool = false,
         heldReason: HeldReason? = nil,
-        salvageBegan: Bool = false
+        salvageBegan: Bool = false,
+        keptWhileWriting: KeptWhileWriting? = nil
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -102,6 +117,7 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
         self.quitMarkedByPowerOff = quitMarkedByPowerOff
         self.heldReason = heldReason
         self.salvageBegan = salvageBegan
+        self.keptWhileWriting = keptWhileWriting
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -129,6 +145,7 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
             heldReason = nil
         }
         salvageBegan = try container.decodeIfPresent(Bool.self, forKey: .salvageBegan) ?? false
+        keptWhileWriting = (try? container.decodeIfPresent(KeptWhileWriting.self, forKey: .keptWhileWriting)) ?? nil
     }
 
     // MARK: - File location
@@ -337,7 +354,8 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
             stopCause: stopCause,
             quitMarkedByPowerOff: quitMarkedByPowerOff,
             heldReason: heldReason,
-            salvageBegan: salvageBegan
+            salvageBegan: salvageBegan,
+            keptWhileWriting: keptWhileWriting
         )
     }
 }

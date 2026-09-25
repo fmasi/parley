@@ -60,6 +60,9 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     case diskWriteFailure
     case diskLow, rotationFailed, sessionWriteFailed, helperUnresponsive, crashProtectionOff
     case recordingResumedWithGap, recordingStopped, recordingFolderUnavailable
+    /// App-owned, ACKNOWLEDGEABLE (L review 219): audio of a finished recording, recorded after its transcript was written,
+    /// is kept beside it untranscribed. A past event — nothing just stopped — so never under "Recording STOPPED".
+    case audioAfterTranscript
     /// App-owned: the helper reported alarm kinds this build does not know (a newer helper). One
     /// generic alarm, so they are never silently dropped; cleared when a snapshot no longer has any.
     case unknownHelperAlarm
@@ -88,7 +91,25 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
 
     /// Past events the user dismisses; everything else clears only when the condition clears.
     public var isAcknowledgeable: Bool {
-        self == .recordingResumedWithGap || self == .recordingStopped || self == .micFollowFailed
+        self == .recordingResumedWithGap || self == .recordingStopped || self == .micFollowFailed || self == .audioAfterTranscript
+    }
+
+    /// The row's headline, shared by the menu's sticky rows and the alarm window (in Core, so it is tested — L review 219).
+    public var headline: String {
+        switch self {
+        case .crashProtectionOff: return "Crash protection is off"
+        case .micNotDelivering, .micDigitalSilence: return "Your microphone isn’t being recorded"
+        case .micFollowFailed: return "Couldn’t switch microphones"
+        case .remoteNotDelivering, .remoteRecoveryFailed, .remotePermissionDenied, .remoteCantConfirm:
+            return "The other side may not be recorded"
+        case .diskLow, .diskWriteFailure, .rotationFailed, .sessionWriteFailed: return "Recording to disk is in trouble"
+        case .helperUnresponsive: return "The capture helper stopped answering"
+        case .recordingResumedWithGap: return "Recording resumed after a crash"
+        case .recordingStopped: return "Recording STOPPED"
+        case .recordingFolderUnavailable: return "Recording folder unavailable"
+        case .audioAfterTranscript: return "Audio kept after a transcript"
+        case .unknownHelperAlarm: return "Parley needs an update to show a capture problem"
+        }
     }
 
     /// Survives the end of a recording: a machine-level condition, or a past event the user has

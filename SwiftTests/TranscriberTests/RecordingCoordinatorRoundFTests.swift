@@ -212,6 +212,39 @@ struct SlowRead: Sendable {
     }
 }
 
+// MARK: - A salvage's late write is announced (228)
+
+@MainActor
+@Suite struct LateSalvageWriteRoundFTests {
+    /// L review 228, IMPORTANT: a salvage whose transcript write did not answer keeps its session — and WHY it was kept
+    /// (`keptWhileWriting`), apart from why it stopped. When the write lands later, the next pass's finalized gate says it
+    /// with the salvage's own row — a transcript written — and offers the rename panel. Never silent.
+    @Test func aSalvageWriteThatLandsLaterIsSaidAndPresented() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let p = try roundFPendingSession(h, "p", orphan: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        let hung = HungRead("transcript: write")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderWriteDeadline = .milliseconds(300)
+        h.coordinator.folderReadDeadline = .milliseconds(300)
+        await h.coordinator.retryPendingSessions()
+        let kept = try #require(RecordingSentinel.readPending(directory: h.tmp).first)
+        #expect(kept.keptWhileWriting?.chunkCount == 2, "kept, and why: \(String(describing: kept.keptWhileWriting))")
+        #expect(h.presented.value.isEmpty && h.appState.activeAlarms[.recordingStopped] == nil, "nothing claimed yet")
+        hung.release()   // the write lands
+        let transcript = h.tmp.appendingPathComponent("p/p.json")
+        await Harness.until { FileManager.default.fileExists(atPath: transcript.path) }
+        h.coordinator.folderReadDeadline = .seconds(5)
+        await h.coordinator.retryPendingSessions()
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "finished")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("Recording STOPPED") && row.contains("p.json") && row.contains("2 chunks"), "the salvage's own row: \(row)")
+        #expect(h.presented.value.map(\.lastPathComponent) == ["p.json"], "the rename panel is offered")
+    }
+}
+
 // MARK: - The engine a salvage needs: the diarizer too, only for audio to recognise, and the right remedy (230, 232, 233)
 
 /// A diarizer whose model is not downloaded (L review 232): made fine, never ready.
@@ -295,6 +328,40 @@ struct NotReadyDiarizer: DiarizationProvider {
         await h.coordinator.retryPendingSessions()
         #expect(h.appState.activeAlarms[.recordingStopped] == nil, "said once")
         #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "still kept")
+    }
+}
+
+// MARK: - Late audio's reference is the transcript's own write time (220)
+
+@MainActor
+@Suite struct LateAudioReferenceRoundFTests {
+    /// L review 220: finalize stamps `transcript_written_at` into the record, and late-audio detection judges from it — so
+    /// a rename or a disclosure stamp that rewrites the transcript BEFORE the first look never moves the reference and
+    /// hides audio recorded after the transcript was written.
+    @Test func aRewriteBeforeTheFirstLookNeverHidesLateAudio() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let dir = h.tmp.appendingPathComponent("day")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "sess", meetingStart: Date(), chunkIndices: [0])
+        let result = try #require(try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "sess", config: h.config.config, transcriber: FakeEngine(), diarizer: FakeDiarizer(),
+            runner: h.runner))
+        let meta = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["metadata"] as? [String: Any])
+        let stamp = try #require(meta["transcript_written_at"] as? String, "finalize stamps its write time")
+        #expect(TranscriptAssembler.parseWrittenAt(stamp) != nil, "\(stamp)")
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "sess", meetingStart: Date(), chunkIndices: [0])   // a leftover
+        let late = dir.appendingPathComponent("sess-7.wav")
+        try RecoveryFixtures.writeFakeWav(at: late, seconds: 30)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: late.path)
+        // A rename — or the disclosure's stamp — rewrote the transcript after the late audio, before any look.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(120)], ofItemAtPath: result.jsonPath.path)
+        let s = RecordingSentinel(startedAt: Date(), sessionName: "sess", systemAudioPath: dir.appendingPathComponent("sess-0.wav").path,
+                                  micAudioPath: dir.appendingPathComponent("sess-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true)
+        try RecordingSentinel.writePending([s], directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        let row = try #require(h.appState.activeAlarms[.audioAfterTranscript]?.message, "the late audio is said")
+        #expect(row.contains("30 s") && row.contains("sess.json"), "\(row)")
     }
 }
 

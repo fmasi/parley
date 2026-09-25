@@ -17,21 +17,7 @@ extension AlarmKind {
         }
     }
 
-    var headline: String {
-        switch self {
-        case .crashProtectionOff: return "Crash protection is off"
-        case .micNotDelivering, .micDigitalSilence: return "Your microphone isn’t being recorded"
-        case .micFollowFailed: return "Couldn’t switch microphones"
-        case .remoteNotDelivering, .remoteRecoveryFailed, .remotePermissionDenied, .remoteCantConfirm:
-            return "The other side may not be recorded"
-        case .diskLow, .diskWriteFailure, .rotationFailed, .sessionWriteFailed: return "Recording to disk is in trouble"
-        case .helperUnresponsive: return "The capture helper stopped answering"
-        case .recordingResumedWithGap: return "Recording resumed after a crash"
-        case .recordingStopped: return "Recording STOPPED"
-        case .recordingFolderUnavailable: return "Recording folder unavailable"
-        case .unknownHelperAlarm: return "Parley needs an update to show a capture problem"
-        }
-    }
+    // `headline` is TranscriberCore's (L review 219): tested there.
 }
 
 /// The alarm window (§6.3): every active alarm with the one action it has. Nothing here dismisses a

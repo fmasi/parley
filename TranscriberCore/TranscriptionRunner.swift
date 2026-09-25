@@ -659,7 +659,9 @@ public final class TranscriptionRunner {
             processingIssues: processingIssues,
             mergedAudio: mergedAudio,
             chunkDurations: lengths,
-            chunkOffsets: chunkOffsets
+            chunkOffsets: chunkOffsets,
+            // The reference late audio is judged from (L review 220): a rewrite never moves it.
+            writtenAt: Date()
         )
 
         // 7b–10. The record's writes — the transcript, its finalized marker, the format file, the progress file's delete —
@@ -674,7 +676,7 @@ public final class TranscriptionRunner {
             Result { try Self.writeRecord(data, to: jsonPath, sessionId: sessionId, in: outputDirectory) }
         }) else {
             Logger.files.error("The transcript's write did not finish within \(self.folderWriteSeconds, privacy: .public) s — the recording folder is not answering")
-            throw FolderNotAnswering()
+            throw FolderNotAnswering(duringWrite: true)   // it may land later (L review 228)
         }
         try written.get()
         // 4b's deletes, fire-and-forget on the folder's queue once the record is written (L review 215): a mutation never

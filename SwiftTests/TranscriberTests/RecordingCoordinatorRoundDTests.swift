@@ -224,6 +224,12 @@ import Testing
             outputDirectory: dir, sessionId: "sess", config: h.config.config, transcriber: FakeEngine(), diarizer: FakeDiarizer(),
             runner: h.runner))
         try SessionState.write(state, directory: dir)   // the leftover progress file
+        // Written two minutes ago: its stamp (L review 220) and its file's time say so.
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        var metadata = try #require(json["metadata"] as? [String: Any])
+        metadata[TranscriptAssembler.writtenAtKey] = TranscriptAssembler.formatWrittenAt(Date().addingTimeInterval(-120))
+        json["metadata"] = metadata
+        try TranscriptAssembler.write(json, to: result.jsonPath)
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-120)], ofItemAtPath: result.jsonPath.path)
         let lateURL = dir.appendingPathComponent(late.name)
         if let seconds = late.seconds { try RecoveryFixtures.writeFakeWav(at: lateURL, seconds: seconds) } else { try Data(repeating: 7, count: 4_096).write(to: lateURL) }
@@ -237,7 +243,8 @@ import Testing
     /// L review 176: lateness is judged from a FIXED reference — the transcript's time as the first look found it, kept in
     /// the note — never from the transcript's modification time, which the note's own write moves. A Start during the
     /// scan interrupts the pass after the note is written; the retry still raises the row. L review 181: the row is honest
-    /// — seconds under a minute, the transcript named, and no "Recording STOPPED" (nothing just stopped).
+    /// — seconds under a minute, the transcript named, and no "Recording STOPPED" (nothing just stopped). L review 219: nor
+    /// under that headline — its own acknowledgeable kind, "Audio kept after a transcript".
     @Test func aRetryAfterAnInterruptedScanStillSaysTheLateAudio() async throws {
         let h = try Harness()
         defer { tearDown(h) }
@@ -259,7 +266,10 @@ import Testing
         #expect(h.appState.isIdle && !coordinator.isStartInFlight)
         hung.release()   // the retry's scan answers at once
         await coordinator.retryPendingSessions()
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(h.appState.activeAlarms[.recordingStopped] == nil, "never under the \"Recording STOPPED\" headline")
+        let alarm = try #require(h.appState.activeAlarms[.audioAfterTranscript])
+        #expect(alarm.kind.headline == "Audio kept after a transcript" && alarm.kind.isAcknowledgeable)
+        let row = alarm.message
         #expect(row.contains("30 s") && row.contains("sess.json") && row.contains("not transcribed"), "\(row)")
         #expect(!row.contains("STOPPED") && !row.contains("min"), "\(row)")
         #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "done")
@@ -271,16 +281,21 @@ import Testing
         defer { tearDown(h) }
         _ = try await finalizedPending(h, late: ("sess-7.wav", nil))
         await h.coordinator.retryPendingSessions()
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        let row = try #require(h.appState.activeAlarms[.audioAfterTranscript]?.message)
         #expect(row.contains("length unknown") && !row.contains("min"), "\(row)")
     }
 
-    /// L review 181, the wording itself.
+    /// L review 181, the wording itself. L review 226: never rounded into a length it is not — 150 s is "2 min 30 s", and
+    /// under a second is "less than 1 s".
     @Test func theLateAudioRowIsHonest() {
         let under = RecoveryMessages.audioAfterTranscript(seconds: 45, transcript: "sess.json", folder: "~/Rec")
         #expect(under.contains("45 s") && under.contains("sess.json") && under.contains("~/Rec") && !under.contains("STOPPED"), "\(under)")
         let over = RecoveryMessages.audioAfterTranscript(seconds: 150, transcript: "sess.json", folder: "~/Rec")
-        #expect(over.contains("3 min") && !over.contains(" s "), "\(over)")
+        #expect(over.hasPrefix("2 min 30 s of audio") && !over.contains("3 min"), "\(over)")
+        let whole = RecoveryMessages.audioAfterTranscript(seconds: 120, transcript: "sess.json", folder: "~/Rec")
+        #expect(whole.hasPrefix("2 min of audio"), "\(whole)")
+        let tiny = RecoveryMessages.audioAfterTranscript(seconds: 0.4, transcript: "sess.json", folder: "~/Rec")
+        #expect(tiny.hasPrefix("Less than 1 s of audio"), "never rounded up to a second: \(tiny)")
         let unknown = RecoveryMessages.audioAfterTranscript(seconds: nil, transcript: "sess.json", folder: "~/Rec")
         #expect(unknown.contains("length unknown") && unknown.contains("sess.json"), "\(unknown)")
     }

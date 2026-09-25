@@ -4984,7 +4984,7 @@ struct Harness {
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: late.path)
         await h.coordinator.recoverAtLaunch()
         #expect(h.presented.value.isEmpty && h.client.drains.isEmpty, "the transcript itself is left as it is (its record is only built, L review 200)")
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        let row = try #require(h.appState.activeAlarms[.audioAfterTranscript]?.message, "its own kind (L review 219)")
         #expect(row.contains("recorded after") && row.contains("not transcribed") && row.contains("2 min"), "\(row)")
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])
         let note = (json["metadata"] as? [String: Any])?["audio_after_transcript"] as? [String: Any]

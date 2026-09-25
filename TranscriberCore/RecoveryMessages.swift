@@ -303,17 +303,25 @@ public enum RecoveryMessages {
         "Recording STOPPED at \(clock(at)) — \(reason(cause)). Parley was quit while recovering it. " + outcomeSentence(outcome)
     }
 
-    /// Audio recorded after a finished recording's transcript was written (L reviews 137, 181): how much — seconds under a
-    /// minute, "length unknown" when it could not be read — beside which transcript, and where it is kept. Nothing just
-    /// stopped: no "Recording STOPPED".
+    /// Audio recorded after a finished recording's transcript was written (L reviews 137, 181): how much — minutes and
+    /// seconds, never rounded into a length it is not (L review 226), "less than 1 s", or "length unknown" when it could not
+    /// be read — beside which transcript, and where it is kept. Nothing just stopped: no "Recording STOPPED".
     public static func audioAfterTranscript(seconds: Double?, transcript: String, folder: String) -> String {
         let length: String
-        switch seconds {
-        case nil: length = "Audio (length unknown)"
-        case let s? where s < 59.5: length = "\(max(1, Int(s.rounded()))) s of audio"
-        case let s?: length = "\(Int((s / 60).rounded())) min of audio"
+        if let seconds {
+            length = seconds < 1 ? "Less than 1 s of audio" : "\(duration(seconds)) of audio"
+        } else {
+            length = "Audio (length unknown)"
         }
         return "\(length) recorded after \(transcript) was written is kept in \(folder), not transcribed."
+    }
+
+    /// A length of at least a second, to the second (L review 226): "45 s", "2 min", "2 min 30 s".
+    static func duration(_ seconds: Double) -> String {
+        let total = max(1, Int(seconds.rounded()))
+        guard total >= 60 else { return "\(total) s" }
+        let (minutes, rest) = total.quotientAndRemainder(dividingBy: 60)
+        return rest == 0 ? "\(minutes) min" : "\(minutes) min \(rest) s"
     }
 
     /// A session HELD because the capture helper would not let go of it, salvaged once it did (L review 177): what
