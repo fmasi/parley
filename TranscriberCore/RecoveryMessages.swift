@@ -32,13 +32,33 @@ public struct SalvageOutcome: Equatable, Sendable {
 
     /// Counted from the chunks' own `asr_failed` issues. An issue with no track fails the chunk.
     public static func recognitionFailures(in chunks: [ProcessedChunk]) -> RecognitionFailures {
+        tally(chunks.map { chunk in (chunk.issues.filter { $0.code == .asrFailed }.map(\.track), chunk.isDualStream) })
+    }
+
+    /// The same count from a WRITTEN transcript's `metadata.processing_issues` — what a salvage that only has
+    /// the file knows (L review 93). A chunk with `mic_stream_absent` had no microphone side. Nil when the
+    /// transcript cannot be read.
+    public static func recognitionFailures(inTranscriptAt url: URL) -> RecognitionFailures? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = json["metadata"] as? [String: Any] else { return nil }
+        var failed: [Int: [String?]] = [:]
+        var withoutMic: Set<Int> = []
+        for issue in metadata["processing_issues"] as? [[String: Any]] ?? [] {
+            guard let chunk = issue["chunk"] as? Int, let code = issue["code"] as? String else { continue }
+            if code == ChunkIssue.Code.asrFailed.rawValue { failed[chunk, default: []].append(issue["track"] as? String) }
+            if code == ChunkIssue.Code.micStreamAbsent.rawValue { withoutMic.insert(chunk) }
+        }
+        return tally(failed.map { ($0.value, !withoutMic.contains($0.key)) })
+    }
+
+    /// Per chunk: the tracks whose recognition failed (nil = the whole chunk) and whether it had both sides.
+    private static func tally(_ chunks: [(failedTracks: [String?], dualStream: Bool)]) -> RecognitionFailures {
         var result = RecognitionFailures()
-        for chunk in chunks {
-            let failed = chunk.issues.filter { $0.code == .asrFailed }
-            guard !failed.isEmpty else { continue }
-            let remote = failed.contains { $0.track == "remote" || $0.track == nil }
-            let local = failed.contains { $0.track == "local" || $0.track == nil }
-            if (remote && local) || (remote && !chunk.isDualStream) { result.wholeChunks += 1 }
+        for (failed, dualStream) in chunks where !failed.isEmpty {
+            let remote = failed.contains { $0 == "remote" || $0 == nil }
+            let local = failed.contains { $0 == "local" || $0 == nil }
+            if (remote && local) || (remote && !dualStream) { result.wholeChunks += 1 }
             else if remote { result.remoteOnly += 1 }
             else { result.localOnly += 1 }
         }

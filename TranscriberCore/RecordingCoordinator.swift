@@ -2005,6 +2005,13 @@ public final class RecordingCoordinator {
             await updateFolderAlarm()
             return .handled
         }
+        // A finalized session is finished (L review 93): never resumed into — the salvage cleans up its leftovers.
+        if scan.finalized {
+            Logger.state.info("The session to resume was already transcribed — never resumed")
+            captureClient.captureEnded()
+            await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
+            return .handled
+        }
         let plan = scan.plan, gapStart = scan.crashedAt
         let seed = seedState(for: sentinel, persisted: scan.persisted)
         Logger.state.info("Resuming the crashed session at chunk \(plan.index, privacy: .public) (\(scan.orphans.count, privacy: .public) orphan chunks)")
@@ -2102,6 +2109,8 @@ public final class RecordingCoordinator {
 
     /// What a resume needs from the session's folder, read off the main actor (L review 75).
     struct ResumeScan {
+        /// Already transcribed: never resumed (L review 93).
+        var finalized = false
         let plan: (baseName: String, index: Int, newSentinel: RecordingSentinel)
         let persisted: SessionState?
         /// The chunks the crash cut short, the plan's own file excluded, with their creation.
@@ -2116,7 +2125,8 @@ public final class RecordingCoordinator {
         let orphans = CrashRecoveryPlanner.orphanChunks(
             outputDirectory: outputDir, sessionId: sessionId, completedIndices: Set(persisted?.chunks.map(\.index) ?? [])
         ).filter { $0.baseName != plan.baseName }
-        return ResumeScan(plan: plan, persisted: persisted,
+        return ResumeScan(finalized: CrashRecoveryPlanner.isFinalized(outputDirectory: outputDir, sessionId: sessionId),
+                          plan: plan, persisted: persisted,
                           orphans: orphans.map { ($0, creationDate(outputDir.appendingPathComponent($0.baseName + ".wav"))) },
                           crashedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive))
     }
@@ -2601,6 +2611,15 @@ public final class RecordingCoordinator {
             await updateFolderAlarm()
             return
         }
+        if scan.finalized == .cleanedUp {
+            // Already transcribed: the recovery file lingered — a crash between the transcript and the sentinel's
+            // delete, or a held session transcribed before its hold (L review 136). Its leftovers were cleaned up
+            // (R2's `cleanupFinalized`, L review 94) and that is all: no second finalize, no rename panel, no row.
+            Logger.state.info("The recovery file of an already transcribed recording lingered — its leftovers are cleaned up, nothing is transcribed again")
+            forgetSession(sentinel)
+            captureClient.captureEnded()
+            return
+        }
         let stoppedAt = scan.stoppedAt, chunkCount = scan.chunkCount
         appState.phase = .transcribing(progress: "Recovering…")
         let outcome: SalvageOutcome
@@ -2623,24 +2642,29 @@ public final class RecordingCoordinator {
             ) {
                 Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
                 recovered = result
-                outcome = SalvageOutcome(kind: .transcriptWritten(result.jsonPath), chunkCount: chunkCount)
+                // Chunks whose speech recognition failed are never called "transcribed" (R2 item 9, L review 93):
+                // counted from the transcript just written, off the main actor.
+                let jsonPath = result.jsonPath
+                let failures = await readOffMain("salvage: transcript") { SalvageOutcome.recognitionFailures(inTranscriptAt: jsonPath) } ?? nil
+                outcome = SalvageOutcome(kind: .transcriptWritten(result.jsonPath), chunkCount: chunkCount,
+                                         recognitionFailures: failures ?? .init())
             } else {
                 Logger.state.info("Chunked session had nothing to recover")
-                // Chunks on disk that produced nothing are kept, not "no recorded audio" (L round 5).
+                // Chunks on disk that produced nothing are kept, not "no recorded audio" (L round 5). A finalized
+                // session whose transcript cannot be read back had nothing to rebuild it from: its audio is kept.
+                let why = scan.finalized == .damaged
+                    ? "its transcript could not be read back, and no progress file was left to rebuild it from"
+                    : "none of their audio could be processed"
                 outcome = chunkCount > 0
-                    ? SalvageOutcome(kind: .finalizeFailed("none of their audio could be processed"), chunkCount: chunkCount)
+                    ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: chunkCount)
                     : SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
             }
         } catch {
             Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
             outcome = SalvageOutcome(kind: .finalizeFailed(error.localizedDescription), chunkCount: chunkCount)
         }
-        // Only now, the salvage having run: out of the pending list AND out of the slot (L review 82) — the slot
-        // only when it holds this session, never another recording's sentinel.
-        removePending(sentinel)
-        if RecordingSentinel.read(directory: sentinelDirectory)?.sessionKey == sentinel.sessionKey {
-            RecordingSentinel.delete(directory: sentinelDirectory)
-        }
+        // Only now, the salvage having run: out of the pending list AND out of the slot (L review 82).
+        forgetSession(sentinel)
         if let recovered {
             await presentCompletedTranscription(recovered)   // completion notice, rename + auto-summary
         }
@@ -2656,6 +2680,8 @@ public final class RecordingCoordinator {
         } else if outcome.kind == .nothingToSalvage, scan.legacyAudio {
             message = RecoveryMessages.relaunchStoppedKeepingOlderFormat(at: scan.legacyLastWrite.map { min($0, Date()) },
                                                                          folder: abbreviatedDisplayPath(outputDir.path))
+        } else if Self.stoppedByRestart(sentinel) {
+            message = RecoveryMessages.relaunchStoppedByRestart(at: stoppedAt, outcome: outcome)   // never "crashed" (L review 69)
         } else {
             message = RecoveryMessages.relaunchStopped(at: stoppedAt, outcome: outcome)
         }
@@ -2663,8 +2689,36 @@ public final class RecordingCoordinator {
         captureClient.captureEnded()
     }
 
+    /// The session is out of the pending list AND out of the slot (L review 82) — the slot only when it holds
+    /// this session, never another recording's sentinel.
+    private func forgetSession(_ sentinel: RecordingSentinel) {
+        removePending(sentinel)
+        if RecordingSentinel.read(directory: sentinelDirectory)?.sessionKey == sentinel.sessionKey {
+            RecordingSentinel.delete(directory: sentinelDirectory)
+        }
+    }
+
+    /// The Mac restarted (or lost power) while this session was recording (R2 follow-up 1, L review 69): its
+    /// sentinel is from another boot and was not stopping — the relaunch decision's `salvageStale`, and a
+    /// session a launch like that kept pending.
+    nonisolated static func stoppedByRestart(_ sentinel: RecordingSentinel, currentBoot: String? = BootSession.currentUUID()) -> Bool {
+        guard !sentinel.stopping, let recorded = sentinel.bootSessionUUID, let currentBoot else { return false }
+        return recorded != currentBoot
+    }
+
+    /// Whether the session was already finalized (R2's durable marker, or its transcript).
+    enum FinalizedState: Equatable, Sendable {
+        case notFinalized
+        /// Its transcript verifies: the leftovers were cleaned up (R2's `cleanupFinalized`). Nothing more to do.
+        case cleanedUp
+        /// Its transcript cannot be read back: rebuilt from its session.json when there is one (L review 93b).
+        case damaged
+    }
+
     /// What a salvage needs from the session's folder, read off the main actor (L review 75).
     struct SalvageScan {
+        /// Checked FIRST (L review 93, 120): a finalized session is never transcribed again.
+        var finalized: FinalizedState = .notFinalized
         let stoppedAt: Date
         let chunkCount: Int
         /// The sentinel's own file holds audio, yet it is not a chunk of the session: a pre-0.6 recording.
@@ -2675,12 +2729,23 @@ public final class RecordingCoordinator {
 
     nonisolated static func scanForSalvage(sentinel: RecordingSentinel, outputDir: URL) -> SalvageScan {
         let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
+        var finalized = FinalizedState.notFinalized
+        if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDir, sessionId: sessionId) {
+            // Verified: cleaned up here (no rename, no summary) and done. Unreadable: rebuilt by the salvage (93b).
+            if CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDir, sessionId: sessionId) {
+                return SalvageScan(finalized: .cleanedUp, stoppedAt: Date(), chunkCount: 0, legacyAudio: false, legacyLastWrite: nil)
+            }
+            finalized = .damaged
+        }
         let completed = Set(SessionState.read(directory: outputDir, sessionId: sessionId)?.chunks.map(\.index) ?? [])
-        let chunkCount = completed.count
-            + CrashRecoveryPlanner.orphanChunks(outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed).count
+        // A finalized session has no "orphans" (R2): its chunk files are its record's audio — counted as kept.
+        let onDisk = finalized == .damaged
+            ? CrashRecoveryPlanner.unregisteredChunks(outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed)
+            : CrashRecoveryPlanner.orphanChunks(outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed)
+        let chunkCount = completed.count + onDisk.count
         let files = [sentinel.systemAudioPath, sentinel.micAudioPath].compactMap { try? FileManager.default.attributesOfItem(atPath: $0) }
         let withAudio = files.filter { ($0[.size] as? Int ?? 0) > 44 }
-        return SalvageScan(stoppedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt),
+        return SalvageScan(finalized: finalized, stoppedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt),
                            chunkCount: chunkCount, legacyAudio: !withAudio.isEmpty,
                            legacyLastWrite: withAudio.compactMap { $0[.modificationDate] as? Date }.max())
     }
@@ -2754,7 +2819,8 @@ public final class RecordingCoordinator {
             // audio is on disk, untranscribed.
             if let orphan, !sessionState.chunks.contains(where: { $0.index == orphan.index }),
                FileManager.default.fileExists(atPath: outputDir.appendingPathComponent(orphan.baseName + ".wav").path) {
-                return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount, lastChunkKeptOnDisk: true)
+                return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount, lastChunkKeptOnDisk: true,
+                                      recognitionFailures: outcome.recognitionFailures)
             }
             return outcome
         case .finalizeFailed:
@@ -2792,7 +2858,9 @@ public final class RecordingCoordinator {
             kind = .finalizeFailed(error.localizedDescription)
         }
         transcriptionRunner.teardownChunkedPipeline()
-        return SalvageOutcome(kind: kind, chunkCount: sessionState.chunks.count)
+        // Chunks whose recognition failed are never called "transcribed" (R2 item 9, L review 93).
+        return SalvageOutcome(kind: kind, chunkCount: sessionState.chunks.count,
+                              recognitionFailures: SalvageOutcome.recognitionFailures(in: sessionState.chunks))
     }
 
     // MARK: - Shared steps (deduplicated from MenuView)

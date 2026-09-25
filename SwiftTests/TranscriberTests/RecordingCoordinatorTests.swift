@@ -4578,3 +4578,160 @@ private struct Harness {
         #expect(h.appState.isRecording)
     }
 }
+
+// MARK: - L round A: a finalized session is never processed twice; the salvage says what really happened (69, 93, 93b, 94, 120, 136)
+
+@MainActor
+@Suite struct RecordingCoordinatorFinalizedGateTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    private func slotSentinel(_ h: Harness, alive: TimeInterval, boot: String? = BootSession.currentUUID(), stopping: Bool = false) throws -> RecordingSentinel {
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-alive)
+        s.bootSessionUUID = boot
+        s.stopping = stopping
+        try RecordingSentinel.write(s, directory: h.tmp)
+        return s
+    }
+
+    private func outDir(_ s: RecordingSentinel) -> URL { URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent() }
+
+    /// A session finalized the way a stop finalizes it (transcript, marker, session.json gone), then the
+    /// leftovers a crash between the transcript and the sentinel's delete can leave: session.json, no TXT.
+    private func finalizedWithLeftovers(_ h: Harness, _ s: RecordingSentinel, issues: [ChunkIssue] = []) async throws -> URL {
+        let dir = outDir(s)
+        try writeSession(dir: dir, meetingStart: s.startedAt, issues: issues)
+        let result = try #require(try await ChunkedSessionRecovery.recover(
+            outputDirectory: dir, sessionId: "sess", config: h.config.config, transcriber: FakeEngine(), diarizer: FakeDiarizer(),
+            runner: h.runner))
+        #expect(CrashRecoveryPlanner.isFinalized(outputDirectory: dir, sessionId: "sess"))
+        try writeSession(dir: dir, meetingStart: s.startedAt, issues: issues)   // the leftover progress file
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("sess.txt"))
+        return result.jsonPath
+    }
+
+    private func writeSession(dir: URL, meetingStart: Date, issues: [ChunkIssue]) throws {
+        let chunk = ProcessedChunk(index: 0, startTime: meetingStart, audioPath: "sess-0.m4a",
+                                   segments: [.init(start: 0, end: 5, text: "chunk 0", speaker: "Speaker 1", source: "remote", qualityScore: 1)],
+                                   speakerDatabase: ["Speaker 1": [1, 0, 0]], isDualStream: false, issues: issues)
+        try SessionState.write(SessionState(sessionId: "sess", meetingStart: meetingStart, engine: "fluidAudio", chunkDurationMinutes: 1,
+                                            chunks: [chunk]), directory: dir)
+    }
+
+    /// 94 / 120: a relaunch that finds a FINALIZED session's recovery file cleans its leftovers (R2's
+    /// `cleanupFinalized`) and does nothing else — no second finalize, no rename panel, no STOPPED row.
+    @Test func aFinalizedSessionWithLeftoversIsCleanedUpSilently() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 3600, boot: "another-boot")
+        let transcript = try await finalizedWithLeftovers(h, s)
+        let before = try Data(contentsOf: transcript)
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.presented.value.isEmpty, "no rename panel, no auto-summary")
+        #expect(h.client.finalizeCalls.isEmpty, "nothing finalized again")
+        #expect(h.appState.activeAlarms[.recordingStopped] == nil, "no STOPPED row for a finished recording")
+        #expect(try Data(contentsOf: transcript) == before, "the transcript is untouched")
+        #expect(SessionState.read(directory: outDir(s), sessionId: "sess") == nil, "the leftover progress file is gone")
+        #expect(FileManager.default.fileExists(atPath: outDir(s).appendingPathComponent("sess.txt").path), "the text file is re-written")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && RecordingSentinel.readPending(directory: h.tmp).isEmpty)
+        #expect(h.appState.isIdle)
+    }
+
+    /// 93: a lingering sentinel within the resume window never RESUMES a finalized session.
+    @Test func aFinalizedSessionIsNeverResumed() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 20)
+        _ = try await finalizedWithLeftovers(h, s)
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.startCalls.isEmpty, "never a new capture into a finished session")
+        #expect(h.appState.isIdle && h.presented.value.isEmpty)
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// 93b: a finalized session whose transcript cannot be read back is REBUILT from its session.json, never
+    /// dropped on the marker's word; the damaged file is kept.
+    @Test func aFinalizedSessionWithADamagedTranscriptIsRebuilt() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 3600, boot: "another-boot")
+        let transcript = try await finalizedWithLeftovers(h, s)
+        try Data("{ damaged".utf8).write(to: transcript)
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.presented.value == [transcript], "rebuilt and presented")
+        #expect(TranscriptAssembler.verifies(transcript))
+        #expect(FileManager.default.fileExists(atPath: outDir(s).appendingPathComponent("sess.damaged.json").path))
+    }
+
+    /// 136: an in-session restart failed and its helper would not stop — the session was transcribed, then
+    /// HELD. When the helper lets go, the retry finds it finalized: no second transcript, no rename panel,
+    /// no "crashed" row.
+    @Test func aHeldSessionAlreadyTranscribedIsNeverTranscribedAgain() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        let rotator = try #require(h.runner.chunkRotator)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(rotator.currentBaseName + ".wav"))
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        await h.coordinator.handleXPCCrash()
+        let transcript = try #require(h.appState.lastJsonPath)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "held")
+        let finalizes = h.client.finalizeCalls.count
+        h.appState.acknowledge(.recordingStopped)   // the hold's row, read: anything raised from here is new
+        h.client.onStop = nil   // the helper lets go
+        h.coordinator.helperStopDeadline = .seconds(5)
+        await h.coordinator.retryPendingSessions()
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "finished")
+        #expect(h.presented.value.isEmpty, "no rename panel for a transcript already written")
+        #expect(h.client.finalizeCalls.count == finalizes, "nothing finalized again")
+        #expect(h.appState.activeAlarms[.recordingStopped] == nil, "no new row — above all no \"crashed\" one")
+        #expect(FileManager.default.fileExists(atPath: transcript))
+    }
+
+    /// 69 (R2 follow-up 1): a stale-boot salvage names the restart, never a crash.
+    @Test func aStaleBootSalvageNamesTheRestartNotACrash() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 3600, boot: "another-boot")
+        try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
+        await h.coordinator.recoverAtLaunch()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("your Mac restarted during the recording") && !row.contains("crashed"), "\(row)")
+        #expect(row.contains("Parley recovered 1 chunk to sess.json"), "\(row)")
+    }
+
+    /// 93 (R2 item 9): a salvaged chunk whose speech recognition failed is never called "transcribed".
+    @Test func aSalvageSaysWhichChunksWereNotRecognised() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let s = try slotSentinel(h, alive: 3600, boot: BootSession.currentUUID())
+        try writeSession(dir: outDir(s), meetingStart: s.startedAt, issues: [ChunkIssue(code: .asrFailed, track: nil, count: nil)])
+        await h.coordinator.recoverAtLaunch()
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("written to sess.json, but speech recognition failed on it"), "\(row)")
+    }
+
+    /// … and so does the in-session salvage, from the live session's own chunks.
+    @Test func anAbandonedSessionsSalvageCountsItsRecognitionFailures() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let dir = h.tmp.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let chunk = { (i: Int, issues: [ChunkIssue]) in
+            ProcessedChunk(index: i, startTime: Date(), audioPath: "s-\(i).m4a", segments: [], speakerDatabase: [:], isDualStream: true, issues: issues)
+        }
+        let state = SessionState(sessionId: "s", meetingStart: Date(), engine: "fluidAudio", chunkDurationMinutes: 1,
+                                 chunks: [chunk(0, []), chunk(1, [ChunkIssue(code: .asrFailed, track: "remote", count: nil)])])
+        let outcome = await h.coordinator.salvageAbandonedSession(sessionState: state, outputDir: dir)
+        #expect(outcome.recognitionFailures == .init(remoteOnly: 1))
+    }
+}
