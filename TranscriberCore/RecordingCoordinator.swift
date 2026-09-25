@@ -2325,10 +2325,20 @@ public final class RecordingCoordinator {
         markExitDuringFinalize()
     }
 
+    /// The app is ending NOW (L review 85): SYNCHRONOUSLY — the process can exit in the same turn, before any
+    /// Task runs — the sentinel is marked `stopping` (salvage-only) and quit, so the next launch salvages it as
+    /// a quit even if the bounded helper stop that follows never gets to run. The terminate delegate calls it
+    /// before it answers `.terminateLater`.
+    public func markForTermination() {
+        markSentinelStopping()
+        markExitDuringFinalize()
+    }
+
     /// The app is about to end while a stopped recording's transcript is still being finished (its
     /// sentinel is there, marked `stopping`): say so in the sentinel, so the next launch words it as a
-    /// quit, never "Parley crashed" (L follow-up 42).
-    private func markExitDuringFinalize() {
+    /// quit, never "Parley crashed" (L follow-up 42). Synchronous and public (L review 85): `willPowerOff`
+    /// calls it directly. A live recording is left alone — a logout can still be cancelled.
+    public func markExitDuringFinalize() {
         guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.stopping, !sentinel.quitDuringFinalize else { return }
         sentinel.quitDuringFinalize = true
         do {

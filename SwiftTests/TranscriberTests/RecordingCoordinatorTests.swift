@@ -3480,7 +3480,7 @@ private struct Harness {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         try stopReturnsTheFirstChunk(h)
-        h.runner.finalizeDelayForTesting = .seconds(2)
+        h.runner.finalizeDelayForTesting = .milliseconds(600)
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until { h.appState.isTranscribing }
@@ -3489,7 +3489,39 @@ private struct Harness {
         await h.coordinator.prepareForTermination(bound: .seconds(5))
         #expect(ContinuousClock.now - began < .milliseconds(500))
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
-        stopping.cancel()
+        await stopping.value   // awaited, never cancelled into the next test
+    }
+
+    /// L review 85: the process can end in the same turn a logout is announced or a termination answered —
+    /// the marks are SYNCHRONOUS, never inside a Task. The terminate delegate's mark makes a live recording's
+    /// sentinel salvage-only and worded as a quit before any await.
+    @Test func theTerminationMarkIsSynchronous() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.markForTermination()   // no await: this is all the process may get
+        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        #expect(sentinel.stopping && sentinel.quitDuringFinalize)
+    }
+
+    /// L review 85: `willPowerOff` marks a transcript being finished as a quit, synchronously — and leaves a live
+    /// recording alone (a logout can still be cancelled).
+    @Test func thePowerOffMarkIsSynchronousAndSparesALiveRecording() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.markExitDuringFinalize()
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == false, "a live recording is not a finishing one")
+        try stopReturnsTheFirstChunk(h)
+        h.runner.finalizeDelayForTesting = .milliseconds(300)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { h.appState.isTranscribing }
+        h.coordinator.markExitDuringFinalize()   // no await
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
+        await stopping.value
     }
 
     /// L10 review 54: a sleep and a wake while a Stop is in flight. The helper still gets its "sleep"/"wake"
@@ -3779,8 +3811,9 @@ private struct Harness {
         #expect(h.appState.activeAlarms[.recordingStopped] != nil)
     }
 
-    /// 35: no timer. Nothing happens until an event — a volume mount, a wake, a launch, a recording's end.
-    @Test func theFolderRetryIsEventDrivenNeverATimer() async throws {
+    /// 35: nothing retries by itself (within this test's window — a test cannot prove "never"); the event —
+    /// a volume mount, a wake, a launch, a recording's end — does. There is no retry timer in the code.
+    @Test func aReturnedFolderWaitsForAnEvent() async throws {
         let h = try Harness()
         let (_, locked) = try writeUnreachableSentinel(h)
         defer { unlock(locked) }
@@ -4151,7 +4184,9 @@ private struct Harness {
     }
 
     /// 29: a live pipeline, a crash reported during a failed stop, and exactly one ingest of the chunk in
-    /// progress: the stop path owns it all, no restart.
+    /// progress: the stop path owns it all, no restart. The processor skips a same-file duplicate silently,
+    /// so the single ingest is shown by the crash path never running at all (no retry recorded) — it is the
+    /// only other ingester (L review, RCT:3310).
     @Test func aCrashDuringAFailedStopIngestsTheOrphanOnce() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
@@ -4165,6 +4200,7 @@ private struct Harness {
         h.client.onStop = { await h.coordinator.handleXPCCrash() }
         await h.coordinator.stopRecording()
         #expect(h.client.startCalls.count == 1, "no restart")
+        #expect(h.client.retryEvents.isEmpty, "the crash path never ran: nothing else ingested the chunk")
         let critical = try #require(h.criticals.value.first)
         #expect(h.criticals.value.count == 1 && critical.body.contains("1 chunk"), "\(critical.body)")
     }
@@ -4181,13 +4217,15 @@ private struct Harness {
         let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
         try Harness.headerOnlyWAV().write(to: sys)
         h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
-        h.runner.finalizeDelayForTesting = .seconds(2)
+        h.runner.finalizeDelayForTesting = .milliseconds(300)
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until { h.appState.isTranscribing }
         #expect(await h.coordinator.prepareForQuit(confirm: { Issue.record("no question while finishing"); return true }))
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
-        stopping.cancel()
+        // Awaited, never cancelled (L review, RCT:3329): a cancelled Task keeps running into the next test.
+        await stopping.value
+        #expect(h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil, "the finalize still finished")
     }
 
     /// 42: the next launch words it as a quit, never a crash.

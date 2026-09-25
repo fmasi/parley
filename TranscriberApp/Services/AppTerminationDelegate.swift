@@ -27,6 +27,8 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         case .terminateLater(let bound):
             Logger.state.info("Termination (\(String(describing: kind), privacy: .public)) with work in flight — stopping the helper first, bounded")
+            // Synchronously, before any Task (L review 85): the process may end in this very turn.
+            coordinator.markForTermination()
             Task { @MainActor in
                 await coordinator.prepareForTermination(bound: bound)
                 sender.reply(toApplicationShouldTerminate: true)
