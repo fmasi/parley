@@ -41,6 +41,9 @@ public enum AudioConcatenatorError: LocalizedError {
     /// is not finite, earlier than the first chunk's, or gaps over `maxInsertedSilenceSeconds`.
     /// Refused before anything is written; the chunk files stay the recording's audio.
     case implausibleTiming(String)
+    /// A step that touches the recording folder did not answer within its bound (L review 231): the merge is skipped — its
+    /// sources untouched — and the chunk files are the recording's audio. The step, by name.
+    case folderNotAnswering(String)
 
     public var errorDescription: String? {
         switch self {
@@ -49,7 +52,68 @@ public enum AudioConcatenatorError: LocalizedError {
         case .exportFailed(let msg): return "Export failed: \(msg)"
         case .mixedSources(let names): return "Refusing to merge sources that are not all .m4a: \(names.joined(separator: ", "))"
         case .implausibleTiming(let why): return "Refusing to merge: \(why)"
+        case .folderNotAnswering(let step): return "The recording folder did not answer (\(step)) — the chunks were not merged"
         }
+    }
+}
+
+/// Where a merge's blocking file steps run (L review 231) — loading the sources, removing and checking the output, deleting
+/// the sources: the recording folder's own queue, bounded, never the Swift cooperative pool, where a hung folder held a
+/// thread and left the finalize "Finishing…" forever. The export itself runs in AVFoundation, under its own timeout.
+/// Inline by default: the merge's own tests.
+public protocol MergeFileSteps: Sendable {
+    /// `work`'s value; `AudioConcatenatorError.folderNotAnswering(label)` when it did not answer within its bound.
+    func run<T>(_ label: String, _ work: @escaping @Sendable () throws -> T) async throws -> T
+    /// The same for a step whose file work is AVFoundation's asynchronous loading.
+    func runAsync<T>(_ label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T
+}
+
+/// Every step at once, where the merge runs.
+public struct InlineMergeFileSteps: MergeFileSteps {
+    public init() {}
+    public func run<T>(_ label: String, _ work: @escaping @Sendable () throws -> T) async throws -> T { try work() }
+    public func runAsync<T>(_ label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T { try await work() }
+}
+
+/// Every step on the recording folder's queue, within `seconds` of awake time (L review 231). An asynchronous step holds
+/// that queue — never a pool thread — until its loads answer, so the folder's other reads and writes stay in order behind it.
+public struct FolderMergeSteps: MergeFileSteps {
+    let reads: FolderReads
+    let folder: String
+    let seconds: Double
+
+    public init(reads: FolderReads, folder: String, seconds: Double) {
+        self.reads = reads; self.folder = folder; self.seconds = seconds
+    }
+
+    public func run<T>(_ label: String, _ work: @escaping @Sendable () throws -> T) async throws -> T {
+        guard let result = await reads.read(label, folder: folder, key: folder + "#" + label, seconds: seconds, {
+            StepResult(Result { try work() })
+        }) else { throw AudioConcatenatorError.folderNotAnswering(label) }
+        return try result.value.get()
+    }
+
+    public func runAsync<T>(_ label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await run(label) {
+            // On the folder's queue — a dispatch thread, never the pool — waiting for the loads, which run in AVFoundation.
+            let box = StepBox<T>()
+            let done = DispatchSemaphore(value: 0)
+            Task.detached {
+                do { box.result = .success(try await work()) } catch { box.result = .failure(error) }
+                done.signal()
+            }
+            done.wait()
+            return try box.result!.get()
+        }
+    }
+
+    private struct StepResult<T>: @unchecked Sendable {
+        let value: Result<T, Error>
+        init(_ value: Result<T, Error>) { self.value = value }
+    }
+
+    private final class StepBox<T>: @unchecked Sendable {
+        var result: Result<T, Error>?
     }
 }
 
@@ -115,6 +179,8 @@ public enum AudioConcatenator {
     ///
     /// - Parameter deleteSources: delete the chunk files after a verified merge (false honours
     ///   `preserve_source_wav`).
+    /// - Parameter steps: where its blocking file steps run (L review 231): the finalize's folder queue, bounded. A step
+    ///   that does not answer throws `folderNotAnswering` — the sources untouched, a late step never leaving a half merge.
     /// - Important: `chunks` must be provided in chronological order. This function inserts
     ///   them sequentially into the composition without sorting — callers are responsible for
     ///   ordering by chunk index (or recording time) before calling. (#56)
@@ -122,7 +188,8 @@ public enum AudioConcatenator {
         chunks: [ChunkAudio],
         outputDirectory: URL,
         outputName: String,
-        deleteSources: Bool
+        deleteSources: Bool,
+        steps fileSteps: any MergeFileSteps = InlineMergeFileSteps()
     ) async throws -> AudioConcatenationResult {
         guard !chunks.isEmpty else { throw AudioConcatenatorError.noSources }
         // Wall-clock order when every chunk has a start time — the order the transcript's timestamps
@@ -152,55 +219,59 @@ public enum AudioConcatenator {
         // must leave it alone. `exportVerified` replaces it only once every source has loaded.
         let outputURL = outputDirectory.appendingPathComponent("\(outputName).m4a")
 
-        // Build composition
-        let composition = AVMutableComposition()
-        guard let compositionTrack = composition.addMutableTrack(
-            withMediaType: .audio,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw AudioConcatenatorError.exportFailed("Cannot add composition track")
-        }
-
+        let steps = Steps(runner: fileSteps)
         // Load every source first, and check the timeline they make before anything is inserted or
-        // written: implausible timing is refused, the chunk files kept (round 5).
-        // The assets are kept alongside their tracks: a track whose asset is released can't be inserted.
-        var loaded: [(asset: AVURLAsset, track: AVAssetTrack, duration: CMTime)] = []
-        for chunk in chunks {
-            let asset = AVURLAsset(url: chunk.url)
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let track = tracks.first else {
-                throw AudioConcatenatorError.cannotLoadTrack(chunk.url.lastPathComponent)
+        // written: implausible timing is refused, the chunk files kept (round 5). One step on the folder's queue (L review
+        // 231): the loads, the check, and the composition that reads the sources' tracks.
+        let built = try await steps.runAsync("merge: sources") { () -> Built in
+            let composition = AVMutableComposition()
+            guard let compositionTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw AudioConcatenatorError.exportFailed("Cannot add composition track")
             }
-            loaded.append((asset, track, try await asset.load(.duration)))
-        }
-        if let why = implausibleTiming(chunks, durations: loaded.map(\.duration.seconds)) {
-            Logger.files.error("AudioConcatenator: refusing to merge — \(why, privacy: .public); keeping the chunk files")
-            throw AudioConcatenatorError.implausibleTiming(why)
-        }
-
-        // Each chunk goes at its ABSOLUTE wall-clock offset from the first chunk: the gap is
-        // measured against where the merged file actually is (`insertTime`), not the previous
-        // chunk's end, so sub-second shortfalls cannot add up — every boundary stays within 1 s.
-        var insertTime = CMTime.zero
-        var sourceSeconds = 0.0
-        var gapsInsertedSeconds = 0.0
-        let origin = chunks.first?.startTime
-        for (chunk, source) in zip(chunks, loaded) {
-            let (_, track, duration) = source
-            if let start = chunk.startTime, let origin {
-                let gap = start.timeIntervalSince(origin) - insertTime.seconds
-                if gap > gapThresholdSeconds {
-                    let gapTime = CMTime(seconds: gap, preferredTimescale: 48_000)
-                    compositionTrack.insertEmptyTimeRange(CMTimeRange(start: insertTime, duration: gapTime))
-                    insertTime = CMTimeAdd(insertTime, gapTime)
-                    gapsInsertedSeconds += gap
+            // The assets are kept alongside their tracks: a track whose asset is released can't be inserted.
+            var loaded: [(asset: AVURLAsset, track: AVAssetTrack, duration: CMTime)] = []
+            for chunk in chunks {
+                let asset = AVURLAsset(url: chunk.url)
+                let tracks = try await asset.loadTracks(withMediaType: .audio)
+                guard let track = tracks.first else {
+                    throw AudioConcatenatorError.cannotLoadTrack(chunk.url.lastPathComponent)
                 }
+                loaded.append((asset, track, try await asset.load(.duration)))
             }
-            let timeRange = CMTimeRange(start: .zero, duration: duration)
-            try compositionTrack.insertTimeRange(timeRange, of: track, at: insertTime)
-            insertTime = CMTimeAdd(insertTime, duration)
-            sourceSeconds += duration.seconds
+            if let why = implausibleTiming(chunks, durations: loaded.map(\.duration.seconds)) {
+                Logger.files.error("AudioConcatenator: refusing to merge — \(why, privacy: .public); keeping the chunk files")
+                throw AudioConcatenatorError.implausibleTiming(why)
+            }
+
+            // Each chunk goes at its ABSOLUTE wall-clock offset from the first chunk: the gap is
+            // measured against where the merged file actually is (`insertTime`), not the previous
+            // chunk's end, so sub-second shortfalls cannot add up — every boundary stays within 1 s.
+            var insertTime = CMTime.zero
+            var sourceSeconds = 0.0
+            var gapsInsertedSeconds = 0.0
+            let origin = chunks.first?.startTime
+            for (chunk, source) in zip(chunks, loaded) {
+                let (_, track, duration) = source
+                if let start = chunk.startTime, let origin {
+                    let gap = start.timeIntervalSince(origin) - insertTime.seconds
+                    if gap > gapThresholdSeconds {
+                        let gapTime = CMTime(seconds: gap, preferredTimescale: 48_000)
+                        compositionTrack.insertEmptyTimeRange(CMTimeRange(start: insertTime, duration: gapTime))
+                        insertTime = CMTimeAdd(insertTime, gapTime)
+                        gapsInsertedSeconds += gap
+                    }
+                }
+                let timeRange = CMTimeRange(start: .zero, duration: duration)
+                try compositionTrack.insertTimeRange(timeRange, of: track, at: insertTime)
+                insertTime = CMTimeAdd(insertTime, duration)
+                sourceSeconds += duration.seconds
+            }
+            return Built(composition: composition, sourceSeconds: sourceSeconds, gapsInsertedSeconds: gapsInsertedSeconds)
         }
+        let composition = built.composition, sourceSeconds = built.sourceSeconds, gapsInsertedSeconds = built.gapsInsertedSeconds
         if gapsInsertedSeconds > 0 {
             Logger.files.info("AudioConcatenator: inserted \(gapsInsertedSeconds, format: .fixed(precision: 1), privacy: .public)s of silence between chunks")
         }
@@ -220,23 +291,31 @@ public enum AudioConcatenator {
             }
             try await exportVerified(
                 composition: composition, to: outputURL, preset: AVAssetExportPresetPassthrough,
-                expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds
+                expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds, steps: steps
             )
             usedPassthrough = true
             Logger.files.info("AudioConcatenator: passthrough export succeeded → \(outputURL.lastPathComponent, privacy: .sensitive)")
+        } catch AudioConcatenatorError.folderNotAnswering(let step) {
+            throw AudioConcatenatorError.folderNotAnswering(step)   // never a re-encode into a folder that does not answer
         } catch {
             // Passthrough failed or was skipped — re-encode with AAC
             Logger.files.info("AudioConcatenator: re-encoding with AAC (\(gapsInsertedSeconds > 0 ? "silence inserted" : "passthrough failed", privacy: .public))")
             try await exportVerified(
                 composition: composition, to: outputURL, preset: AVAssetExportPresetAppleM4A,
-                expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds
+                expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds, steps: steps
             )
             usedPassthrough = false
             Logger.files.info("AudioConcatenator: re-encode succeeded → \(outputURL.lastPathComponent, privacy: .sensitive)")
         }
 
         if deleteSources {
-            deleteM4aSources(sources)
+            // The merge is verified and listed from here: a delete that does not answer is only logged — it may land later,
+            // and the merged file holds every source (L review 231).
+            do {
+                try await steps.run("merge: delete sources") { deleteM4aSources(sources) }
+            } catch {
+                Logger.files.error("AudioConcatenator: the merged chunk files' deletes did not answer — the merge is kept; they may go later")
+            }
         } else {
             Logger.files.info("AudioConcatenator: keeping the chunk files (preserve_source_wav)")
         }
@@ -269,42 +348,33 @@ public enum AudioConcatenator {
         to outputURL: URL,
         preset: String,
         expectedSeconds: Double,
-        toleranceSeconds: Double
+        toleranceSeconds: Double,
+        steps: Steps
     ) async throws {
-        try? FileManager.default.removeItem(at: outputURL)
+        try await steps.run("merge: output") { try? FileManager.default.removeItem(at: outputURL) }
         do {
-            _ = try await export(composition: composition, to: outputURL, preset: preset, fileType: .m4a)
-            let played = try await AVURLAsset(url: outputURL).load(.duration).seconds
-            let file = try AVAudioFile(forReading: outputURL)
-            let decoded = file.processingFormat.sampleRate > 0
-                ? Double(file.length) / file.processingFormat.sampleRate : 0
-            for actual in [played, decoded] where abs(actual - expectedSeconds) > toleranceSeconds {
-                throw AudioConcatenatorError.exportFailed(
-                    "\(preset): duration mismatch — got \(String(format: "%.2f", actual))s, expected \(String(format: "%.2f", expectedSeconds))s"
-                )
-            }
+            try await export(composition: composition, to: outputURL, preset: preset, fileType: .m4a)
         } catch {
-            try? FileManager.default.removeItem(at: outputURL)
+            try await steps.run("merge: output") { try? FileManager.default.removeItem(at: outputURL) }
             throw error
+        }
+        // The output's checks, on the folder's queue (L review 231). One that answers only after its bound ran out finds the
+        // merge abandoned — the chunk files listed — and removes the output it checked: never an unlisted half merge.
+        let abandoned = steps.abandoned
+        try await steps.runAsync("merge: check output") {
+            do {
+                try await checkOutput(outputURL, preset: preset, expectedSeconds: expectedSeconds, toleranceSeconds: toleranceSeconds)
+                if abandoned.isSet { try? FileManager.default.removeItem(at: outputURL) }
+            } catch {
+                try? FileManager.default.removeItem(at: outputURL)
+                throw error
+            }
         }
     }
 
-    private static func export(
-        composition: AVMutableComposition,
-        to outputURL: URL,
-        preset: String,
-        fileType: AVFileType
-    ) async throws -> URL {
-        guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
-            throw AudioConcatenatorError.exportFailed("Cannot create export session for preset \(preset)")
-        }
-        do {
-            try await exportWithTimeout(session: session, to: outputURL, as: fileType, preset: preset)
-        } catch let error as AudioConcatenatorError {
-            throw error
-        } catch {
-            throw AudioConcatenatorError.exportFailed("\(preset): \(error.localizedDescription)")
-        }
+    /// The export's output is there, not empty, has audio, and is `expectedSeconds` long (± `toleranceSeconds`) as AVFoundation
+    /// plays it AND as `AVAudioFile` decodes it. Blocking file work: only through the merge's steps.
+    private static func checkOutput(_ outputURL: URL, preset: String, expectedSeconds: Double, toleranceSeconds: Double) async throws {
         guard FileManager.default.fileExists(atPath: outputURL.path) else {
             throw AudioConcatenatorError.exportFailed("\(preset): output file missing after export")
         }
@@ -318,7 +388,33 @@ public enum AudioConcatenator {
         guard !tracks.isEmpty else {
             throw AudioConcatenatorError.exportFailed("\(preset): output has no audio tracks")
         }
-        return outputURL
+        let played = try await asset.load(.duration).seconds
+        let file = try AVAudioFile(forReading: outputURL)
+        let decoded = file.processingFormat.sampleRate > 0
+            ? Double(file.length) / file.processingFormat.sampleRate : 0
+        for actual in [played, decoded] where abs(actual - expectedSeconds) > toleranceSeconds {
+            throw AudioConcatenatorError.exportFailed(
+                "\(preset): duration mismatch — got \(String(format: "%.2f", actual))s, expected \(String(format: "%.2f", expectedSeconds))s"
+            )
+        }
+    }
+
+    private static func export(
+        composition: AVMutableComposition,
+        to outputURL: URL,
+        preset: String,
+        fileType: AVFileType
+    ) async throws {
+        guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
+            throw AudioConcatenatorError.exportFailed("Cannot create export session for preset \(preset)")
+        }
+        do {
+            try await exportWithTimeout(session: session, to: outputURL, as: fileType, preset: preset)
+        } catch let error as AudioConcatenatorError {
+            throw error
+        } catch {
+            throw AudioConcatenatorError.exportFailed("\(preset): \(error.localizedDescription)")
+        }
     }
 
     /// Run the export, racing it against `exportTimeout`. If the timeout wins, cancel the
@@ -347,6 +443,44 @@ public enum AudioConcatenator {
                 session.cancelExport()
                 throw error
             }
+        }
+    }
+
+    /// What the sources step built: the composition and the lengths the output is checked against.
+    private struct Built: @unchecked Sendable {
+        let composition: AVMutableComposition
+        let sourceSeconds: Double
+        let gapsInsertedSeconds: Double
+    }
+
+    /// Set once a step ran out of its bound (L review 231): the merge is abandoned, and a step that answers late undoes what
+    /// it made.
+    final class Abandoned: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
+    }
+
+    /// The merge's steps, through `runner`: a step that does not answer marks the merge abandoned (L review 231).
+    struct Steps: Sendable {
+        let runner: any MergeFileSteps
+        let abandoned = Abandoned()
+
+        func run<T>(_ label: String, _ work: @escaping @Sendable () throws -> T) async throws -> T {
+            do { return try await runner.run(label, work) } catch { throw abandonIfUnanswered(error, label) }
+        }
+
+        func runAsync<T>(_ label: String, _ work: @escaping @Sendable () async throws -> T) async throws -> T {
+            do { return try await runner.runAsync(label, work) } catch { throw abandonIfUnanswered(error, label) }
+        }
+
+        private func abandonIfUnanswered(_ error: Error, _ label: String) -> Error {
+            if case AudioConcatenatorError.folderNotAnswering = error {
+                abandoned.set()
+                Logger.files.error("AudioConcatenator: \(label, privacy: .public) did not answer — the merge is skipped, its chunk files kept")
+            }
+            return error
         }
     }
 

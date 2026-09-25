@@ -555,7 +555,9 @@ public final class TranscriptionRunner {
                     },
                     outputDirectory: outputDirectory,
                     outputName: sessionState.sessionId,
-                    deleteSources: !(config.preserveSourceWAV ?? false)
+                    deleteSources: !(config.preserveSourceWAV ?? false),
+                    // Its file steps on the folder's queue, each within the write bound (L review 231).
+                    steps: FolderMergeSteps(reads: folderReads, folder: outputDirectory.path, seconds: folderWriteSeconds)
                 )
                 audioPaths = [concatResult.outputPath]
                 // The merged file starts at the earliest chunk and carries its gaps as silence.
@@ -567,6 +569,14 @@ public final class TranscriptionRunner {
                 Logger.files.info(
                     "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .sensitive) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
+            } catch AudioConcatenatorError.folderNotAnswering(let step) {
+                // A step did not answer within its bound (L review 231): skipped, never "Finishing…" forever — the chunk
+                // files are the audio, untouched (the refusal path), and the record says why.
+                Logger.files.error("Audio not merged — the recording folder did not answer (\(step, privacy: .public)); keeping separate files")
+                audioPaths = chunkAudioPaths
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                    code: .mergeSkippedFolderNotAnswering, track: nil, count: nil,
+                    detail: "\(step) did not answer within \(Int(folderWriteSeconds)) s")))
             } catch AudioConcatenatorError.implausibleTiming(let why) {
                 // Refused before anything was written: the chunk files are the audio, and the record
                 // says why they were not merged (round 5), with the reason (round 7 item 3).
@@ -592,23 +602,41 @@ public final class TranscriptionRunner {
         default: detectedLanguage = "multilingual"
         }
 
-        // 6b. Storage quota enforcement, before the record is written so it can say what the quota
-        // could not do. Never a file backing this record: every listed audio file, every chunk file,
-        // and every archive of the session in the folder (rounds 7-8 item 1). Protecting only the
-        // last listed file let a rebuild's quota pass delete the merged file — the only copy of the
-        // earlier chunks. With the lengths the record lists: on the folder's queue, bounded — never on the main actor
-        // (L review 185).
+        // 6b. The lengths the record lists, and the storage quota, before the record is written so it can say what the quota
+        // could not do. Never a file backing this record: every listed audio file, every chunk file, and every archive of the
+        // session in the folder (rounds 7-8 item 1). Protecting only the last listed file let a rebuild's quota pass delete
+        // the merged file — the only copy of the earlier chunks. Both on the folder's queue, bounded — never on the main
+        // actor (L review 185) — and neither is FATAL (L review 227): the quota pass walks the whole recording root and
+        // deletes files, so a slow but healthy share must never make a Stop "not answering". Lengths that do not answer are
+        // written unknown (left out: readers measure the files), a quota pass that does not finish within the write bound is
+        // recorded, and the transcript is written all the same.
         let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps, sessionId = sessionState.sessionId
         let protectedFiles = audioPaths + chunkAudioPaths + [mergedURL], listedAudio = audioPaths
-        guard let measured = await folderReads.read("transcript: quota and lengths", folder: outputDirectory.path,
-                                                    key: outputDirectory.path + "#finalize-measure:" + sessionId, seconds: folderReadSeconds, {
-            Self.quotaAndLengths(in: outputDirectory, sessionId: sessionId, limitHours: limitHours, bitrateKbps: bitrateKbps,
-                                 protectedFiles: protectedFiles, listedAudio: listedAudio)
-        }) else { throw FolderNotAnswering() }
-        if let overrun = measured.overrunBytes, overrun > 0,
-           !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
-            finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
-                code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(overrun) bytes over the quota")))
+        let lengths = await folderReads.read("transcript: lengths", folder: outputDirectory.path,
+                                             key: outputDirectory.path + "#finalize-lengths:" + sessionId, seconds: folderReadSeconds, {
+            listedAudio.map(TranscriptAssembler.duration(of:))
+        })
+        if lengths == nil {
+            Logger.files.error("The listed audio's lengths did not answer within \(self.folderReadSeconds, privacy: .public) s — written unknown")
+            finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .audioLengthsUnknown, track: nil, count: nil,
+                                                                             detail: "the recording folder did not answer within \(Int(folderReadSeconds)) s")))
+        }
+        let quota = await folderReads.outcome("transcript: quota", folder: outputDirectory.path,
+                                              key: outputDirectory.path + "#finalize-quota:" + sessionId, seconds: folderWriteSeconds, {
+            Self.quota(in: outputDirectory, sessionId: sessionId, limitHours: limitHours, bitrateKbps: bitrateKbps, protectedFiles: protectedFiles)
+        })
+        switch quota {
+        case .answered(let overrun?) where overrun > 0:
+            if !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                    code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(overrun) bytes over the quota")))
+            }
+        case .answered:
+            break
+        case .timedOut:
+            Logger.files.error("The storage quota pass did not finish within \(self.folderWriteSeconds, privacy: .public) s — the transcript is written all the same")
+            finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .quotaNotChecked, track: nil, count: nil,
+                                                                             detail: "the quota pass did not finish within \(Int(folderWriteSeconds)) s")))
         }
 
         // 7. Assemble JSON
@@ -630,7 +658,7 @@ public final class TranscriptionRunner {
             captureGaps: sessionState.gaps,
             processingIssues: processingIssues,
             mergedAudio: mergedAudio,
-            chunkDurations: measured.lengths,
+            chunkDurations: lengths,
             chunkOffsets: chunkOffsets
         )
 
@@ -684,20 +712,18 @@ public final class TranscriptionRunner {
                             previousMergedAudio: previousMergedAudio(transcriptAt: transcriptURL))
     }
 
-    /// The quota pass and the lengths of the audio the record lists (L review 185): `overrunBytes` nil when the quota pass
-    /// failed (logged). Blocking file work: only through `folderReads`.
-    nonisolated static func quotaAndLengths(in directory: URL, sessionId: String, limitHours: Int, bitrateKbps: Int,
-                                            protectedFiles: [URL], listedAudio: [URL]) -> (overrunBytes: Int?, lengths: [Double]) {
-        var overrun: Int?
+    /// The quota pass (L reviews 185, 227): the protected overrun, or nil when the pass failed (logged). It deletes files:
+    /// run only through `folderReads`, under the write bound.
+    nonisolated static func quota(in directory: URL, sessionId: String, limitHours: Int, bitrateKbps: Int, protectedFiles: [URL]) -> Int? {
         do {
-            overrun = try StorageManager.enforceQuotaReport(
+            return try StorageManager.enforceQuotaReport(
                 in: directory, limitHours: limitHours, bitrateKbps: bitrateKbps,
                 protectedFiles: protectedFiles + CrashRecoveryPlanner.sessionArchives(outputDirectory: directory, sessionId: sessionId)
             ).protectedOverrunBytes
         } catch {
             Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+            return nil
         }
-        return (overrun, listedAudio.map(TranscriptAssembler.duration(of:)))
     }
 
     /// The record's writes, in order (L review 185): stray temporaries swept, the transcript written durably, then —
@@ -795,7 +821,7 @@ public final class TranscriptionRunner {
         firstChunkIndex: Int = 0
     ) throws {
         try setupPipeline(captureClient: captureClient, outputDirectory: outputDirectory, sessionBaseName: sessionBaseName,
-                          config: config, seededState: nil, firstChunkIndex: firstChunkIndex)
+                          config: config, seededState: nil, ownStateOnDisk: nil, firstChunkIndex: firstChunkIndex)
     }
 
     /// Set up the chunked pipeline RESUMING a persisted session after a relaunch (L7): its chunks,
@@ -812,10 +838,11 @@ public final class TranscriptionRunner {
         sessionBaseName: String,
         config: Config,
         seededState: SessionState,
+        ownStateOnDisk: SessionState? = nil,
         firstChunkIndex: Int
     ) throws {
         try setupPipeline(captureClient: captureClient, outputDirectory: outputDirectory, sessionBaseName: sessionBaseName,
-                          config: config, seededState: seededState, firstChunkIndex: firstChunkIndex)
+                          config: config, seededState: seededState, ownStateOnDisk: ownStateOnDisk, firstChunkIndex: firstChunkIndex)
     }
 
     private func setupPipeline(
@@ -824,6 +851,7 @@ public final class TranscriptionRunner {
         sessionBaseName: String,
         config: Config,
         seededState: SessionState?,
+        ownStateOnDisk: SessionState?,
         firstChunkIndex: Int
     ) throws {
         if failSetupForTesting { throw SetupFailure.forTesting }
@@ -843,9 +871,10 @@ public final class TranscriptionRunner {
         // when that is on disk (R2a M3: never an empty overwrite of it), else starts fresh; the
         // refusal is recorded as a problem. The seed's own file is untouched and stays recoverable
         // under its id. An engine change between crash and resume (a Settings change) is recorded as
-        // information only, and still seeds.
+        // information only, and still seeds. Its own state is the one the caller's bounded look found (`ownStateOnDisk`,
+        // L review 234): this setup runs on the main actor and never reads the folder itself.
         if let seededState, seededState.sessionId != sessionBaseName {
-            let own = SessionState.read(directory: outputDirectory, sessionId: sessionBaseName)
+            let own = ownStateOnDisk?.sessionId == sessionBaseName ? ownStateOnDisk : nil
             Logger.state.error(
                 "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — not seeding; continuing from \(own == nil ? "a fresh state" : "this session's own state", privacy: .public)"
             )
@@ -871,7 +900,10 @@ public final class TranscriptionRunner {
             outputDirectory: outputDirectory,
             sessionState: sessionState,
             transcriber: transcriber,
-            diarizer: diarizer
+            diarizer: diarizer,
+            // Its session.json writes on the folder's queue, within the write bound (L review 234).
+            folderReads: folderReads,
+            writeSeconds: folderWriteSeconds
         )
         self.chunkProcessor = processor
 

@@ -46,20 +46,29 @@ public final class ChunkProcessor {
 
     /// Actor-isolated mutable session state — replaces NSLock. It also owns every session.json
     /// write, so writes are serialized: a snapshot taken before another chunk's append can never be
-    /// renamed over the newer one (B-M11).
+    /// renamed over the newer one (B-M11). The writes themselves run on the folder's queue, within the write bound (L review
+    /// 234) — never on the cooperative pool, where a hung folder held a thread and the pipeline with it: one that does not
+    /// answer is a failed write (`sessionWriteFailed`, the existing alarm), and the pipeline goes on. On that serial queue a
+    /// snapshot older than one already written is skipped, so a write that answers late never lands over a newer one.
     private actor StateStore {
         var sessionState: SessionState
         let directory: URL
+        let reads: FolderReads
+        let writeSeconds: Double
         /// Every persist attempt's number, in the order the writes happened (R2a M4).
         private var writeSequence: UInt64 = 0
+        /// The newest snapshot written, by its number — read and set on the folder's queue.
+        private let written = WrittenSequence()
         /// Sessions this one has displaced from the folder's session.json, recorded once each (R2a M5).
         private var displacedSessions: Set<String> = []
         /// Test seam: writes that may still succeed before every later one fails (nil = no fault).
         private var successfulWritesLeftForTesting: Int?
 
-        init(sessionState: SessionState, directory: URL) {
+        init(sessionState: SessionState, directory: URL, reads: FolderReads, writeSeconds: Double) {
             self.sessionState = sessionState
             self.directory = directory
+            self.reads = reads
+            self.writeSeconds = writeSeconds
         }
 
         func appendChunk(_ chunk: ProcessedChunk) {
@@ -96,37 +105,74 @@ public final class ChunkProcessor {
         /// overwritten); that is recorded once per displaced session and written with the state. If
         /// only that follow-up write fails, the state (and the chunk) WAS persisted: not a failure —
         /// the note stays in memory for the next write (R2a M5).
-        func persist() -> (sequence: UInt64, error: (any Error)?) {
-            writeSequence += 1
-            do {
-                let displaced = try write()
-                guard let displaced else { return (writeSequence, nil) }
-                let key = displaced.sessionId ?? displaced.movedTo.lastPathComponent
-                guard displacedSessions.insert(key).inserted else { return (writeSequence, nil) }
-                sessionState.issues.append(SessionIssue(
-                    chunk: nil, issue: ChunkIssue(code: .sessionFileDisplaced, track: nil, count: nil)
-                ))
-                do {
-                    try write()
-                } catch {
-                    Logger.state.error("session.json was written, but not the note that another session was moved aside (it will be written next time): \(error, privacy: .private)")
-                }
-                return (writeSequence, nil)
-            } catch {
-                return (writeSequence, error)
+        func persist() async -> (sequence: UInt64, error: (any Error)?) {
+            let (sequence, outcome) = await write()
+            let displaced: DisplacedSession?
+            switch outcome {
+            case .success(let moved): displaced = moved
+            case .failure(let error): return (sequence, error)
             }
+            guard let displaced else { return (sequence, nil) }
+            let key = displaced.sessionId ?? displaced.movedTo.lastPathComponent
+            guard displacedSessions.insert(key).inserted else { return (sequence, nil) }
+            sessionState.issues.append(SessionIssue(
+                chunk: nil, issue: ChunkIssue(code: .sessionFileDisplaced, track: nil, count: nil)
+            ))
+            if case .failure(let error) = await write().outcome {
+                Logger.state.error("session.json was written, but not the note that another session was moved aside (it will be written next time): \(error, privacy: .private)")
+            }
+            return (sequence, nil)
         }
 
-        @discardableResult
-        private func write() throws -> DisplacedSession? {
+        /// One write of the state as it stands now — numbered, the snapshot taken before any suspension — on the folder's
+        /// queue, bounded (L review 234).
+        private func write() async -> (sequence: UInt64, outcome: Result<DisplacedSession?, Error>) {
+            writeSequence += 1
+            let sequence = writeSequence
             if let left = successfulWritesLeftForTesting {
-                guard left > 0 else { throw CocoaError(.fileWriteUnknown) }
+                guard left > 0 else { return (sequence, .failure(CocoaError(.fileWriteUnknown))) }
                 successfulWritesLeftForTesting = left - 1
             }
-            return try SessionState.write(sessionState, directory: directory)
+            let snapshot = sessionState, directory = directory, written = written
+            guard let result = await reads.read("chunk: session file", folder: directory.path, key: directory.path + "#session.json",
+                                                seconds: writeSeconds, {
+                written.writeIfNewer(sequence) { try SessionState.write(snapshot, directory: directory) }
+            }) else {
+                Logger.state.error("session.json did not answer within \(self.writeSeconds, privacy: .public) s — the recording folder is not answering")
+                return (sequence, .failure(SessionWriteNotAnswering(seconds: writeSeconds)))
+            }
+            return (sequence, result)
         }
 
         func setFailWritesForTesting(after successes: Int) { successfulWritesLeftForTesting = successes }
+    }
+
+    /// The newest session.json snapshot written (L review 234): a write — on the folder's serial queue — whose snapshot is
+    /// older than one already written is skipped, so a write that answered late never replaces a newer state.
+    private final class WrittenSequence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var newest: UInt64 = 0
+
+        func writeIfNewer(_ sequence: UInt64, _ write: () throws -> DisplacedSession?) -> Result<DisplacedSession?, Error> {
+            lock.lock(); defer { lock.unlock() }
+            guard sequence > newest else {
+                Logger.state.info("A session.json snapshot older than the one written is skipped")
+                return .success(nil)
+            }
+            do {
+                let displaced = try write()
+                newest = sequence
+                return .success(displaced)
+            } catch {
+                return .failure(error)
+            }
+        }
+    }
+
+    /// A session.json write that did not answer within its bound (L review 234).
+    struct SessionWriteNotAnswering: Error, LocalizedError {
+        let seconds: Double
+        var errorDescription: String? { "the recording folder did not answer the progress file's write within \(Int(seconds)) s" }
     }
 
     /// Test seam: every later session.json write fails (after `successes` more that succeed).
@@ -156,11 +202,13 @@ public final class ChunkProcessor {
         sessionState: SessionState,
         transcriber: any TranscriptionEngine,
         diarizer: (any DiarizationProvider)?,
-        scratchDirectory: URL = FileManager.default.temporaryDirectory
+        scratchDirectory: URL = FileManager.default.temporaryDirectory,
+        folderReads: FolderReads = .shared,
+        writeSeconds: Double = 30
     ) {
         self.config = config
         self.outputDirectory = outputDirectory
-        self.stateStore = StateStore(sessionState: sessionState, directory: outputDirectory)
+        self.stateStore = StateStore(sessionState: sessionState, directory: outputDirectory, reads: folderReads, writeSeconds: writeSeconds)
         self.sourceByIndex = Dictionary(
             sessionState.chunks.map { ($0.index, Self.sourceBaseName(ofFile: $0.audioPath)) },
             uniquingKeysWith: { first, _ in first }

@@ -192,8 +192,9 @@ import Testing
         try SessionState.write(own, directory: dir)
         try SessionState.write(other, directory: dir)                                  // m moved aside
         let runner = TranscriptionRunner()
+        // As the caller's bounded look found it (L review 234): the setup never reads the folder itself.
         try runner.setupChunkedPipeline(captureClient: NoopRotationClient(), outputDirectory: dir, sessionBaseName: "m", config: .default,
-                                        seededState: other, firstChunkIndex: 1)
+                                        seededState: other, ownStateOnDisk: SessionState.read(directory: dir, sessionId: "m"), firstChunkIndex: 1)
         let state = try #require(await runner.chunkProcessor?.getSessionState())
         #expect(state.sessionId == "m" && state.chunks.map(\.audioPath) == ["m-0.m4a"] && state.meetingStart == own.meetingStart)
         #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))

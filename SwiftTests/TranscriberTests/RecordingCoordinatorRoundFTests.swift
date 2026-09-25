@@ -103,6 +103,115 @@ final class FakeSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
 }
 #endif
 
+// MARK: - A slow quota pass or lengths read is never fatal (227)
+
+/// A read named `label` that takes `seconds` — a slow but healthy share, never a hung one.
+struct SlowRead: Sendable {
+    let label: String
+    let seconds: Double
+    func delayIfNamed(_ name: String) { if name == label { Thread.sleep(forTimeInterval: seconds) } }
+}
+
+@MainActor
+@Suite struct FinalizeBoundsRoundFTests {
+    private func folder() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("finalize-f-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// A finished chunked session `f` in `d`, one chunk whose audio is a real WAV.
+    private func session(in d: URL) throws -> SessionState {
+        try RecoveryFixtures.writeSessionJSON(dir: d, sessionId: "f", meetingStart: Date(), chunkIndices: [0])
+        try RecoveryFixtures.writeFakeWav(at: d.appendingPathComponent("f-0.m4a"), seconds: 1)
+        return try #require(SessionState.read(directory: d, sessionId: "f"))
+    }
+
+    private func issues(_ url: URL) throws -> [String] {
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        return ((json["metadata"] as? [String: Any])?["processing_issues"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+    }
+
+    private func metadata(_ url: URL) throws -> [String: Any] {
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        return try #require(json["metadata"] as? [String: Any])
+    }
+
+    /// L review 227, IMPORTANT: a quota pass slower than its bound — it walks the whole recording root and deletes files — is
+    /// NOT fatal: the transcript is written, and the record says the quota was not checked.
+    @Test func aSlowQuotaPassIsNeverFatal() async throws {
+        let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
+        let state = try session(in: d)
+        let runner = TranscriptionRunner()
+        let slow = SlowRead(label: "transcript: quota", seconds: 1.5)
+        runner.folderReads = FolderReads(label: "runner-f-\(UUID().uuidString)", beforeEachRead: { slow.delayIfNamed($0) })
+        runner.folderWriteSeconds = 1
+        let result = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
+        let codes = try issues(result.jsonPath), lengths = try metadata(result.jsonPath)["chunk_durations"] as? [Double]
+        #expect(codes.contains(ChunkIssue.Code.quotaNotChecked.rawValue), "\(codes)")
+        #expect(lengths != nil, "the lengths were read")
+    }
+
+    /// L review 227: lengths that do not answer are written UNKNOWN — left out, never made up, never a failed transcript.
+    @Test func lengthsThatDoNotAnswerAreWrittenUnknown() async throws {
+        let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
+        let state = try session(in: d)
+        let runner = TranscriptionRunner()
+        let slow = SlowRead(label: "transcript: lengths", seconds: 1.5)
+        runner.folderReads = FolderReads(label: "runner-f-\(UUID().uuidString)", beforeEachRead: { slow.delayIfNamed($0) })
+        runner.folderReadSeconds = 1
+        let result = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
+        let codes = try issues(result.jsonPath), lengths = try metadata(result.jsonPath)["chunk_durations"]
+        #expect(lengths == nil, "unknown, never a guess")
+        #expect(codes.contains(ChunkIssue.Code.audioLengthsUnknown.rawValue), "\(codes)")
+    }
+}
+
+// MARK: - The merge is bounded on the folder's queue (231)
+
+@MainActor
+@Suite struct MergeBoundRoundFTests {
+    /// L review 231, IMPORTANT: a merge whose folder does not answer — its sources' loads hung — is SKIPPED within its bound,
+    /// never "Finishing…" forever: the chunk files are listed (the refusal path), the record says why, and nothing of the
+    /// sources is deleted.
+    @Test func aMergeWhoseFolderHangsIsSkippedAndSaid() async throws {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("merge-f-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: d) }
+        let t0 = Date()
+        let chunks = (0..<2).map { i in
+            ProcessedChunk(index: i, startTime: t0.addingTimeInterval(Double(i) * 60), audioPath: "m-\(i).m4a",
+                           segments: [.init(start: 0, end: 1, text: "hi", speaker: "Speaker 1", source: "remote")],
+                           speakerDatabase: ["Speaker 1": [1, 0, 0]])
+        }
+        for chunk in chunks { try Data(repeating: 1, count: 1_024).write(to: d.appendingPathComponent(chunk.audioPath)) }
+        var config = Config.default
+        config.mergeChunkedAudio = true
+        config.preserveSourceWAV = false
+        let state = SessionState(sessionId: "m", meetingStart: t0, engine: "fluid_audio", chunkDurationMinutes: 1, chunks: chunks)
+        let hung = HungRead("merge: sources")
+        defer { hung.release() }
+        let runner = TranscriptionRunner()
+        runner.folderReads = FolderReads(label: "merge-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        runner.folderWriteSeconds = 0.5
+        runner.folderReadSeconds = 5
+        let started = ContinuousClock.now
+        let finalize = Task { try await runner.finalize(sessionState: state, outputDirectory: d, config: config) }
+        await Harness.until { hung.reached }
+        #expect(hung.reached, "the merge's loads run on the folder's queue")
+        try await Task.sleep(for: .milliseconds(800))   // past the merge's bound: the folder answers again
+        hung.release()
+        let result = try await finalize.value
+        #expect(ContinuousClock.now - started < .seconds(5), "within its bound, never the watchdog")
+        let meta = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect(meta["audio_files"] as? [String] == ["m-0.m4a", "m-1.m4a"], "the chunk files are listed")
+        let codes = (meta["processing_issues"] as? [[String: Any]] ?? []).compactMap { $0["code"] as? String }
+        #expect(codes.contains(ChunkIssue.Code.mergeSkippedFolderNotAnswering.rawValue), "\(codes)")
+        #expect(chunks.allSatisfy { FileManager.default.fileExists(atPath: d.appendingPathComponent($0.audioPath).path) }, "no source deleted")
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("m.m4a").path), "no half merge left")
+    }
+}
+
 // MARK: - The engine a salvage needs: the diarizer too, only for audio to recognise, and the right remedy (230, 232, 233)
 
 /// A diarizer whose model is not downloaded (L review 232): made fine, never ready.
@@ -186,5 +295,61 @@ struct NotReadyDiarizer: DiarizationProvider {
         await h.coordinator.retryPendingSessions()
         #expect(h.appState.activeAlarms[.recordingStopped] == nil, "said once")
         #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "still kept")
+    }
+}
+
+// MARK: - The pipeline's own file work: the seed's read and the progress file's writes (234)
+
+/// A rotation client that is never asked: the tests below never rotate.
+private final class IdleRotationClient: ChunkRotationClient {
+    func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+        throw CancellationError()
+    }
+}
+
+@MainActor
+@Suite struct PipelineFileWorkRoundFTests {
+    private func folder() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("pipeline-f-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// L review 234: a refused seed falls back to this session's own state as its CALLER's bounded look found it — the
+    /// setup, on the main actor, never reads the folder itself.
+    @Test func aRefusedSeedFallsBackToTheOwnStateItsCallerRead() async throws {
+        let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
+        let own = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 100), engine: Config.default.engine.rawValue,
+                               chunkDurationMinutes: 10,
+                               chunks: [ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 100), audioPath: "m-0.m4a",
+                                                       segments: [], speakerDatabase: [:])])
+        let other = SessionState(sessionId: "other", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10)
+        let runner = TranscriptionRunner()
+        defer { runner.teardownChunkedPipeline() }
+        try runner.setupChunkedPipeline(captureClient: IdleRotationClient(), outputDirectory: d, sessionBaseName: "m", config: .default,
+                                        seededState: other, ownStateOnDisk: own, firstChunkIndex: 1)
+        let state = try #require(await runner.chunkProcessor?.getSessionState())
+        #expect(state.sessionId == "m" && state.chunks.map(\.audioPath) == ["m-0.m4a"], "the caller's look — nothing on disk to read")
+        #expect(state.issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil))))
+    }
+
+    /// L review 234: a `session.json` write that does not answer within the write bound never blocks the pipeline: it is
+    /// recorded as `sessionWriteFailed` — the existing alarm — and the pipeline goes on.
+    @Test func aProgressFileWriteThatDoesNotAnswerIsAFailedWriteWithinItsBound() async throws {
+        let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
+        let hung = HungRead("chunk: session file")
+        defer { hung.release() }
+        let state = SessionState(sessionId: "m", meetingStart: Date(), engine: "fluid_audio", chunkDurationMinutes: 10)
+        let processor = ChunkProcessor(config: .default, outputDirectory: d, sessionState: state, transcriber: FakeEngine(), diarizer: nil,
+                                       folderReads: FolderReads(label: "pipeline-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) }),
+                                       writeSeconds: 0.3)
+        let failures = Harness.Box<[Int?]>([])
+        processor.onSessionWriteFailure = { failures.value.append($0) }
+        let started = ContinuousClock.now
+        await processor.appendGap(CaptureGap(start: Date(timeIntervalSince1970: 1), end: Date(timeIntervalSince1970: 3), reason: "sleep"))
+        #expect(ContinuousClock.now - started < .seconds(3), "within its bound, never the hung write")
+        #expect(hung.reached, "the write ran on the folder's queue")
+        #expect(failures.value == [nil], "said: the sessionWriteFailed alarm")
+        #expect(await processor.getSessionState().issues.contains(SessionIssue(chunk: nil, issue: ChunkIssue(code: .sessionWriteFailed, track: nil, count: nil))))
     }
 }

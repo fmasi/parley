@@ -67,6 +67,16 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// The storage quota could not be met without deleting this session's own audio, which it
         /// never does (round 8 item 2). Informational: nothing is missing; the folder is over quota.
         public static let quotaExceededByCurrentSession = Code(rawValue: "quota_exceeded_by_current_session")
+        /// The storage quota pass did not finish within its bound — a slow share (L review 227): the transcript was written
+        /// all the same. Informational: nothing is missing; the folder may be over quota.
+        public static let quotaNotChecked = Code(rawValue: "quota_not_checked")
+        /// The listed audio's lengths could not be read within their bound (L review 227): the record's `chunk_durations`
+        /// are left out — unknown, never made up — and readers measure the files themselves. Informational.
+        public static let audioLengthsUnknown = Code(rawValue: "audio_lengths_unknown")
+        /// The chunks were not merged: a merge step that touches the recording folder did not answer within its bound (L
+        /// review 231). The transcript lists each chunk's own audio file; `detail` names the step. Informational: no audio
+        /// is missing.
+        public static let mergeSkippedFolderNotAnswering = Code(rawValue: "merge_skipped_folder_not_answering")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An

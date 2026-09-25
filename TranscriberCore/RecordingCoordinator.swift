@@ -555,6 +555,7 @@ public final class RecordingCoordinator {
             }
             captureStarted = true
 
+            useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient,
                 outputDirectory: outputDir,
@@ -2016,9 +2017,10 @@ public final class RecordingCoordinator {
         }
         let seed = seedState(for: sentinel, persisted: scan.persisted)
         do {
+            useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient, outputDirectory: outputDir, sessionBaseName: stripSegmentSuffix(sentinel.systemAudioPath),
-                config: configManager.config, seededState: seed, firstChunkIndex: scan.liveIndex)
+                config: configManager.config, seededState: seed, ownStateOnDisk: scan.persisted, firstChunkIndex: scan.liveIndex)
         } catch {
             reattachedWithoutPipeline(because: error.localizedDescription)
             return
@@ -2411,9 +2413,10 @@ public final class RecordingCoordinator {
             // The rotator is anchored at the current time inside: the monotonic clock behind it cannot be
             // persisted, so a resume re-anchors at resume time, never at the seeded `meetingStart` (C10).
             // `firstChunkIndex` is the plan's: the rotator must name the file the helper is writing.
+            useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
             try transcriptionRunner.setupChunkedPipeline(
                 captureClient: captureClient, outputDirectory: outputDir, sessionBaseName: sessionId,
-                config: config, seededState: seed, firstChunkIndex: plan.index
+                config: config, seededState: seed, ownStateOnDisk: scan.persisted, firstChunkIndex: plan.index
             )
         } catch {
             Logger.state.error("Resume after a crash failed: \(error, privacy: .private)")
