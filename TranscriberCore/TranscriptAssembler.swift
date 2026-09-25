@@ -222,7 +222,9 @@ public enum TranscriptAssembler {
         guard let updated = try? JSONSerialization.data(
             withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
         ) else { return }
-        try? updated.write(to: jsonPath, options: .atomic)
+        // Durable (final review R-M9): on the `run()` path the source WAVs are already archived and deleted — a power loss
+        // after an unsynced write would leave a transcript naming files that no longer exist.
+        try? DurableFile.replace(jsonPath, with: updated)
         Logger.files.info("Reconciled audio paths in \(jsonPath.lastPathComponent, privacy: .sensitive) → \(paths.count) source(s)")
     }
 
