@@ -4973,6 +4973,22 @@ struct Harness {
         #expect(h.client.stopCalls == 0, "the busy capture is not this start's to stop")
     }
 
+    /// Final review A-M5: a start that fails BEFORE it marked the mic — its recovery file's write failed — leaves the mic a
+    /// held session's helper may still hold marked (#192): it never asked the helper for anything.
+    @Test func aStartWhoseRecoveryFileWriteFailsKeepsAHeldSessionsMicMarked() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.recordingMic.set("held-mic")   // an earlier capture the helper has not let go of
+        // The recovery file cannot be written: its temporary's name is taken by a folder.
+        let blocker = h.tmp.appendingPathComponent("recording.json.tmp")
+        try FileManager.default.createDirectory(at: blocker.appendingPathComponent("x"), withIntermediateDirectories: true)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "new-mic")
+        #expect(h.appState.isIdle && h.appState.errorMessage != nil, "the start failed: \(h.appState.errorMessage ?? "nil")")
+        #expect(h.client.startCalls.isEmpty, "the helper was never asked")
+        #expect(h.recordingMic.current == .some("held-mic"), "the held session's mic stays marked")
+    }
+
     /// L follow-up 26 (R2's `onSessionWriteSucceeded`): `sessionWriteFailed` clears on the next SUCCESSFUL
     /// session.json write — it is not stuck until the recording ends.
     @Test func aSuccessfulSessionWriteClearsTheWriteAlarm() async throws {

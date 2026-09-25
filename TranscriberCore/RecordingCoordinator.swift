@@ -553,8 +553,9 @@ public final class RecordingCoordinator {
         var captureStarted = false
         // The helper was asked to start: a start that timed out may still commit, so it is stopped too.
         var helperStartIssued = false
-        // The mic marked before this start (a held session's, say): put back if the helper was busy with it.
-        var micBefore: String?? = nil
+        // The mic marked before this start (a held session's, say): put back if the helper was busy with it, or never asked.
+        // Read before anything can fail (final review A-M5): a failed slot write must not read as "nothing was marked".
+        let micBefore = recordingMicrophone.current
         // What this start wrote to the slot: held from this copy if the slot cannot be read back (L review 132).
         var startedSentinel: RecordingSentinel?
 
@@ -578,7 +579,6 @@ public final class RecordingCoordinator {
             currentSessionKey = sentinel.sessionKey   // L review 266
 
             // Before the helper opens the mic, so no meter opens it meanwhile (#192).
-            micBefore = recordingMicrophone.current
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
@@ -650,8 +650,10 @@ public final class RecordingCoordinator {
                 })
             }
             if helperLetGo {
-                // A busy helper still holds the mic of the capture it is busy with: that marker stays (#192).
-                if reply == .alreadyCapturing { restoreHelperMic(micBefore) } else { clearHelperMic() }
+                // A busy helper still holds the mic of the capture it is busy with: that marker stays (#192). So does the marker
+                // of a start that failed before it asked the helper for anything (final review A-M5): a held session's helper
+                // may still hold that mic.
+                if reply == .alreadyCapturing || !helperStartIssued { restoreHelperMic(micBefore) } else { clearHelperMic() }
                 await slotDeleteOffMain("start: delete")
                 // No recording exists: no evidence of one either — never an orphan live log (L11 review 68).
                 captureClient.discardSessionEvidence(sessionId: naming.chunkBaseName, directory: outputDir)
