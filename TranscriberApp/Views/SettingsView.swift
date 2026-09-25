@@ -587,6 +587,9 @@ struct SettingsView: View {
             saveStatus = nil
         }
         triggerDownloadIfNeeded()
+        // The engine may be ready now (another one chosen, its model already there): recordings kept waiting for it are
+        // transcribed (L review 178).
+        Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
     }
 
     @ViewBuilder
@@ -659,6 +662,7 @@ struct SettingsView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
+                await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady()   // L review 178
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

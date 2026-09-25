@@ -31,6 +31,23 @@ public struct RecordingSentinel: Codable, Equatable {
     /// not kept yet (the slot's own sentinel), or kept by an earlier build.
     public var stopCause: StopCause?
 
+    /// Why the session was HELD — kept because the capture helper would not let go of it (L review 177). Carried on the
+    /// pending entry, so its eventual row says what happened — never "Parley crashed" for a capture that failed while Parley
+    /// ran — and so no held session is salvaged while another held helper still holds on (L review 183). nil: never held.
+    public var heldReason: HeldReason?
+
+    /// Why a session was held (L review 177).
+    public enum HeldReason: String, Codable, Sendable, Equatable {
+        /// A start failed, and the helper would not stop the capture it may have begun.
+        case startFailed
+        /// The capture failed mid-recording, its restart failed, and the helper would not let go.
+        case restartFailed
+        /// The user's Stop found another stop still under way in the helper, past the Stop's deadline.
+        case stopUnderWay
+        /// A relaunch found the helper would not let go of the recording it was settling.
+        case relaunch
+    }
+
     /// Why a recording stopped (L review 147).
     public enum StopCause: String, Codable, Sendable, Equatable {
         /// The Mac restarted (or lost power) while it was recording.
@@ -56,7 +73,8 @@ public struct RecordingSentinel: Codable, Equatable {
         stopping: Bool = false,
         quitDuringFinalize: Bool = false,
         stopCause: StopCause? = nil,
-        quitMarkedByPowerOff: Bool = false
+        quitMarkedByPowerOff: Bool = false,
+        heldReason: HeldReason? = nil
     ) {
         self.startedAt = startedAt
         self.sessionName = sessionName
@@ -71,6 +89,7 @@ public struct RecordingSentinel: Codable, Equatable {
         self.quitDuringFinalize = quitDuringFinalize
         self.stopCause = stopCause
         self.quitMarkedByPowerOff = quitMarkedByPowerOff
+        self.heldReason = heldReason
     }
 
     // MARK: - Codable (backwards-compatible: chunkIndex defaults to 0, the L7 fields to nil/false)
@@ -91,6 +110,12 @@ public struct RecordingSentinel: Codable, Equatable {
         // An unknown cause (a newer build's) reads as none: the salvage then words it by its boot, as before.
         stopCause = (try? container.decodeIfPresent(StopCause.self, forKey: .stopCause)) ?? nil
         quitMarkedByPowerOff = try container.decodeIfPresent(Bool.self, forKey: .quitMarkedByPowerOff) ?? false
+        // An unknown reason (a newer build's) still reads as held: the session waits for the helper all the same.
+        if container.contains(.heldReason), !((try? container.decodeNil(forKey: .heldReason)) ?? true) {
+            heldReason = (try? container.decodeIfPresent(HeldReason.self, forKey: .heldReason)) ?? .relaunch
+        } else {
+            heldReason = nil
+        }
     }
 
     // MARK: - File location
@@ -273,7 +298,8 @@ public struct RecordingSentinel: Codable, Equatable {
             stopping: stopping,
             quitDuringFinalize: quitDuringFinalize,
             stopCause: stopCause,
-            quitMarkedByPowerOff: quitMarkedByPowerOff
+            quitMarkedByPowerOff: quitMarkedByPowerOff,
+            heldReason: heldReason
         )
     }
 }

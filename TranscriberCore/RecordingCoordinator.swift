@@ -157,8 +157,11 @@ public final class RecordingCoordinator {
     /// folder again (L review 127).
     private var foldersNotAnswering: Set<String> = []
     /// The `recordingStopped` messages of one recovery pass, said as ONE row at its end (L review 90); nil
-    /// outside a pass.
-    private var stoppedBatch: (recovered: [String], other: [String])?
+    /// outside a pass. Each with the session it is about (nil: none — a note about the pending list, say).
+    private var stoppedBatch: (recovered: [(session: String?, message: String)], other: [(session: String?, message: String)])?
+    /// The sessions a pass already said are waiting for the transcription engine (L review 178): said once per run, never
+    /// again at every wake or mount while the engine is still not ready.
+    private var saidWaitingForEngine: Set<String> = []
     /// The bound on the free-space read at a rotation (L11 review 70): a hung volume skips that rotation's
     /// check, never the UI. Tests shorten it.
     var rotationDiskReadDeadline: Duration = .seconds(2)
@@ -617,7 +620,7 @@ public final class RecordingCoordinator {
                 Logger.state.error("A failed start left the capture helper unanswered — holding its session")
                 if let held = slot ?? startedSentinel {
                     holdForHelper(held, message: "Parley couldn’t stop the capture of the recording that failed to start — its audio is kept, and Parley will finish it once the capture helper lets go.",
-                                  cause: .captureFailed)
+                                  cause: .captureFailed, reason: .startFailed)
                 } else {
                     reportStopped("Parley couldn’t stop the capture of a recording that failed to start, and has no record of it — check the recordings folder.", recovered: false)
                 }
@@ -901,7 +904,7 @@ public final class RecordingCoordinator {
                 await settleAbandonedPipeline()
                 let message = "Stopping the recording is taking longer than expected — another stop is still under way in the capture helper. Its audio is kept, and Parley will finish it once the capture helper lets go."
                 if let held = RecordingSentinel.read(directory: sentinelDirectory) ?? sentinel {
-                    holdForHelper(held, message: message, cause: .captureFailed)
+                    holdForHelper(held, message: message, cause: .captureFailed, reason: .stopUnderWay)
                 } else {
                     Logger.state.error("The held Stop's session has no recovery file")
                     reportStopped(message, recovered: false)
@@ -1629,7 +1632,7 @@ public final class RecordingCoordinator {
                 Logger.state.error("A failed restart left the capture helper unanswered — holding its session, untranscribed")
                 holdForHelper(RecordingSentinel.read(directory: sentinelDirectory) ?? sentinel,
                               message: "Parley couldn’t stop the capture after the failed restart — its audio is kept, and Parley will transcribe it once the capture helper lets go.",
-                              cause: .captureFailed)
+                              cause: .captureFailed, reason: .restartFailed)
                 notifyCritical("Recording Failed", appState.criticalError ?? "")
                 return
             }
@@ -1705,12 +1708,15 @@ public final class RecordingCoordinator {
     }
 
     /// A `recordingStopped` message: into the pass's one row when a recovery pass is running, else raised and
-    /// presented at once. `recovered`: a salvage's (they are counted together).
-    private func reportStopped(_ message: String, recovered: Bool) {
+    /// presented at once. `recovered`: a salvage's (they are counted together). `session`: the session it is about (its
+    /// key), nil for a note about no one session.
+    private func reportStopped(_ message: String, recovered: Bool, session: String? = nil) {
         if let batch = stoppedBatch {
-            // Said once per pass, however many times the pass looks (L review 130).
-            guard !batch.recovered.contains(message), !batch.other.contains(message) else { return }
-            if recovered { stoppedBatch?.recovered.append(message) } else { stoppedBatch?.other.append(message) }
+            // Said once per pass, however many times the pass looks (L review 130) — deduplicated by SESSION, never by the
+            // text alone: two sessions whose rows read the same are both said (L review 180).
+            let entry = (session: session, message: message)
+            guard !(batch.recovered + batch.other).contains(where: { $0.session == entry.session && $0.message == entry.message }) else { return }
+            if recovered { stoppedBatch?.recovered.append(entry) } else { stoppedBatch?.other.append(entry) }
             return
         }
         appState.raiseAppAlarm(.recordingStopped, message: message)
@@ -1723,11 +1729,11 @@ public final class RecordingCoordinator {
         stoppedBatch = nil
         var parts: [String] = []
         if batch.recovered.count == 1 {
-            parts.append(batch.recovered[0])
+            parts.append(batch.recovered[0].message)
         } else if batch.recovered.count > 1 {
-            parts.append("\(batch.recovered.count) earlier recordings were recovered: " + batch.recovered.joined(separator: " "))
+            parts.append("\(batch.recovered.count) earlier recordings were recovered: " + batch.recovered.map(\.message).joined(separator: " "))
         }
-        parts += batch.other
+        parts += batch.other.map(\.message)
         guard !parts.isEmpty else { return }
         appState.raiseAppAlarm(.recordingStopped, message: parts.joined(separator: " "))
         presentAlarms()
@@ -1977,12 +1983,15 @@ public final class RecordingCoordinator {
     /// holds this session. Tracked ONCE, by session (L review 82): the newest copy — the slot's, when a resume
     /// rewrote it — replaces any earlier one in the list, and leaves the slot. `markStopping`: salvage-only.
     /// `cause`: why it stopped, as this launch — or this session — sees it; stamped once, the first keeping's standing
-    /// (L review 147). Without one, this launch's: the Mac restarted, or Parley went.
-    private func keepPending(_ sentinel: RecordingSentinel, markStopping: Bool = false, cause: RecordingSentinel.StopCause? = nil) {
+    /// (L review 147). Without one, this launch's: the Mac restarted, or Parley went. `held`: why the helper holds it —
+    /// stamped once too (L review 177).
+    private func keepPending(_ sentinel: RecordingSentinel, markStopping: Bool = false, cause: RecordingSentinel.StopCause? = nil,
+                             held: RecordingSentinel.HeldReason? = nil) {
         let slot = RecordingSentinel.read(directory: sentinelDirectory)
         let slotIsThisSession = slot?.sessionKey == sentinel.sessionKey
         var kept = (slotIsThisSession ? slot : nil) ?? sentinel
         kept.stopCause = kept.stopCause ?? sentinel.stopCause ?? cause ?? Self.relaunchCause(sentinel)
+        kept.heldReason = kept.heldReason ?? sentinel.heldReason ?? held
         kept.stopping = kept.stopping || sentinel.stopping || markStopping
         // A quit's own mark wins over `willPowerOff`'s time-boxed one (L review 174).
         let quit = kept.quitDuringFinalize || sentinel.quitDuringFinalize
@@ -2016,14 +2025,15 @@ public final class RecordingCoordinator {
     /// The helper did not stop a recording (L follow-up 40; L review 81): its file may still be written, so it
     /// is not salvaged now. Held — marked `stopping` (salvage-only: never resumed) and pending (out of the slot a
     /// next Start writes), the helper's mic kept marked (#192, L review 88) — the user told (a sticky row), and
-    /// finished at the next event once the helper's stop says it let go (L review 84).
+    /// finished at the next event once the helper's stop says it let go (L review 84). `reason`: why it is held, carried on
+    /// the pending entry (L review 177) — the relaunch's by default.
     private func holdForHelper(_ sentinel: RecordingSentinel,
                                message: String = "Parley couldn’t stop the previous recording cleanly — its audio is kept, and Parley will finish it once the capture helper lets go.",
-                               cause: RecordingSentinel.StopCause? = nil) {
+                               cause: RecordingSentinel.StopCause? = nil, reason: RecordingSentinel.HeldReason = .relaunch) {
         captureClient.captureEnded()
         setHelperMic(sentinel.micDeviceUID)
-        keepPending(sentinel, markStopping: true, cause: cause)
-        reportStopped(message, recovered: false)
+        keepPending(sentinel, markStopping: true, cause: cause, held: reason)
+        reportStopped(message, recovered: false, session: sentinel.sessionKey)
     }
 
     /// `recordingFolderUnavailable` while any pending session's folder cannot be written, cleared otherwise.
@@ -2088,6 +2098,12 @@ public final class RecordingCoordinator {
         releaseRecoveryGate()
     }
 
+    /// The transcription engine may be ready now — a model download finished, Setup completed, the engine was changed (L
+    /// review 178): the sessions kept waiting for it are retried. Nothing pending: nothing to do.
+    public func transcriptionEngineMayBeReady() async {
+        await retryPendingSessions()
+    }
+
     /// The retry itself, under the recovery gate.
     /// `helperHolds`: the session whose capture the helper just refused to let go of at this launch — left held,
     /// and the helper not asked again; every other ready session is finished (L review 118).
@@ -2100,8 +2116,16 @@ public final class RecordingCoordinator {
         }
         // Off the main actor, bounded (L review 75): folders that do not answer are not ready.
         let folders = await pendingFolderStatuses(pending)
+        // While a held helper has not let go, no HELD session is salvaged (L review 183): the stuck helper's capture may be
+        // any of theirs — an older held session's chunk still being written. They wait for the helper's stop; a session
+        // never held (its folder was away, say) is not the helper's, and is finished now.
+        let helperHoldsOn = heldKey != nil
         let ready = pending.filter {
-            $0.sessionKey != heldKey && folders.statuses[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
+            $0.sessionKey != heldKey && !(helperHoldsOn && $0.heldReason != nil)
+                && folders.statuses[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
+        }
+        if helperHoldsOn, pending.contains(where: { $0.sessionKey != heldKey && $0.heldReason != nil }) {
+            Logger.state.info("A held capture helper has not let go — the other held sessions wait for its stop")
         }
         if !ready.isEmpty {
             // Re-checked after the read (L follow-up 38): a start pressed meanwhile owns the app.
@@ -2524,17 +2548,42 @@ public final class RecordingCoordinator {
             if let late = scan.lateAudio {
                 reportStopped(RecoveryMessages.audioAfterTranscript(seconds: late.seconds, transcript: late.transcript,
                                                                     folder: abbreviatedDisplayPath(outputDir.path)),
-                              recovered: false)
+                              recovered: false, session: sentinel.sessionKey)
             }
             return
         }
         let stoppedAt = scan.stoppedAt, chunkCount = scan.chunkCount
+        let config = configManager.config
+        // The engine, before anything is bound, drained or written (L review 178). One that is not there — it cannot be
+        // made on this macOS, or its speech model is not downloaded while there is audio to recognise — is not the audio's
+        // failure: the session stays pending, said so, and is finished once the engine is ready. A session whose every
+        // chunk is already transcribed needs no engine.
+        let transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?
+        do {
+            (transcriber, diarizer) = try prepareEngines(config: config)
+            if scan.orphanCount > 0 {
+                let engine = transcriber
+                guard await Task.detached(operation: { engine.isReady() }).value else { throw EngineNotReady() }
+            }
+        } catch {
+            Logger.state.error("The transcription engine is not ready — the session waits for it: \(error, privacy: .private)")
+            // A Start during the engine check owns the app now: the session waits all the same, and nothing touches that start.
+            guard stillOwnsTheSession(sentinel) else { return }
+            keepPending(sentinel)
+            if saidWaitingForEngine.insert(sentinel.sessionKey).inserted {
+                reportStopped(RecoveryMessages.waitingForEngine(at: stoppedAt, folder: abbreviatedDisplayPath(outputDir.path),
+                                                                why: error.localizedDescription),
+                              recovered: false, session: sentinel.sessionKey)
+            }
+            captureClient.captureEnded()
+            return
+        }
+        guard stillOwnsTheSession(sentinel) else { return }
+        saidWaitingForEngine.remove(sentinel.sessionKey)
         appState.phase = .transcribing(progress: "Recovering…")
         let outcome: SalvageOutcome
         var recovered: TranscriptionResult?
         do {
-            let config = configManager.config
-            let (transcriber, diarizer) = try prepareEngines(config: config)
             // Bound to this session BEFORE its drain (L review 98): reset, drain, build — as the resume does. What
             // the helper still holds is this session's (a pending retry attributed a stray helper's already) — unless
             // it holds a held session's capture: then nothing is drained (L review 167).
@@ -2605,6 +2654,11 @@ public final class RecordingCoordinator {
         let message: String
         if sentinel.quitDuringFinalize {
             message = RecoveryMessages.quitWhileFinishing(outcome: outcome)   // a quit, not a crash (L follow-up 42)
+        } else if let held = sentinel.heldReason {
+            // Held for the helper (L review 177): what happened, then that Parley kept it until the helper let go — never
+            // "Parley crashed" for a capture that failed while Parley ran.
+            message = RecoveryMessages.heldStopped(at: stoppedAt, outcome: outcome, held: held,
+                                                   cause: sentinel.stopCause ?? Self.relaunchCause(sentinel))
         } else if outcome.kind == .nothingToSalvage, scan.legacyAudio {
             message = RecoveryMessages.relaunchStoppedKeepingOlderFormat(at: scan.legacyLastWrite.map { min($0, Date()) },
                                                                          folder: abbreviatedDisplayPath(outputDir.path))
@@ -2614,7 +2668,11 @@ public final class RecordingCoordinator {
         }
         // Only a written transcript is a recovery (L review 133): nothing to salvage, or chunks kept untranscribed,
         // are said on their own — never counted in "N earlier recordings were recovered".
-        if case .transcriptWritten = outcome.kind { reportStopped(message, recovered: true) } else { reportStopped(message, recovered: false) }
+        if case .transcriptWritten = outcome.kind {
+            reportStopped(message, recovered: true, session: sentinel.sessionKey)
+        } else {
+            reportStopped(message, recovered: false, session: sentinel.sessionKey)
+        }
         captureClient.captureEnded()
     }
 
@@ -2944,6 +3002,11 @@ extension RecordingCoordinator: RecordingMicrophoneObserver {
 /// A recording-folder read did not answer within its bound (L review 122).
 struct FolderNotAnswering: Error, LocalizedError {
     var errorDescription: String? { "the recording folder isn’t answering" }
+}
+
+/// The transcription engine is there, but not ready — its speech model is not downloaded (L review 178).
+struct EngineNotReady: Error, LocalizedError {
+    var errorDescription: String? { "its speech model is not downloaded" }
 }
 
 /// Whether the repair path has answered, shared by the capped wait and the answer (main actor).

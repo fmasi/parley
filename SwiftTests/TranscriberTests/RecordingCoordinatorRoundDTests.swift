@@ -303,3 +303,138 @@ import Testing
         #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/Users/x/Rec"), probe: home) == .notWritable, "not an automount root")
     }
 }
+
+// MARK: - Held sessions, the engine, one row per session (177, 178, 180, 183)
+
+/// An engine whose model is not there (L review 178): created fine, never ready — every transcription fails.
+struct NotReadyEngine: TranscriptionEngine {
+    struct NotDownloaded: Error, LocalizedError { var errorDescription: String? { "its speech model is not downloaded" } }
+    let name = "NotReady"
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] { throw NotDownloaded() }
+    func isReady() -> Bool { false }
+    func prepare() async throws { throw NotDownloaded() }
+}
+
+@MainActor
+@Suite struct RecordingCoordinatorHeldRoundDTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+
+    /// A pending session `name` in `folder`: chunk 0 transcribed in its session.json, and — `orphan` — a chunk 1 on disk that
+    /// is not (it needs the engine).
+    private func pendingSession(_ h: Harness, _ name: String, in folder: String, orphan: Bool = false,
+                                startedAt: Date = Date(), held: RecordingSentinel.HeldReason? = nil) throws -> RecordingSentinel {
+        let dir = h.tmp.appendingPathComponent(folder)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: name, meetingStart: startedAt, chunkIndices: [0])
+        if orphan { try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("\(name)-1.wav"), seconds: 1) }
+        var s = RecordingSentinel(startedAt: startedAt, sessionName: name, systemAudioPath: dir.appendingPathComponent("\(name)-0.wav").path,
+                                  micAudioPath: dir.appendingPathComponent("\(name)-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true)
+        s.heldReason = held
+        return s
+    }
+
+    /// L review 177: a Stop HELD because another stop was still under way in the helper is, once the helper lets go,
+    /// said for what it was — never "Parley crashed".
+    @Test func aHeldStopIsSaidForWhatItWasOnceTheHelperLetsGo() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        h.client.stopError = RefusedStoppingError()
+        h.coordinator.stopDeadline = .milliseconds(200)
+        h.coordinator.stopReaskInterval = .milliseconds(50)
+        await h.coordinator.stopRecording()
+        #expect(pending(h).first?.heldReason == .stopUnderWay)
+        h.appState.acknowledge(.recordingStopped)
+        h.client.stopError = nil   // the other stop is over: "No capture in progress"
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty)
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(!row.contains("crashed") && row.contains("another stop was still under way") && row.contains("until the capture helper let go"), "\(row)")
+    }
+
+    /// L review 183: while a held helper has not let go, NO held session is salvaged — the stuck helper may still be writing
+    /// its chunk. A pending session that was never held still is (L review 167's). Once the helper lets go, both are.
+    @Test func noHeldSessionIsSalvagedWhileAHeldHelperHoldsOn() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let older = try pendingSession(h, "held", in: "other", held: .restartFailed)
+        let away = try pendingSession(h, "away", in: "third")
+        try RecordingSentinel.writePending([older, away], directory: h.tmp)
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.presented.value.map(\.lastPathComponent) == ["away.json"], "only the never-held one: \(h.presented.value)")
+        #expect(Set(pending(h).map(\.sessionKey)) == [older.sessionKey, s.sessionKey], "the held ones wait")
+        h.client.onStop = nil
+        h.client.isCapturingResult = false
+        h.coordinator.helperStopDeadline = .seconds(5)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.presented.value.map(\.lastPathComponent).contains("held.json") && pending(h).isEmpty, "\(h.presented.value)")
+    }
+
+    /// L review 178: a salvage whose engine is not ready — its model not downloaded — while there is audio to transcribe is
+    /// not the audio's failure: the session stays PENDING, the row says so, and it is finished once the engine is ready.
+    @Test func aSalvageWhoseEngineIsNotReadyWaitsForIt() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let p = try pendingSession(h, "p", in: "p", orphan: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        h.engine.value = NotReadyEngine()
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "kept")
+        #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "nothing transcribed without the engine")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("transcription engine isn’t ready") && row.contains("once the engine is ready") && !row.contains("could not be transcribed"), "\(row)")
+        h.engine.value = FakeEngine()   // a model download finished
+        await h.coordinator.transcriptionEngineMayBeReady()
+        #expect(pending(h).isEmpty && h.presented.value.map(\.lastPathComponent) == ["p.json"])
+    }
+
+    /// … an engine that cannot even be made (not on this macOS) keeps it pending too …
+    @Test func aSalvageWhoseEngineCannotBeMadeWaitsForIt() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let p = try pendingSession(h, "p", in: "p")
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        h.engineError.value = TranscriptionRunner.RunnerError.engineUnavailable("SpeechAnalyzer")
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "kept, never \"finalize failed\" and forgotten")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("transcription engine isn’t ready"), "\(row)")
+    }
+
+    /// … while a session whose every chunk is already transcribed needs no engine: it is finished at once.
+    @Test func aSalvageWithNothingToTranscribeNeedsNoEngine() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let p = try pendingSession(h, "p", in: "p")
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        h.engine.value = NotReadyEngine()
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty && h.presented.value.map(\.lastPathComponent) == ["p.json"])
+    }
+
+    /// L review 180: rows are deduplicated by SESSION, never by their text: two sessions whose rows read the same are both
+    /// said.
+    @Test func twoSessionsWithTheSameRowAreBothSaid() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let began = Date(timeIntervalSince1970: 1_800_000_000)
+        let a = try pendingSession(h, "sess", in: "a", startedAt: began), b = try pendingSession(h, "sess", in: "b", startedAt: began)
+        try RecordingSentinel.writePending([a, b], directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.presented.value.count == 2)
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains("2 earlier recordings were recovered"), "\(row)")
+    }
+}

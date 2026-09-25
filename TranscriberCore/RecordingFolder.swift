@@ -223,6 +223,9 @@ extension RecordingCoordinator {
         var finalized: FinalizedState = .notFinalized
         let stoppedAt: Date
         let chunkCount: Int
+        /// Of `chunkCount`, the chunks on disk not yet transcribed into the session — what the salvage needs the engine for
+        /// (L review 178).
+        var orphanCount = 0
         /// The sentinel's own file holds audio, yet it is not a chunk of the session: a pre-0.6 recording.
         let legacyAudio: Bool
         /// When that older-format recording was last written: the later of its two files (L review 86).
@@ -304,11 +307,11 @@ extension RecordingCoordinator {
             }
             finalized = .damaged
         }
-        let chunkCount = chunksOnDisk(outputDir: outputDir, sessionId: sessionId, finalized: finalized == .damaged)
+        let counts = chunkCounts(outputDir: outputDir, sessionId: sessionId, finalized: finalized == .damaged)
         let files = [sentinel.systemAudioPath, sentinel.micAudioPath].compactMap { try? FileManager.default.attributesOfItem(atPath: $0) }
         let withAudio = files.filter { ($0[.size] as? Int ?? 0) > 44 }
         return SalvageScan(finalized: finalized, stoppedAt: crashTime(sentinel: sentinel, outputDir: outputDir, lastAlive: sentinel.lastAliveAt),
-                           chunkCount: chunkCount, legacyAudio: !withAudio.isEmpty,
+                           chunkCount: counts.completed + counts.onDisk, orphanCount: counts.onDisk, legacyAudio: !withAudio.isEmpty,
                            legacyLastWrite: withAudio.compactMap { $0[.modificationDate] as? Date }.max())
     }
 
@@ -317,10 +320,16 @@ extension RecordingCoordinator {
     /// (R2), its chunk files are its record's audio — counted all the same, as kept. Reads the folder: only through
     /// `readOffMain`.
     nonisolated static func chunksOnDisk(outputDir: URL, sessionId: String, finalized: Bool) -> Int {
+        let counts = chunkCounts(outputDir: outputDir, sessionId: sessionId, finalized: finalized)
+        return counts.completed + counts.onDisk
+    }
+
+    /// `chunksOnDisk`, split: the chunks completed in `session.json`, and those on disk not in it.
+    nonisolated static func chunkCounts(outputDir: URL, sessionId: String, finalized: Bool) -> (completed: Int, onDisk: Int) {
         let completed = Set(SessionState.read(directory: outputDir, sessionId: sessionId)?.chunks.map(\.index) ?? [])
         let onDisk = finalized
             ? CrashRecoveryPlanner.unregisteredChunks(outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed)
             : CrashRecoveryPlanner.orphanChunks(outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed)
-        return completed.count + onDisk.count
+        return (completed.count, onDisk.count)
     }
 }

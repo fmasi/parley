@@ -398,6 +398,8 @@ struct SetupView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
+                // Recordings kept waiting for the engine are transcribed now (L review 178).
+                await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady()
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

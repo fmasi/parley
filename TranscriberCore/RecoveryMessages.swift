@@ -278,6 +278,33 @@ public enum RecoveryMessages {
         return "\(length) recorded after \(transcript) was written is kept in \(folder), not transcribed."
     }
 
+    /// A session HELD because the capture helper would not let go of it, salvaged once it did (L review 177): what
+    /// happened, then that Parley kept it until the helper let go, then what the salvage did — never "Parley crashed" for
+    /// a capture that failed while Parley ran. A relaunch's hold is worded by why the recording stopped (`cause`).
+    public static func heldStopped(at: Date, outcome: SalvageOutcome, held: RecordingSentinel.HeldReason,
+                                   cause: RecordingSentinel.StopCause) -> String {
+        let why: String
+        switch held {
+        case .restartFailed: why = "its capture failed and could not be restarted"
+        case .startFailed: why = "it failed to start"
+        case .stopUnderWay: why = "another stop was still under way in the capture helper"
+        case .relaunch:
+            switch cause {
+            case .restart: why = "your Mac restarted during the recording"
+            case .appCrash: why = "Parley crashed"
+            case .captureFailed: why = "its capture failed and could not be restarted"
+            case .folderNotAnswering: why = "the recording folder stopped answering"
+            }
+        }
+        return "Recording STOPPED at \(clock(at)) — \(why). Parley kept it until the capture helper let go of it. " + outcomeSentence(outcome)
+    }
+
+    /// A salvage whose transcription engine is not ready (L review 178): nothing about the audio failed — it is kept, and
+    /// transcribed once the engine is ready.
+    public static func waitingForEngine(at: Date, folder: String, why: String) -> String {
+        "A recording that stopped at \(clock(at)) is kept in \(folder), untranscribed: the transcription engine isn’t ready (\(why.trimmingCharacters(in: CharacterSet(charactersIn: ". ")))). Parley will transcribe it once the engine is ready — after Setup or a model download."
+    }
+
     /// Review fix 9: the wall clock can step back across a crash/resume pair; the reported gap is
     /// clamped to ≥ 0 rather than printing a negative duration.
     public static func resumedAfterCrash(crashedAt: Date, resumedAt: Date) -> String {

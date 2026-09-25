@@ -305,6 +305,9 @@ struct Harness {
     let presented: Box<[URL]> = Box([])
     /// Runs as each transcript is presented, after it is recorded in `presented` — as the app's rename panel would.
     let onPresent: Box<((URL) -> Void)?> = Box(nil)
+    /// The engine a launch salvage transcribes with, and an error its preparation throws instead (L review 178).
+    let engine: Box<any TranscriptionEngine> = Box(FakeEngine())
+    let engineError: Box<Error?> = Box(nil)
     let repairRequests: Box<Int> = Box(0)
     /// What the repair path answers: true = its window presented (L round 4, item 4).
     let repairPresents: Box<Bool> = Box(true)
@@ -333,6 +336,7 @@ struct Harness {
         let repairRequests = repairRequests
         let repairPresents = repairPresents
         let freeBytes = freeBytes, diskReadHook = diskReadHook
+        let engine = engine, engineError = engineError
         coordinator = RecordingCoordinator(
             appState: appState,
             captureClient: client,
@@ -343,7 +347,10 @@ struct Harness {
             notifyCritical: { criticals.value.append(($0, $1)) },
             presentTranscript: { url, _ in presented.value.append(url); onPresent.value?(url) },
             onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
-            engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
+            engineFactory: { _ in
+                if let error = engineError.value { throw error }
+                return (engine.value, FakeDiarizer())
+            },
             recordingMicrophone: recordingMic,
             freeBytesProvider: { _ in diskReadHook.value?(); return freeBytes.value },
             launchRecoveryPending: launchRecoveryPending
@@ -2443,8 +2450,9 @@ struct Harness {
         #expect(shown.value.count == 1)
     }
 
-    /// Item 8: the failure branch — the engine cannot even be prepared; the chunk stays on disk.
-    @Test func launchSalvageFailureSaysTheChunksAreKeptOnDisk() async throws {
+    /// Item 8, as L review 178 rules it: the engine cannot even be prepared — not the audio's failure. The chunk stays on
+    /// disk, the session is kept pending (out of the slot) for when the engine is ready, and the row says so.
+    @Test func launchSalvageWithoutAnEngineKeepsTheSession() async throws {
         let h = try Harness()
         let coordinator = RecordingCoordinator(
             appState: h.appState, captureClient: h.client, transcriptionRunner: h.runner, configManager: h.config,
@@ -2458,9 +2466,10 @@ struct Harness {
                                     segments: [], speakerDatabase: [:])]
         ), directory: outDir)
         await coordinator.salvageAtLaunch(sentinel: sentinel, outputDir: outDir)
-        #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.relaunchStopped(
-            at: sentinel.startedAt, outcome: SalvageOutcome(kind: .finalizeFailed(FakeCaptureError().localizedDescription), chunkCount: 1)))
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.waitingForEngine(
+            at: sentinel.startedAt, folder: abbreviatedDisplayPath(outDir.path), why: FakeCaptureError().localizedDescription))
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [sentinel.sessionKey], "kept for the engine")
     }
 
     /// Item 8: the nil branch — nothing on disk to recover.
@@ -4924,6 +4933,7 @@ struct Harness {
         h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
         await h.coordinator.handleXPCCrash()
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "held")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "why it is held travels with it (L review 177)")
         #expect(h.client.finalizeCalls.isEmpty && h.appState.lastJsonPath == nil, "nothing transcribed while the helper may still write")
         #expect(h.criticals.value.last?.body.contains("once the capture helper lets go") == true, "\(h.criticals.value)")
         // The helper went on writing the restart's chunk after the failure; then it lets go.
@@ -4936,6 +4946,9 @@ struct Harness {
         #expect(h.presented.value.count == 1 && h.client.finalizeCalls.count == 1, "one transcript, once")
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
         #expect(row.contains("The 2 chunks recorded before it were transcribed"), "chunk 0 and the late chunk 1: \(row)")
+        // L review 177: Parley never crashed — the capture failed, and Parley waited for the helper.
+        #expect(!row.contains("crashed"), "no \"crashed\" row: \(row)")
+        #expect(row.contains("its capture failed and could not be restarted") && row.contains("until the capture helper let go"), "\(row)")
     }
 
     /// L review 137: a finalized session whose folder holds audio written AFTER its transcript, which the
