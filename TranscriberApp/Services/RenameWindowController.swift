@@ -18,6 +18,21 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     private var preparingRequest: UUID?
     var isPreparing: Bool { preparingRequest != nil }
 
+    /// The app's rename panels, one at a time (L review 90): a recovery pass that salvages several recordings
+    /// presents each transcript in turn, and a rename asked for from the menu waits for the one on screen —
+    /// never a panel superseding another (whose auto-summary would then never run).
+    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: (() -> Void)?)> { [weak self] item, done in
+        self?.show(jsonPath: item.jsonPath) {
+            item.onDismiss?()
+            done()
+        }
+    }
+
+    /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed.
+    func enqueue(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
+        queue.enqueue((jsonPath, onDismiss))
+    }
+
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.

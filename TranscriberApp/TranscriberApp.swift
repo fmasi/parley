@@ -158,7 +158,8 @@ struct TranscriberApp: App {
                 MenuView.sendCriticalNotification(title: title, body: body)
             },
             presentTranscript: { jsonPath, config in
-                RenameWindowController.shared.show(jsonPath: jsonPath) {
+                // Queued: several salvaged transcripts open one rename panel at a time (L review 90).
+                RenameWindowController.shared.enqueue(jsonPath: jsonPath) {
                     // Auto-summarize after rename completes (so summary has real speaker names)
                     MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }

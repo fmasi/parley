@@ -100,9 +100,22 @@ public enum RecoveryMessages {
 
     /// A pre-0.6 single-file recording was found (L follow-up 25): kept, never "no recorded audio". Names
     /// the folder, not the meeting.
-    public static func relaunchStoppedKeepingOlderFormat(at: Date, folder: String) -> String {
-        "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. An older-format recording was found and kept in \(folder)."
+    /// `at`: when its file was last written (L review 86) — never the start; nil leaves the time out.
+    public static func relaunchStoppedKeepingOlderFormat(at: Date?, folder: String) -> String {
+        let when = at.map { " at \(clock($0))" } ?? ""
+        return "Recording STOPPED\(when) — Parley crashed and could not resume it. An older-format recording was found and kept in \(folder)."
     }
+
+    /// A crash with no recovery file, salvaged from the live pipeline (L review 87): says what that salvage did,
+    /// never "no recovery data" next to a transcript it wrote.
+    public static func crashWithoutRecoveryFile(after outcome: SalvageOutcome) -> String {
+        "Recording failed — its recovery file was missing. " + outcomeSentence(outcome)
+    }
+
+    /// A crash with no recovery file AND no pipeline: nothing could be looked at, so nothing is claimed about
+    /// what was recorded (L review 87).
+    public static let crashWithoutRecoveryFileOrPipeline =
+        "Recording failed — its recovery file was missing and no transcription was running, so Parley could not check what was recorded. Any audio it captured is in the recordings folder."
 
     public static func relaunchStopped(at: Date, outcome: SalvageOutcome) -> String {
         "Recording STOPPED at \(clock(at)) — Parley crashed and could not resume it. " + outcomeSentence(outcome)

@@ -148,15 +148,33 @@ public struct RecordingSentinel: Codable, Equatable {
 
     /// Sessions a relaunch could not finish yet — their folder unreachable (an unplugged drive), or the
     /// capture helper not letting go of them — kept as a LIST beside the sentinel, so a later recording's
-    /// sentinel can never take their place. Missing or unreadable → empty.
-    public static func readPending(directory: URL? = nil) -> [RecordingSentinel] {
-        let url = (directory ?? AppPaths.dataDirectory).appendingPathComponent(pendingFileName)
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        guard let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) else {
-            Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable — ignoring")
-            return []
+    /// sentinel can never take their place. Missing → empty. Unreadable → set aside first (L review 89): moved
+    /// to `pending-sessions.unreadable-<time>.json`, never read as empty and then overwritten, which dropped
+    /// every session it named. `setAside` says where, so the caller can say so.
+    public static func loadPending(directory: URL? = nil) -> (sessions: [RecordingSentinel], setAside: URL?) {
+        let dir = directory ?? AppPaths.dataDirectory
+        let url = dir.appendingPathComponent(pendingFileName)
+        guard let data = try? Data(contentsOf: url) else { return ([], nil) }
+        if let sessions = try? makeDecoder().decode([RecordingSentinel].self, from: data) { return (sessions, nil) }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        var aside = dir.appendingPathComponent("pending-sessions.unreadable-\(stamp).json")
+        var n = 1
+        while FileManager.default.fileExists(atPath: aside.path) {
+            n += 1
+            aside = dir.appendingPathComponent("pending-sessions.unreadable-\(stamp)-\(n).json")
         }
-        return sessions
+        do {
+            try FileManager.default.moveItem(at: url, to: aside)
+            Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable — set aside as \(aside.lastPathComponent, privacy: .sensitive)")
+            return ([], aside)
+        } catch {
+            Logger.state.error("Pending sessions at \(url.path, privacy: .sensitive) are unreadable and could not be set aside: \(error, privacy: .private)")
+            return ([], url)
+        }
+    }
+
+    public static func readPending(directory: URL? = nil) -> [RecordingSentinel] {
+        loadPending(directory: directory).sessions
     }
 
     /// Atomically replace the list; an empty list removes the file.

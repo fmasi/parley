@@ -131,6 +131,9 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         recordedEvents.append((kind, severity, detail))
     }
 
+    /// With no `stopResult`: answer "No capture in progress" when not capturing, as the real helper does. Off
+    /// for tests of a stop that merely fails.
+    var stopsLikeTheHelper = true
     /// Whether the task running `stop()` was already cancelled (L2/L4 fix round 2, item 3).
     var stopSawCancellation: Bool?
     func stop() async throws -> AudioPaths {
@@ -138,7 +141,13 @@ private final class FakeCaptureClient: RecordingCaptureClient {
         stopSawCancellation = Task.isCancelled
         await onStop?()
         if let stopError { throw stopError }
-        guard let stopResult else { throw CocoaError(.fileNoSuchFile) }
+        guard let stopResult else {
+            // As the real helper answers when nothing is capturing (its stop then "lets go").
+            if (captureStateResult ?? (isCapturingResult ? .capturing : .notCapturing)) == .notCapturing, stopsLikeTheHelper {
+                throw NoCaptureError()
+            }
+            throw CocoaError(.fileNoSuchFile)
+        }
         return stopResult
     }
 
@@ -1970,6 +1979,7 @@ private struct Harness {
 
     @Test func stopFailureWithNothingOnDiskSaysSo() async throws {
         let h = try Harness()
+        h.client.stopsLikeTheHelper = false   // a stop that merely fails
         await h.coordinator.stopRecording()   // no sentinel, no session: nothing recorded
         let critical = try #require(h.criticals.value.first)
         #expect(critical.body == RecoveryMessages.stopFailed(
@@ -1979,9 +1989,14 @@ private struct Harness {
     @Test func crashWithoutSentinelEscalatesCritically() async throws {
         let h = try Harness()
 
+        h.appState.phase = .recording(since: Date())
         await h.coordinator.handleXPCCrash()
 
-        #expect(h.appState.criticalError?.hasPrefix("Recording failed — no recovery data available.") == true)
+        // L review 87: no recovery file AND no pipeline — nothing was looked at, so nothing is claimed about
+        // what was recorded; never "no recorded audio".
+        let critical = try #require(h.appState.criticalError)
+        #expect(critical.hasPrefix("Recording failed — its recovery file was missing"), "\(critical)")
+        #expect(!critical.contains("no recorded audio") && !(h.criticals.value.first?.body.contains("no recorded audio") ?? true))
         #expect(h.appState.isIdle)
         #expect(h.criticals.value.map { $0.title } == ["Recording Failed"])
         #expect(h.client.startCalls.isEmpty)
@@ -3253,7 +3268,8 @@ private struct Harness {
         h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
-        #expect(RecordingSentinel.read(directory: h.tmp) != nil && h.recordingMic.current == .some("mic-1"))
+        // Held (L review 81): pending, marked stopping, the mic kept marked.
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.stopping == true && h.recordingMic.current == .some("mic-1"))
     }
 
     /// L9 review 44: the crash restart's start timed out — it may still commit, so the helper is stopped
@@ -3284,7 +3300,8 @@ private struct Harness {
         await h.coordinator.handleXPCCrash()
         #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
         #expect(h.appState.isIdle)
-        #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true, "kept, and never resumed: salvaged at the next launch")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.stopping == true, "held (L review 81): never resumed, salvaged once the helper lets go")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil, "out of the slot a next Start writes")
         #expect(h.recordingMic.current == .some("mic-1"))
     }
 }
@@ -3838,7 +3855,9 @@ private struct Harness {
         h.coordinator.helperStopDeadline = .milliseconds(150)
         h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
-        #expect(RecordingSentinel.read(directory: h.tmp) != nil, "the next launch sees the capturing helper and handles it")
+        // Held (L review 81): pending, marked stopping — salvage-only — and out of the slot a next Start writes.
+        let held = try #require(RecordingSentinel.readPending(directory: h.tmp).first)
+        #expect(held.stopping && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.recordingMic.current == .some("mic-1"), "the helper may still hold the mic")
         #expect(h.client.recordedEvents.contains { $0.kind == .xpcTimeout && $0.detail["call"] == "stop after failed start" })
         #expect(h.appState.isIdle && !h.coordinator.isStartInFlight && h.notified.value.last?.title == "Recording Failed")
@@ -3852,7 +3871,175 @@ private struct Harness {
         h.client.stopError = FakeCaptureError()
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         #expect(h.client.recordedEvents.contains { $0.kind == .streamStopError && $0.detail["call"] == "stop after failed start" })
-        #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "kept (L review 81: held, not left in the slot)")
+    }
+
+    /// L review 81: a failed start whose helper will not stop is HELD — marked stopping, pending — so a second
+    /// Start cannot overwrite it and leave the stuck helper untracked.
+    @Test func aHeldFailedStartSurvivesTheNextStart() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { h.runner.stopChunkRotation(); h.runner.teardownChunkedPipeline() }
+        h.runner.failSetupForTesting = true
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.startRecording(sessionName: "first", microphoneDeviceId: nil)
+        let first = try #require(h.client.startCalls.first)
+        h.runner.failSetupForTesting = false
+        h.client.onStop = nil
+        await h.coordinator.startRecording(sessionName: "second", microphoneDeviceId: nil)
+        #expect(h.appState.isRecording)
+        let held = RecordingSentinel.readPending(directory: h.tmp)
+        #expect(held.map { stripSegmentSuffix($0.systemAudioPath) }.contains { $0.hasSuffix(first.sessionId) }, "still tracked")
+        #expect(held.allSatisfy { $0.stopping })
+    }
+
+    /// L review 81: … and a relaunch within the resume window SALVAGES it — never resumes a meeting the user
+    /// was told had failed.
+    @Test func aHeldFailedStartIsSalvagedNeverResumed() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.runner.failSetupForTesting = true
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.runner.failSetupForTesting = false
+        h.client.onStop = nil   // the helper lets go now
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.startCalls.count == 1, "never resumed")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty && h.appState.isIdle)
+        #expect(h.appState.activeAlarms[.recordingStopped] != nil)
+    }
+
+    /// L review 82: a failed resume whose helper will not stop is tracked ONCE — the newest copy, in the list —
+    /// never in the slot and the list both.
+    @Test func aHeldFailedResumeIsTrackedOnce() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-20); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.runner.failSetupForTesting = true   // the resume's capture starts, its pipeline cannot be built
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.recoverAtLaunch()
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil, "not in the slot")
+        let held = RecordingSentinel.readPending(directory: h.tmp)
+        #expect(held.count == 1 && held.first?.sessionKey == s.sessionKey)
+        #expect(held.first?.chunkIndex == 1, "the newest copy: the resume's")
+    }
+
+    /// L review 84: a held session is released only when the helper's stop says it let go — never on a ping. A
+    /// ping answering "not capturing" while the stop still hangs salvages nothing.
+    @Test func aHeldSessionIsNeverReleasedOnAPing() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.captureStateResult = .notCapturing   // the ping says so…
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // …but the helper does not let go
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "never salvaged on a ping")
+        #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
+        await h.coordinator.retryPendingSessions()
+        #expect(h.presented.value.isEmpty && pending(h).count == 1, "nor at the retry")
+        h.client.onStop = nil
+        await h.coordinator.retryPendingSessions()
+        #expect(pending(h).isEmpty && !h.client.finalizeCalls.isEmpty, "released once the stop said so")
+    }
+
+    /// L review 88: a relaunch that holds a session for its helper marks the helper's mic, so no level meter
+    /// opens it (#192) — and releases it once the helper let go.
+    @Test func aHeldSessionMarksTheHelpersMicUntilItLetsGo() async throws {
+        let h = try Harness()
+        var s = try h.writeSentinel(micDeviceUID: "mic-7")
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID(); s.stopping = true
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.recordingMic.current == .some("mic-7"))
+        h.client.onStop = nil
+        h.client.isCapturingResult = false
+        await h.coordinator.retryPendingSessions()
+        #expect(h.recordingMic.current == .none)
+    }
+
+    /// L review 83: launch recovery and the pending retries are ONE at a time. A retry asked for while the
+    /// relaunch is still deciding (here: during its ping) defers — it never stops the crashed app's live helper
+    /// as a "stray" — and runs once the gate is free.
+    @Test func aRetryDuringLaunchRecoveryDefers() async throws {
+        let h = try Harness()
+        defer { h.runner.stopChunkRotation(); h.runner.teardownChunkedPipeline() }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        let other = h.tmp.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try RecordingSentinel.writePending([RecordingSentinel(
+            startedAt: Date(), sessionName: "Old", systemAudioPath: other.appendingPathComponent("old-0.wav").path,
+            micAudioPath: other.appendingPathComponent("old-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true)], directory: h.tmp)
+        h.client.isCapturingResult = true   // the crashed app's helper is still recording
+        let coordinator = h.coordinator
+        let retried = Harness.Box(false)
+        h.client.onIsCapturing = {
+            guard !retried.value else { return }
+            retried.value = true
+            await coordinator.retryPendingSessions()   // a volume mounted just now
+        }
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.client.stopCalls == 0, "the live helper was never stopped as a stray")
+        #expect(h.appState.isRecording, "re-attached")
+        #expect(pending(h).count == 1, "the retry waits for the recording to end")
+    }
+
+    /// L review 90: one retry that salvages several sessions says so ONCE — one row naming them all — and
+    /// every transcript is presented (the app queues the rename panels).
+    @Test func severalSalvagesInOneRetryAreOneRow() async throws {
+        let h = try Harness()
+        var sessions: [RecordingSentinel] = []
+        for name in ["one", "two"] {
+            let dir = h.tmp.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: name, meetingStart: Date(), chunkIndices: [0])
+            sessions.append(RecordingSentinel(startedAt: Date(), sessionName: name, systemAudioPath: dir.appendingPathComponent("\(name)-0.wav").path,
+                                              micAudioPath: dir.appendingPathComponent("\(name)-0_mic.wav").path, segment: 1, chunkIndex: 0, stopping: true))
+        }
+        try RecordingSentinel.writePending(sessions, directory: h.tmp)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.presented.value.count == 2)
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.hasPrefix("2 earlier recordings were recovered:"), "\(row)")
+        #expect(row.contains("one.json") && row.contains("two.json"), "\(row)")
+    }
+
+    /// L review 89: an unreadable pending list is set aside and said, never silently dropped.
+    @Test func anUnreadablePendingListIsSaid() async throws {
+        let h = try Harness()
+        try Data("{ not a list".utf8).write(to: h.tmp.appendingPathComponent("pending-sessions.json"))
+        await h.coordinator.retryPendingSessions()
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains("could not read its list of unfinished recordings") == true)
+        let aside = try FileManager.default.contentsOfDirectory(atPath: h.tmp.path).filter { $0.hasPrefix("pending-sessions.unreadable") }
+        #expect(aside.count == 1)
+    }
+
+    /// L review 86: an older-format recording's STOPPED time is when its file was last written, never its start.
+    @Test func aLegacyRecordingIsStoppedWhenItsFileWasLastWritten() async throws {
+        let h = try Harness()
+        let outDir = h.tmp.appendingPathComponent("out")
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let started = Date().addingTimeInterval(-3600)
+        let sentinel = RecordingSentinel(
+            startedAt: started, sessionName: "Legacy", systemAudioPath: outDir.appendingPathComponent("legacy.wav").path,
+            micAudioPath: outDir.appendingPathComponent("legacy_mic.wav").path, segment: 1, chunkIndex: 0)
+        try RecordingSentinel.write(sentinel, directory: h.tmp)
+        try Data(count: 4096).write(to: URL(fileURLWithPath: sentinel.systemAudioPath))
+        let lastWrite = started.addingTimeInterval(1800)
+        try FileManager.default.setAttributes([.modificationDate: lastWrite], ofItemAtPath: sentinel.systemAudioPath)
+        await h.coordinator.recoverAtLaunch()
+        let message = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(message.contains(RecoveryMessages.clock(lastWrite)) && !message.contains(RecoveryMessages.clock(started)), "\(message)")
     }
 
     /// 25: a legacy (pre-0.6, single-file) recording is never called "no recorded audio": it is kept, and
@@ -4218,7 +4405,7 @@ private struct Harness {
         h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
         h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(h.client.discardedSessions.isEmpty && RecordingSentinel.read(directory: h.tmp) != nil)
+        #expect(h.client.discardedSessions.isEmpty && RecordingSentinel.readPending(directory: h.tmp).count == 1)
     }
 
     /// 37: the newest orphan's last write IS when capture stopped. `lastAliveAt` is only the fallback: an

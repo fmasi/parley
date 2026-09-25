@@ -293,4 +293,19 @@ struct RecordingSentinelTests {
         let next = s.incrementedSegment(systemAudioPath: "/tmp/system-1.wav", micAudioPath: "/tmp/mic-1.wav")
         #expect(next.lastAliveAt == s.lastAliveAt && next.bootSessionUUID == "B1" && next.stopping)
     }
+
+    /// L review 89: an unreadable pending list is set aside — never read as `[]` and then overwritten, which
+    /// dropped every session it named.
+    @Test func anUnreadablePendingListIsSetAsideNeverOverwritten() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let garbage = Data("{ not a list".utf8)
+        try garbage.write(to: dir.appendingPathComponent("pending-sessions.json"))
+        let loaded = RecordingSentinel.loadPending(directory: dir)
+        #expect(loaded.sessions.isEmpty)
+        let aside = try #require(loaded.setAside)
+        #expect(try Data(contentsOf: aside) == garbage, "the unreadable list is kept, byte for byte")
+        try RecordingSentinel.writePending([makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))], directory: dir)
+        #expect(try Data(contentsOf: aside) == garbage, "and never overwritten by the next write")
+        #expect(RecordingSentinel.loadPending(directory: dir).setAside == nil, "set aside once")
+    }
 }

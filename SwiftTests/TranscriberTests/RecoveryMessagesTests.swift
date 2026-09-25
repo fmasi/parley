@@ -117,4 +117,21 @@ import Testing
         let m = RecoveryMessages.resumedAfterCrash(crashedAt: crashed, resumedAt: resumed)
         #expect(m.hasSuffix("0 s not recorded."))
     }
+
+    /// L review 87: a crash with no recovery file never contradicts itself — when the live pipeline's salvage
+    /// wrote a transcript, the banner says the file was missing, not "no recovery data available".
+    @Test func aCrashWithoutItsRecoveryFileSaysWhatTheSalvageDid() {
+        let written = SalvageOutcome(kind: .transcriptWritten(URL(fileURLWithPath: "/r/m.json")), chunkCount: 2)
+        let banner = RecoveryMessages.crashWithoutRecoveryFile(after: written)
+        #expect(banner.hasPrefix("Recording failed — its recovery file was missing."), "\(banner)")
+        #expect(banner.contains("m.json") && !banner.contains("no recovery data"))
+        // Nothing to look at (no recovery file, no pipeline): nothing claimed about what was recorded.
+        let unknown = RecoveryMessages.crashWithoutRecoveryFileOrPipeline
+        #expect(!unknown.contains("no recorded audio") && unknown.contains("recordings folder"), "\(unknown)")
+    }
+
+    /// L review 86: an older-format recording with no readable time says none.
+    @Test func anOlderFormatRecordingWithoutATimeSaysNone() {
+        #expect(RecoveryMessages.relaunchStoppedKeepingOlderFormat(at: nil, folder: "~/R").hasPrefix("Recording STOPPED — "))
+    }
 }

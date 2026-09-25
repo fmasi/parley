@@ -143,9 +143,9 @@ struct MenuView: View {
                     dismissPanel()
                     if let jsonPath = appState.lastJsonPath,
                        FileManager.default.fileExists(atPath: jsonPath) {
-                        RenameWindowController.shared.show(jsonPath: URL(fileURLWithPath: jsonPath))
+                        RenameWindowController.shared.enqueue(jsonPath: URL(fileURLWithPath: jsonPath))
                     } else if let picked = pickTranscript() {
-                        RenameWindowController.shared.show(jsonPath: picked)
+                        RenameWindowController.shared.enqueue(jsonPath: picked)
                     }
                 }
 
