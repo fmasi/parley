@@ -85,7 +85,7 @@ import Testing
         #expect(h.coordinator.stopRequestedDuringRecovery && !h.appState.isRecording)
         let quit = Harness.Box<Bool?>(nil)
         let quitting = Task { quit.value = await coordinator.prepareForQuit(confirm: { Issue.record("the user already stopped it"); return false }) }
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(quit.value == nil, "waiting for the deferred Stop")
         h.client.onStartAsync = nil
         released.value = true

@@ -458,8 +458,7 @@ final class HungRead: @unchecked Sendable {
         h.appState.interruptionWarning = nil
         h.coordinator.systemDidWake(at: Date())
         #expect(!h.coordinator.framesSinceImplicitWake && h.coordinator.implicitWakeAt == nil, "settled by the real wake")
-        for _ in 0..<50 { await Task.yield() }
-        try await Task.sleep(for: .milliseconds(50))
+        await Harness.settle()
         let gaps = try #require(await h.runner.chunkProcessor?.getSessionState().gaps)
         #expect(gaps.count == 1, "no gap over captured audio")
         #expect(h.client.rotateCalls == 1 && h.appState.interruptionWarning == nil, "nothing redone")

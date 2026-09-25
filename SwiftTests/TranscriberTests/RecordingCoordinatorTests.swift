@@ -378,6 +378,12 @@ struct Harness {
         }
     }
 
+    /// A NEGATIVE check's wait (L review 263): nothing is supposed to happen, so there is no condition to poll for — the
+    /// queued work gets a stretch of awake time (never a count of yields, which one more queue hop outlasts), then is checked.
+    static func settle(_ seconds: Double = 0.1) async {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
     /// A WAV with a header and no audio: processing it never loads a model (`streamEmpty`).
     static func headerOnlyWAV() -> Data {
         var d = Data()
@@ -579,7 +585,7 @@ struct Harness {
         #expect(seenAtStart == .some("mic-1"), "a meter could open the mic while the helper was opening it")
         #expect(h.recordingMic.current == .some("mic-1"))
         h.client.onMicDeviceChanged?("mic-2")   // helper auto-switched
-        await Task.yield(); await Task.yield()
+        await Harness.until { h.recordingMic.current == .some("mic-2") }
         #expect(h.recordingMic.current == .some("mic-2"))
     }
 
@@ -600,7 +606,7 @@ struct Harness {
         #expect(h.appState.isRecording)
 
         h.client.onQualityAnomaly?("exactZeroMic", "The microphone has delivered 12s of pure digital silence.")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.interruptionWarning != nil }
 
         #expect(h.appState.interruptionWarning == "The microphone has delivered 12s of pure digital silence.")
     }
@@ -617,12 +623,12 @@ struct Harness {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.repairRequests.value == 1 }
         #expect(h.appState.activeAlarms[.remotePermissionDenied] != nil)
         #expect(h.appState.remoteAudioNotCaptured)
         #expect(h.repairRequests.value == 1)
         h.client.onAlarmsChanged?(snapshot("1000-0", 2, [.remotePermissionDenied]))   // the next poll: no second repair window
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.repairRequests.value == 1)
     }
 
@@ -632,14 +638,14 @@ struct Harness {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.repairRequests.value == 1 }
         #expect(h.repairRequests.value == 1)
 
         h.appState.phase = .idle
         await h.coordinator.startRecording(sessionName: "Second", microphoneDeviceId: "mic-1")
         #expect(h.appState.isRecording)
         h.client.onAlarmsChanged?(snapshot("1000-1", 1, [.remotePermissionDenied]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.repairRequests.value == 2 }
         #expect(h.repairRequests.value == 2)
     }
 
@@ -647,7 +653,7 @@ struct Harness {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onQualityAnomaly?("exactZeroMic", "mic silent")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.interruptionWarning == "mic silent" }
         #expect(h.appState.interruptionWarning == "mic silent")
         #expect(!h.appState.remoteAudioNotCaptured && h.repairRequests.value == 0)
     }
@@ -656,9 +662,9 @@ struct Harness {
         let h = try Harness()
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.remoteAudioNotCaptured }
         h.client.onAlarmsChanged?(snapshot("1000-0", 2, []))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { !h.appState.remoteAudioNotCaptured }
         #expect(!h.appState.remoteAudioNotCaptured)
     }
 
@@ -669,7 +675,7 @@ struct Harness {
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.client.onSystemAudioUnrecoverable?("tap rebuild failed")
         h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remoteRecoveryFailed]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.remoteAudioNotCaptured && h.appState.interruptionWarning != nil }
         #expect(h.appState.interruptionWarning?.contains("only your microphone") == true)
         #expect(h.appState.remoteAudioNotCaptured)
     }
@@ -679,7 +685,7 @@ struct Harness {
         await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
         h.appState.phase = .idle
         h.client.onAlarmsChanged?(snapshot("1000-0", 1, [.remotePermissionDenied]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.appState.activeAlarms.isEmpty && h.repairRequests.value == 0)
     }
 
@@ -697,15 +703,15 @@ struct Harness {
         #expect(h.appState.remoteAudioNotCaptured, "still true after the restart")
 
         h.client.onAlarmsChanged?(snapshot("2000-0", 1, []))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.appState.remoteAudioNotCaptured, "the new helper's empty registry proves nothing yet")
 
         h.client.onFirstFrames?(.system, "2000-0")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.appState.remoteAudioNotCaptured, "frames on time prove nothing about a denied tap: they are zeros")
 
         h.client.onRealAudio?(.system, "2000-0")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { !h.appState.remoteAudioNotCaptured }
         #expect(!h.appState.remoteAudioNotCaptured)
     }
 
@@ -784,7 +790,7 @@ struct Harness {
         h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
         h.client.onAlarmsChanged?(CaptureStatusSnapshot(helperSessionId: "2000-0", sequence: 1, isCapturing: true,
             alarms: [ActiveAlarm(kind: .micNotDelivering, raisedAt: t0 + 10, lastNotifiedAt: nil, message: "m", episode: 1)], tracks: []))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.activeAlarms[.micNotDelivering] != nil }
         h.coordinator.confirmRecoveryHealthy(now: t0 + 61)
         #expect(h.coordinator.xpcRetryCount == 1)
     }
@@ -912,7 +918,7 @@ struct Harness {
         h.appState.phase = .recording(since: Date())
         await h.coordinator.handleXPCCrash()
         h.client.onAlarmsChanged?(snapshot("2000-0", 1, [.micNotDelivering]))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.activeAlarms[.micNotDelivering] != nil }
         let t0 = Date()
         h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0", now: t0)
         h.coordinator.confirmRecoveryHealthy(now: t0 + 61)
@@ -1167,7 +1173,7 @@ struct Harness {
         h.client.onStartAsync = {
             guard second.value == nil else { return }
             second.value = Task { await coordinator.startRecording(sessionName: "Second", microphoneDeviceId: "mic-2") }
-            for _ in 0..<50 { await Task.yield() }
+            await second.value?.value   // it returns at its guard at once: a start is running
         }
         await coordinator.startRecording(sessionName: "First", microphoneDeviceId: "mic-1")
         await second.value?.value
@@ -1281,7 +1287,7 @@ struct Harness {
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         client.startError = nil
         await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(client.startCalls.count == 2 && client.retryEvents.isEmpty, "no restart for the failed start's crash")
         #expect(h.appState.isRecording)
     }
@@ -1337,7 +1343,7 @@ struct Harness {
         coordinator.presentAlarms()
         state.applyHelperSnapshot(snapshot("1000-0", 1, [.remoteCantConfirm]))
         coordinator.presentAlarms()
-        for _ in 0..<50 where shown.value.count < 2 { await Task.yield() }
+        await Harness.until { shown.value.count >= 2 }
         #expect(shown.value.count == 2 && shown.value[1].due == [.remoteCantConfirm] && shown.value[1].new == [.remoteCantConfirm])
         #expect(state.activeAlarms[.remoteCantConfirm]?.lastNotifiedAt != nil, "a presentation that happened")
     }
@@ -1351,7 +1357,7 @@ struct Harness {
         state.phase = .recording(since: Date())
         state.applyHelperSnapshot(snapshot("1000-0", 1, [.remotePermissionDenied]))
         coordinator.presentAlarms()
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { state.activeAlarms[.remotePermissionDenied]?.lastNotifiedAt != nil }
         #expect(shown.value.isEmpty)
         #expect(state.activeAlarms[.remotePermissionDenied]?.lastNotifiedAt != nil, "the repair window's presentation counts")
     }
@@ -1425,7 +1431,7 @@ struct Harness {
         h.client.statusSnapshot = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 2, isCapturing: false, alarms: [], tracks: [])
         await h.coordinator.pollHelperStatus()
         h.appState.phase = .idle   // stopped before the dispatched recovery ran
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.startCalls.isEmpty)
     }
 
@@ -1464,9 +1470,9 @@ struct Harness {
             presentAlarmsUI: { due, new in shown.value.append((due.map(\.kind), new)) }, recordingMicrophone: h.recordingMic)
         let t0 = Date()
         state.raiseAppAlarm(.crashProtectionOff, message: "off", now: t0)
-        for _ in 0..<50 where shown.value.isEmpty { await Task.yield() }
+        await Harness.until { !shown.value.isEmpty }
         #expect(shown.value.count == 1 && shown.value[0].new == [.crashProtectionOff], "at once, with its window")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(shown.value.count == 1, "exactly once")
         coordinator.presentAlarms(now: t0 + 110)
         #expect(shown.value.count == 1)
@@ -1475,9 +1481,9 @@ struct Harness {
 
         // A new raise of the same kind (a new episode) is presented at once again.
         state.clearAppAlarm(.crashProtectionOff)
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         state.raiseAppAlarm(.crashProtectionOff, message: "off again")
-        for _ in 0..<50 where shown.value.count == 2 { await Task.yield() }
+        await Harness.until { shown.value.count != 2 }
         #expect(shown.value.count == 3 && shown.value[2].new == [.crashProtectionOff])
     }
 
@@ -1551,7 +1557,7 @@ struct Harness {
         client.onCaptureEnded = { pipelineAliveAtCaptureEnded.value = runner.chunkProcessor != nil }
 
         await h.coordinator.handleXPCCrash()
-        for _ in 0..<200 { await Task.yield() }
+        await Harness.until { !h.criticals.value.isEmpty }
 
         #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
         #expect(client.startCalls.count == 2, "the recording's start + exactly one restart")
@@ -1606,13 +1612,13 @@ struct Harness {
         let stopTask = Harness.Box<Task<Void, Never>?>(nil)
         client.onIsCapturing = {
             stopTask.value = Task { await coordinator.stopRecording() }   // the user presses Stop now
-            for _ in 0..<20 { await Task.yield() }
+            await Harness.until { coordinator.stopRequestedDuringRecovery || coordinator.stopInFlight }
         }
-        client.onStop = { for _ in 0..<200 { await Task.yield() } }   // …and the stop is still in flight
+        client.onStop = { try? await Task.sleep(for: .milliseconds(50)) }   // …and the stop is still in flight
 
         await coordinator.handleXPCCrash()
         await stopTask.value?.value
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
 
         #expect(client.startCalls.count == 1, "no restart raced the Stop")
         #expect(client.stopCalls == 1)
@@ -1654,7 +1660,7 @@ struct Harness {
         h.client.statusSnapshot = CaptureStatusSnapshot(helperSessionId: "1000-0", sequence: 1, isCapturing: true,
             alarms: [ActiveAlarm(kind: .micDigitalSilence, raisedAt: Date(), lastNotifiedAt: nil, message: "m", episode: 1)], tracks: [])
         await h.coordinator.recoverAtLaunch()
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.until { h.appState.isRecording && !h.client.launchRecoveries.isEmpty && h.appState.activeAlarms[.micDigitalSilence] != nil }
         #expect(h.appState.isRecording && h.client.startCalls.isEmpty)
         #expect(h.client.launchRecoveries.first?["flow"] == "A")
         // No start() ran in this process, so crash detection must be armed explicitly (C1).
@@ -1856,7 +1862,7 @@ struct Harness {
         // A late report after the recording ended is ignored.
         h.appState.phase = .idle
         h.client.onMicDeviceChanged?("mic-8")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.recordingMic.current == .some("mic-7"))
     }
 
@@ -2323,12 +2329,8 @@ struct Harness {
         // Positive control: while recording, the wired callback drives a real recovery restart.
         h.appState.phase = .recording(since: Date())
         h.client.onServiceCrash?()
-        var tries = 0
         // The restart is over — its recovery file written off the main actor (L review 217) — before the test ends it.
-        while (h.client.startCalls.count < wiredStarts + 1 || h.coordinator.recoveryInFlight) && tries < 1000 {
-            await Task.yield()
-            tries += 1
-        }
+        await Harness.until { h.client.startCalls.count >= wiredStarts + 1 && !h.coordinator.recoveryInFlight }
         #expect(h.client.startCalls.count == wiredStarts + 1)
 
         // guard appState.isRecording: when idle, the same callbacks must do nothing.
@@ -2336,7 +2338,7 @@ struct Harness {
         h.appState.criticalError = nil
         h.client.onServiceCrash?()
         h.client.onFatalFailure?("boom")
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.startCalls.count == wiredStarts + 1)  // no further restart attempt
         #expect(h.appState.criticalError == nil)
     }
@@ -3225,7 +3227,8 @@ struct Harness {
         let seenAtStop = Harness.Box<(index: Int, timerLive: Bool)?>(nil)
         h.client.onStop = { seenAtStop.value = (rotator.currentChunkInfo.index, rotator.activeTimerForTesting != nil) }
         let stopping = Task { await h.coordinator.stopRecording() }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.coordinator.stopInFlight }
+        await Harness.settle()
         #expect(h.client.stopCalls == 0, "the helper is not asked to stop while a rotation is in flight")
         released.value = true
         await stopping.value
@@ -3242,7 +3245,7 @@ struct Harness {
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.client.rotateError = RefusedStoppingError()
         await h.runner.chunkRotator?.rotateForTesting()
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.startCalls.count == 1 && h.appState.activeAlarms[.rotationFailed] == nil)
     }
 
@@ -3271,12 +3274,12 @@ struct Harness {
         h.client.onRotate = { while !released.value { await Task.yield() } }
         h.client.rotateError = NoCaptureError()
         h.runner.chunkRotator?.rotateNow()
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.client.rotateCalls == 1 }
         let stopping = Task { await h.coordinator.stopRecording() }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.coordinator.stopInFlight }
         released.value = true
         await stopping.value
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(!h.client.recordedEvents.contains { $0.kind == .rotationFailed })
         #expect(h.client.startCalls.count == 1, "no crash restart during the stop")
     }
@@ -3495,7 +3498,7 @@ struct Harness {
         let h = try Harness()
         h.coordinator.systemWillSleep(at: Date())
         h.coordinator.systemDidWake(at: Date())
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents.isEmpty && h.client.recordedEvents.isEmpty)
     }
 
@@ -3507,11 +3510,11 @@ struct Harness {
         defer { tearDown(h) }
         #expect(!h.coordinator.preventsIdleSleep)
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.coordinator.preventsIdleSleep }
         #expect(h.coordinator.preventsIdleSleep)
         h.client.stopError = FakeCaptureError()
         await h.coordinator.stopRecording()
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { !h.coordinator.preventsIdleSleep }
         #expect(!h.coordinator.preventsIdleSleep)
     }
 
@@ -3538,12 +3541,13 @@ struct Harness {
         h.client.onStartAsync = { while !released.value { await Task.yield() } }
         let coordinator = h.coordinator
         let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.coordinator.isStartInFlight }
         #expect(h.coordinator.isStartInFlight && h.appState.isIdle)
         #expect(await h.coordinator.prepareForQuit(confirm: { false }) == false, "a start in flight is busy, like a recording")
         let asked = Harness.Box(false)
         let quitting = Task { await coordinator.prepareForQuit(confirm: { asked.value = true; return true }) }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { asked.value }
+        await Harness.settle()
         #expect(asked.value && h.client.stopCalls == 0, "confirmed, and waiting for the start")
         released.value = true
         await starting.value
@@ -3644,10 +3648,10 @@ struct Harness {
         h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
         let coordinator = h.coordinator
         let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.coordinator.hasWorkInFlight }
         #expect(h.coordinator.hasWorkInFlight, "a start in flight is busy")
         let terminating = Task { await coordinator.prepareForTermination(bound: .seconds(2)) }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.stopCalls == 0)
         released.value = true
         let releasedAt = ContinuousClock.now
@@ -3760,7 +3764,7 @@ struct Harness {
         h.coordinator.systemWillSleep(at: Date().addingTimeInterval(-3600))   // asleep an hour: the lost wake came ~30 s ago
         await Harness.until { clock.pendingSleeps > 0 }
         clock.advance(by: .seconds(29))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents == ["sleep"], "29 s awake: still waiting for the wake")
         clock.advance(by: .seconds(1))
         await Harness.until { h.client.powerEvents.count == 2 }
@@ -3786,7 +3790,7 @@ struct Harness {
         h.coordinator.systemDidWake(at: Date())
         await Harness.until { clock.pendingSleeps == 0 }
         clock.advance(by: .seconds(60))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents == ["sleep", "wake"])
     }
 
@@ -3803,7 +3807,7 @@ struct Harness {
         await Harness.until { h.client.powerEvents.count == 2 }
         #expect(h.client.powerEvents == ["sleep", "wake"])
         h.coordinator.systemDidWake(at: Date())
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents == ["sleep", "wake"])
         #expect(!h.client.recordedEvents.contains { $0.kind == .systemWake })
     }
@@ -3838,7 +3842,7 @@ struct Harness {
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until { h.appState.isTranscribing }
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.settle()
         #expect(h.coordinator.preventsIdleSleep, "still finishing the transcript")
         await stopping.value
         await Harness.until { !h.coordinator.preventsIdleSleep }
@@ -3874,7 +3878,7 @@ struct Harness {
         await Harness.until { h.client.stopCalls == 1 }
         let quit = Harness.Box<Bool?>(nil)
         let quitting = Task { quit.value = await coordinator.prepareForQuit(confirm: { true }) }
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(quit.value == nil, "waiting for the stop in flight")
         released.value = true
         let releasedAt = ContinuousClock.now
@@ -5184,7 +5188,7 @@ struct Harness {
         await Harness.until { clock.pendingSleeps > 0 }
         clock.advance(by: .seconds(30))
         await Harness.until { clock.pendingSleeps > 0 }   // re-armed
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents == ["sleep"], "dark: no implicit wake")
         displayOn.value = true
         clock.advance(by: .seconds(30))
@@ -5204,7 +5208,7 @@ struct Harness {
             await Harness.until { clock.pendingSleeps > 0 }
             clock.advance(by: .seconds(30))
         }
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.client.powerEvents == ["sleep"], "under the cap: still waiting")
         await Harness.until { clock.pendingSleeps > 0 }
         clock.advance(by: .seconds(30))
@@ -5410,7 +5414,7 @@ struct Harness {
         h.coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0")
         await Harness.until { clock.pendingSleeps > 0 }
         clock.advance(by: .seconds(59))
-        for _ in 0..<50 { await Task.yield() }
+        await Harness.settle()
         #expect(h.coordinator.xpcRetryCount == 1, "59 s awake: not yet")
         clock.advance(by: .seconds(1))
         await Harness.until { h.coordinator.xpcRetryCount == 0 }
