@@ -19,6 +19,9 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     /// a lower bound, and the record says so (R2b item 8).
     public var exactZeroIsLowerBound = false
     public var heartbeatCallbacksIsLowerBound = false
+    /// The helper's stop timed out sealing the capture: its counts are the last tick's (≤ 1 s stale), so every
+    /// value is a lower bound (final review R-M1) — never stamped as exact. A sum with one such session is one too.
+    public var coverageIncomplete = false
 
     public static let minimumDeficitSeconds: Double = 15
     public static let deficitRatio: Double = 0.10
@@ -27,7 +30,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case expectedSeconds, heartbeatCallbacks, deliveredSeconds, exactZeroSeconds, paddedSeconds,
-             longestGapSeconds, gapCount, rebuilds, exactZeroIsLowerBound, heartbeatCallbacksIsLowerBound
+             longestGapSeconds, gapCount, rebuilds, exactZeroIsLowerBound, heartbeatCallbacksIsLowerBound, coverageIncomplete
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -42,6 +45,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         try c.encode(rebuilds, forKey: .rebuilds)
         if exactZeroIsLowerBound { try c.encode(true, forKey: .exactZeroIsLowerBound) }
         if heartbeatCallbacksIsLowerBound { try c.encode(true, forKey: .heartbeatCallbacksIsLowerBound) }
+        if coverageIncomplete { try c.encode(true, forKey: .coverageIncomplete) }
     }
 
     /// Tolerant (C-M7): session.json persists this inside the provenance, and synthesized Decodable
@@ -59,6 +63,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         rebuilds = try c.decodeIfPresent(Int.self, forKey: .rebuilds) ?? 0
         exactZeroIsLowerBound = try c.decodeIfPresent(Bool.self, forKey: .exactZeroIsLowerBound) ?? false
         heartbeatCallbacksIsLowerBound = try c.decodeIfPresent(Bool.self, forKey: .heartbeatCallbacksIsLowerBound) ?? false
+        coverageIncomplete = try c.decodeIfPresent(Bool.self, forKey: .coverageIncomplete) ?? false
     }
 
     /// `contentAnomalies` is the count of CONTENT-compromising events on this track (rate drift,
@@ -105,6 +110,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         lhs.longestGapSeconds = max(lhs.longestGapSeconds, rhs.longestGapSeconds)
         lhs.gapCount += rhs.gapCount
         lhs.rebuilds += rhs.rebuilds
+        lhs.coverageIncomplete = lhs.coverageIncomplete || rhs.coverageIncomplete
     }
 
     private static func sum<T: AdditiveArithmetic>(_ a: T?, _ b: T?) -> T? {
@@ -162,6 +168,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         heartbeatCallbacksIsLowerBound = detail["\(prefix)_heartbeat_callbacks_is_lower_bound"] == "1"
         gapCount = detail["\(prefix)_gap_count"].flatMap(Int.init) ?? 0
         rebuilds = detail["\(prefix)_rebuilds"].flatMap(Int.init) ?? 0
+        // The stop's own mark, for both sides: NOT prefixed (`AudioCaptureService`'s timed-out seal, R-M1).
+        coverageIncomplete = detail["coverage_incomplete"] == "true"
     }
 
     /// `metadata.capture.<side>`. An unmeasured value is left out, never written as 0.
@@ -174,6 +182,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         if let heartbeatCallbacks { d["heartbeat_callbacks"] = heartbeatCallbacks }
         if exactZeroIsLowerBound { d["exact_zero_seconds_is_lower_bound"] = true }
         if heartbeatCallbacksIsLowerBound { d["heartbeat_callbacks_is_lower_bound"] = true }
+        if coverageIncomplete { d["coverage_incomplete"] = true }
         return d
     }
 }

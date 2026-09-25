@@ -156,7 +156,9 @@ enum SummaryPromptBuilder {
 
     private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> CaptureHeaderLine? {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
-        let amounts = "(\(delivered) s delivered of \(expected) s expected)"
+        // A stop whose seal timed out counted to its last tick: both figures are lower bounds (final review R-M1).
+        let atLeast = note.coverageIncomplete ? "at least " : ""
+        let amounts = "(\(atLeast)\(delivered) s delivered of \(atLeast)\(expected) s expected)"
         let zeros = clampedZeros(note)
         // A figure summed over measured and unmeasured sessions is only a lower bound (round 3 item 5).
         let silence = (note.exactZeroIsLowerBound ? "at least " : "") + (zeros.map(seconds) ?? "?")
@@ -193,7 +195,7 @@ enum SummaryPromptBuilder {
             text = "\(label): captured, but \(silence) s of \(delivered) s was digital silence\(count)"
         case .compromised:
             text = "\(label): captured, but compromised (\(anomalies ?? "anomaly count not recorded"))\(silenceSuffix)\(permission)"
-        case .unknown: text = "\(label): capture status unknown (\(delivered) s of \(expected) s)"
+        case .unknown: text = "\(label): capture status unknown (\(atLeast)\(delivered) s of \(atLeast)\(expected) s)"
         }
         return CaptureHeaderLine(text: text, warrantsBanner: true)
     }

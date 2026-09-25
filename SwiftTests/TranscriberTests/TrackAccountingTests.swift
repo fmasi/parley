@@ -180,4 +180,35 @@ import Testing
         #expect(p.systemExactZeroSeconds == nil, "the bare integer can't carry the mark: left out")
         #expect((p.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["exact_zero_seconds_is_lower_bound"] as? Bool == true)
     }
+
+    /// Final review R-M1: a `captureStop` whose seal timed out carries `coverage_incomplete` (last-tick counts, ≤ 1 s stale):
+    /// the seconds are a lower bound, and the record says so — never stamped as exact. The key is not prefixed (it is the
+    /// stop's, for both sides).
+    @Test func coverageIncompleteIsCarriedAsALowerBound() throws {
+        let stale = try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "290",
+                                                          "coverage_incomplete": "true"], prefix: "remote"))
+        #expect(stale.coverageIncomplete)
+        #expect(stale.asMetadataDictionary(status: .healthy)["coverage_incomplete"] as? Bool == true)
+        let complete = try #require(TrackAccounting(detail: ["remote_expected_seconds": "600", "remote_delivered_seconds": "600"], prefix: "remote"))
+        #expect(!complete.coverageIncomplete && complete.asMetadataDictionary(status: .healthy)["coverage_incomplete"] == nil,
+                "absent: never an invented mark")
+        var sum = complete; sum += stale
+        #expect(sum.coverageIncomplete && sum.expectedSeconds == 900, "a sum with an incomplete session is incomplete")
+        var other = stale; other += complete
+        #expect(other.coverageIncomplete)
+        let decoded = try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(sum))
+        #expect(decoded.coverageIncomplete, "session.json keeps the mark")
+        #expect(try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(complete)).coverageIncomplete == false)
+
+        // Through the record: the stop's mark reaches `capture_provenance.<side>_coverage`, whichever session it was.
+        var diagnostics = CaptureDiagnostics()
+        let stops: [[String: String]] = [complete.asDetail(prefix: "remote"),
+                                         stale.asDetail(prefix: "remote").merging(["coverage_incomplete": "true"]) { $1 }]
+        for (i, detail) in stops.enumerated() {
+            diagnostics.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: Double(i)), origin: .helper, kind: .captureStop,
+                                            severity: .info, detail: detail))
+        }
+        let p = diagnostics.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect((p.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["coverage_incomplete"] as? Bool == true)
+    }
 }

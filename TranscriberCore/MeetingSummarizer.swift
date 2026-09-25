@@ -289,7 +289,8 @@ public enum MeetingSummarizer {
             // This side's own content anomalies — the session-wide `quality_anomaly_count` would
             // blame one side for the other's faults.
             anomalyCount: side["content_anomaly_count"] as? Int,
-            exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true
+            exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true,
+            coverageIncomplete: side["coverage_incomplete"] as? Bool == true
         )
     }
 

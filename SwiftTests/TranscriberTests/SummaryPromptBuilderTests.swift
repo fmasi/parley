@@ -313,4 +313,16 @@ struct SummaryPromptBuilderTests {
         #expect(SummaryPromptBuilder.captureLine(shortfall)
                 == "Remote audio: partly captured (1000 s delivered of 2736 s expected); at least 400 s of it was digital silence")
     }
+
+    /// Final review R-M1: coverage from a stop whose seal timed out is a lower bound — "at least N s delivered of at least M s
+    /// expected", never stated as exact.
+    @Test func anIncompleteCoverageSaysAtLeast() {
+        let partial = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, coverageIncomplete: true))
+        #expect(SummaryPromptBuilder.captureLine(partial) == "Remote audio: partly captured (at least 1000 s delivered of at least 2736 s expected)")
+        let never = meta(local: CaptureSideNote(status: "neverDelivered", deliveredSeconds: 0, expectedSeconds: 60, coverageIncomplete: true))
+        #expect(SummaryPromptBuilder.captureLine(never) == "Your microphone: not captured (at least 0 s delivered of at least 60 s expected)")
+        let exact = meta(remote: CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736))
+        #expect(SummaryPromptBuilder.captureLine(exact) == "Remote audio: partly captured (1000 s delivered of 2736 s expected)")
+    }
 }
+
