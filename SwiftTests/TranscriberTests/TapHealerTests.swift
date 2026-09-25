@@ -374,6 +374,19 @@ import Testing
         #expect(r.tap.rebuilds.map(\.token) == [1, 2, 3], "the stale deadline cancelled nothing")
     }
 
+    // MARK: - Final review HF-9: a give-up at idle never claims audio is playing
+
+    /// Rebuilds that threw while nothing plays (an `srst` at pre-call idle, coreaudiod still coming up):
+    /// "could not restart" is true and is raised; "isn't reaching Parley although audio is playing" is
+    /// not — and nothing at idle would clear it. With audio playing, both as before; a give-up with nothing
+    /// thrown always says not-delivering, whatever the gate (never silent).
+    @Test func aGiveUpFromThrowingRebuildsWhileNothingPlaysNeverSaysNotDelivering() {
+        #expect(TapHealer.giveUpAlarms(rebuildFailed: true, gateOpen: false) == [.remoteRecoveryFailed])
+        #expect(TapHealer.giveUpAlarms(rebuildFailed: true, gateOpen: true) == [.remoteNotDelivering, .remoteRecoveryFailed])
+        #expect(TapHealer.giveUpAlarms(rebuildFailed: false, gateOpen: true) == [.remoteNotDelivering])
+        #expect(TapHealer.giveUpAlarms(rebuildFailed: false, gateOpen: false) == [.remoteNotDelivering], "never silent")
+    }
+
     @Test func aVerdictAfterAStopIsStillIgnored() {
         let r = rig()
         r.healer.endSession()

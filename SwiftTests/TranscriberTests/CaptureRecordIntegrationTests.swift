@@ -659,10 +659,13 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
             healer.onEvent = { [unowned self] kind, severity, detail in self.record(kind, severity, detail) }
             healer.onGiveUp = { [unowned self] rebuildFailed in
                 self.giveUps.append(rebuildFailed)
-                if self.raise(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing.") {
+                // The helper's own decision (`TapHealer.giveUpAlarms`), on the gate it reads (HF-9).
+                let kinds = TapHealer.giveUpAlarms(rebuildFailed: rebuildFailed, gateOpen: self.gateOpen)
+                if kinds.contains(.remoteNotDelivering),
+                   self.raise(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing.") {
                     self.record(.systemAudioUnrecovered, .anomaly, ["source": "system-tap", "reason": "healing ladder gave up"])
                 }
-                if rebuildFailed { self.raise(.remoteRecoveryFailed, "Parley could not restart system-audio capture.") }
+                if kinds.contains(.remoteRecoveryFailed) { self.raise(.remoteRecoveryFailed, "Parley could not restart system-audio capture.") }
             }
             healer.onRecovered = { [unowned self] in self.recovered += 1; self.clear(.remoteNotDelivering) }
             healer.onStuck = { [unowned self] in self.stuck += 1; self.raise(.remoteRecoveryFailed, "Parley could not restart system-audio capture.") }
@@ -842,6 +845,34 @@ final class IntegrationCapturingProvider: SummaryProvider, @unchecked Sendable {
         #expect(r.newlyRaised.isEmpty && r.giveUps.isEmpty)
         #expect(r.count(.firstFrames) == 1)
         #expect(r.recovered == 0, "nothing was healing")
+    }
+
+    /// Final review HF-9: a coreaudiod restart at pre-call idle whose rebuilds all throw (coreaudiod still
+    /// coming up). "Could not restart" is raised, and it clears when the 60 s slow retry rebuilds; "isn't
+    /// reaching Parley although audio is playing" is never raised — nothing at idle (no heartbeat, no gate
+    /// verdict) would clear it. With audio playing, the same failure still raises both.
+    @Test func anIdleGiveUpAfterThrowingRebuildsNeverClaimsAudioIsPlaying() {
+        let r = Rig()
+        r.delivering = false
+        r.gateOpen = false
+        r.rebuildOutcome = { _, _ in false }
+        r.healer.trigger(.serviceRestarted)
+        r.run(until: 30)
+        #expect(r.giveUps == [true])
+        #expect(r.newlyRaised == [.remoteRecoveryFailed])
+        #expect(r.count(.systemAudioUnrecovered) == 0, "nothing expected was lost")
+        r.rebuildOutcome = { _, _ in true }   // coreaudiod is back: the slow retry rebuilds
+        r.run(until: 100)
+        #expect(r.rungSucceeded == 1 && r.alarms.isEmpty, "no row left up at idle")
+
+        let playing = Rig()
+        playing.delivering = false
+        playing.rebuildOutcome = { _, _ in false }
+        playing.healer.trigger(.serviceRestarted)
+        playing.run(until: 30)
+        #expect(playing.giveUps == [true])
+        #expect(playing.newlyRaised == [.remoteNotDelivering, .remoteRecoveryFailed])
+        #expect(playing.count(.systemAudioUnrecovered) == 1)
     }
 
     /// Stop while a rung is in flight (it never returns — a HAL call blocked on a paused context):

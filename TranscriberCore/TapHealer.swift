@@ -101,6 +101,17 @@ public final class TapHealer {
         self.scheduler = scheduler
     }
 
+    /// The alarms a give-up raises (§6.1), in order. `remoteNotDelivering` says the other side isn't
+    /// reaching Parley "although audio is playing", and clears only on a heartbeat or a gate verdict. So a
+    /// give-up from rebuilds that THREW while nothing plays (an `srst` at pre-call idle) raises only
+    /// `remoteRecoveryFailed` — true, and cleared by the next rebuild that works; not-delivering waits for a
+    /// give-up with audio playing (final review HF-9). A give-up with nothing thrown always says
+    /// not-delivering, whatever the gate: never silent.
+    public static func giveUpAlarms(rebuildFailed: Bool, gateOpen: Bool) -> [AlarmKind] {
+        guard rebuildFailed else { return [.remoteNotDelivering] }
+        return gateOpen ? [.remoteNotDelivering, .remoteRecoveryFailed] : [.remoteRecoveryFailed]
+    }
+
     /// A new tap session: forget whatever the previous one left, then target `tap` — in ONE step on
     /// the serial context, so a rung scheduled for the old session can never rebuild the new tap.
     public func startSession(tap: TapRebuilding) {

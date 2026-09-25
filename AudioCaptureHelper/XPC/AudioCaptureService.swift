@@ -1549,12 +1549,15 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         // raises nothing; the ladder's give-up does.
         tapHealer.onGiveUp = { [weak self] rebuildFailed in
             guard let self else { return }
-            let newlyGivenUp = self.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.")
-            if newlyGivenUp {
+            // Rebuilds that threw while nothing plays: "could not restart" only, never "although audio is
+            // playing", which nothing at idle would clear (final review HF-9). Lock-only gate read.
+            let kinds = TapHealer.giveUpAlarms(rebuildFailed: rebuildFailed, gateOpen: self.livenessWatchdog.lastGateOpen)
+            if kinds.contains(.remoteNotDelivering),
+               self.raiseAlarm(.remoteNotDelivering, "The other side of the call isn’t reaching Parley although audio is playing. Parley keeps retrying; if this persists, check the output device in the call app.") {
                 // Once per give-up episode: sets `system_audio_unrecovered` in provenance for tap sessions.
                 self.record(.systemAudioUnrecovered, .anomaly, ["source": "system-tap", "reason": "healing ladder gave up"])
             }
-            if rebuildFailed {
+            if kinds.contains(.remoteRecoveryFailed) {
                 self.raiseAlarm(.remoteRecoveryFailed, "Parley could not restart system-audio capture. The other side may not be recorded.")
             }
         }
