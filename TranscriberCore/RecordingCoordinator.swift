@@ -15,14 +15,14 @@ import os
 @MainActor
 @Observable
 public final class RecordingCoordinator {
-    private let appState: AppState
-    private let captureClient: any RecordingCaptureClient
-    private let transcriptionRunner: TranscriptionRunner
+    let appState: AppState
+    let captureClient: any RecordingCaptureClient
+    let transcriptionRunner: TranscriptionRunner
     private let configManager: ConfigManager
     /// Test-only override for where the crash sentinel lives; nil = the real app-support path.
-    private let sentinelDirectory: URL?
+    let sentinelDirectory: URL?
     /// Post a normal user notification: (title, body).
-    private let notify: @MainActor (String, String) -> Void
+    let notify: @MainActor (String, String) -> Void
     /// Post a critical alert (floating panel + critical notification): (title, body).
     private let notifyCritical: @MainActor (String, String) -> Void
     /// Present a completed transcript — rename dialog, then auto-summary: (jsonPath, config).
@@ -90,13 +90,13 @@ public final class RecordingCoordinator {
 
     /// When the Mac went to sleep mid-recording: the wake records the interval as a capture gap. Cleared when
     /// the recording ends, which then delivers the helper's "wake" itself (L10 review 57).
-    private var sleptAt: Date?
+    var sleptAt: Date?
     /// The "sleep" delivery to the helper: the "wake" waits for it, so the helper's sleep-time
     /// `cancelAll()` is always paired with its wake-time `trigger(.wake)` (H7).
-    private var sleepDelivery: Task<Void, Never>?
+    var sleepDelivery: Task<Void, Never>?
     /// A lost `didWake` must not leave app-side monitoring off for good (L10 review 55): armed at every sleep,
     /// it runs an implicit wake after `lostWakeTimeout` of AWAKE time (the clock does not count the sleep).
-    private var lostWakeWatchdog: Task<Void, Never>?
+    var lostWakeWatchdog: Task<Void, Never>?
     var lostWakeTimeout: Duration = .seconds(30)
     /// The watchdog's clock: awake time. Tests drive it.
     var wakeWatchdogClock: any Clock<Duration> = SuspendingClock()
@@ -107,12 +107,12 @@ public final class RecordingCoordinator {
     var darkWakeCap: Duration = .seconds(300)
     /// Where the watchdog's implicit wake ended the sleep's gap: a REAL didWake after it, with no sleep in between,
     /// records the rest of the sleep and restarts monitoring again — never swallowed (L review 104).
-    private var implicitWakeAt: Date?
+    var implicitWakeAt: Date?
     /// `ProcessInfo` activity that keeps the Mac from idle-sleeping from a recording's start until its
     /// transcript is finished — every phase but `.idle` (L10 review 59). Follows the phase, so every path in
     /// and out is covered. A lid close or a user sleep still sleeps: that is the user's call — recorded as a
     /// gap, not fought.
-    private var idleSleepActivity: NSObjectProtocol?
+    var idleSleepActivity: NSObjectProtocol?
     /// Internal for tests.
     var preventsIdleSleep: Bool { idleSleepActivity != nil }
     /// The user's Quit stops the recording within this (at most 30 s, L10 review 60). Tests shorten it.
@@ -120,12 +120,12 @@ public final class RecordingCoordinator {
     /// A user Quit still stopping after this says so (L10 review 60). Tests shorten it.
     var quitFeedbackDelay: Duration = .seconds(2)
     /// The user's Quit is stopping the recording: the menu says "Quitting…".
-    public private(set) var isQuitting = false
+    public internal(set) var isQuitting = false
     /// The bound on the live-log flush at every exit (L review 96). Tests shorten it.
     var evidenceFlushBound: Duration = .seconds(1)
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
     /// two quit events) joins it instead of stopping twice.
-    private var terminationPrep: Task<Void, Never>?
+    var terminationPrep: Task<Void, Never>?
 
     // MARK: - Sentinel liveness and relaunch (§8.3, §8.9)
 
@@ -135,11 +135,11 @@ public final class RecordingCoordinator {
     private var aliveTimer: Task<Void, Never>?
     /// A retry of the pending sessions was asked for (a volume mounted, the Mac woke) while busy: it runs
     /// when the app is next idle. No timer: zero idle wakeups (L follow-up 35).
-    private var retryPendingWhenIdle = false
+    var retryPendingWhenIdle = false
     /// Launch recovery and every pending-session retry run one at a time, under this one gate (L review 83):
     /// a retry during launch recovery would stop the crashed app's live helper as a "stray", or overlap two
     /// salvages. A retry asked for while it is held runs once it is released (and the app is idle).
-    private var recoveryGateHeld = false
+    var recoveryGateHeld = false
     /// The `recordingStopped` messages of one recovery pass, said as ONE row at its end (L review 90); nil
     /// outside a pass.
     private var stoppedBatch: (recovered: [String], other: [String])?
@@ -157,15 +157,18 @@ public final class RecordingCoordinator {
     /// How long the restarted capture must deliver frames — with no newer crash and no mic
     /// NotDelivering alarm — before the retry streak resets (L9). Tests set it.
     public var recoveryConfirmationSeconds: TimeInterval = 60
+    /// The confirmation window's clock: AWAKE time (L review 117) — a sleep inside the window never shortens it.
+    /// Tests drive it.
+    var recoveryConfirmationClock: any Clock<Duration> = SuspendingClock()
     /// A restart is waiting for the new helper's first mic frames before it says "Resumed".
-    private var awaitingRecoveryFrames = false
+    var awaitingRecoveryFrames = false
     /// When the restarted capture delivered its first mic frames: the confirmation window's start.
-    private var recoveryFramesAt: Date?
+    var recoveryFramesAt: Date?
     /// The last time a snapshot carried `micNotDelivering`: inside the window it voids the confirmation.
     private var lastMicAlarmAt: Date?
     /// The awaited restart is a relaunch's resume: audio between the crash and the relaunch was lost,
     /// and "Resumed" says so (the `recordingResumedWithGap` alarm states the gap exactly).
-    private var restartLostAudio = false
+    var restartLostAudio = false
     /// Only a relaunch's resume awaits frames before the phase is `.recording`: set there before its
     /// `start()`, cleared when the capture is up. Nothing else accepts frames outside a recording (L2/L4
     /// fix round 2, item 1).
@@ -203,7 +206,7 @@ public final class RecordingCoordinator {
     public var isStartInFlight: Bool { startAnnounced || startRunning || relaunchProbing }
     /// A start that is not the relaunch's own: what every relaunch step yields to after an await (L reviews 38,
     /// 112, 129).
-    private var userStartInFlight: Bool { startAnnounced || startRunning }
+    var userStartInFlight: Bool { startAnnounced || startRunning }
     private var relaunchProbing = false
     private var startAnnounced = false
     private var startRunning = false
@@ -599,11 +602,11 @@ public final class RecordingCoordinator {
     }
 
     /// What is left until `deadline`, in awake seconds (never zero: a spent deadline still times out at once).
-    private static func seconds(until deadline: SuspendingClock.Instant) -> Double {
+    static func seconds(until deadline: SuspendingClock.Instant) -> Double {
         max(0.001, seconds(deadline - .now))
     }
 
-    private static func seconds(_ duration: Duration) -> Double {
+    static func seconds(_ duration: Duration) -> Double {
         let c = duration.components
         return Double(c.seconds) + Double(c.attoseconds) / 1e18
     }
@@ -611,7 +614,7 @@ public final class RecordingCoordinator {
     /// A helper call bounded at the coordinator (§8.8), on top of the client's own deadline: a
     /// `DeadlineError` is recorded as `xpcTimeout` and thrown as `CaptureCallTimeout`, whose wording is the
     /// user's. The body runs on after a timeout, but its completion changes nothing.
-    private func bounded<T: Sendable>(_ call: String, seconds: Double, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+    func bounded<T: Sendable>(_ call: String, seconds: Double, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
         do {
             return try await withDeadline(seconds: seconds, label: call, body)
         } catch DeadlineError.timedOut {
@@ -966,7 +969,7 @@ public final class RecordingCoordinator {
 
     /// Pull the helper's alarm state every `statusPollInterval` while recording (§6.2). Holds the
     /// coordinator only while polling, never across the sleep.
-    private func startStatusPoll() {
+    func startStatusPoll() {
         statusPoll?.cancel()
         missedPolls = 0
         notCapturingPolls = 0
@@ -994,7 +997,7 @@ public final class RecordingCoordinator {
 
     /// Called on every path that ends a recording: the poll stops, and a restart still waiting for its
     /// first frames is dropped with it (fix round 2, item 1).
-    private func stopStatusPoll() {
+    func stopStatusPoll() {
         statusPoll?.cancel()
         statusPoll = nil
         aliveTimer?.cancel()
@@ -1209,18 +1212,21 @@ public final class RecordingCoordinator {
             appState.interruptionWarning = "Recording briefly interrupted. Resumed."
             notify("Recording Resumed", "Recording was briefly interrupted and has been restarted.")
         }
-        let window = recoveryConfirmationSeconds
+        let window = recoveryConfirmationSeconds, clock = recoveryConfirmationClock
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(window))
-            self?.confirmRecoveryHealthy()
+            // Awake time (L review 117): the window's end is this clock's, for THIS window only.
+            do { try await clock.sleep(for: .seconds(window)) } catch { return }
+            self?.confirmRecoveryHealthy(windowOf: now)
         }
     }
 
     /// L9 / §8.5: the streak resets only after `recoveryConfirmationSeconds` of frames since the
     /// restart's first frame, with no newer crash and no mic NotDelivering alarm in that window.
-    func confirmRecoveryHealthy(now: Date = Date()) {
+    /// `windowOf`: the scheduled check — the window that began then has run its length in AWAKE time (L review
+    /// 117); a later restart's window is never ended by an earlier one's check. Without it, the wall clock `now`.
+    func confirmRecoveryHealthy(now: Date = Date(), windowOf scheduled: Date? = nil) {
         guard appState.isRecording, let since = recoveryFramesAt,
-              now.timeIntervalSince(since) >= recoveryConfirmationSeconds,
+              scheduled.map({ $0 == since }) ?? (now.timeIntervalSince(since) >= recoveryConfirmationSeconds),
               lastCrashAt.map({ $0 <= since }) ?? true,
               lastMicAlarmAt.map({ $0 <= since }) ?? true,
               appState.activeAlarms[.micNotDelivering] == nil else { return }
@@ -1283,7 +1289,7 @@ public final class RecordingCoordinator {
 
     private func helperCaptureState() async -> HelperCaptureState { await captureClient.captureState() }
     /// The helper's stop, its paths discarded, for the bounded stops that only need the helper gone.
-    private func stopHelper() async throws { _ = try await helperStop() }
+    func stopHelper() async throws { _ = try await helperStop() }
     /// The helper calls a bounded (`@Sendable`) body makes: main-actor methods, so the body never touches
     /// the client itself.
     private func helperStop() async throws -> AudioPaths { try await captureClient.stop() }
@@ -1292,7 +1298,7 @@ public final class RecordingCoordinator {
         try await captureClient.start(outputDirectory: outputDirectory, baseName: baseName, microphoneDeviceId: microphoneDeviceId,
                                       systemAudioSource: systemAudioSource, options: options, sessionId: sessionId)
     }
-    private func awaitRotationInFlight() async { await transcriptionRunner.chunkRotator?.awaitRotationInFlight() }
+    func awaitRotationInFlight() async { await transcriptionRunner.chunkRotator?.awaitRotationInFlight() }
     private func attributeHelperDrain(_ sessions: [(sessionId: String, directory: URL)]) async {
         await captureClient.attributeHelperDrain(toOneOf: sessions)
     }
@@ -1300,7 +1306,7 @@ public final class RecordingCoordinator {
 
     /// Every queued live-log write reaches the disk before the process ends (L review 96) — bounded: a stuck disk
     /// never holds an exit longer than `evidenceFlushBound`.
-    private func flushEvidenceForExit() async {
+    func flushEvidenceForExit() async {
         _ = try? await withDeadline(seconds: Self.seconds(evidenceFlushBound), label: "exit: evidence flush") { await self.flushEvidence() }
     }
 
@@ -2239,316 +2245,6 @@ public final class RecordingCoordinator {
         .flatMap { [$0.baseName + ".wav", $0.baseName + "_mic.wav"] }
         .compactMap { (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent($0).path))?[.modificationDate] as? Date }
         return min(orphanEnds.max() ?? lastAlive ?? sentinel.startedAt, Date())
-    }
-
-    // MARK: - Sleep, wake, power-off, quit (§8.10)
-
-    /// Follow the phase: begin or end the idle-sleep activity, close a sleep/wake pairing the recording's end
-    /// left open, run a pending-session retry asked for while busy once idle, then re-evaluate on the phase's
-    /// next change.
-    private func trackIdleSleepActivity() {
-        // A pending-session retry asked for while busy runs now the app is idle (L follow-up 35).
-        if appState.isIdle, retryPendingWhenIdle, !recoveryGateHeld {
-            Task { await self.retryPendingSessions() }
-        }
-        // The recording ended between a sleep and its wake: the helper still gets its "wake" (L10 review 57).
-        if !appState.isRecording, sleptAt != nil { closeSleepPairing() }
-        if !appState.isRecording { implicitWakeAt = nil }
-        if !appState.isIdle, idleSleepActivity == nil {
-            idleSleepActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Recording a meeting")
-        } else if appState.isIdle, let activity = idleSleepActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            idleSleepActivity = nil
-        }
-        withObservationTracking {
-            _ = appState.phase
-        } onChange: { [weak self] in
-            Task { @MainActor in self?.trackIdleSleepActivity() }
-        }
-    }
-
-    /// `NSWorkspace.willSleep` while recording: nothing is captured until the wake. The helper is told
-    /// (it pauses its detectors), the status poll and the rotation timer stop — a rotation the timer
-    /// would owe on wake is the wake's forced one — and the lost-wake watchdog is armed (L10 review 55).
-    /// During a Stop only the helper's pairing and the record matter: the stop owns the rest (L10 review 54).
-    public func systemWillSleep(at date: Date = Date()) {
-        guard appState.isRecording, sleptAt == nil else { return }
-        Logger.state.info("System going to sleep while recording")
-        sleptAt = date
-        implicitWakeAt = nil   // a new sleep: the last one's implicit wake is settled
-        captureClient.record(.systemSleep, .info, [:])
-        if !stopInFlight {
-            stopStatusPoll()
-            transcriptionRunner.stopChunkRotation()
-        }
-        let previous = sleepDelivery
-        sleepDelivery = Task {
-            await previous?.value
-            await self.captureClient.systemPowerEvent("sleep")
-        }
-        armLostWakeWatchdog(sleptAt: date)
-    }
-
-    /// `NSWorkspace.didWake`: the helper is told — only after its "sleep" landed (H7) — and, while recording,
-    /// the sleep becomes a capture gap in the session (re-detect's bound reads an unrecorded gap as implausible
-    /// timing), a rotation seals the chunk that spans the sleep, and "Resumed" waits for the first frames again.
-    /// A Stop in flight gets the gap and the pairing, never a rotation, a timer, a poll or a banner (L10 review
-    /// 54). `implicit`: no didWake came, the watchdog stands in (L10 review 55).
-    public func systemDidWake(at date: Date = Date()) {
-        if sleptAt == nil, let since = implicitWakeAt {
-            realWakeAfterImplicit(since: since, at: date)
-            return
-        }
-        systemDidWake(at: date, implicit: false)
-    }
-
-    /// The watchdog stood in for a wake that had not come — a DarkWake it took for one — and the real one is here
-    /// (L review 104): the rest of the sleep is a gap too, and the rotation and the "waiting for audio" banner run
-    /// again. The helper already had its "wake": one sleep, one wake.
-    private func realWakeAfterImplicit(since: Date, at date: Date) {
-        implicitWakeAt = nil
-        guard appState.isRecording else { return }
-        let end = max(since, date)
-        Logger.state.info("The real wake arrived after the implicit one (\(Int(end.timeIntervalSince(since)), privacy: .public) s later)")
-        captureClient.record(.systemWake, .info, ["seconds": "\(Int(end.timeIntervalSince(since)))", "after_implicit": "true"])
-        let gap = CaptureGap(start: since, end: end, reason: "sleep")
-        Task { await self.transcriptionRunner.recordCaptureGap(gap) }
-        guard !stopInFlight else { return }
-        resumeMonitoringAfterWake()
-    }
-
-    private func systemDidWake(at date: Date, implicit: Bool) {
-        guard let start = sleptAt else { return }
-        guard appState.isRecording else {
-            closeSleepPairing()   // the recording ended meanwhile: the pairing only
-            return
-        }
-        sleptAt = nil
-        lostWakeWatchdog?.cancel()
-        lostWakeWatchdog = nil
-        let end = max(start, date)
-        Logger.state.info("System woke while recording (\(Int(end.timeIntervalSince(start)), privacy: .public) s asleep\(implicit ? ", implicit" : "", privacy: .public))")
-        var detail = ["seconds": "\(Int(end.timeIntervalSince(start)))"]
-        if implicit { detail["implicit"] = "true" }
-        captureClient.record(.systemWake, .info, detail)
-        let gap = CaptureGap(start: start, end: end, reason: "sleep")
-        Task { await self.transcriptionRunner.recordCaptureGap(gap) }
-        if implicit { implicitWakeAt = end }
-        deliverWake()
-        guard !stopInFlight else { return }   // the recording is ending: nothing to restart
-        resumeMonitoringAfterWake()
-    }
-
-    /// A rotation seals the chunk that spans the sleep; the timer, the poll and "Resumed"'s wait for frames restart.
-    private func resumeMonitoringAfterWake() {
-        transcriptionRunner.chunkRotator?.rotateNow()
-        transcriptionRunner.startChunkRotation()
-        startStatusPoll()
-        awaitingRecoveryFrames = true
-        recoveryFramesAt = nil
-        restartLostAudio = true   // nothing was captured while the Mac slept
-        appState.interruptionWarning = "Recording restarted — waiting for audio…"
-    }
-
-    /// The helper's "wake", after its "sleep" landed.
-    private func deliverWake() {
-        let sleep = sleepDelivery
-        sleepDelivery = Task {
-            await sleep?.value
-            await self.captureClient.systemPowerEvent("wake")
-        }
-    }
-
-    /// The recording ended between a sleep and its wake: the helper gets its "wake" now — the pairing holds —
-    /// and the sleep is forgotten, so a later didWake does nothing (L10 review 57).
-    private func closeSleepPairing() {
-        guard sleptAt != nil else { return }
-        sleptAt = nil
-        lostWakeWatchdog?.cancel()
-        lostWakeWatchdog = nil
-        deliverWake()
-    }
-
-    /// A DarkWake or Power Nap is awake time with the display asleep (L review 104): the watchdog re-arms instead of
-    /// firing, for up to `darkWakeCap` after the first dark sign — bounded as the helper's own pause is.
-    private func armLostWakeWatchdog(sleptAt start: Date) {
-        lostWakeWatchdog?.cancel()
-        let clock = wakeWatchdogClock, timeout = lostWakeTimeout, cap = darkWakeCap
-        lostWakeWatchdog = Task { [weak self] in
-            var dark: Duration = .zero
-            while true {
-                do { try await clock.sleep(for: timeout) } catch { return }   // cancelled: the wake came
-                guard let self, self.sleptAt == start else { return }
-                guard !self.displayIsAwake(), dark < cap else { break }
-                dark += timeout
-                Logger.state.info("Awake with the display asleep (a DarkWake) — still waiting for the real wake")
-            }
-            guard let self else { return }
-            Logger.state.error("No wake arrived \(Self.seconds(timeout), privacy: .public) s of awake time after the sleep — waking implicitly")
-            // Awake for `timeout` since the wake that never came: it was about that long ago.
-            self.systemDidWake(at: Date().addingTimeInterval(-Self.seconds(timeout)), implicit: true)
-        }
-    }
-
-    // MARK: Quit and termination (L10 review 53, 58, 60)
-
-    /// What an exit would cut short now (L10 review 53): a recording, a start or a stop in flight, a
-    /// transcript being finished, or a crash recovery.
-    public var hasWorkInFlight: Bool {
-        TerminationPolicy.isBusy(recording: appState.isRecording, startInFlight: isStartInFlight, stopInFlight: stopInFlight,
-                                 transcribing: appState.isTranscribing, recoveryInFlight: recoveryInFlight)
-    }
-
-    /// Every Quit Parley offers goes through here (L10 review 58) — the menu's, and the setup panel's, which
-    /// can be up during a Flow A re-attach or a resume: with a coordinator, it asks and stops first
-    /// (`prepareForQuit`); without one nothing can be recording.
-    public static func quitGate(_ coordinator: RecordingCoordinator?, confirm: () async -> Bool) async -> Bool {
-        guard let coordinator else { return true }
-        return await coordinator.prepareForQuit(confirm: confirm)
-    }
-
-    /// Quit. Idle → true. While recording, or while a start is in flight → `confirm()`: true → the start is
-    /// awaited, then the recording is stopped — or a stop, a finalize or a recovery already running awaited —
-    /// within `quitStopBound`, then true; false → false (Parley stays). A stop still running at the bound is
-    /// left to the next launch, worded as a quit.
-    public func prepareForQuit(confirm: () async -> Bool) async -> Bool {
-        guard appState.isRecording || isStartInFlight else {
-            markExitDuringFinalize()
-            return true
-        }
-        guard await confirm() else { return false }
-        isQuitting = true
-        defer { isQuitting = false }
-        // A long quit says so: the menu shows it, and a notification once it outlasts `quitFeedbackDelay`.
-        let delay = quitFeedbackDelay
-        let feedback = Task { [weak self] in
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled, let self, self.isQuitting else { return }
-            self.notify("Quitting Parley", "Parley is saving the recording before it quits — this can take up to half a minute.")
-        }
-        defer { feedback.cancel() }
-        await stopForExit(bound: quitStopBound)
-        markExitDuringFinalize()
-        return true
-    }
-
-    /// Logout, shutdown, restart, or a quit from outside Parley (Activity Monitor, `osascript`, Sparkle): the
-    /// process ends right after this returns (L10 review 53). Within `bound` — tight — a start in flight is let
-    /// resolve and the helper is stopped, so it seals its files; the sentinel is left marked `stopping` (and
-    /// quit-during-finalize), and the long finalize is skipped: the next launch salvages it through
-    /// `.salvageAndStop(.wasStopping)`. A second request joins the first.
-    public func prepareForTermination(bound: Duration) async {
-        if let running = terminationPrep {
-            await running.value
-            return
-        }
-        let prep = Task { await self.prepareTermination(bound: bound) }
-        terminationPrep = prep
-        await prep.value
-        terminationPrep = nil
-    }
-
-    private func prepareTermination(bound: Duration) async {
-        let deadline = SuspendingClock.now + bound
-        guard hasWorkInFlight else { return }
-        Logger.state.info("Parley is being terminated with work in flight — stopping the helper, the finalize is left to the next launch")
-        // A crash restart in flight keeps the user's stop across its sentinel rewrite.
-        if recoveryInFlight { stopRequestedDuringRecovery = true }
-        markSentinelStopping()
-        markExitDuringFinalize()
-        _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "termination: start in flight") {
-            await self.awaitSettled { !$0.isStartInFlight }
-        }
-        markSentinelStopping()   // a start that just wrote its sentinel
-        if appState.isRecording || recoveryInFlight {
-            stopStatusPoll()
-            transcriptionRunner.stopChunkRotation()
-            if stopInFlight {
-                // The user's Stop is asking the helper already: wait for its answer, not its finalize.
-                _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "termination: stop in flight") {
-                    await self.awaitSettled { !$0.appState.isRecording }
-                }
-            } else {
-                _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "termination: rotation") {
-                    await self.awaitRotationInFlight()
-                }
-                do {
-                    try await bounded("termination stop", seconds: Self.seconds(until: deadline)) { try await self.stopHelper() }
-                } catch is CaptureCallTimeout {
-                    captureClient.dropConnection()   // the helper's invalidation handler stops it (L9 review 45)
-                } catch {
-                    Logger.state.error("The capture helper's stop at termination failed: \(error, privacy: .private)")
-                }
-            }
-        }
-        // Again: a restart or a start may have rewritten the sentinel meanwhile.
-        markSentinelStopping()
-        markExitDuringFinalize()
-        await flushEvidenceForExit()
-    }
-
-    /// The app is ending NOW (L review 85): SYNCHRONOUSLY — the process can exit in the same turn, before any
-    /// Task runs — the sentinel is marked `stopping` (salvage-only) and quit, so the next launch salvages it as
-    /// a quit even if the bounded helper stop that follows never gets to run. The terminate delegate calls it
-    /// before it answers `.terminateLater`.
-    public func markForTermination() {
-        markSentinelStopping()
-        markExitDuringFinalize()
-    }
-
-    /// The app is about to end while a stopped recording's transcript is still being finished (its
-    /// sentinel is there, marked `stopping`): say so in the sentinel, so the next launch words it as a
-    /// quit, never "Parley crashed" (L follow-up 42). Synchronous and public (L review 85): `willPowerOff`
-    /// calls it directly. A live recording is left alone — a logout can still be cancelled.
-    public func markExitDuringFinalize() {
-        guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.stopping, !sentinel.quitDuringFinalize else { return }
-        sentinel.quitDuringFinalize = true
-        do {
-            try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
-        } catch {
-            Logger.state.error("Could not mark the recovery file as quit during finalize: \(error, privacy: .private)")
-        }
-    }
-
-    /// Before the process ends: let a start in flight resolve (bounded by its own deadline and the stop that
-    /// may follow it), then stop the recording — or await the stop, finalize or recovery already running —
-    /// until the app is idle, within `bound`. Awaited, never polled (L10 review 60).
-    ///
-    /// ONE deadline covers the start's wait and the stop (L review 105): a hung start never adds its own 50 s to the
-    /// stop's bound. A start still in flight at the deadline leaves its recovery file `stopping`, so the next launch
-    /// salvages it and never resumes a recording the user quit.
-    private func stopForExit(bound: Duration) async {
-        let deadline = SuspendingClock.now + bound
-        do {
-            try await withDeadline(seconds: Self.seconds(until: deadline), label: "exit: start in flight") {
-                await self.awaitSettled { !$0.isStartInFlight }
-            }
-            if !appState.isIdle {
-                _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "exit stop") { await self.stopUntilIdle() }
-            }
-        } catch {
-            Logger.state.error("A recording start was still running when the quit's bound ran out — its recovery file is marked for salvage")
-            markSentinelStopping()
-        }
-        await flushEvidenceForExit()
-    }
-
-    private func stopUntilIdle() async {
-        if appState.isRecording, !stopInFlight { await stopRecording() }
-        await awaitSettled { $0.appState.isIdle }
-    }
-
-    /// Returns once `condition` holds, re-checked on every change of the observable state it reads.
-    private func awaitSettled(_ condition: @escaping @MainActor (RecordingCoordinator) -> Bool) async {
-        while !condition(self) {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                withObservationTracking {
-                    _ = condition(self)
-                } onChange: {
-                    cont.resume()
-                }
-            }
-        }
     }
 
     // MARK: - Sentinel liveness (§8.3, §8.8)

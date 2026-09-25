@@ -10,8 +10,9 @@ import os
 final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
     /// Parley's own Quit asked (confirmed, its recording already stopped within its bound): answered at once.
     static var userQuitRequested = false
-    /// `NSWorkspace.willPowerOff` was seen: a logout, shutdown or restart is under way.
-    static var powerOffSeen = false
+    /// When `NSWorkspace.willPowerOff` was last seen: a logout, shutdown or restart under way — or one the user
+    /// then cancelled, which is why it counts only for `TerminationPolicy.powerOffWindow` (L review 107).
+    static var powerOffSeenAt: Date?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let coordinator = TranscriberApp.busyCoordinator else { return .terminateNow }
@@ -20,7 +21,7 @@ final class AppTerminationDelegate: NSObject, NSApplicationDelegate {
         let event = NSAppleEventManager.shared().currentAppleEvent
         let reason = (event?.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
             ?? event?.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason)))?.enumCodeValue
-        let kind = TerminationPolicy.kind(quitReason: reason, powerOffSeen: Self.powerOffSeen,
+        let kind = TerminationPolicy.kind(quitReason: reason, powerOffSeenAt: Self.powerOffSeenAt, now: Date(),
                                           userQuitRequested: Self.userQuitRequested)
         switch TerminationPolicy.reply(busy: coordinator.hasWorkInFlight, kind: kind) {
         case .terminateNow:

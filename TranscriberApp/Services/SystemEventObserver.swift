@@ -34,7 +34,7 @@ final class SystemEventObserver {
         observers.append(center.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak coordinator] _ in
             // Synchronous, never in a Task (L review 85): the process can end right after this handler returns.
             MainActor.assumeIsolated {
-                AppTerminationDelegate.powerOffSeen = true
+                AppTerminationDelegate.powerOffSeenAt = Date()
                 coordinator?.markExitDuringFinalize()
             }
         })

@@ -46,10 +46,19 @@ public enum TerminationPolicy {
     /// kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAEShowShutdownDialog, kAERestart, kAEShutDown.
     static let powerOffReasons: Set<FourCharCode> = Set(["logo", "rlgo", "rrst", "rsdn", "rest", "shut"].map(fourCharCode))
 
-    /// Which kind of termination this is. A power-off wins: it ends the process whatever else was asked.
-    public static func kind(quitReason: FourCharCode?, powerOffSeen: Bool, userQuitRequested: Bool) -> TerminationKind {
-        if powerOffSeen || quitReason.map(powerOffReasons.contains) == true { return .powerOff }
-        return userQuitRequested ? .userQuit : .outsideQuit
+    /// How long a `willPowerOff` counts (L review 107): a logout that was CANCELLED sends no second notice, so a
+    /// later quit must not still be read as a power-off.
+    public static let powerOffWindow: TimeInterval = 60
+
+    /// Which kind of termination this is (L review 107). The quit event's own reason is the authority: a logout,
+    /// restart or shutdown there is a power-off whatever else was asked. Then Parley's own Quit is the user's —
+    /// even just after a logout the user cancelled. Only then does a recent `willPowerOff` (within
+    /// `powerOffWindow`) make it a power-off; anything else is a quit from outside Parley.
+    public static func kind(quitReason: FourCharCode?, powerOffSeenAt: Date?, now: Date, userQuitRequested: Bool) -> TerminationKind {
+        if quitReason.map(powerOffReasons.contains) == true { return .powerOff }
+        if userQuitRequested { return .userQuit }
+        if let seen = powerOffSeenAt, now.timeIntervalSince(seen) <= powerOffWindow { return .powerOff }
+        return .outsideQuit
     }
 
     private static func fourCharCode(_ s: String) -> FourCharCode {

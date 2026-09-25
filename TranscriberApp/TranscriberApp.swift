@@ -122,7 +122,9 @@ struct TranscriberApp: App {
     /// Owns the recording lifecycle and every crash path, launch recovery included (§8.3). Built here,
     /// once, and injected into `MenuView` — a view-owned coordinator would not exist yet at launch.
     private let coordinator: RecordingCoordinator
-    /// Sleep, wake and power-off, forwarded to the coordinator for the app's lifetime (§8.10).
+    /// Sleep and wake forwarded to the coordinator for the app's lifetime (§8.10); a volume mount and a wake retry
+    /// the pending sessions; the power-off notice only notes the termination's kind and marks a transcript being
+    /// finished — the stop happens when the quit itself arrives (L review 110).
     private let systemEvents: SystemEventObserver
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
@@ -515,6 +517,14 @@ struct TranscriberApp: App {
                 configManager: configManager,
                 permissionManager: launchGate.permissionManager
             )
+        }
+        // Cmd-Q from any Parley window (Settings, Setup) is the one Quit too — it asks while recording and stops
+        // first, never the app menu's plain terminate that skipped the confirm (L review 108).
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Parley") { quitParley() }
+                    .keyboardShortcut("q")
+            }
         }
     }
 }

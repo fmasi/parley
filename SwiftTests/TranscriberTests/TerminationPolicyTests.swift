@@ -35,13 +35,28 @@ import Testing
     /// The quit Apple event's reason names a logout, restart or shutdown; `willPowerOff` says so too; else
     /// Parley's own menu Quit; else someone outside Parley (Activity Monitor, `osascript`, Sparkle).
     @Test func theKindComesFromTheQuitReasonThePowerOffAndTheMenu() {
+        let now = Date()
         for reason in ["logo", "rlgo", "rrst", "rsdn", "rest", "shut"] {
-            #expect(TerminationPolicy.kind(quitReason: code(reason), powerOffSeen: false, userQuitRequested: false) == .powerOff, "\(reason)")
+            #expect(TerminationPolicy.kind(quitReason: code(reason), powerOffSeenAt: nil, now: now, userQuitRequested: false) == .powerOff, "\(reason)")
         }
-        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeen: true, userQuitRequested: false) == .powerOff)
-        #expect(TerminationPolicy.kind(quitReason: code("logo"), powerOffSeen: false, userQuitRequested: true) == .powerOff)
-        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeen: false, userQuitRequested: true) == .userQuit)
-        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeen: false, userQuitRequested: false) == .outsideQuit)
-        #expect(TerminationPolicy.kind(quitReason: code("xxxx"), powerOffSeen: false, userQuitRequested: false) == .outsideQuit)
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: now, now: now, userQuitRequested: false) == .powerOff)
+        #expect(TerminationPolicy.kind(quitReason: code("logo"), powerOffSeenAt: nil, now: now, userQuitRequested: true) == .powerOff)
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: nil, now: now, userQuitRequested: true) == .userQuit)
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: nil, now: now, userQuitRequested: false) == .outsideQuit)
+        #expect(TerminationPolicy.kind(quitReason: code("xxxx"), powerOffSeenAt: nil, now: now, userQuitRequested: false) == .outsideQuit)
+    }
+
+    /// L review 107: a `willPowerOff` is time-boxed — a CANCELLED logout never makes a later quit a power-off —
+    /// and the user's own Quit is always the user's, whatever `willPowerOff` said before it. Only the quit event's
+    /// own reason makes it a power-off then.
+    @Test func aCancelledLogoutNeverRecolorsALaterQuit() {
+        let now = Date()
+        let recent = now.addingTimeInterval(-10), stale = now.addingTimeInterval(-TerminationPolicy.powerOffWindow - 1)
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: recent, now: now, userQuitRequested: true) == .userQuit,
+                "the user's Quit after a cancelled logout")
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: stale, now: now, userQuitRequested: false) == .outsideQuit,
+                "a logout cancelled a minute ago is over")
+        #expect(TerminationPolicy.kind(quitReason: nil, powerOffSeenAt: recent, now: now, userQuitRequested: false) == .powerOff)
+        #expect(TerminationPolicy.powerOffWindow <= 60)
     }
 }
