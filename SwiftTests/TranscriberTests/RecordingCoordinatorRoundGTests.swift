@@ -439,3 +439,28 @@ final class StuckSentinelQueue: @unchecked Sendable {
         #expect(h.presented.value.isEmpty, "never finalized again")
     }
 }
+
+// MARK: - A note about the pending list never takes a session's row (249)
+
+@MainActor
+@Suite struct PendingListRowRoundGTests {
+    /// L review 249: a pending list Parley cannot read is said in its own row — never under "Recording STOPPED", where it
+    /// would take the place of the row a Stop that is held raises for its session.
+    @Test func anUnreadableListNeverPreEmptsAHeldStopsRow() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        try Data("not a list".utf8).write(to: h.tmp.appendingPathComponent("pending-\(UUID().uuidString).json"))
+        h.client.stopError = RefusedStoppingError()
+        h.coordinator.stopDeadline = .milliseconds(200)
+        h.coordinator.stopReaskInterval = .milliseconds(50)
+        h.coordinator.stopReaskMinimumBudget = .milliseconds(10)
+        await h.coordinator.stopRecording()
+        let stopped = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(stopped.contains("another stop is still under way"), "the Stop's own row: \(stopped)")
+        let list = try #require(h.appState.activeAlarms[.pendingListUnreadable])
+        #expect(list.message.contains("could not read") && list.message.contains("pending-"), "\(list.message)")
+        #expect(list.kind.isAcknowledgeable && list.kind.headline != AlarmKind.recordingStopped.headline)
+    }
+}

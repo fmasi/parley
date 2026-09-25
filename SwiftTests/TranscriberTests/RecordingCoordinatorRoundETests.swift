@@ -360,11 +360,14 @@ import Testing
         var s = try h.writeSentinel()
         s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
         s.stopCause = .folderNotAnswering; s.quitDuringFinalize = true; s.quitMarkedByPowerOff = true
+        s.heldReason = .relaunch; s.heldBecause = "its stop timed out"; s.salvageBegan = true
         try RecordingSentinel.write(s, directory: h.tmp)
         await h.coordinator.recoverAtLaunch()
         #expect(h.appState.isRecording, "resumed")
         let live = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(live.stopCause == nil && !live.quitDuringFinalize && !live.quitMarkedByPowerOff && !live.stopping)
+        // … nor a hold, nor a salvage's start (L review 250).
+        #expect(live.heldReason == nil && live.heldBecause == nil && !live.salvageBegan)
     }
 
     /// L review 193: a start that failed is said as never started — "could not be started", never "restarted".
@@ -427,7 +430,8 @@ import Testing
                                            directory: h.tmp)
         try Data("not a list".utf8).write(to: h.tmp.appendingPathComponent("pending-\(UUID().uuidString).json"))
         await h.coordinator.retryPendingSessions()
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        // Its own row, never "Recording STOPPED" (L review 249).
+        let row = try #require(h.appState.activeAlarms[.pendingListUnreadable]?.message)
         #expect(row.contains("could not read") && row.contains("pending-"), "\(row)")
     }
 

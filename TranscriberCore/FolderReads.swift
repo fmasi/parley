@@ -72,8 +72,9 @@ public final class FolderReads: @unchecked Sendable {
         lock.withLock { _ = roots.insert(root) }
     }
 
-    /// `path`, its `.` and `..` removed — lexically, never a file-system call.
-    private static func normalised(_ path: String) -> String { URL(fileURLWithPath: path).standardized.path }
+    /// `path`, its `.` and `..` removed — lexically, never a file-system call (a directory URL: `fileURLWithPath:` alone would
+    /// look whether the path is a directory).
+    private static func normalised(_ path: String) -> String { URL(fileURLWithPath: path, isDirectory: true).standardized.path }
 
     /// The root `folder` is derived from (L review 237): the deepest recording root it lies in — or, under none, itself.
     private func root(of folder: String) -> String {

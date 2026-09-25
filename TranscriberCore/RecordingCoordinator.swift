@@ -179,7 +179,7 @@ public final class RecordingCoordinator {
     /// outside a pass. Each with the session it is about (nil: none — a note about the pending list, say). `late`: the
     /// `audioAfterTranscript` messages — their own row, never under "Recording STOPPED" (L review 219).
     private var stoppedBatch: (recovered: [(session: String?, message: String)], other: [(session: String?, message: String)],
-                               late: [(session: String?, message: String)])?
+                               late: [(session: String?, message: String)], lists: [String])?
     /// The sessions a pass already said are waiting for the transcription engine (L review 178): said once per run, never
     /// again at every wake or mount while the engine is still not ready.
     private var saidWaitingForEngine: Set<String> = []
@@ -1797,7 +1797,7 @@ public final class RecordingCoordinator {
             await awaitSettled { !$0.recoveryGateHeld }
             recoveryGateHeld = true
         }
-        stoppedBatch = ([], [], [])
+        stoppedBatch = ([], [], [], [])
         if let sentinel = slotRead() {
             if await recover(sentinel) != .heldForHelper {
                 // Sessions an earlier launch could not finish (their folder away, or the helper not letting go).
@@ -1853,10 +1853,25 @@ public final class RecordingCoordinator {
         presentAlarms()
     }
 
+    /// A note about the pending list itself — one Parley could not read (L review 249): its own row, `pendingListUnreadable`,
+    /// never "Recording STOPPED", where it would take the place of a session's own row. Batched in a pass as the others are.
+    private func reportPendingListNote(_ message: String) {
+        if let batch = stoppedBatch {
+            guard !batch.lists.contains(message) else { return }
+            stoppedBatch?.lists.append(message)
+            return
+        }
+        appState.raiseAppAlarm(.pendingListUnreadable, message: message)
+        presentAlarms()
+    }
+
     /// One row for everything a recovery pass has to say (L review 90): "N earlier recordings were recovered: …".
     private func flushStoppedBatch() {
         guard let batch = stoppedBatch else { return }
         stoppedBatch = nil
+        if !batch.lists.isEmpty {
+            appState.raiseAppAlarm(.pendingListUnreadable, message: batch.lists.joined(separator: " "))
+        }
         var parts: [String] = []
         if batch.recovered.count == 1 {
             parts.append(batch.recovered[0].message)
@@ -1868,7 +1883,7 @@ public final class RecordingCoordinator {
             appState.raiseAppAlarm(.audioAfterTranscript, message: batch.late.map(\.message).joined(separator: " "))
         }
         guard !parts.isEmpty else {
-            if !batch.late.isEmpty { presentAlarms() }
+            if !batch.late.isEmpty || !batch.lists.isEmpty { presentAlarms() }
             return
         }
         appState.raiseAppAlarm(.recordingStopped, message: parts.joined(separator: " "))
@@ -2129,19 +2144,17 @@ public final class RecordingCoordinator {
     /// The pending sessions. An unreadable list is set aside and said, never dropped (L review 89).
     private func pendingSessions() -> [RecordingSentinel] {
         let loaded = pendingLoad()
+        // Each in its own row, never "Recording STOPPED" (L review 249).
         if let aside = loaded.setAside {
-            reportStopped("Parley could not read its list of unfinished recordings — it was set aside in \(abbreviatedDisplayPath(aside.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand.",
-                          recovered: false)
+            reportPendingListNote("Parley could not read its list of unfinished recordings — it was set aside in \(abbreviatedDisplayPath(aside.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand.")
         } else if let kept = loaded.keptUnreadable {
             // Not "set aside": it could not even be moved. Left in place, never overwritten (L review 130); the recordings
             // Parley keeps since go to a new list beside it, so every hold is tracked (L review 166).
-            reportStopped("Parley could not read its list of unfinished recordings, nor move it aside — it is left in \(abbreviatedDisplayPath(kept.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand. Recordings Parley keeps since go to a separate list beside it.",
-                          recovered: false)
+            reportPendingListNote("Parley could not read its list of unfinished recordings, nor move it aside — it is left in \(abbreviatedDisplayPath(kept.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand. Recordings Parley keeps since go to a separate list beside it.")
         }
         // A list kept beside it that cannot be read is said too — never only a log line (L review 196).
         for list in loaded.unreadableOverflow {
-            reportStopped("Parley could not read a list of unfinished recordings (\(list.lastPathComponent)) — it is left as it is in \(abbreviatedDisplayPath(list.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand.",
-                          recovered: false)
+            reportPendingListNote("Parley could not read a list of unfinished recordings (\(list.lastPathComponent)) — it is left as it is in \(abbreviatedDisplayPath(list.deletingLastPathComponent().path)), and those recordings may need to be transcribed by hand.")
         }
         return loaded.sessions
     }
@@ -2305,7 +2318,7 @@ public final class RecordingCoordinator {
             return
         }
         recoveryGateHeld = true
-        stoppedBatch = ([], [], [])
+        stoppedBatch = ([], [], [], [])
         foldersNotAnswering.removeAll()   // an event: every folder is read again (L review 127)
         await retryPendingLocked()
         releaseRecoveryGate()
@@ -2993,13 +3006,8 @@ public final class RecordingCoordinator {
             Logger.state.error("The transcription engine is not ready — the session waits for it: \(error, privacy: .private)")
             // A Start during the engine check owns the app now: the session waits all the same, and nothing touches that start.
             guard stillOwnsTheSession(sentinel) else { return }
-            keepPending(sentinel)
-            if saidWaitingForEngine.insert(sentinel.sessionKey).inserted {
-                reportStopped(RecoveryMessages.waitingForEngine(at: stoppedAt, folder: abbreviatedDisplayPath(outputDir.path),
-                                                                why: error.localizedDescription,
-                                                                remedy: Self.engineRemedy(for: error, engine: config.engine)),
-                              recovered: false, session: sentinel.sessionKey)
-            }
+            waitForTheEngine(sentinel, stoppedAt: stoppedAt, why: error.localizedDescription,
+                             remedy: Self.engineRemedy(for: error, engine: config.engine))
             endCaptureIfStillOwned()
             return
         }
@@ -3192,13 +3200,21 @@ public final class RecordingCoordinator {
             Logger.state.error("A stopped recording waits for its engine but has no recovery file and no known folder")
             return
         }
-        keepPending(kept, markStopping: true, cause: .userStopped)
-        let folder = abbreviatedDisplayPath(URL(fileURLWithPath: kept.systemAudioPath).deletingLastPathComponent().path)
-        let message = RecoveryMessages.waitingForEngine(at: Date(), folder: folder, why: why, remedy: remedy)
-        appState.errorMessage = message
-        if saidWaitingForEngine.insert(kept.sessionKey).inserted {
-            reportStopped(message, recovered: false, session: kept.sessionKey)
+        appState.errorMessage = waitForTheEngine(kept, stoppedAt: Date(), markStopping: true, cause: .userStopped, why: why, remedy: remedy)
+    }
+
+    /// A session waits for its transcription engine (L reviews 178, 218, 230): kept pending, and said ONCE per run with what
+    /// makes the engine ready — the salvage's wait and the Stop's share it (L review 250). Returns the row's message.
+    @discardableResult
+    private func waitForTheEngine(_ sentinel: RecordingSentinel, stoppedAt: Date, markStopping: Bool = false,
+                                  cause: RecordingSentinel.StopCause? = nil, why: String, remedy: RecoveryMessages.EngineRemedy) -> String {
+        keepPending(sentinel, markStopping: markStopping, cause: cause)
+        let folder = abbreviatedDisplayPath(URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent().path)
+        let message = RecoveryMessages.waitingForEngine(at: stoppedAt, folder: folder, why: why, remedy: remedy)
+        if saidWaitingForEngine.insert(sentinel.sessionKey).inserted {
+            reportStopped(message, recovered: false, session: sentinel.sessionKey)
         }
+        return message
     }
 
     /// The capture died and its restart could not be planned: the recording folder did not answer (L review 122).

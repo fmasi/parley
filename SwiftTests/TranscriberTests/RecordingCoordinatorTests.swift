@@ -4252,7 +4252,8 @@ struct Harness {
         let h = try Harness()
         try Data("{ not a list".utf8).write(to: h.tmp.appendingPathComponent("pending-sessions.json"))
         await h.coordinator.retryPendingSessions()
-        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains("could not read its list of unfinished recordings") == true)
+        // Its own row, never "Recording STOPPED" (L review 249).
+        #expect(h.appState.activeAlarms[.pendingListUnreadable]?.message.contains("could not read its list of unfinished recordings") == true)
         let aside = try FileManager.default.contentsOfDirectory(atPath: h.tmp.path).filter { $0.hasPrefix("pending-sessions.unreadable") }
         #expect(aside.count == 1)
     }

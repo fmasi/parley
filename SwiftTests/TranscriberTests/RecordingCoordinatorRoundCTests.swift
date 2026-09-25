@@ -737,8 +737,11 @@ final class HungRead: @unchecked Sendable {
         await h.coordinator.startRecording(sessionName: "next", microphoneDeviceId: nil)   // writes the slot
         #expect(pending(h).map(\.sessionKey) == [held.sessionKey], "still tracked after the next Start")
         #expect(try Data(contentsOf: list) == Data("not a list".utf8), "the unreadable list is never overwritten")
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        // The list's own row (L review 249) — and the hold's own, never taken by it.
+        let row = try #require(h.appState.activeAlarms[.pendingListUnreadable]?.message)
         #expect(row.contains("separate list"), "\(row)")
+        let hold = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(hold.contains("couldn’t stop the capture"), "\(hold)")
     }
 }
 

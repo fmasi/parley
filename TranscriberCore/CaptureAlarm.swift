@@ -63,6 +63,10 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// App-owned, ACKNOWLEDGEABLE (L review 219): audio of a finished recording, recorded after its transcript was written,
     /// is kept beside it untranscribed. A past event — nothing just stopped — so never under "Recording STOPPED".
     case audioAfterTranscript
+    /// App-owned, ACKNOWLEDGEABLE (L review 249): a list of unfinished recordings Parley could not read — set aside, or left
+    /// in place — and those recordings may need finishing by hand. A note about the list, not about one recording: never
+    /// under "Recording STOPPED", where it would take the place of a session's own row.
+    case pendingListUnreadable
     /// App-owned: the helper reported alarm kinds this build does not know (a newer helper). One
     /// generic alarm, so they are never silently dropped; cleared when a snapshot no longer has any.
     case unknownHelperAlarm
@@ -92,6 +96,7 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
     /// Past events the user dismisses; everything else clears only when the condition clears.
     public var isAcknowledgeable: Bool {
         self == .recordingResumedWithGap || self == .recordingStopped || self == .micFollowFailed || self == .audioAfterTranscript
+            || self == .pendingListUnreadable
     }
 
     /// The row's headline, shared by the menu's sticky rows and the alarm window (in Core, so it is tested — L review 219).
@@ -108,6 +113,7 @@ public enum AlarmKind: String, Codable, CaseIterable, Sendable {
         case .recordingStopped: return "Recording STOPPED"
         case .recordingFolderUnavailable: return "Recording folder unavailable"
         case .audioAfterTranscript: return "Audio kept after a transcript"
+        case .pendingListUnreadable: return "A list of unfinished recordings couldn’t be read"
         case .unknownHelperAlarm: return "Parley needs an update to show a capture problem"
         }
     }
