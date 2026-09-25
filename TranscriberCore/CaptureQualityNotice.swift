@@ -22,27 +22,50 @@ public enum CaptureQualityNotice {
 
     private static let couldNotCheck = "Parley couldn't re-read the transcript to check it"
 
-    /// Notification title for a completed transcription — exactly one of five, with precedence
-    /// unreadable > no speech > capture anomalies > processing problems > complete (§7.3).
+    /// Notification title for a completed transcription, with precedence unreadable > no speech > a side
+    /// not captured > a side partly captured > capture anomalies > processing problems > complete (§7.3).
     ///
-    /// A transcript that could not be re-read leads: none of the other four can be known, and
+    /// A transcript that could not be re-read leads: none of the others can be known, and
     /// "Complete" would be a clean bill for a file nobody checked. An empty transcript comes next:
     /// "Transcription Complete" over a file with no words in it is the most misleading thing this
-    /// notice could say. Anomalies beat processing problems because they mean the AUDIO itself may
-    /// be wrong; the body still names every non-zero count.
-    public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int) -> String {
+    /// notice could say. The per-side verdict (`capture_provenance.<side>_coverage.status`, the fact the
+    /// summary banner uses) comes before the ring's anomalies: a side that delivered nothing may carry no
+    /// anomaly at all — a crashed helper's undrained ring, a recording too short to judge live (final review
+    /// R-I2). Anomalies beat processing problems because they mean the AUDIO itself may be wrong; the body
+    /// still names every side and every non-zero count.
+    ///
+    /// `remoteStatus` / `localStatus`: a `TrackAccounting.Status` raw value, nil when the record has none
+    /// (never an invented alarm); `idle` and `healthy` say nothing.
+    public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                       remoteStatus: String? = nil, localStatus: String? = nil) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "Transcription finished — \(couldNotCheck)" }
         if segmentCount == 0 { return "Transcription Complete — no speech was transcribed" }
+        let remote = side(remoteStatus), local = side(localStatus)
+        switch (remote, local) {
+        case (.neverDelivered?, .neverDelivered?): return "Transcription Complete — neither side was captured"
+        case (.neverDelivered?, _): return "Transcription Complete — the other side was not captured"
+        case (_, .neverDelivered?): return "Transcription Complete — your microphone was not captured"
+        case (.compromised?, _), (_, .compromised?): return "Transcription Complete — capture compromised"
+        default: break
+        }
         if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
         if problemChunkCount > 0 { return "Transcription Complete — \(problemPhrase(problemChunkCount))" }
         return "Transcription Complete"
     }
 
-    /// Notification body: the file name, then every non-zero count.
-    public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int) -> String {
+    /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count.
+    public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                      remoteStatus: String? = nil, localStatus: String? = nil) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }
+        for (name, status) in [("remote audio", side(remoteStatus)), ("microphone", side(localStatus))] {
+            switch status {
+            case .neverDelivered?: parts.append("\(name) not captured")
+            case .compromised?: parts.append("\(name) partly captured")
+            default: break
+            }
+        }
         if anomalyCount > 0 {
             let noun = anomalyCount == 1 ? "anomaly" : "anomalies"
             parts.append("\(anomalyCount) capture \(noun) recorded; audio may be affected")
@@ -50,6 +73,15 @@ public enum CaptureQualityNotice {
         if problemChunkCount > 0 { parts.append(problemPhrase(problemChunkCount)) }
         guard !parts.isEmpty else { return fileName }
         return "\(fileName) — " + parts.joined(separator: "; ")
+    }
+
+    /// A side's verdict worth saying: `neverDelivered` or `compromised`; nil otherwise (absent, unknown, idle, healthy).
+    private static func side(_ status: String?) -> TrackAccounting.Status? {
+        switch status.flatMap(TrackAccounting.Status.init(rawValue:)) {
+        case .neverDelivered?: return .neverDelivered
+        case .compromised?: return .compromised
+        default: return nil
+        }
     }
 
     private static func problemPhrase(_ count: Int) -> String {
@@ -103,6 +135,17 @@ public enum CaptureQualityNotice {
     public static func segmentCount(inTranscriptAt url: URL) -> Int {
         guard let segments = readRoot(url)?["segments"] as? [[String: Any]] else { return unreadable }
         return segments.filter { !TranscriptAssembler.isFlagged($0) }.count
+    }
+
+    /// Each side's verdict, `metadata.capture_provenance.{remote,local}_coverage.status` — the fact the summary banner
+    /// uses (final review R-I2). nil when the transcript can't be read back (the caller says it could not check); each
+    /// side nil when its key is absent (never an invented alarm). Synchronous file I/O — call off the main actor, like
+    /// `anomalyCount(inTranscriptAt:)`.
+    public static func sideStatuses(inTranscriptAt url: URL) -> (remote: String?, local: String?)? {
+        guard let root = readRoot(url) else { return nil }
+        let provenance = (root["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any]
+        func status(_ key: String) -> String? { (provenance?[key] as? [String: Any])?["status"] as? String }
+        return (status("remote_coverage"), status("local_coverage"))
     }
 
     private static func readRoot(_ url: URL) -> [String: Any]? {

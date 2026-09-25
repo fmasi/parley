@@ -169,4 +169,81 @@ import Foundation
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 1)
     }
+
+    // MARK: - The per-side verdict (final review R-I2)
+
+    /// A side that delivered nothing — a crashed helper's undrained ring, a sub-5 s recording — carries no ring anomaly,
+    /// yet the record's own per-side verdict says it was not captured: never a plain "Transcription Complete".
+    @Test func aSideNeverDeliveredChangesTheTitleWithoutAnomalies() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 12,
+                                                     remoteStatus: "neverDelivered", localStatus: "healthy")
+                == "Transcription Complete — the other side was not captured")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 12,
+                                                    remoteStatus: "neverDelivered", localStatus: "healthy")
+                == "m.json — remote audio not captured")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 12,
+                                                     remoteStatus: "healthy", localStatus: "neverDelivered")
+                == "Transcription Complete — your microphone was not captured")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 12,
+                                                    remoteStatus: "healthy", localStatus: "neverDelivered")
+                == "m.json — microphone not captured")
+    }
+
+    /// Precedence: an empty transcript still leads — "no speech" is the most misleading thing to leave out — and the
+    /// body still names the side.
+    @Test func noSpeechStillBeatsASideStatus() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 0,
+                                                     remoteStatus: "neverDelivered", localStatus: nil)
+                == "Transcription Complete — no speech was transcribed")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 0,
+                                                    remoteStatus: "neverDelivered", localStatus: nil)
+                == "m.json — no speech was transcribed; remote audio not captured")
+    }
+
+    /// Precedence: a side not captured > a side partly captured > capture anomalies > processing problems; the body names
+    /// every one.
+    @Test func aSideStatusBeatsCaptureAnomalies() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 2, problemChunkCount: 1, segmentCount: 12,
+                                                     remoteStatus: "healthy", localStatus: "compromised")
+                == "Transcription Complete — capture compromised")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 2, problemChunkCount: 1, segmentCount: 12,
+                                                    remoteStatus: "healthy", localStatus: "compromised")
+                == "m.json — microphone partly captured; 2 capture anomalies recorded; audio may be affected; 1 chunk had processing problems")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 2, problemChunkCount: 0, segmentCount: 12,
+                                                     remoteStatus: "compromised", localStatus: "neverDelivered")
+                == "Transcription Complete — your microphone was not captured", "not captured beats partly captured")
+    }
+
+    /// `idle` (nothing played on this Mac) and `healthy` are not problems — and an absent status invents nothing.
+    @Test func idleAndHealthySidesSayNothing() {
+        for (remote, local) in [("idle", "healthy"), ("healthy", "healthy"), (nil, nil), ("idle", nil)] as [(String?, String?)] {
+            #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 3,
+                                                         remoteStatus: remote, localStatus: local) == "Transcription Complete")
+            #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 3,
+                                                        remoteStatus: remote, localStatus: local) == "m.json")
+        }
+    }
+
+    /// The fact the summary banner uses, read back off the artifact: `capture_provenance.<side>_coverage.status`.
+    @Test func readsSideStatusesFromProvenance() throws {
+        let url = try writeTranscript([
+            "metadata": ["capture_provenance": [
+                "quality_anomaly_count": 0,
+                "remote_coverage": ["status": "neverDelivered", "expected_seconds": 42.0, "delivered_seconds": 0.0],
+                "local_coverage": ["status": "healthy", "expected_seconds": 42.0, "delivered_seconds": 42.0],
+            ]],
+            "segments": [["start": 0, "end": 1, "text": "x", "speaker": "S"]],
+        ])
+        defer { try? FileManager.default.removeItem(at: url) }
+        let statuses = try #require(CaptureQualityNotice.sideStatuses(inTranscriptAt: url))
+        #expect(statuses.remote == "neverDelivered" && statuses.local == "healthy")
+
+        // Absent: nil each — never an invented alarm. Unreadable: nil — the caller says it could not check.
+        let bare = try writeTranscript(["metadata": ["capture_provenance": ["quality_anomaly_count": 0]], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: bare) }
+        let none = try #require(CaptureQualityNotice.sideStatuses(inTranscriptAt: bare))
+        #expect(none.remote == nil && none.local == nil)
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("does-not-exist-\(UUID().uuidString).json")
+        #expect(CaptureQualityNotice.sideStatuses(inTranscriptAt: missing) == nil)
+    }
 }

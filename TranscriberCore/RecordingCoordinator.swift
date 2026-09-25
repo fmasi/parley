@@ -3646,12 +3646,18 @@ public final class RecordingCoordinator {
         // Complete" only when it is truly clean.
         let jsonPath = result.jsonPath
         // On the folder queue, bounded (L review 122, 123): unanswered reads as "couldn't re-read the transcript".
+        // Each side's verdict too (final review R-I2), in the same folder read: a side unreadable there is the whole
+        // transcript unreadable — "couldn't re-read", never a clean bill.
         let unreadable = CaptureQualityNotice.unreadable
-        let (anomalies, problemChunks, segments) = await readOffMain("completion: transcript", folder: jsonPath.deletingLastPathComponent()) {
+        let read = await readOffMain("completion: transcript", folder: jsonPath.deletingLastPathComponent()) {
             (CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.problemChunkCount(inTranscriptAt: jsonPath),
-             CaptureQualityNotice.segmentCount(inTranscriptAt: jsonPath))
-        } ?? (unreadable, unreadable, unreadable)
+             CaptureQualityNotice.segmentCount(inTranscriptAt: jsonPath),
+             CaptureQualityNotice.sideStatuses(inTranscriptAt: jsonPath))
+        }
+        let sides = read?.3 ?? nil
+        var (anomalies, problemChunks, segments) = (unreadable, unreadable, unreadable)
+        if let read, sides != nil { (anomalies, problemChunks, segments) = (read.0, read.1, read.2) }
         // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
         // async read (setting it first let a new recording start mid-read), but deferring opens the
         // mirror-image risk: the main actor is free during the suspension, so a crash handler or a
@@ -3671,10 +3677,12 @@ public final class RecordingCoordinator {
         // The notification is passive, so it always fires: the transcript IS finished, and staying
         // silent about it would be the bigger failure.
         notify(
-            CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: problemChunks, segmentCount: segments),
+            CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: problemChunks, segmentCount: segments,
+                                                 remoteStatus: sides?.remote, localStatus: sides?.local),
             CaptureQualityNotice.completionBody(
                 fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies,
-                problemChunkCount: problemChunks, segmentCount: segments)
+                problemChunkCount: problemChunks, segmentCount: segments,
+                remoteStatus: sides?.remote, localStatus: sides?.local)
         )
         guard sessionStillOurs else {
             // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is
