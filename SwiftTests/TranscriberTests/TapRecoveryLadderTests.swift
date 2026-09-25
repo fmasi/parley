@@ -404,14 +404,36 @@ import Testing
         #expect(l.trigger(.permissionGrant, now: 5) == .run(.rebuildAggregate, token: 5, afterSeconds: 0))
     }
 
-    /// A grant while a rung is in flight is dropped, not queued: that rung builds its aggregate after
-    /// the grant, or, if it was already past that point, `TapPermissionGuard.tapBuilt(status:)` marks
-    /// the tap as built without the grant and the guard asks again.
-    @Test func permissionGrantWhileARungIsInFlightIsDropped() {
+    /// Final review H-I3: a grant while a rung is in flight is kept, and runs when that rung's result
+    /// lands — whatever the result. The rung may have built its aggregate before the grant (delivering
+    /// zeros), and the permission guard, which already counted the grant as answered, polls nothing more.
+    @Test func permissionGrantWhileARungIsInFlightRunsAfterIt() {
         var l = L()
-        _ = l.trigger(.stalled, now: 0)
-        #expect(l.trigger(.permissionGrant, now: 0.1) == .none)
+        #expect(l.trigger(.stalled, now: 0) == .run(.rebuildAggregate, token: 1, afterSeconds: 0))
+        #expect(l.trigger(.permissionGrant, now: 0.05) == .none)
         #expect(l.inFlightToken == 1 && l.totalRebuilds == 1)
+        #expect(l.rungCompleted(token: 1, succeeded: true, now: 0.1) == .run(.rebuildAggregate, token: 2, afterSeconds: 0))
+        #expect(l.rungCompleted(token: 2, succeeded: true, now: 0.2) == .awaitHeartbeat(seconds: L.heartbeatDeadlineSeconds, token: 2))
+    }
+
+    /// A gate close forgets the rung, not the grant: the stale result of the forgotten rung runs it.
+    @Test func aGrantPendingAcrossAGateCloseStillRuns() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)                                   // token 1
+        #expect(l.trigger(.permissionGrant, now: 0.05) == .none)
+        #expect(l.gateClosed() == .none)
+        #expect(l.rungCompleted(token: 1, succeeded: true, now: 0.3) == .run(.rebuildAggregate, token: 2, afterSeconds: 0))
+    }
+
+    /// A wake (or `srst`, or a new session) starts over with the permission as it is now: the pending
+    /// grant goes with the rest.
+    @Test func aWakeForgetsAPendingGrant() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)                                   // token 1
+        #expect(l.trigger(.permissionGrant, now: 0.05) == .none)
+        #expect(l.trigger(.wake, now: 1) == .none)
+        #expect(l.rungCompleted(token: 1, succeeded: true, now: 1.1) == .none)
+        #expect(l.inFlight == nil && !l.awaitingHeartbeat)
     }
 
     /// The grey zone's insurance rebuild: once, only when nothing else is going on — and a heal that

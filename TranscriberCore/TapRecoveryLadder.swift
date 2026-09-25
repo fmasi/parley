@@ -59,6 +59,9 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     /// When a heartbeat first ended the episode's current silence; `nil` = silent since the last trouble.
     private var healedAt: Double?
     private var onReopen: Reopen = .fresh
+    /// A grant that arrived while a rung was in flight: it runs when that rung's result lands (final review
+    /// H-I3). A gate close keeps it (the rung is forgotten, not the grant); `forgetEverything` does not.
+    private var grantPending = false
     /// The rung whose heartbeat the ladder is waiting for; `nil` = none.
     public private(set) var awaitedToken: Int?
     private var nextToken = 1
@@ -83,7 +86,10 @@ public struct TapRecoveryLadder: Equatable, Sendable {
             episodeStartedAt = now
             return start(.rebuildTap, delay: 0)
         case .permissionGrant:
-            if inFlight != nil { return .none }
+            // The rung in flight may have built its aggregate before the grant (it then delivers zeros, and
+            // the permission guard already counted the grant as answered): keep it for that rung's result.
+            if inFlight != nil { grantPending = true; return .none }
+            grantPending = false
             refundIfHealthHeld(now: now)
             if episodeStartedAt == nil { episodeStartedAt = now }
             awaitedToken = nil
@@ -107,11 +113,16 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     }
 
     /// The result of the rung the ladder ordered with `token`. Any other token (a stale rung from
-    /// before a reset, or 0 for a rebuild the ladder did not order) completes nothing.
+    /// before a reset, or 0 for a rebuild the ladder did not order) completes nothing — but a grant that
+    /// waited for it runs now, if nothing else is in flight. A grant that waited for THIS rung runs
+    /// whatever the rung's result: the rung may have built its aggregate before the grant.
     public mutating func rungCompleted(token: Int, succeeded: Bool, now: Double) -> Action {
-        guard inFlightToken == token else { return .none }
+        guard inFlightToken == token else {
+            return grantPending && inFlight == nil ? trigger(.permissionGrant, now: now) : .none
+        }
         inFlight = nil
         inFlightToken = nil
+        if grantPending { return trigger(.permissionGrant, now: now) }
         if succeeded {
             awaitedToken = token
             return .awaitHeartbeat(seconds: Self.heartbeatDeadlineSeconds, token: token)
@@ -237,8 +248,11 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         exhausted = false
     }
 
+    /// Wake, `srst`, a new session: the next tap is built with the permission as it is now, so a pending
+    /// grant goes too.
     private mutating func forgetEverything() {
         endEpisode()
         onReopen = .fresh
+        grantPending = false
     }
 }
