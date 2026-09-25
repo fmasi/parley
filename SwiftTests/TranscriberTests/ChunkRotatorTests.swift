@@ -42,10 +42,10 @@ struct ChunkRotatorTests {
         #expect(rotator.currentChunkInfo.index == 0)
     }
 
-    @Test func recoverFromCrashAdvancesIndexAndKeepsOrphanAtCurrent() {
+    @Test func recoverFromCrashAdvancesIndexAndKeepsOrphanAtCurrent() async {
         let rotator = makeRotator()
 
-        let plan = rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 1000))
+        let plan = await rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 1000))
 
         #expect(plan.orphanIndex == 0)
         #expect(plan.orphanBaseName == "meeting-0")
@@ -56,11 +56,11 @@ struct ChunkRotatorTests {
         #expect(rotator.currentChunkInfo.startTime == Date(timeIntervalSince1970: 1000))
     }
 
-    @Test func secondRecoveryAdvancesFromTheNewIndex() {
+    @Test func secondRecoveryAdvancesFromTheNewIndex() async {
         let rotator = makeRotator()
-        _ = rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 1000))
+        _ = await rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 1000))
 
-        let plan = rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 2000))
+        let plan = await rotator.recoverFromCrash(now: Date(timeIntervalSince1970: 2000))
 
         #expect(plan.orphanIndex == 1)
         #expect(plan.orphanBaseName == "meeting-1")
@@ -138,6 +138,7 @@ struct ChunkRotatorTests {
         rotator.start()
         let timer = try #require(rotator.activeTimerForTesting)
         timer.fire()                                    // one rotation, synchronously scheduled
+        await until { fired.value == 1 }
         for _ in 0..<50 { await Task.yield() }
         rotator.stop()
         #expect(fired.value == 1 && rotator.currentChunkInfo.index == 1)
@@ -153,7 +154,7 @@ struct ChunkRotatorTests {
                                    chunkDurationMinutes: 10, clock: clock, onChunkFinalized: { _ in })
         #expect(rotator.currentChunkInfo.startTime == Date(timeIntervalSince1970: 0))
         rotator.rotateNow()
-        for _ in 0..<50 { await Task.yield() }
+        await until { rotator.currentChunkInfo.index == 1 }
         let t = rotator.currentChunkInfo.startTime.timeIntervalSince1970
         #expect(t >= 0 && t < 5, "derived from the monotonic clock, not from Date()")
     }
@@ -168,7 +169,7 @@ struct ChunkRotatorTests {
         rotator.onRotationFailed = { _ in failures.value += 1 }
         rotator.onRotated = { rotated.value += 1 }
         rotator.rotateNow()
-        for _ in 0..<50 { await Task.yield() }
+        await until { failures.value == 1 }   // the rotation looks at the folder off the main actor first (L review 158)
         #expect(failures.value == 1 && rotator.currentChunkInfo.index == 0)
         #expect(rotated.value == 0, "a failed rotation is not a rotation")
     }
@@ -252,10 +253,10 @@ struct ChunkRotatorTests {
                                    chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0),
                                    onChunkFinalized: { finalized.value.append(($0.index, URL(fileURLWithPath: $0.systemPath).lastPathComponent)) })
         await rotator.rotateForTesting()
-        #expect(rotator.reconcileLateRotation())
+        #expect(await rotator.reconcileLateRotation())
         #expect(finalized.value.map(\.index) == [0] && finalized.value.first?.system == "meeting-0.wav")
         #expect(rotator.currentChunkInfo.index == 1, "the stop's last chunk is the helper's")
-        #expect(!rotator.reconcileLateRotation(), "once")
+        #expect(!(await rotator.reconcileLateRotation()), "once")
     }
 
     /// … and a rotation that timed out WITHOUT completing changes nothing: the next one rotates the chunk the
@@ -278,7 +279,7 @@ struct ChunkRotatorTests {
                                    chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0),
                                    onChunkFinalized: { finalized.value.append($0.index) })
         await rotator.rotateForTesting()
-        #expect(!rotator.reconcileLateRotation(), "nothing on disk: not completed")
+        #expect(!(await rotator.reconcileLateRotation()), "nothing on disk: not completed")
         await rotator.rotateForTesting()
         #expect(finalized.value == [0])
         #expect(client.requested == ["meeting-1", "meeting-2"], "never the timed-out attempt's name again")
@@ -297,6 +298,7 @@ struct ChunkRotatorTests {
                                    onChunkFinalized: { finalized.value.append($0.index) })
         rotator.rotateNow()
         rotator.rotateNow()
+        await until { !helper.requested.isEmpty }
         for _ in 0..<20 { await Task.yield() }
         #expect(helper.requested == ["meeting-1"], "the second waits for the first")
         released.value = true
@@ -306,11 +308,11 @@ struct ChunkRotatorTests {
     }
 
     /// L11 review 68: a crash recovery's new chunk starts on the rotator's monotonic clock by default.
-    @Test func recoverFromCrashDefaultsToTheMonotonicClock() {
+    @Test func recoverFromCrashDefaultsToTheMonotonicClock() async {
         let clock = MonotonicWallClock(anchorWall: Date(timeIntervalSince1970: 0), anchorMonotonic: ContinuousClock.now)
         let rotator = ChunkRotator(captureClient: FakeChunkRotationClient(), outputDirectory: "/tmp/out", sessionBaseName: "meeting",
                                    chunkDurationMinutes: 10, clock: clock, onChunkFinalized: { _ in })
-        rotator.recoverFromCrash()
+        await rotator.recoverFromCrash()
         let t = rotator.currentChunkInfo.startTime.timeIntervalSince1970
         #expect(t >= 0 && t < 5, "from the monotonic clock, not Date()")
     }
@@ -329,6 +331,16 @@ struct ChunkRotatorTests {
         #expect(!timer.isValid)
     }
 
+    /// Polls `condition` (up to about 2 s): the rotation looks at its folder off the main actor (L review 158), so a
+    /// fixed number of yields is not enough.
+    private func until(_ condition: () -> Bool) async {
+        var waited = 0
+        while !condition(), waited < 400 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            waited += 1
+        }
+    }
+
     // MARK: - L round B (113, 115, 118)
 
     private func rotator(_ client: any ChunkRotationClient, dir: URL, startIndex: Int = 0,
@@ -343,18 +355,18 @@ struct ChunkRotatorTests {
     /// L review 113: the Stop's last chunk is the one the helper's stop reply NAMES — never one chunk's audio under
     /// another's index. A reply naming a later chunk than the rotator's current one (a rotation completed that no
     /// file check showed) emits the current chunk from its own files first.
-    @Test func theStopsLastChunkIsTheOneItsReplyNames() throws {
+    @Test func theStopsLastChunkIsTheOneItsReplyNames() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
         let r = rotator(FakeChunkRotationClient(), dir: dir, finalized: finalized, rotated: rotated)
-        let last = r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-1.wav").path,
+        let last = await r.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-1.wav").path,
                                      micPath: dir.appendingPathComponent("meeting-1_mic.wav").path)
         #expect(last.index == 1 && URL(fileURLWithPath: last.systemPath).lastPathComponent == "meeting-1.wav")
         #expect(finalized.value.map(\.index) == [0] && finalized.value.first?.system == "meeting-0.wav", "chunk 0 from its own files")
         #expect(r.currentChunkInfo.index == 1)
         let same = rotator(FakeChunkRotationClient(), dir: dir, finalized: Box([]), rotated: rotated)
-        #expect(same.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-0.wav").path,
-                                     micPath: dir.appendingPathComponent("meeting-0_mic.wav").path).index == 0)
+        #expect(await same.lastChunkAtStop(systemPath: dir.appendingPathComponent("meeting-0.wav").path,
+                                           micPath: dir.appendingPathComponent("meeting-0_mic.wav").path).index == 0)
         #expect(rotated.value == 0, "settling at Stop is not a rotation (L review 118)")
     }
 
@@ -366,7 +378,7 @@ struct ChunkRotatorTests {
         let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
         let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
         await r.rotateForTesting()   // times out; completed late
-        r.recoverFromCrash()
+        await r.recoverFromCrash()
         #expect(finalized.value.map(\.index) == [0], "reconciled")
         #expect(rotated.value == 0, "not announced as a rotation")
     }
@@ -382,8 +394,8 @@ struct ChunkRotatorTests {
         let r = rotator(helper, dir: dir, startIndex: 2, finalized: finalized, rotated: rotated)
         helper.lateOnce = true
         r.rotateNow()   // asks for meeting-3; the helper dies before answering
-        for _ in 0..<20 { await Task.yield() }
-        let plan = r.recoverFromCrash()
+        await until { !helper.requested.isEmpty }
+        let plan = await r.recoverFromCrash()
         #expect(plan.recoveryIndex == 3)
         gated.value = false
         helper.writing = "meeting-3"   // the NEW helper records the recovery chunk
@@ -446,5 +458,30 @@ struct ChunkRotatorTests {
         #expect(finalized.value.map(\.index) == [0, 1, 2])
         #expect(finalized.value.map(\.system) == ["meeting-0.wav", "meeting-1.wav", "meeting-2.wav"])
         #expect(r.currentChunkInfo.index == 3)
+    }
+
+    // MARK: - L round C (158)
+
+    /// L review 158: the rotation's look at the session folder runs off the main actor, bounded. A share that stops
+    /// answering mid-recording never blocks it: the look is skipped, the next index comes from the counter, and the
+    /// folder is said not to answer. A crash recovery on the same folder is never blocked either.
+    @Test func aRotationWhoseFolderDoesNotAnswerIsNeverBlocked() async throws {
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
+        let notAnswering = Box<[String]>([])
+        let r = rotator(FakeChunkRotationClient(), dir: URL(fileURLWithPath: "/tmp/out"), finalized: finalized, rotated: rotated)
+        r.folderReads = FolderReads(label: "rotator-hung-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        r.folderProbeSeconds = 0.2
+        r.onFolderNotAnswering = { notAnswering.value.append($0) }
+        let began = ContinuousClock.now
+        await r.rotateForTesting()
+        #expect(ContinuousClock.now - began < .seconds(1), "bounded")
+        #expect(hung.reached, "the look ran on the folder queue")
+        #expect(r.currentChunkInfo.index == 1 && finalized.value.map(\.index) == [0], "rotated, by the counter")
+        #expect(rotated.value == 1)
+        #expect(!notAnswering.value.isEmpty, "said")
+        let plan = await r.recoverFromCrash()
+        #expect(plan.recoveryIndex == 2 && ContinuousClock.now - began < .seconds(2))
     }
 }

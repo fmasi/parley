@@ -51,6 +51,9 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case captureGap
     /// A chunk rotation threw. `.anomaly`.
     case rotationFailed
+    /// The recording folder did not answer a bounded look (L review 158): that step's file checks were skipped — a
+    /// rotation named its next chunk from the counter. `.anomaly`.
+    case folderNotAnswering
     /// `session.json` could not be written after a chunk. `.anomaly` (the audio is intact).
     case sessionWriteFailed
     /// Free space fell below one chunk at a rotation. `.warning`.

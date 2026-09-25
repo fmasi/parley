@@ -762,7 +762,7 @@ public final class RecordingCoordinator {
                 // A rotation that timed out may have completed in the helper: the chunk it sealed is processed
                 // from its own files (L9 review 46). The last chunk is the one the stop's reply NAMES, labelled
                 // by its own index — never another chunk's (L review 113).
-                let lastChunk = rotator.lastChunkAtStop(systemPath: paths.systemAudio.path, micPath: paths.micAudio.path)
+                let lastChunk = await rotator.lastChunkAtStop(systemPath: paths.systemAudio.path, micPath: paths.micAudio.path)
                 await processor.processLastChunk(lastChunk)
 
                 // Wait for any background chunks still processing
@@ -894,9 +894,9 @@ public final class RecordingCoordinator {
             }
             finishSentinel(after: outcome, sentinel: sentinel)
             appState.errorMessage = error.localizedDescription
-            // #155: this catch is the stop path's only signal to the user — the sentinel is deleted
-            // unconditionally, so relaunching will not retry. It says what the salvage did and what is
-            // on disk (§7.4 P6), and whether the stop itself failed or only the transcript.
+            // #155: this catch is the stop path's only signal to the user. It says what the salvage did and what is on
+            // disk (§7.4 P6), and whether the stop itself failed or only the transcript. The recovery file goes with the
+            // salvage — unless the folder did not answer: then it is kept, salvage-only, for when it does (L review 122).
             let body = stopSucceeded
                 ? RecoveryMessages.transcriptionFailed(after: outcome, error: error.localizedDescription)
                 : RecoveryMessages.stopFailed(after: outcome, error: error.localizedDescription)
@@ -1451,8 +1451,8 @@ public final class RecordingCoordinator {
         // the orphan's audio is processed by no one and silently dropped from the final transcript.
         if let rotator = transcriptionRunner.chunkRotator,
            let processor = transcriptionRunner.chunkProcessor {
-            let orphan = reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
-            let plan = rotator.recoverFromCrash()
+            let orphan = await reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
+            let plan = await rotator.recoverFromCrash()
             let restart = Self.liveRestartPlan(sentinel: sentinel, recoveryPlan: plan, outputDir: outputDir)
             baseName = restart.baseName
             newSentinel = restart.newSentinel
@@ -1900,7 +1900,7 @@ public final class RecordingCoordinator {
     /// unreachable.
     private func updateFolderAlarm() async {
         let pending = pendingSessions()
-        applyFolderAlarm(pending: pending, statuses: pending.isEmpty ? [:] : await pendingFolderStatuses(pending))
+        applyFolderAlarm(pending: pending, folders: pending.isEmpty ? PendingFolders() : await pendingFolderStatuses(pending))
     }
 
     /// A session scan that timed out (L review 127): the session waits — pending, its folder counted as not
@@ -1915,11 +1915,17 @@ public final class RecordingCoordinator {
         await updateFolderAlarm()
     }
 
-    private func applyFolderAlarm(pending: [RecordingSentinel], statuses: [String: FolderStatus]?) {
+    private func applyFolderAlarm(pending: [RecordingSentinel], folders: PendingFolders) {
         foldersNotAnswering.formIntersection(pending.map(\.sessionKey))   // a session no longer pending is resolved
+        // A folder with no answer YET — an earlier read of it is still out — says nothing either way (L review 164): the
+        // alarm is left as it is, never raised as "not reachable" nor cleared on a guess.
+        let folderOf = { (s: RecordingSentinel) in URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent().path }
+        if pending.contains(where: { !foldersNotAnswering.contains($0.sessionKey) && folders.noAnswerYet.contains(folderOf($0)) }) {
+            Logger.state.info("A pending folder has no answer yet — its alarm is left as it is")
+            return
+        }
         let waiting: [FolderStatus] = pending.map {
-            foldersNotAnswering.contains($0.sessionKey) ? .unreachable
-                : statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] ?? .unreachable
+            foldersNotAnswering.contains($0.sessionKey) ? .unreachable : folders.statuses[folderOf($0)] ?? .unreachable
         }.filter { $0 != .reachable }
         if waiting.isEmpty {
             appState.clearAppAlarm(.recordingFolderUnavailable)
@@ -1962,9 +1968,9 @@ public final class RecordingCoordinator {
             return
         }
         // Off the main actor, bounded (L review 75): folders that do not answer are not ready.
-        let statuses = await pendingFolderStatuses(pending)
+        let folders = await pendingFolderStatuses(pending)
         let ready = pending.filter {
-            $0.sessionKey != heldKey && statuses?[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
+            $0.sessionKey != heldKey && folders.statuses[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
         }
         if !ready.isEmpty {
             // Re-checked after the read (L follow-up 38): a start pressed meanwhile owns the app.
@@ -1977,7 +1983,7 @@ public final class RecordingCoordinator {
                 // helper's stop answer releases a session — "No capture in progress" counts — never a ping, which
                 // can read a slow helper as not capturing (L review 84).
                 guard await boundedHelperStop("stop a pending session") else {
-                    applyFolderAlarm(pending: pendingSessions(), statuses: statuses)
+                    applyFolderAlarm(pending: pendingSessions(), folders: folders)
                     return   // still not letting go: the next event tries again
                 }
                 guard appState.isIdle, !userStartInFlight else {
@@ -2002,7 +2008,7 @@ public final class RecordingCoordinator {
                 await salvageAtLaunch(sentinel: sentinel, outputDir: URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent())
             }
         }
-        applyFolderAlarm(pending: pendingSessions(), statuses: statuses)
+        applyFolderAlarm(pending: pendingSessions(), folders: folders)
     }
 
     /// The bound on a folder or disk read off the main actor (L review 74, 75): a hung network share or a
@@ -2010,23 +2016,43 @@ public final class RecordingCoordinator {
     var folderReadDeadline: Duration = .seconds(5)
     /// What the folder reads ask the file system. Tests inject a slow or fake one.
     var folderProbe: FolderProbe = .live
-    /// Where every blocking recording-folder read runs: one dedicated serial queue, never the cooperative pool
-    /// (L review 123). Tests inject one that hangs.
+    /// Where every blocking recording-folder read runs: a serial queue per volume, never the cooperative pool (L
+    /// reviews 123, 160). Tests inject one that hangs.
     var folderReads: FolderReads = .shared
 
     /// A read of `folder`, off the main actor and bounded (on awake time): nil when it did not answer — or when the
-    /// folder still has an earlier read outstanding (L review 123: `FolderReads`, one serial queue, never the pool).
+    /// folder still has an earlier read outstanding (L reviews 123, 160: `FolderReads`, its volume's queue, never the pool).
     private func readOffMain<T>(_ label: String, folder: URL, bound: Duration? = nil, _ read: @escaping @Sendable () -> T) async -> T? {
         await folderReads.read(label, folder: folder.path, seconds: Self.seconds(bound ?? folderReadDeadline), read)
     }
 
-    /// The status of each pending session's folder, read off the main actor under one bound; nil when the
-    /// read did not answer (then none is known reachable).
-    private func pendingFolderStatuses(_ sessions: [RecordingSentinel]) async -> [String: FolderStatus]? {
-        let probe = folderProbe
-        let folders = sessions.map { URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent() }
-        return await readOffMain("pending folders", folder: URL(fileURLWithPath: folders.map(\.path).sorted().joined(separator: "|"))) {
-            Dictionary(folders.map { ($0.path, Self.folderStatus($0, probe: probe)) }, uniquingKeysWith: { a, _ in a })
+    /// What the pending sessions' folders answered, by folder path (L reviews 75, 164). A read that timed out is
+    /// `.unreachable`; a folder whose earlier read has not answered yet is in `noAnswerYet` — neither reachable nor not.
+    struct PendingFolders {
+        var statuses: [String: FolderStatus] = [:]
+        var noAnswerYet: Set<String> = []
+    }
+
+    /// The status of each pending session's folder: each read on its own, concurrently — every one on its volume's
+    /// queue, so a hung share never keeps a healthy folder from answering (L review 160) — and bounded.
+    private func pendingFolderStatuses(_ sessions: [RecordingSentinel]) async -> PendingFolders {
+        let probe = folderProbe, reads = folderReads, seconds = Self.seconds(folderReadDeadline)
+        let folders = Set(sessions.map { URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent() })
+        return await withTaskGroup(of: (String, FolderReads.Outcome<FolderStatus>).self) { group in
+            for folder in folders {
+                group.addTask {
+                    (folder.path, await reads.outcome("pending folder", folder: folder.path, seconds: seconds) { Self.folderStatus(folder, probe: probe) })
+                }
+            }
+            var result = PendingFolders()
+            for await (path, outcome) in group {
+                switch outcome {
+                case .answered(let status): result.statuses[path] = status
+                case .timedOut: result.statuses[path] = .unreachable
+                case .busy: result.noAnswerYet.insert(path)
+                }
+            }
+            return result
         }
     }
 
@@ -2188,6 +2214,12 @@ public final class RecordingCoordinator {
             self?.rotationSucceeded()
         }
         transcriptionRunner.chunkRotator?.onRotationFailed = { [weak self] error in self?.rotationFailed(error) }
+        // The rotator looks at the folder through the coordinator's reader, off the main actor (L review 158); a look
+        // that did not answer is on record — the recording itself goes on.
+        transcriptionRunner.chunkRotator?.folderReads = folderReads
+        transcriptionRunner.chunkRotator?.onFolderNotAnswering = { [weak self] step in
+            self?.captureClient.record(.folderNotAnswering, .anomaly, ["during": step])
+        }
         transcriptionRunner.chunkProcessor?.onSessionWriteFailure = { [weak self] index in self?.sessionWriteFailed(chunk: index) }
         // The progress file is written again: its alarm is over (L follow-up 26, R2's hook).
         transcriptionRunner.chunkProcessor?.onSessionWriteSucceeded = { [weak self] in self?.appState.clearAppAlarm(.sessionWriteFailed) }
@@ -2522,7 +2554,7 @@ public final class RecordingCoordinator {
 
         var orphan: (index: Int, baseName: String)?
         if reingestOrphan, let rotator = transcriptionRunner.chunkRotator {
-            orphan = reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
+            orphan = await reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
         }
 
         await processor.awaitAllProcessed()
@@ -2650,10 +2682,11 @@ public final class RecordingCoordinator {
     /// NOT the stale sentinel path. Returns the orphan's (index, baseName) for logging.
     private func reingestOrphanChunk(
         rotator: ChunkRotator, processor: ChunkProcessor, outputDir: URL
-    ) -> (index: Int, baseName: String) {
+    ) async -> (index: Int, baseName: String) {
         // A timed-out rotation the helper completed late: the orphan is the chunk it was really writing, and
         // the chunk it sealed goes through the pipeline from its own files (L9 review 46). Not a rotation (118).
-        rotator.reconcileLateRotation(announce: false)
+        // The folder is looked at off the main actor, bounded (L review 158).
+        await rotator.reconcileLateRotation(announce: false)
         let orphan = rotator.currentChunkInfo
         let orphanBase = rotator.currentBaseName  // live-index base, NOT the stale sentinel path
         processor.processChunk(Self.orphanChunk(

@@ -6,7 +6,7 @@ import Foundation
 /// (#139 audit finding 3 / PR-6). Uses a fake capture client — no real audio, no XPC — and a
 /// per-test sentinel directory so nothing touches the real app-support path.
 @MainActor
-private final class FakeCaptureClient: RecordingCaptureClient {
+final class FakeCaptureClient: RecordingCaptureClient {
     var onServiceCrash: (@Sendable () -> Void)?
     var onMicDeviceChanged: (@Sendable (String?) -> Void)?
     var onFatalFailure: (@Sendable (String) -> Void)?
@@ -232,28 +232,28 @@ private final class FakeCaptureClient: RecordingCaptureClient {
     }
 }
 
-private struct FakeCaptureError: Error, LocalizedError {
+struct FakeCaptureError: Error, LocalizedError {
     var errorDescription: String? { "fake capture failure" }
 }
 
 /// The helper's reply to a rotate when it is not capturing: the capture is dead (§8.7).
-private struct NoCaptureError: Error, LocalizedError {
+struct NoCaptureError: Error, LocalizedError {
     var errorDescription: String? { CaptureReplies.noCaptureInProgress }
 }
 
 /// The helper's reply to a rotate while it is stopping (council B-I3, stream H2): not a dead capture.
-private struct RefusedStoppingError: Error, LocalizedError {
+struct RefusedStoppingError: Error, LocalizedError {
     var errorDescription: String? { CaptureReplies.refusedStopping }
 }
 
 /// Any other helper reply, by its wire text (a `CaptureReplies` constant).
-private struct HelperReplyError: Error, LocalizedError {
+struct HelperReplyError: Error, LocalizedError {
     let reply: String
     var errorDescription: String? { reply }
 }
 
 @MainActor
-private struct Harness {
+struct Harness {
     let tmp: URL
     let appState = AppState()
     let client = FakeCaptureClient()
@@ -3146,7 +3146,7 @@ private struct Harness {
         let released = Harness.Box(false)
         h.client.onRotate = { while !released.value { await Task.yield() } }
         rotator.rotateNow()
-        for _ in 0..<20 { await Task.yield() }
+        await Harness.until { h.client.rotateCalls == 1 }   // it looks at its folder off the main actor first (L review 158)
         #expect(h.client.rotateCalls == 1, "a rotation is in flight")
         let seenAtStop = Harness.Box<(index: Int, timerLive: Bool)?>(nil)
         h.client.onStop = { seenAtStop.value = (rotator.currentChunkInfo.index, rotator.activeTimerForTesting != nil) }
