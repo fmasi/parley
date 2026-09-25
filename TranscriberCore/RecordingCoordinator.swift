@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 import os
@@ -99,6 +100,14 @@ public final class RecordingCoordinator {
     var lostWakeTimeout: Duration = .seconds(30)
     /// The watchdog's clock: awake time. Tests drive it.
     var wakeWatchdogClock: any Clock<Duration> = SuspendingClock()
+    /// Whether the Mac is FULLY awake — its main display on (L review 104). A DarkWake or a Power Nap is awake time
+    /// with the display asleep: the watchdog's clock runs, yet the real wake has not happened. Tests set it.
+    var displayIsAwake: @MainActor () -> Bool = { CGDisplayIsAsleep(CGMainDisplayID()) == 0 }
+    /// How long the watchdog keeps re-arming while the Mac is awake but dark: the helper's DarkWake bound (H2).
+    var darkWakeCap: Duration = .seconds(300)
+    /// Where the watchdog's implicit wake ended the sleep's gap: a REAL didWake after it, with no sleep in between,
+    /// records the rest of the sleep and restarts monitoring again — never swallowed (L review 104).
+    private var implicitWakeAt: Date?
     /// `ProcessInfo` activity that keeps the Mac from idle-sleeping from a recording's start until its
     /// transcript is finished — every phase but `.idle` (L10 review 59). Follows the phase, so every path in
     /// and out is covered. A lid close or a user sleep still sleeps: that is the user's call — recorded as a
@@ -477,7 +486,9 @@ public final class RecordingCoordinator {
                 segment: 1,
                 chunkIndex: 0,
                 lastAliveAt: Date(),
-                bootSessionUUID: BootSession.currentUUID()
+                bootSessionUUID: BootSession.currentUUID(),
+                // A Quit already under way: whatever this start leaves behind is salvage-only (L review 105).
+                stopping: isQuitting
             )
             try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
 
@@ -2210,6 +2221,7 @@ public final class RecordingCoordinator {
         }
         // The recording ended between a sleep and its wake: the helper still gets its "wake" (L10 review 57).
         if !appState.isRecording, sleptAt != nil { closeSleepPairing() }
+        if !appState.isRecording { implicitWakeAt = nil }
         if !appState.isIdle, idleSleepActivity == nil {
             idleSleepActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled], reason: "Recording a meeting")
         } else if appState.isIdle, let activity = idleSleepActivity {
@@ -2231,6 +2243,7 @@ public final class RecordingCoordinator {
         guard appState.isRecording, sleptAt == nil else { return }
         Logger.state.info("System going to sleep while recording")
         sleptAt = date
+        implicitWakeAt = nil   // a new sleep: the last one's implicit wake is settled
         captureClient.record(.systemSleep, .info, [:])
         if !stopInFlight {
             stopStatusPoll()
@@ -2250,7 +2263,26 @@ public final class RecordingCoordinator {
     /// A Stop in flight gets the gap and the pairing, never a rotation, a timer, a poll or a banner (L10 review
     /// 54). `implicit`: no didWake came, the watchdog stands in (L10 review 55).
     public func systemDidWake(at date: Date = Date()) {
+        if sleptAt == nil, let since = implicitWakeAt {
+            realWakeAfterImplicit(since: since, at: date)
+            return
+        }
         systemDidWake(at: date, implicit: false)
+    }
+
+    /// The watchdog stood in for a wake that had not come — a DarkWake it took for one — and the real one is here
+    /// (L review 104): the rest of the sleep is a gap too, and the rotation and the "waiting for audio" banner run
+    /// again. The helper already had its "wake": one sleep, one wake.
+    private func realWakeAfterImplicit(since: Date, at date: Date) {
+        implicitWakeAt = nil
+        guard appState.isRecording else { return }
+        let end = max(since, date)
+        Logger.state.info("The real wake arrived after the implicit one (\(Int(end.timeIntervalSince(since)), privacy: .public) s later)")
+        captureClient.record(.systemWake, .info, ["seconds": "\(Int(end.timeIntervalSince(since)))", "after_implicit": "true"])
+        let gap = CaptureGap(start: since, end: end, reason: "sleep")
+        Task { await self.transcriptionRunner.recordCaptureGap(gap) }
+        guard !stopInFlight else { return }
+        resumeMonitoringAfterWake()
     }
 
     private func systemDidWake(at date: Date, implicit: Bool) {
@@ -2269,8 +2301,14 @@ public final class RecordingCoordinator {
         captureClient.record(.systemWake, .info, detail)
         let gap = CaptureGap(start: start, end: end, reason: "sleep")
         Task { await self.transcriptionRunner.recordCaptureGap(gap) }
+        if implicit { implicitWakeAt = end }
         deliverWake()
         guard !stopInFlight else { return }   // the recording is ending: nothing to restart
+        resumeMonitoringAfterWake()
+    }
+
+    /// A rotation seals the chunk that spans the sleep; the timer, the poll and "Resumed"'s wait for frames restart.
+    private func resumeMonitoringAfterWake() {
         transcriptionRunner.chunkRotator?.rotateNow()
         transcriptionRunner.startChunkRotation()
         startStatusPoll()
@@ -2299,12 +2337,21 @@ public final class RecordingCoordinator {
         deliverWake()
     }
 
+    /// A DarkWake or Power Nap is awake time with the display asleep (L review 104): the watchdog re-arms instead of
+    /// firing, for up to `darkWakeCap` after the first dark sign — bounded as the helper's own pause is.
     private func armLostWakeWatchdog(sleptAt start: Date) {
         lostWakeWatchdog?.cancel()
-        let clock = wakeWatchdogClock, timeout = lostWakeTimeout
+        let clock = wakeWatchdogClock, timeout = lostWakeTimeout, cap = darkWakeCap
         lostWakeWatchdog = Task { [weak self] in
-            do { try await clock.sleep(for: timeout) } catch { return }   // cancelled: the wake came
-            guard let self, self.sleptAt == start else { return }
+            var dark: Duration = .zero
+            while true {
+                do { try await clock.sleep(for: timeout) } catch { return }   // cancelled: the wake came
+                guard let self, self.sleptAt == start else { return }
+                guard !self.displayIsAwake(), dark < cap else { break }
+                dark += timeout
+                Logger.state.info("Awake with the display asleep (a DarkWake) — still waiting for the real wake")
+            }
+            guard let self else { return }
             Logger.state.error("No wake arrived \(Self.seconds(timeout), privacy: .public) s of awake time after the sleep — waking implicitly")
             // Awake for `timeout` since the wake that never came: it was about that long ago.
             self.systemDidWake(at: Date().addingTimeInterval(-Self.seconds(timeout)), implicit: true)
@@ -2434,12 +2481,22 @@ public final class RecordingCoordinator {
     /// Before the process ends: let a start in flight resolve (bounded by its own deadline and the stop that
     /// may follow it), then stop the recording — or await the stop, finalize or recovery already running —
     /// until the app is idle, within `bound`. Awaited, never polled (L10 review 60).
+    ///
+    /// ONE deadline covers the start's wait and the stop (L review 105): a hung start never adds its own 50 s to the
+    /// stop's bound. A start still in flight at the deadline leaves its recovery file `stopping`, so the next launch
+    /// salvages it and never resumes a recording the user quit.
     private func stopForExit(bound: Duration) async {
-        _ = try? await withDeadline(seconds: Self.seconds(startDeadline + helperStopDeadline), label: "exit: start in flight") {
-            await self.awaitSettled { !$0.isStartInFlight }
-        }
-        if !appState.isIdle {
-            _ = try? await withDeadline(seconds: Self.seconds(bound), label: "exit stop") { await self.stopUntilIdle() }
+        let deadline = SuspendingClock.now + bound
+        do {
+            try await withDeadline(seconds: Self.seconds(until: deadline), label: "exit: start in flight") {
+                await self.awaitSettled { !$0.isStartInFlight }
+            }
+            if !appState.isIdle {
+                _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "exit stop") { await self.stopUntilIdle() }
+            }
+        } catch {
+            Logger.state.error("A recording start was still running when the quit's bound ran out — its recovery file is marked for salvage")
+            markSentinelStopping()
         }
         await flushEvidenceForExit()
     }

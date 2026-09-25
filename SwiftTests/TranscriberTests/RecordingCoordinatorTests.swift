@@ -298,6 +298,7 @@ private struct Harness {
             recordingMicrophone: recordingMic,
             freeBytesProvider: { _ in diskReadHook.value?(); return freeBytes.value }
         )
+        coordinator.displayIsAwake = { true }   // never the test machine's own display
     }
 
     /// Polls `condition` (up to about 2 s): a deadline, never a fixed number of yields.
@@ -4865,5 +4866,110 @@ private struct Harness {
         try RecordingSentinel.writePending(sessions, directory: h.tmp)
         await h.coordinator.retryPendingSessions()
         #expect(h.client.evidenceOrder == ["attribute:p,h", "adopt:p", "finalize:p", "commit:p", "adopt:h", "finalize:h", "commit:h"])
+    }
+}
+
+// MARK: - L round A: a DarkWake never swallows the real wake; one Quit deadline (104, 105)
+
+@MainActor
+@Suite struct RecordingCoordinatorWakeAndQuitTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    private func recording(_ h: Harness, clock: ManualTestClock) async throws {
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        h.coordinator.wakeWatchdogClock = clock
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        try FileManager.default.createDirectory(at: try #require(h.client.startCalls.first).outputDirectory, withIntermediateDirectories: true)
+    }
+
+    /// L review 104(a): the watchdog stood in for a wake that had not come (a DarkWake it took for one). The REAL
+    /// didWake later, with no sleep in between, records the rest of the sleep as a gap and redoes the rotation
+    /// and the banner — never swallowed.
+    @Test func aRealWakeAfterTheWatchdogStoodInRecordsTheRestOfTheSleep() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let clock = ManualTestClock()
+        try await recording(h, clock: clock)
+        let slept = Date().addingTimeInterval(-3600)
+        h.coordinator.systemWillSleep(at: slept)
+        await Harness.until { clock.pendingSleeps > 0 }
+        clock.advance(by: .seconds(30))
+        await Harness.until { h.client.rotateCalls == 1 }
+        let first = try #require(await h.runner.chunkProcessor?.getSessionState().gaps)
+        #expect(first.count == 1)
+        h.appState.interruptionWarning = nil
+        let woke = Date()
+        h.coordinator.systemDidWake(at: woke)
+        await Harness.until { h.client.rotateCalls == 2 }
+        #expect(h.client.rotateCalls == 2, "the real wake rotates again")
+        let gaps = try #require(await h.runner.chunkProcessor?.getSessionState().gaps)
+        #expect(gaps.count == 2 && gaps[1].start == gaps[0].end && gaps[1].end == woke, "the rest of the sleep is a gap too")
+        #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
+        #expect(h.client.powerEvents == ["sleep", "wake"], "one sleep, one wake: the pairing holds")
+        #expect(h.client.recordedEvents.filter { $0.kind == .systemWake }.count == 2)
+    }
+
+    /// L review 104(b): awake time with the display asleep (a DarkWake, a Power Nap) is not the lost wake: the
+    /// watchdog re-arms, and fires once the Mac is fully awake.
+    @Test func theWatchdogWaitsOutADarkWake() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let clock = ManualTestClock()
+        try await recording(h, clock: clock)
+        let displayOn = Harness.Box(false)
+        h.coordinator.displayIsAwake = { displayOn.value }
+        h.coordinator.systemWillSleep(at: Date())
+        await Harness.until { clock.pendingSleeps > 0 }
+        clock.advance(by: .seconds(30))
+        await Harness.until { clock.pendingSleeps > 0 }   // re-armed
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep"], "dark: no implicit wake")
+        displayOn.value = true
+        clock.advance(by: .seconds(30))
+        await Harness.until { h.client.powerEvents.count == 2 }
+        #expect(h.client.powerEvents == ["sleep", "wake"])
+    }
+
+    /// … bounded as the helper is: 5 min after the first dark sign, it wakes anyway.
+    @Test func aDarkWakeThatNeverEndsIsCappedAtFiveMinutes() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let clock = ManualTestClock()
+        try await recording(h, clock: clock)
+        h.coordinator.displayIsAwake = { false }
+        h.coordinator.systemWillSleep(at: Date())
+        for _ in 0..<10 {   // 30 s, then 9 more re-arms: 4.5 min of dark after the first
+            await Harness.until { clock.pendingSleeps > 0 }
+            clock.advance(by: .seconds(30))
+        }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.client.powerEvents == ["sleep"], "under the cap: still waiting")
+        await Harness.until { clock.pendingSleeps > 0 }
+        clock.advance(by: .seconds(30))
+        await Harness.until { h.client.powerEvents.count == 2 }
+        #expect(h.client.powerEvents == ["sleep", "wake"], "at the cap: woken anyway")
+    }
+
+    /// L review 105: the user's Quit is ONE deadline — a hung start and the stop share `quitStopBound`, never
+    /// the start's 50 s and then the stop's 30 s. A start still hung at the deadline leaves its sentinel
+    /// `stopping`: the next launch salvages it, never resumes it.
+    @Test func aQuitDuringAHungStartIsBoundedByOneDeadline() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.coordinator.quitStopBound = .milliseconds(300)
+        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }   // the audio system hangs
+        let coordinator = h.coordinator
+        let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
+        await Harness.until { !h.client.startCalls.isEmpty }
+        let began = ContinuousClock.now
+        #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(ContinuousClock.now - began < .milliseconds(1500), "one bound for the start and the stop")
+        #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true, "salvage-only at the next launch")
+        await starting.value
     }
 }
