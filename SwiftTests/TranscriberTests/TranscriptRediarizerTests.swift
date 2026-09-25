@@ -356,8 +356,8 @@ struct TranscriptRediarizerProgressTests {
     func rewritesAreDurable() async throws {
         let (transcript, cleanup) = try makeMicOnlyRecording()
         defer { cleanup() }
-        DurableFile.recordsSyncsForTesting = true
-        defer { DurableFile.recordsSyncsForTesting = false }
+        DurableFile.startRecordingSyncsForTesting()
+        defer { DurableFile.stopRecordingSyncsForTesting() }
         let before = DurableFile.syncedForTesting.count
         _ = try await TranscriptRediarizer.rediarize(transcript: transcript, source: "local", speakerCount: 1, diarizer: FakeDiarizer())
         let synced = DurableFile.syncedForTesting.dropFirst(before)

@@ -350,8 +350,8 @@ struct ChunkSessionTests {
     @Test("aWriteIsFullySyncedBeforeTheRename")
     func aWriteIsFullySyncedBeforeTheRename() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        DurableFile.recordsSyncsForTesting = true
-        defer { DurableFile.recordsSyncsForTesting = false }
+        DurableFile.startRecordingSyncsForTesting()
+        defer { DurableFile.stopRecordingSyncsForTesting() }
         let before = DurableFile.syncedForTesting.count
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
         #expect(DurableFile.syncedForTesting.dropFirst(before).contains(dir.appendingPathComponent("session.json").path))
@@ -361,9 +361,8 @@ struct ChunkSessionTests {
     @Test("theSyncSeamRecordsNothingUnlessATestAsks")
     func theSyncSeamRecordsNothingUnlessATestAsks() throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let before = DurableFile.syncedForTesting.count
         try SessionState.write(session("afternoon", chunks: [0]), directory: dir)
-        #expect(DurableFile.syncedForTesting.count == before)
+        #expect(!DurableFile.syncedForTesting.contains { $0.hasPrefix(dir.path) }, "this test's own folder: nothing recorded")
 
         // Round 4 item 1: a FINALIZED session's leftover session.json (its transcript verifies) is
         // deleted when the next recording writes, never moved aside and never recorded as displaced.

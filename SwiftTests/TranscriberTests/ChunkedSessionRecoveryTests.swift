@@ -349,8 +349,8 @@ struct ChunkedSessionRecoveryTests {
 
     /// Item 2: the transcript is flushed to the disk BEFORE the marker that vouches for it.
     @Test func theTranscriptIsDurableBeforeTheMarker() async throws {
-        DurableFile.recordsSyncsForTesting = true
-        defer { DurableFile.recordsSyncsForTesting = false }
+        DurableFile.startRecordingSyncsForTesting()
+        defer { DurableFile.stopRecordingSyncsForTesting() }
         let before = DurableFile.syncedForTesting.count
         let (dir, transcript, _, _) = try await finalizedSession()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -412,7 +412,8 @@ struct ChunkedSessionRecoveryTests {
         #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "deleted only after the new transcript was written")
         let metadata = try #require(json["metadata"] as? [String: Any])
         #expect(metadata["audio_files"] as? [String] == ["m-0.m4a", "m-1.m4a"], "round 5: per-chunk audio, not a merge")
-        #expect((metadata["processing_issues"] as? [[String: Any]])?.contains { $0["code"] as? String == "merge_skipped_implausible_timing" } == true)
+        let refusal = (metadata["processing_issues"] as? [[String: Any]])?.first { $0["code"] as? String == "merge_skipped_implausible_timing" }
+        #expect((refusal?["detail"] as? String)?.hasSuffix(" h > 12 h bound") == true, "round 7 item 3: the reason and the gap size")
         #expect(metadata["merged_audio"] == nil)
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.m4a").path)
                 && FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-1.m4a").path))
@@ -544,6 +545,86 @@ struct ChunkedSessionRecoveryTests {
         #expect(try String(contentsOf: dir.appendingPathComponent("m-summary.damaged.md"), encoding: .utf8) == "# The old summary\n")
         #expect(try String(contentsOf: txt, encoding: .utf8).contains("rebuilt"), "the new TXT is the rebuilt record's")
         #expect(!FileManager.default.fileExists(atPath: summary.path), "no summary claims to describe the rebuilt record")
+    }
+
+    // MARK: - Round 7
+
+    /// A two-chunk session "m", finalized with the given config: returns the leftover state and runner.
+    private func mergedSession(in dir: URL, config: Config) async throws -> (state: SessionState, transcript: URL, runner: TranscriptionRunner) {
+        let start = Date().addingTimeInterval(-60)
+        let processor = await ChunkProcessor(config: config, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "m", meetingStart: start, engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        for i in 0...1 {
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-\(i).wav"), seconds: 1)
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: i, systemPath: dir.appendingPathComponent("m-\(i).wav").path,
+                                                                         micPath: dir.appendingPathComponent("m-\(i)_mic.wav").path,
+                                                                         startTime: start.addingTimeInterval(Double(i))))
+        }
+        let state = await processor.getSessionState()
+        let runner = await TranscriptionRunner()
+        let first = try await runner.finalize(sessionState: state, outputDirectory: dir, config: config)
+        return (state, first.jsonPath, runner)
+    }
+
+    /// Item 1 (IMPORTANT, data loss): after a rebuild the quota protected only the LAST listed file —
+    /// the orphan — and could delete the merged `<id>.m4a`, the only copy of the earlier chunks.
+    @Test(.timeLimit(.minutes(1)))
+    func theQuotaNeverDeletesAFileThatBacksTheRebuiltRecord() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var config = Config.default
+        let (state, transcript, runner) = try await mergedSession(in: dir, config: config)
+        try SessionState.write(state, directory: dir)
+        try Data("{".utf8).write(to: transcript)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+        config.audioArchiveLimitHours = 0   // every archive is over quota
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                                           transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let paths = try #require((json["metadata"] as? [String: Any])?["audio_paths"] as? [String])
+        #expect(paths.map { URL(fileURLWithPath: $0).lastPathComponent } == ["m.m4a", "m-2.m4a"])
+        #expect(paths.allSatisfy { FileManager.default.fileExists(atPath: $0) }, "every listed file is still there")
+    }
+
+    /// Item 2: with preserve_source_wav on (the owner's setting) a surviving chunk file can be INSIDE
+    /// the merged file. Only a chunk starting at or after the merged file's end is outside it.
+    @Test(.timeLimit(.minutes(1)))
+    func mergeMembershipIsDecidedByOffset() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var config = Config.default
+        config.preserveSourceWAV = true
+        let (state, transcript, runner) = try await mergedSession(in: dir, config: config)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m.m4a").path)
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-1.m4a").path), "merged, sources kept")
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("m-0.m4a"))   // one source gone
+        try SessionState.write(state, directory: dir)
+        try Data("{".utf8).write(to: transcript)
+        let result = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                                           transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        #expect((json["metadata"] as? [String: Any])?["audio_files"] as? [String] == ["m.m4a"], "m-1 is inside the merge: not listed on top of it")
+    }
+
+    /// Item 4: the damaged record's re-detect backup is kept aside too, so the rebuilt record's first
+    /// re-detect writes its own.
+    @Test(.timeLimit(.minutes(1)))
+    func aRebuildKeepsTheDamagedRecordsReDetectBackup() async throws {
+        let (dir, transcript, config, runner) = try await finalizedSession()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1,
+                                 chunks: [ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+                                                         segments: [.init(start: 0, end: 5, text: "rebuilt", speaker: "Speaker 1", source: "remote")],
+                                                         speakerDatabase: ["Speaker 1": [1, 0, 0]])])
+        try SessionState.write(state, directory: dir)
+        let backup = dir.appendingPathComponent("m.json.bak")
+        try Data("{\"old\": true}".utf8).write(to: backup)
+        try Data("{".utf8).write(to: transcript)
+        _ = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
+                                                     transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner)
+        #expect(!FileManager.default.fileExists(atPath: backup.path))
+        #expect(try Data(contentsOf: dir.appendingPathComponent("m.damaged.json.bak")) == Data("{\"old\": true}".utf8))
     }
 }
 

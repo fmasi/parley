@@ -324,7 +324,7 @@ public final class TranscriptionRunner {
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
-                    protectedFile: archived.last
+                    protectedFiles: archived   // every file the transcript lists (round 7 item 1)
                 )
             } catch {
                 Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
@@ -442,9 +442,18 @@ public final class TranscriptionRunner {
         let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
         let present = chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
         let sourcesGone = present.contains(false)
-        if chunkAudioPaths.count > 1, sourcesGone, TranscriptAssembler.duration(of: mergedURL) > 0 {
-            let mergedOffset = zip(perChunkOffsets, present).filter { !$0.1 }.map(\.0).min() ?? (perChunkOffsets.min() ?? 0)
-            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present).filter(\.1).map(\.0)
+        let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
+        if chunkAudioPaths.count > 1, sourcesGone, mergedSeconds > 0 {
+            // The merged file starts at the earliest chunk. A chunk is outside it only when it starts
+            // at the merged file's end or later — never merely because its own file survived: with
+            // preserve_source_wav on, the merged chunks' files survive too (round 7 item 2). Half the
+            // chunk's own length of slack: a chunk inside the merge ends by the merged end, so it
+            // starts a whole chunk before it; one outside starts at it, give or take rotation jitter
+            // and AAC padding.
+            let mergedOffset = perChunkOffsets.min() ?? 0
+            let mergedEnd = mergedOffset + mergedSeconds
+            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present)
+                .filter { $0.1 && $0.0.1 >= mergedEnd - TranscriptAssembler.duration(of: $0.0.0) / 2 }.map(\.0)
             let listed = ([(mergedURL, mergedOffset)] + alongside).sorted { $0.1 < $1.1 }
             Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it, with \(alongside.count, privacy: .public) chunk file(s) not in it")
             audioPaths = listed.map(\.0)
@@ -475,10 +484,10 @@ public final class TranscriptionRunner {
                 )
             } catch AudioConcatenatorError.implausibleTiming(let why) {
                 // Refused before anything was written: the chunk files are the audio, and the record
-                // says why they were not merged (round 5).
+                // says why they were not merged (round 5), with the reason (round 7 item 3).
                 Logger.files.error("Audio not merged — implausible chunk timing (\(why, privacy: .public)); keeping separate files")
                 audioPaths = chunkAudioPaths
-                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .mergeSkippedImplausibleTiming, track: nil, count: nil)))
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .mergeSkippedImplausibleTiming, track: nil, count: nil, detail: why)))
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
                 // so on throw the chunk files are still intact. The error can name files: private.
@@ -540,13 +549,15 @@ public final class TranscriptionRunner {
             Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
 
-        // 9. Storage quota enforcement
+        // 9. Storage quota enforcement. Never a file backing this record: every listed audio file,
+        // the merged file and every chunk file (round 7 item 1). Protecting only the last listed file
+        // let a rebuild's quota pass delete the merged file — the only copy of the earlier chunks.
         do {
             try StorageManager.enforceQuota(
                 in: outputDirectory,
                 limitHours: config.audioArchiveLimitHours,
                 bitrateKbps: config.archiveBitrateKbps,
-                protectedFile: audioPaths.last
+                protectedFiles: audioPaths + chunkAudioPaths + [mergedURL]
             )
         } catch {
             Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
@@ -596,6 +607,7 @@ public final class TranscriptionRunner {
             if let chunk { d["chunk"] = chunk }
             if let track = issue.track { d["track"] = track }
             if let count = issue.count { d["count"] = count }
+            if let detail = issue.detail { d["detail"] = detail }
             return d
         }
         return chunks.flatMap { c in c.issues.map { dictionary(chunk: c.index, issue: $0) } }

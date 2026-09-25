@@ -452,13 +452,17 @@ public final class ChunkProcessor {
         // that were already deleted. No archive, no quota pass. Scope stays the day folder (#224).
         if let archivePath {
             do {
-                let evicted = try StorageManager.enforceQuota(
+                // Never this session's own audio (round 7 item 1): this chunk's archive, every chunk
+                // archive already in the session, and a merged `<id>.m4a` an earlier finalize wrote.
+                let state = await stateStore.getSessionState()
+                let protected = [archivePath] + state.chunks.map { outputDirectory.appendingPathComponent($0.audioPath) }
+                    + [outputDirectory.appendingPathComponent("\(state.sessionId).m4a")]
+                try StorageManager.enforceQuota(
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
-                    protectedFile: archivePath
+                    protectedFiles: protected
                 )
-                await noteEvictions(evicted)
             } catch {
                 Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")
             }
@@ -509,16 +513,6 @@ public final class ChunkProcessor {
         let segments: [LabeledSegment]
         let speakerDatabase: [String: [Float]]
         var issues: [ChunkIssue] = []
-    }
-
-    /// This session's chunk archives the quota just deleted: recorded against their chunks (C-M9).
-    private nonisolated func noteEvictions(_ evicted: [URL]) async {
-        guard !evicted.isEmpty else { return }
-        let names = Set(evicted.map(\.lastPathComponent))
-        for chunk in await stateStore.getSessionState().chunks where names.contains(chunk.audioPath) {
-            Logger.files.error("The storage quota deleted chunk \(chunk.index, privacy: .public)'s audio during this recording — recorded")
-            await stateStore.noteIssue(SessionIssue(chunk: chunk.index, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil)))
-        }
     }
 
     /// The chunk's `.m4a` when its system WAV is gone and the archive exists — whatever the mic WAV:

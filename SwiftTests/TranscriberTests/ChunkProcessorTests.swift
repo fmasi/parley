@@ -453,13 +453,17 @@ struct ChunkProcessorTests {
         #expect(!ChunkIssue.Code.micStreamAbsent.affectsContent)
     }
 
-    /// C-M9: the storage quota may delete this meeting's own earlier chunk archives (its scope is the
-    /// owner's call, #224). The eviction is recorded against the chunk, never silent.
-    @Test func aQuotaEvictionOfThisSessionsAudioIsRecorded() async throws {
+    /// C-M9 / round 7 item 1: the storage quota NEVER deletes the audio of the session being
+    /// processed — its earlier chunk archives and a merged `<id>.m4a` from an earlier finalize (the
+    /// only copy of the chunks it holds). Another recording's old archive can still go.
+    @Test func theQuotaNeverDeletesThisSessionsAudio() async throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let earlier = dir.appendingPathComponent("meeting-0.m4a")
-        try Data(count: 4096).write(to: earlier)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: earlier.path)
+        let earlier = dir.appendingPathComponent("meeting-0.m4a"), merged = dir.appendingPathComponent("meeting.m4a")
+        let otherRecording = dir.appendingPathComponent("older-0.m4a")
+        for url in [earlier, merged, otherRecording] {
+            try Data(count: 4096).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: url.path)
+        }
         try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-1.wav"), seconds: 1)
         var config = Config.default
         config.audioArchiveLimitHours = 0
@@ -471,11 +475,10 @@ struct ChunkProcessorTests {
         await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: 1, systemPath: dir.appendingPathComponent("meeting-1.wav").path,
                                                                      micPath: dir.appendingPathComponent("meeting-1_mic.wav").path,
                                                                      startTime: Date(timeIntervalSince1970: 600)))
-        #expect(!FileManager.default.fileExists(atPath: earlier.path), "the quota really evicted it")
-        let state = await processor.getSessionState()
-        #expect(state.issues.contains(SessionIssue(chunk: 0, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil))))
-        #expect(SessionState.read(directory: dir, sessionId: "meeting")?.issues.contains(
-            SessionIssue(chunk: 0, issue: ChunkIssue(code: .chunkAudioEvicted, track: nil, count: nil))) == true, "and persisted")
+        #expect(!FileManager.default.fileExists(atPath: otherRecording.path), "the quota really ran")
+        #expect(FileManager.default.fileExists(atPath: earlier.path), "this session's earlier chunk archive is kept")
+        #expect(FileManager.default.fileExists(atPath: merged.path), "this session's merged audio is kept")
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-1.m4a").path))
     }
 
     // MARK: - R2 round 2 (R2a M2, M4, M5)

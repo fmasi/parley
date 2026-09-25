@@ -60,10 +60,6 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// no signal), so it was processed remote-only (C-M4). Informational — a system-only source is
         /// legitimate; `metadata.capture.local` holds the mic's coverage.
         public static let micStreamAbsent = Code(rawValue: "mic_stream_absent")
-        /// The storage quota deleted this chunk's archive during the recording (C-M9; the quota's
-        /// scope is the owner's call, #224). Informational: the chunk's words are in the record, its
-        /// audio is not on disk any more.
-        public static let chunkAudioEvicted = Code(rawValue: "chunk_audio_evicted")
         /// The chunks' start times were implausible for one timeline (a gap over 12 h, a start that
         /// is not a real time or before the first chunk's): they were not merged, and the transcript
         /// lists each chunk's own audio file (round 5). Informational: no audio is missing.
@@ -94,11 +90,14 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
     public let track: String?
     /// How many items the issue covers (dropped duplicates, absorbed clusters…); nil when not a count.
     public let count: Int?
+    /// Why, in words, when the code alone doesn't say (e.g. a refused merge's gap); nil otherwise.
+    public let detail: String?
 
-    public init(code: Code, track: String?, count: Int?) {
+    public init(code: Code, track: String?, count: Int?, detail: String? = nil) {
         self.code = code
         self.track = track
         self.count = count
+        self.detail = detail
     }
 
     /// See `Code.contentAffecting`. NOT streamEmpty.
@@ -318,14 +317,14 @@ enum DurableFile {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var synced: [String] = []
 
-    /// Test seam, OFF in production (round 4 item 4): while on, every fully synced path is recorded
-    /// in order. Off, nothing is kept — the paths carry meeting names.
-    nonisolated(unsafe) private static var recording = false
-    static var recordsSyncsForTesting: Bool {
-        get { lock.withLock { recording } }
-        set { lock.withLock { recording = newValue } }
-    }
-    /// Test seam: every path fully synced while `recordsSyncsForTesting` was on, in order.
+    /// Test seam, OFF in production (round 4 item 4): while any test has started recording, every
+    /// fully synced path is recorded in order. Off, nothing is kept — the paths carry meeting names.
+    /// A counter under the lock (round 7 item 5), so overlapping tests can't switch it off for each
+    /// other.
+    nonisolated(unsafe) private static var recorders = 0
+    static func startRecordingSyncsForTesting() { lock.withLock { recorders += 1 } }
+    static func stopRecordingSyncsForTesting() { lock.withLock { recorders = max(0, recorders - 1) } }
+    /// Test seam: every path fully synced while a test was recording, in order.
     static var syncedForTesting: [String] { lock.withLock { synced } }
 
     static func replace(_ url: URL, with data: Data) throws {
@@ -354,7 +353,7 @@ enum DurableFile {
             }
         }
         if fcntl(fd, F_FULLFSYNC) == 0 {
-            lock.withLock { if recording { synced.append(final.path) } }
+            lock.withLock { if recorders > 0 { synced.append(final.path) } }
         } else if fsync(fd) != 0 {
             throw posixError(errno)
         }

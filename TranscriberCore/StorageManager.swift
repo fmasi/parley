@@ -35,13 +35,25 @@ public enum StorageManager {
             .reduce(0, +)
     }
 
-    /// Enforce storage quota by deleting oldest .m4a files (recursive scan).
+    /// Enforce storage quota by deleting oldest .m4a files (recursive scan), never `protectedFile`.
     @discardableResult
     public static func enforceQuota(
         in directory: URL,
         limitHours: Int,
         bitrateKbps: Int,
         protectedFile: URL?
+    ) throws -> [URL] {
+        try enforceQuota(in: directory, limitHours: limitHours, bitrateKbps: bitrateKbps, protectedFiles: protectedFile.map { [$0] } ?? [])
+    }
+
+    /// Enforce storage quota by deleting oldest .m4a files (recursive scan), never one of
+    /// `protectedFiles` — every file backing the record being written (round 7 item 1).
+    @discardableResult
+    public static func enforceQuota(
+        in directory: URL,
+        limitHours: Int,
+        bitrateKbps: Int,
+        protectedFiles: [URL]
     ) throws -> [URL] {
         let quota = quotaBytes(hours: limitHours, bitrateKbps: bitrateKbps)
 
@@ -60,13 +72,12 @@ public enum StorageManager {
 
         guard totalSize > quota else { return [] }
 
-        let resolvedProtected = protectedFile.map { $0.resolvingSymlinksInPath().path }
+        let resolvedProtected = Set(protectedFiles.map { $0.resolvingSymlinksInPath().path })
 
         var deleted: [URL] = []
         for file in m4aFiles {
             guard totalSize > quota else { break }
-            if let resolvedProtected,
-               file.resolvingSymlinksInPath().path == resolvedProtected { continue }
+            if resolvedProtected.contains(file.resolvingSymlinksInPath().path) { continue }
 
             let fileSize = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             try FileManager.default.removeItem(at: file)

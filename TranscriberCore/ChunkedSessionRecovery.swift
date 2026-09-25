@@ -94,13 +94,17 @@ public enum ChunkedSessionRecovery {
 
     /// The damaged record is kept, never overwritten by its rebuild (round 4 item 2, round 6 item 2):
     /// the transcript and its companions — the TXT/SRT and the summary, possibly the only readable
-    /// copies, renames included — move to `<id>.damaged.json`, `<id>.damaged.txt`,
-    /// `<id>.damaged.srt` and `<id>-summary.damaged.md` (a unique suffix when a name is taken).
+    /// copies, renames included, and the re-detect backup — move to `<id>.damaged.json`,
+    /// `<id>.damaged.txt`, `<id>.damaged.srt`, `<id>-summary.damaged.md` and `<id>.damaged.json.bak`
+    /// (a unique suffix when a name is taken).
     private static func moveDamagedRecordAside(_ transcript: URL) throws {
         let base = transcript.deletingPathExtension().lastPathComponent
         let directory = transcript.deletingLastPathComponent()
+        // …and the re-detect backup `<id>.json.bak`, so the rebuilt record's first re-detect writes
+        // its own (round 7 item 4).
         let companions = [("\(base).json", "\(base).damaged", "json"), ("\(base).txt", "\(base).damaged", "txt"),
-                          ("\(base).srt", "\(base).damaged", "srt"), ("\(base)-summary.md", "\(base)-summary.damaged", "md")]
+                          ("\(base).srt", "\(base).damaged", "srt"), ("\(base)-summary.md", "\(base)-summary.damaged", "md"),
+                          ("\(base).json.bak", "\(base).damaged", "json.bak")]
         for (name, asideBase, ext) in companions {
             let file = directory.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: file.path) else { continue }

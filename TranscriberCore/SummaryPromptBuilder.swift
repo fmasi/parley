@@ -132,7 +132,8 @@ enum SummaryPromptBuilder {
         ].compactMap { $0 }
         if metadata.captureReconstructed {
             lines.append(CaptureHeaderLine(
-                text: "Capture facts were reconstructed after a crash and may be incomplete", warrantsBanner: false))
+                // Deterministic (round 7 item 6): never on the strength of a model obeying the rule.
+                text: "Capture facts were reconstructed after a crash and may be incomplete", warrantsBanner: true))
         }
         if metadata.coverageNotRecorded {
             lines.append(CaptureHeaderLine(text: "Capture coverage was not recorded", warrantsBanner: false))

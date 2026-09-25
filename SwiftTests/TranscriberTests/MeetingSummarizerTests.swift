@@ -694,8 +694,8 @@ struct TranscriptRewritesAreDurableTests {
         let url = dir.appendingPathComponent("m.json")
         try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any],
             "segments": [["start": 0.0, "end": 1.0, "speaker": "Remote Speaker 1", "text": "hi"]]]).write(to: url)
-        DurableFile.recordsSyncsForTesting = true
-        defer { DurableFile.recordsSyncsForTesting = false }
+        DurableFile.startRecordingSyncsForTesting()
+        defer { DurableFile.stopRecordingSyncsForTesting() }
         let before = DurableFile.syncedForTesting.count
         #expect(TranscriptRenamer.applyRenames(["Remote Speaker 1": "Alice"], jsonPath: url))
         try MeetingSummarizer.stampDisclosure(.attempted(endpoint: "http://127.0.0.1:1"), into: url)
@@ -717,6 +717,8 @@ struct MeetingSummarizerReconstructedTests {
         let (_, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
         #expect(metadata.captureReconstructed)
         #expect(SummaryPromptBuilder.captureLine(metadata)?.contains("Capture facts were reconstructed after a crash and may be incomplete") == true)
+        // Round 7 item 6: in the deterministic banner, never on the strength of a model obeying.
+        #expect(SummaryPromptBuilder.captureBanner(metadata)?.contains("> Capture facts were reconstructed after a crash and may be incomplete") == true)
         #expect(SummaryPromptBuilder.captureLine(SummaryMetadata(sessionName: "s", date: Date(), durationSeconds: 1, speakers: [])) == nil,
                 "no caveat for a record that was not rebuilt")
     }

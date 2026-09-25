@@ -69,6 +69,11 @@ public enum AudioConcatenator {
     /// estimated from a file date), and padding it wrote hours of silence until the export timed out.
     static let maxInsertedSilenceSeconds: Double = 12 * 3600
 
+    private static func hours(_ seconds: Double) -> String {
+        let h = seconds / 3600
+        return h.rounded() == h ? String(Int(h)) : String(format: "%.1f", h)
+    }
+
     /// Why these start times can't be merged as a timeline, or nil when they can. `chunks` in the
     /// order they will be inserted; `durations` their lengths.
     static func implausibleTiming(_ chunks: [ChunkAudio], durations: [Double]) -> String? {
@@ -78,12 +83,14 @@ public enum AudioConcatenator {
             guard let start = chunk.startTime else { inserted += duration; continue }
             let offset = start.timeIntervalSince(origin)
             guard offset.isFinite else { return "a chunk's start time is not a real time" }
-            guard offset >= -gapThresholdSeconds else { return "a chunk starts before the first chunk" }
+            guard offset >= -gapThresholdSeconds else { return "a chunk starts \(Int(-offset)) s before the first chunk" }
             let gap = offset - inserted
             if gap > gapThresholdSeconds {
-                guard gap <= maxInsertedSilenceSeconds else { return "a gap of \(Int(gap)) s between chunks" }
+                guard gap <= maxInsertedSilenceSeconds else { return "gap \(hours(gap)) h > \(hours(maxInsertedSilenceSeconds)) h bound" }
                 total += gap
-                guard total <= maxInsertedSilenceSeconds else { return "\(Int(total)) s of gaps between chunks" }
+                guard total <= maxInsertedSilenceSeconds else {
+                    return "gaps totalling \(hours(total)) h > \(hours(maxInsertedSilenceSeconds)) h bound"
+                }
                 inserted += gap
             }
             inserted += duration
