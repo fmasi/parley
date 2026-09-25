@@ -562,6 +562,228 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
 }
 #endif
 
+// MARK: - Why a session was kept survives a Start that got in (258)
+
+@MainActor
+@Suite struct KeptWhileWritingRoundHTests {
+    /// L review 258 (228): a salvage whose transcript write does not answer while the user began a Start meanwhile (its name
+    /// asked for) yields to that Start — and the session it keeps still says it was kept WHILE WRITING, so the write that
+    /// lands later is said.
+    @Test func aStartThatGotInNeverDropsWhyTheSessionWasKept() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let p = try roundFPendingSession(h, "p", orphan: true)
+        try RecordingSentinel.writePending([p], directory: h.tmp)
+        let hung = HungRead("transcript: write")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-h-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderWriteDeadline = .milliseconds(300)
+        let coordinator = h.coordinator, client = h.client
+        client.onFinalizeDiagnostics = {
+            client.onFinalizeDiagnostics = nil
+            coordinator.announceStart()   // the user pressed Record: the name is being asked for
+        }
+        await h.coordinator.retryPendingSessions()
+        #expect(h.coordinator.userStartInFlight, "the Start got in")
+        let kept = try #require(RecordingSentinel.readPending(directory: h.tmp).first { $0.sessionKey == p.sessionKey })
+        #expect(kept.keptWhileWriting?.chunkCount == 2, "why it was kept survives: \(String(describing: kept.keptWhileWriting))")
+    }
+}
+
+// MARK: - The power-off withdraw clears every mark this process set (259)
+
+@MainActor
+@Suite struct PowerOffMarksRoundHTests {
+    /// L review 259 (221): this process marked TWO sessions — one, then the next once the first went to the pending list —
+    /// and the withdraw clears both, never only the last.
+    @Test func theWithdrawClearsEverySessionThisProcessMarked() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        h.coordinator.powerOffMarkWindow = .seconds(30)   // withdrawn by hand below
+        var first = try h.writeSentinel(sessionId: "one")
+        first.stopping = true
+        try RecordingSentinel.write(first, directory: h.tmp)
+        h.coordinator.markPowerOffDuringFinalize()
+        var marked = try #require(RecordingSentinel.read(directory: h.tmp))
+        #expect(marked.quitMarkedByPowerOff)
+        marked.stopping = true
+        try RecordingSentinel.writePending([marked], directory: h.tmp)   // its session goes to the pending list, the mark with it
+        var second = try h.writeSentinel(sessionId: "two")
+        second.stopping = true
+        try RecordingSentinel.write(second, directory: h.tmp)
+        h.coordinator.markPowerOffDuringFinalize()
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitMarkedByPowerOff == true)
+        await h.coordinator.withdrawPowerOffMark()
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == false, "the second mark is withdrawn")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.quitDuringFinalize == false, "and the first, from its pending entry")
+    }
+}
+
+// MARK: - A failed restart's hold reads its session before the app goes idle (264)
+
+@MainActor
+@Suite struct RestartHoldOwnershipRoundHTests {
+    /// L review 264 (242): a failed restart whose helper will not stop holds its session — and reads that session BEFORE the
+    /// app goes idle, so nothing is awaited between the idle phase and the hold's end of the capture: no Start can get in
+    /// and have its crash detection disarmed.
+    @Test func aFailedRestartsHoldReadsItsSessionBeforeTheAppGoesIdle() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
+        h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
+        h.coordinator.helperStopDeadline = .milliseconds(100)
+        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let reads = Harness.Box(0), idleDuringTheHoldsRead = Harness.Box<Bool?>(nil), appState = h.appState
+        h.coordinator.sentinelIO = SentinelIO(label: "rc-h-\(UUID().uuidString)", beforeEach: { label in
+            guard label == "crash: read" else { return }
+            reads.value += 1   // on the queue: one at a time
+            guard reads.value == 2 else { return }   // the hold's own read
+            idleDuringTheHoldsRead.value = DispatchQueue.main.sync { MainActor.assumeIsolated { appState.isIdle } }
+        })
+        await h.coordinator.handleXPCCrash()
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "held")
+        #expect(idleDuringTheHoldsRead.value == false, "read while the recording's phase still refused a Start")
+    }
+}
+
+// MARK: - A Stop is always kept apart when its mark may not land (265, 266, 267)
+
+@MainActor
+@Suite struct StopKeptApartRoundHTests {
+    private func request(_ h: Harness) -> RecordingSentinel.StopRequest? { RecordingSentinel.readStopRequest(directory: h.tmp) }
+
+    /// L review 265 (236): the stop kept apart is remembered only once its file is WRITTEN — a write that failed is tried
+    /// again at the next mark that does not answer, never taken for done.
+    @Test func aStopRequestWhoseWriteFailedIsWrittenAtTheNextMark() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let key = try #require(RecordingSentinel.read(directory: h.tmp)).sessionKey
+        let stuck = StuckSentinelQueue(["mark stopping"])
+        defer { stuck.release() }
+        h.coordinator.sentinelIO = stuck.io
+        h.coordinator.sentinelDeadline = .milliseconds(200)
+        let blocker = h.tmp.appendingPathComponent("stop-requested.json")
+        try FileManager.default.createDirectory(at: blocker, withIntermediateDirectories: true)   // the write fails
+        await h.coordinator.markSentinelStoppingOffMain()
+        #expect(request(h) == nil)
+        try FileManager.default.removeItem(at: blocker)
+        await h.coordinator.markSentinelStoppingOffMain()   // the mark still does not answer
+        #expect(request(h)?.sessionKey == key, "written this time")
+    }
+
+    /// L review 266: a Stop deferred while a crash restart runs only queues its mark — so it always keeps the stop apart too,
+    /// from the recording's key kept in memory since its start.
+    @Test func aStopDeferredDuringRecoveryIsKeptApart() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let key = try #require(RecordingSentinel.read(directory: h.tmp)).sessionKey
+        h.client.stopError = FakeCaptureError()
+        let coordinator = h.coordinator, tmp = h.tmp
+        let keptWhileRestarting = Harness.Box<String?>(nil)
+        h.client.onStartAsync = {
+            await coordinator.stopRecording()   // deferred: recovery is in flight
+            await coordinator.settleStopRequestIOForTesting()
+            keptWhileRestarting.value = RecordingSentinel.readStopRequest(directory: tmp)?.sessionKey
+        }
+        await h.coordinator.handleXPCCrash()
+        #expect(keptWhileRestarting.value == key, "kept apart while the restart ran")
+    }
+
+    /// L review 266: a Stop with no live pipeline (a re-attach that could not set one up) whose recovery file does not answer
+    /// still knows its recording — kept in memory since the re-attach — and keeps the stop apart, never only a log line.
+    @Test func aStopWithNoPipelineAndNoRecoveryFileIsKeptApart() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.runner.failSetupForTesting = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isRecording && h.runner.chunkRotator == nil, "re-attached without a pipeline")
+        let stuck = StuckSentinelQueue()
+        defer { stuck.release() }
+        h.coordinator.sentinelIO = stuck.io
+        h.coordinator.sentinelDeadline = .milliseconds(200)
+        let client = h.client, dead = Harness.Box<CheckedContinuation<Void, Never>?>(nil)
+        client.onStop = { await withCheckedContinuation { dead.value = $0 } }
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { dead.value != nil }
+        await h.coordinator.settleStopRequestIOForTesting()
+        #expect(request(h)?.sessionKey == s.sessionKey, "kept apart: \(String(describing: request(h)))")
+        stuck.release()
+        client.onStop = nil
+        dead.value?.resume()
+        await stopping.value
+    }
+
+    /// L review 267: a Stop whose mark did not answer, but which then finishes normally — its recovery file deleted — clears
+    /// the stop it kept apart.
+    @Test func aNormalStopClearsTheStopItKeptApart() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)   // the helper hands back its first chunk: a normal Stop
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav"), mic = call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav")
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: mic)
+        let stuck = StuckSentinelQueue(["mark stopping"])
+        defer { stuck.release() }
+        h.coordinator.sentinelIO = stuck.io
+        h.coordinator.sentinelDeadline = .milliseconds(200)
+        let tmp = h.tmp, keptDuringTheStop = Harness.Box(false)
+        h.client.onStop = {
+            keptDuringTheStop.value = RecordingSentinel.readStopRequest(directory: tmp) != nil
+            stuck.release()   // the recovery file answers again: the Stop's delete lands
+        }
+        await h.coordinator.stopRecording()
+        await h.coordinator.settleStopRequestIOForTesting()
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.presented.value.count == 1, "a normal Stop: transcribed, its recovery file deleted")
+        #expect(keptDuringTheStop.value, "kept apart while the mark did not answer")
+        #expect(request(h) == nil, "cleared once the Stop finished")
+    }
+
+    /// … and a Stop that failed — the helper had already let go — whose salvage settled the recording clears it too.
+    @Test func aFailedStopsSalvageClearsTheStopItKeptApart() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let stuck = StuckSentinelQueue(["mark stopping"])
+        defer { stuck.release() }
+        h.coordinator.sentinelIO = stuck.io
+        h.coordinator.sentinelDeadline = .milliseconds(200)
+        let tmp = h.tmp, keptDuringTheStop = Harness.Box(false)
+        h.client.onStop = {
+            keptDuringTheStop.value = RecordingSentinel.readStopRequest(directory: tmp) != nil
+            stuck.release()
+        }
+        await h.coordinator.stopRecording()   // "no capture in progress": salvaged from disk
+        await h.coordinator.settleStopRequestIOForTesting()
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil, "settled")
+        #expect(keptDuringTheStop.value && request(h) == nil, "kept apart, then cleared")
+    }
+
+    /// L review 267: a relaunch that finds no recovery file for the stop kept apart — the recording's fate settled by another
+    /// path — clears that stale file.
+    @Test func aRelaunchClearsAStaleStopRequest() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        try RecordingSentinel.writeStopRequest(RecordingSentinel.StopRequest(sessionKey: "/gone/sess", requestedAt: Date()), directory: h.tmp)
+        await h.coordinator.recoverAtLaunch()
+        await h.coordinator.settleStopRequestIOForTesting()
+        #expect(request(h) == nil)
+    }
+}
+
 // MARK: - Small items (268)
 
 @MainActor

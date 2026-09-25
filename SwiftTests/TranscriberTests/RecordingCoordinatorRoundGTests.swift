@@ -116,6 +116,8 @@ final class StuckSentinelQueue: @unchecked Sendable {
         #expect(relaunched.client.startCalls.isEmpty, "never resumed")
         #expect(relaunched.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil, "salvaged")
         #expect(relaunched.appState.activeAlarms[.recordingResumedWithGap] == nil)
+        await relaunched.coordinator.settleStopRequestIOForTesting()
+        #expect(RecordingSentinel.readStopRequest(directory: h.tmp) == nil, "the stop kept apart goes with the salvage (L review 267)")
         // The first process is let go, its Stop finished, before the folder goes.
         stuck.release()
         client.onStop = nil

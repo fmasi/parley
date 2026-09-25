@@ -393,9 +393,9 @@ extension RecordingCoordinator {
     }
 
     /// The logout or shutdown did not come within its window: `willPowerOff`'s quit mark is withdrawn — from the slot and
-    /// from a pending entry that carried it — and a quit's own mark is left alone (L review 174). Only the mark THIS process
-    /// set, on the session it marked (L review 221): one a dead earlier process left is final — its power-off happened. Off
-    /// the main actor, bounded (L review 235).
+    /// from a pending entry that carried it — and a quit's own mark is left alone (L review 174). Only the marks THIS process
+    /// set, on every session it marked (L reviews 221, 259): one a dead earlier process left is final — its power-off
+    /// happened. Off the main actor, bounded (L review 235).
     func withdrawPowerOffMark() async {
         powerOffMarkExpiry = nil
         let directory = sentinelDirectory, mark = powerOffMark
@@ -407,8 +407,9 @@ extension RecordingCoordinator {
     }
 
     nonisolated static func withdrawPowerOff(directory: URL?, mark: PowerOffMark) {
-        guard let marked = mark.take() else { return }
-        if var sentinel = RecordingSentinel.read(directory: directory), sentinel.sessionKey == marked, sentinel.quitMarkedByPowerOff {
+        let marked = mark.take()
+        guard !marked.isEmpty else { return }
+        if var sentinel = RecordingSentinel.read(directory: directory), marked.contains(sentinel.sessionKey), sentinel.quitMarkedByPowerOff {
             sentinel.quitDuringFinalize = false
             sentinel.quitMarkedByPowerOff = false
             do {
@@ -419,11 +420,11 @@ extension RecordingCoordinator {
             }
         }
         let pending = RecordingSentinel.loadPending(directory: directory).sessions
-        guard pending.contains(where: { $0.sessionKey == marked && $0.quitMarkedByPowerOff }) else { return }
+        guard pending.contains(where: { marked.contains($0.sessionKey) && $0.quitMarkedByPowerOff }) else { return }
         do {
             try RecordingSentinel.writePending(pending.map {
                 var entry = $0
-                if entry.sessionKey == marked, entry.quitMarkedByPowerOff { entry.quitDuringFinalize = false; entry.quitMarkedByPowerOff = false }
+                if marked.contains(entry.sessionKey), entry.quitMarkedByPowerOff { entry.quitDuringFinalize = false; entry.quitMarkedByPowerOff = false }
                 return entry
             }, directory: directory)
         } catch {
@@ -431,12 +432,13 @@ extension RecordingCoordinator {
         }
     }
 
-    /// The session `willPowerOff`'s mark landed on (L review 221), set and taken on the recovery file's queue.
+    /// The sessions `willPowerOff`'s marks landed on — every one this process marked (L reviews 221, 259) — set and taken on
+    /// the recovery file's queue.
     final class PowerOffMark: @unchecked Sendable {
         private let lock = NSLock()
-        private var session: String?
-        func set(_ key: String) { lock.withLock { session = key } }
-        func take() -> String? { lock.withLock { defer { session = nil }; return session } }
+        private var sessions: Set<String> = []
+        func set(_ key: String) { lock.withLock { _ = sessions.insert(key) } }
+        func take() -> Set<String> { lock.withLock { defer { sessions = [] }; return sessions } }
     }
 
     /// A mark on the recovery file a Stop or an exit makes (L reviews 217, 235): on its queue, bounded by the exit's

@@ -151,11 +151,14 @@ public final class RecordingCoordinator {
     /// The most a mark an exit makes waits for the recovery file (L review 235) — never past the exit's own deadline, and
     /// not at all once its queue is stuck. Tests shorten it.
     var exitMarkBound: Duration = .seconds(1)
-    /// A Stop whose stopping mark did not answer, kept apart (L review 236): in memory, and in its own file, written on its
-    /// own queue — never the recovery file's, which is the one not answering.
+    /// A Stop whose stopping mark did not answer, kept apart (L review 236): in its own file, written on its own queue — never
+    /// the recovery file's, which is the one not answering — and, once that file is written, in memory (L review 265).
     var stopKeptApart: RecordingSentinel.StopRequest?
     /// The held sessions whose record already says why they were held (L review 268): said once per session.
     private var recordedWhyHeld: Set<String> = []
+    /// The recording's session key (L review 266): set by its start, a resume and a re-attach — so a Stop always knows what to
+    /// keep apart, even when the recovery file does not answer and no pipeline is running.
+    var currentSessionKey: String?
     /// Where the Stop kept apart is written and read: a serial queue of its own (L review 236). Tests inject one.
     var stopRequestIO = SentinelIO(label: "eu.fmasi.parley.stop-request")
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
@@ -569,6 +572,7 @@ public final class RecordingCoordinator {
             // Off the main actor, within what is left of the start's deadline (L review 217).
             try await slotWriteOffMain(sentinel, "start: write", seconds: Self.seconds(until: startBy))
             startedSentinel = sentinel
+            currentSessionKey = sentinel.sessionKey   // L review 266
 
             // Before the helper opens the mic, so no meter opens it meanwhile (#192).
             micBefore = recordingMicrophone.current
@@ -794,6 +798,8 @@ public final class RecordingCoordinator {
             // phase says the Stop, or the restart could honour it first.
             let directory = sentinelDirectory
             sentinelIO.enqueue("mark stopping") { Self.markStopping(directory: directory) }
+            // That mark is never waited for, so the stop is always kept apart too — queued on its own queue (L review 266).
+            keepStopApartQueued(session: currentSessionKey ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) })
             appState.phase = .transcribing(progress: "Finishing…")
             return
         }
@@ -947,7 +953,10 @@ public final class RecordingCoordinator {
 
             // Only now: the transcript exists (or there was nothing to write). The stop kept apart goes with the recovery file —
             // only once its delete answered (L review 236).
-            if await slotDeleteOffMain("stop: delete"), let kept = stopKeptApart { dropStopKeptApart(for: kept.sessionKey) }
+            // Whatever kept it apart — this Stop's mark, or a Stop deferred during a crash restart (L reviews 266, 267).
+            if await slotDeleteOffMain("stop: delete"), let key = sentinel?.sessionKey ?? stopKeptApart?.sessionKey ?? currentSessionKey {
+                dropStopKeptApart(for: key)
+            }
             transcriptionRunner.teardownChunkedPipeline()
         } catch {
             // Either the helper's stop failed, or (stop succeeded) finishing the transcript did.
@@ -1595,6 +1604,9 @@ public final class RecordingCoordinator {
             // Every give-up path ends the recording without stopRecording(); release the mic record.
             if appState.isIdle, !keepMicMarked { clearHelperMic() }
         }
+        // Whether this crash came during a recording (L review 264): its phase then refuses any Start until this recovery
+        // ends the recording — read before the first await.
+        let wasRecording = appState.isRecording
         // #61: count consecutive failures with time decay, not a cumulative lifetime cap, so a long
         // recording isn't locked out by sporadic, individually-recovered interruptions. A tight
         // crash loop (interruptions within the decay window) still trips the cap.
@@ -1608,8 +1620,9 @@ public final class RecordingCoordinator {
 
         guard let sentinel = await slotReadOffMain("crash: read") else {
             Logger.state.error("No sentinel found during crash recovery")
-            // The recording's own capture (L review 242): its phase refuses any Start while the crash recovery runs.
-            captureClient.captureEnded()
+            // The recording's own capture (L reviews 242, 264): a recording's phase refused any Start during the read. A crash
+            // reported with no recording running ends the capture only if no Start got in meanwhile.
+            if wasRecording { captureClient.captureEnded() } else { endCaptureIfStillOwned() }
             // No recovery file to restart from, but a live pipeline still knows its session: salvage it
             // there (the rotation stops, the pipeline is torn down) — never leave it running behind an idle
             // app (L follow-up 28).
@@ -1753,12 +1766,15 @@ public final class RecordingCoordinator {
                 // written while the helper still writes would leave its later audio out. The chunks processed so far
                 // are in session.json; the salvage, once the helper lets go, transcribes everything once.
                 await settleAbandonedPipeline()
+                // Read BEFORE the phase goes idle (L review 264): from there to the hold nothing awaits, so no Start gets in
+                // before the hold ends this capture.
+                let held = await slotReadOffMain("crash: read") ?? sentinel
                 appState.criticalError = "Recording failed — could not restart capture: \(Self.describe(error)). Its audio is kept; Parley will transcribe the recording once the capture helper lets go."
                 appState.phase = .idle
                 stopStatusPoll()
                 keepMicMarked = true
                 Logger.state.error("A failed restart left the capture helper unanswered — holding its session, untranscribed")
-                holdForHelper(await slotReadOffMain("crash: read") ?? sentinel,
+                holdForHelper(held,
                               message: "Parley couldn’t stop the capture after the failed restart — its audio is kept, and Parley will transcribe it once the capture helper lets go.",
                               cause: .captureFailed, reason: .restartFailed, because: helperStop.because)
                 notifyCritical("Recording Failed", appState.criticalError ?? "")
@@ -1811,7 +1827,9 @@ public final class RecordingCoordinator {
             recoveryGateHeld = true
         }
         stoppedBatch = ([], [], [], [], [])
-        if let sentinel = slotRead() {
+        let slot = slotRead()
+        clearStaleStopRequest(keeping: slot?.sessionKey)   // L review 267
+        if let sentinel = slot {
             if await recover(sentinel) != .heldForHelper {
                 // Sessions an earlier launch could not finish (their folder away, or the helper not letting go).
                 await retryPendingLocked()
@@ -1933,10 +1951,11 @@ public final class RecordingCoordinator {
     /// user's, announced or running — owns the app, so the session waits for the next idle — pending, retried then — and
     /// nothing here touches that start (not its phase, not its crash detection). Checked BEFORE anything disarms or arms
     /// crash detection. False when it yielded.
-    private func stillOwnsTheSession(_ sentinel: RecordingSentinel) -> Bool {
+    /// `keptWhileWriting`: why the caller keeps the session (L review 258) — kept with it here too, never dropped by this keep.
+    private func stillOwnsTheSession(_ sentinel: RecordingSentinel, keptWhileWriting: RecordingSentinel.KeptWhileWriting? = nil) -> Bool {
         guard !appState.isIdle || userStartInFlight else { return true }
         Logger.state.info("A recording start is in flight — the relaunch session waits")
-        keepPending(sentinel)
+        keepPending(sentinel, keptWhileWriting: keptWhileWriting)
         retryPendingWhenIdle = true
         return false
     }
@@ -2041,6 +2060,7 @@ public final class RecordingCoordinator {
             // chunk pipeline exists — the crash path then names its restart from the live rotator, and a Stop
             // finishes the recording once, on the live pipeline (the orphans are already queued in it).
             appState.phase = .recording(since: sentinel.startedAt)
+            currentSessionKey = sentinel.sessionKey   // L review 266
             relaunchProbing = false   // the recording is re-attached: the phase says it from here (L review 159)
             setHelperMic(sentinel.micDeviceUID)   // keep level meters off it (#192)
             // Bound NOW (L review 121): what the pipeline's setup records — a re-attach that cannot rotate — is this
@@ -2256,8 +2276,9 @@ public final class RecordingCoordinator {
                                message: String = "Parley couldn’t stop the previous recording cleanly — its audio is kept, and Parley will finish it once the capture helper lets go.",
                                cause: RecordingSentinel.StopCause? = nil, reason: RecordingSentinel.HeldReason = .relaunch,
                                because: String? = nil) {
-        // The caller's own capture (L review 242): a start's, a restart's or a Stop's — or a relaunch's, reached only through
-        // `stillOwnsTheSession` right before.
+        // The caller's own capture (L reviews 242, 264), which no Start can own yet: a failed start's (its start still runs,
+        // and refuses another), a Stop's (the recording's phase), a failed restart's (nothing awaited since its phase went
+        // idle), a failed resume's (its relaunch still probing), or a relaunch's (through `stillOwnsTheSession` right before).
         captureClient.captureEnded()
         setHelperMic(sentinel.micDeviceUID)
         keepPending(sentinel, markStopping: true, cause: cause, held: reason, heldBecause: because)
@@ -2283,7 +2304,7 @@ public final class RecordingCoordinator {
     private func waitForUnansweringFolder(_ sentinel: RecordingSentinel,
                                           keptWhileWriting: RecordingSentinel.KeptWhileWriting? = nil) async {
         foldersNotAnswering.insert(sentinel.sessionKey)
-        guard stillOwnsTheSession(sentinel) else { return }
+        guard stillOwnsTheSession(sentinel, keptWhileWriting: keptWhileWriting) else { return }
         endCaptureIfStillOwned()
         keepPending(sentinel, keptWhileWriting: keptWhileWriting)
         await updateFolderAlarm()
@@ -2587,6 +2608,7 @@ public final class RecordingCoordinator {
             newSentinel.heldBecause = nil
             newSentinel.salvageBegan = false
             try slotWrite(newSentinel)
+            currentSessionKey = newSentinel.sessionKey   // L review 266
             // The rotator is anchored at the current time inside: the monotonic clock behind it cannot be
             // persisted, so a resume re-anchors at resume time, never at the seeded `meetingStart` (C10).
             // `firstChunkIndex` is the plan's: the rotator must name the file the helper is writing.
@@ -2711,6 +2733,11 @@ public final class RecordingCoordinator {
         _ = await sentinelIO.run("settle", seconds: 5) { () }
     }
 
+    /// Returns once everything queued on the stop request's queue has run. Internal for tests.
+    func settleStopRequestIOForTesting() async {
+        _ = await stopRequestIO.run("settle", seconds: 5) { () }
+    }
+
     /// The stopping mark, off the main actor, bounded (L reviews 217, 235) — never past an exit's own `deadline`. One that
     /// does not answer stays queued, and the stop is KEPT APART (L review 236): a crash before the mark lands never lets the
     /// next launch resume a recording the user stopped. `session`: the recording's key, when the caller knows it — else the
@@ -2718,7 +2745,7 @@ public final class RecordingCoordinator {
     func markSentinelStoppingOffMain(by deadline: SuspendingClock.Instant? = nil, session: String? = nil) async {
         let directory = sentinelDirectory
         guard !(await exitMark("mark stopping", by: deadline, { Self.markStopping(directory: directory) })) else { return }
-        await keepStopApart(session: session ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) },
+        await keepStopApart(session: session ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) } ?? currentSessionKey,
                             by: deadline)
     }
 
@@ -2727,9 +2754,10 @@ public final class RecordingCoordinator {
         location.outputDir.appendingPathComponent(location.sessionId).path
     }
 
-    /// The stopping mark did not answer (L review 236): the Stop is kept apart — in memory, and in a file of its own written
-    /// on a queue of its own, bounded as the mark was — so the next launch treats that recording as stopping. Once per
-    /// session. With no known session nothing can be kept (logged).
+    /// The stopping mark did not answer (L review 236): the Stop is kept apart — in a file of its own written on a queue of
+    /// its own, bounded as the mark was — so the next launch treats that recording as stopping. Once per session: remembered
+    /// only once the file is written (L review 265), so a write that failed — or has not answered — is made again at the
+    /// next mark. With no known session nothing can be kept (logged).
     private func keepStopApart(session: String?, by deadline: SuspendingClock.Instant?) async {
         guard let session else {
             Logger.state.error("A stopping mark did not answer, and no recording is known to keep the stop apart for")
@@ -2737,18 +2765,47 @@ public final class RecordingCoordinator {
         }
         guard stopKeptApart?.sessionKey != session else { return }
         let request = RecordingSentinel.StopRequest(sessionKey: session, requestedAt: Date())
-        stopKeptApart = request
         let directory = sentinelDirectory
         let bound = deadline.map { min(exitMarkBound, max(.zero, $0 - .now)) } ?? sentinelDeadline
         switch await stopRequestIO.run("stop request: write", seconds: max(0.001, Self.seconds(bound)), {
             Result { try RecordingSentinel.writeStopRequest(request, directory: directory) }
         }) {
         case .success?:
+            stopKeptApart = request
             Logger.state.error("The recovery file's stopping mark did not answer — the stop is kept apart, so it is never resumed")
         case .failure(let error)?:
-            Logger.state.error("The stopping mark did not answer, and the stop could not be kept apart: \(error, privacy: .private)")
+            Logger.state.error("The stopping mark did not answer, and the stop could not be kept apart — tried again at the next mark: \(error, privacy: .private)")
         case nil:
             Logger.state.error("The stopping mark did not answer, and keeping the stop apart did not answer either — it stays queued")
+        }
+    }
+
+    /// A Stop deferred during a crash restart (L review 266): its mark is only queued, never waited for — so the stop is kept
+    /// apart too, queued on its own queue, never awaited (nothing may suspend before the phase says the Stop). Its end — the
+    /// recovery file deleted, or its salvage — drops it, queued after this write.
+    private func keepStopApartQueued(session: String?) {
+        guard let session else {
+            Logger.state.error("A Stop deferred during a crash restart knows no recording to keep the stop apart for")
+            return
+        }
+        let request = RecordingSentinel.StopRequest(sessionKey: session, requestedAt: Date()), directory = sentinelDirectory
+        stopRequestIO.enqueue("stop request: write") {
+            do {
+                try RecordingSentinel.writeStopRequest(request, directory: directory)
+            } catch {
+                Logger.state.error("A Stop deferred during a crash restart could not be kept apart: \(error, privacy: .private)")
+            }
+        }
+    }
+
+    /// A relaunch's recovery file is not the one a Stop kept apart names — or there is none (L review 267): that stop's
+    /// recording was settled another way, and its stale file goes. Queued on its own queue, before the relaunch reads it.
+    private func clearStaleStopRequest(keeping slotKey: String?) {
+        let directory = sentinelDirectory
+        stopRequestIO.enqueue("stop request: clear stale") {
+            guard let request = RecordingSentinel.readStopRequest(directory: directory), request.sessionKey != slotKey else { return }
+            RecordingSentinel.deleteStopRequest(directory: directory)
+            Logger.state.info("A stop kept apart for a recording no recovery file names — cleared")
         }
     }
 
@@ -3211,7 +3268,10 @@ public final class RecordingCoordinator {
     /// the folder answers" is only ever made about something kept (L review 163).
     private func finishSentinel(after outcome: SalvageOutcome, sentinel: RecordingSentinel?, location: (outputDir: URL, sessionId: String)? = nil) async {
         guard outcome.kind == .folderNotAnswering else {
-            await slotDeleteOffMain("delete")
+            // Settled: the stop kept apart for it goes with its recovery file (L review 267).
+            if await slotDeleteOffMain("delete"), let key = sentinel?.sessionKey ?? location.map(Self.sessionKey(of:)) ?? currentSessionKey {
+                dropStopKeptApart(for: key)
+            }
             return
         }
         if let kept = await slotReadOffMain("read") ?? sentinel ?? location.map({ Self.keptSentinel(for: $0) }) {
