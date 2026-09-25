@@ -926,7 +926,8 @@ struct Harness {
     }
 
     /// Item 2: first frames can land while `start()` is still awaited (a main-actor stall); the flag is
-    /// armed before the start, so "Resumed" is still said and the banner is not reset to "waiting".
+    /// armed before the start, so "Resumed" is still said and the banner is not reset to "waiting". The
+    /// restart lost the audio between the crash and its start (final review R-I1): said so.
     @Test func firstFramesDuringTheRestartStillAnnounceResumed() async throws {
         let h = try Harness()
         _ = try h.writeSentinel()
@@ -935,7 +936,28 @@ struct Harness {
         h.client.onStart = { coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0") }
         await h.coordinator.handleXPCCrash()
         #expect(h.notified.value.map(\.title) == ["Recording Resumed"])
-        #expect(h.appState.interruptionWarning == "Recording briefly interrupted. Resumed.")
+        #expect(h.appState.interruptionWarning == "Recording was briefly interrupted. Some audio may have been lost.")
+    }
+
+    /// Final review R-I1: a helper-crash restart records the gap it opened — in the evidence, with its reason, from
+    /// the crash to the restart — and its "Resumed" says audio may have been lost, as the relaunch's does: never a
+    /// clean record over seconds that exist nowhere.
+    @Test func aHelperRestartRecordsTheGapAndSaysAudioMayHaveBeenLost() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        let coordinator = h.coordinator
+        h.client.onStart = { coordinator.noteFirstFrames(track: .mic, helperSessionId: "2000-0") }
+        let before = Date()
+        await h.coordinator.handleXPCCrash()
+        let gap = try #require(h.client.recordedEvents.first { $0.kind == .captureGap }, "the restart's gap is in the evidence")
+        #expect(gap.detail["reason"] == "helper restart")
+        #expect(gap.severity == .anomaly)
+        let start = try Date(try #require(gap.detail["start"]), strategy: .iso8601)
+        let end = try Date(try #require(gap.detail["end"]), strategy: .iso8601)
+        #expect(start <= end && start >= before.addingTimeInterval(-1), "from the crash (no live file: its detection) to the restart")
+        #expect(h.notified.value.first?.body.contains("Some audio may have been lost") == true)
+        #expect(h.appState.interruptionWarning?.contains("Some audio may have been lost") == true)
     }
 
     @Test func aFailedRestartDoesNotLeaveTheRecoveryArmed() async throws {
@@ -4649,6 +4671,22 @@ struct Harness {
         await h.coordinator.recoverAtLaunch()
         #expect(h.appState.isRecording && h.runner.chunkRotator?.currentBaseName == "sess-1", "re-attached on the live file")
         return (s, live)
+    }
+
+    /// Final review R-I1: on the live pipeline the restart's gap is in the session too (session.json → the transcript's
+    /// `metadata.capture.gaps`): from the live file's last write — the crash — to the restart.
+    @Test func aHelperRestartOnTheLivePipelineRecordsItsGapInTheSession() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let lastWrite = Date().addingTimeInterval(-30)
+        _ = try await reattachedOnALiveFile(h, lastWrite: lastWrite)
+        h.client.isCapturingResult = false   // the helper died
+        await h.coordinator.handleXPCCrash()
+        #expect(h.appState.isRecording && h.client.startCalls.count == 1, "restarted")
+        let processor = try #require(h.runner.chunkProcessor)
+        let gaps = await processor.getSessionState().gaps
+        #expect(gaps.map(\.reason) == ["helper restart"])
+        #expect(gaps.first.map { abs($0.start.timeIntervalSince(lastWrite)) < 1 } == true, "from the live file's last write")
     }
 
     /// Final review A-I1: a restart refused as busy (a false crash verdict: the helper still writes the live file) never

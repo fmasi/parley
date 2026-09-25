@@ -219,9 +219,6 @@ public final class RecordingCoordinator {
     var recoveryFramesAt: Date?
     /// The last time a snapshot carried `micNotDelivering`: inside the window it voids the confirmation.
     private var lastMicAlarmAt: Date?
-    /// The awaited restart is a relaunch's resume: audio between the crash and the relaunch was lost,
-    /// and "Resumed" says so (the `recordingResumedWithGap` alarm states the gap exactly).
-    var restartLostAudio = false
     /// Only a relaunch's resume awaits frames before the phase is `.recording`: set there before its
     /// `start()`, cleared when the capture is up. Nothing else accepts frames outside a recording (L2/L4
     /// fix round 2, item 1).
@@ -1173,7 +1170,6 @@ public final class RecordingCoordinator {
         awaitingRecoveryFrames = false
         recoveryFramesAt = nil
         lastMicAlarmAt = nil
-        restartLostAudio = false
         acceptFramesBeforeRecording = false
     }
 
@@ -1367,13 +1363,10 @@ public final class RecordingCoordinator {
         awaitingRecoveryFrames = false
         recoveryFramesAt = now
         lastMicAlarmAt = nil
-        if restartLostAudio {
-            appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
-            notify("Recording Resumed", "Recording was briefly interrupted. Some audio may have been lost.")
-        } else {
-            appState.interruptionWarning = "Recording briefly interrupted. Resumed."
-            notify("Recording Resumed", "Recording was briefly interrupted and has been restarted.")
-        }
+        // Every restart lost audio — a helper restart, a relaunch's resume, a wake — and records its gap (final review
+        // R-I1): never "Resumed" as if nothing was lost.
+        appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
+        notify("Recording Resumed", "Recording was briefly interrupted. Some audio may have been lost.")
         let window = recoveryConfirmationSeconds, clock = recoveryConfirmationClock
         Task { [weak self] in
             // Awake time (L review 117): the window's end is this clock's, for THIS window only.
@@ -1702,6 +1695,9 @@ public final class RecordingCoordinator {
         // The orphaned in-progress chunk, located before the rotator advances and processed only once nothing may still
         // write it: after the restart's start, or after a failed restart's helper let go (final review A-I1).
         var pendingOrphan: (chunk: ChunkRotator.FinalizedChunk, processor: ChunkProcessor)?
+        // When the helper last wrote the orphan — the crash, as the relaunch reads it (its WAVs' mtime): the restart's gap
+        // starts there (final review R-I1). Nil when there is no live file, or the folder did not answer.
+        var orphanLastWrittenAt: Date?
 
         // #92: when the chunked pipeline is still live (the common live-crash case), locate the orphaned
         // in-progress chunk and advance the rotator BEFORE restarting capture. Otherwise the orphan's audio
@@ -1710,6 +1706,10 @@ public final class RecordingCoordinator {
            let processor = transcriptionRunner.chunkProcessor {
             let orphan = await locateOrphanChunk(rotator: rotator, outputDir: outputDir)
             pendingOrphan = (orphan, processor)
+            let orphanFiles = [orphan.systemPath, orphan.micPath]
+            orphanLastWrittenAt = await readOffMain("crash: orphan mtime", folder: outputDir, {
+                orphanFiles.compactMap { (try? FileManager.default.attributesOfItem(atPath: $0))?[.modificationDate] as? Date }.max()
+            }) ?? nil
             let plan = await rotator.recoverFromCrash()
             let restart = Self.liveRestartPlan(sentinel: sentinel, recoveryPlan: plan, outputDir: outputDir)
             baseName = restart.baseName
@@ -1745,7 +1745,6 @@ public final class RecordingCoordinator {
             // BEFORE the start: its first frames may land while `start()` is still being awaited.
             awaitingRecoveryFrames = true
             recoveryFramesAt = nil
-            restartLostAudio = false
             startIssued = true
             try await captureClient.start(
                 outputDirectory: outputDir,
@@ -1761,6 +1760,13 @@ public final class RecordingCoordinator {
                 pendingOrphan = nil
                 orphan.processor.processChunk(orphan.chunk)
             }
+            // The helper died and was restarted: the audio between its last write and this start is recorded nowhere
+            // (final review R-I1). Said the way the relaunch says its gap: evidence + session, awaited so nothing ends
+            // the recording under it; "Resumed" says audio may have been lost (`noteFirstFrames`).
+            let gapEnd = Date()
+            let gapStart = orphanLastWrittenAt.map { min($0, lastCrashAt ?? $0) } ?? lastCrashAt ?? gapEnd
+            captureClient.record(.captureGap, .anomaly, ["start": gapStart.ISO8601Format(), "end": gapEnd.ISO8601Format(), "reason": "helper restart"])
+            await transcriptionRunner.recordCaptureGap(CaptureGap(start: gapStart, end: gapEnd, reason: "helper restart"))
             newSentinel.lastAliveAt = Date()
             // A Stop deferred during this restart already marked the sentinel; the rewrite keeps the mark.
             newSentinel.stopping = newSentinel.stopping || stopRequestedDuringRecovery
@@ -2640,7 +2646,6 @@ public final class RecordingCoordinator {
         wireCaptureCallbacks()
         awaitingRecoveryFrames = true
         recoveryFramesAt = nil
-        restartLostAudio = true
         acceptFramesBeforeRecording = true
         setHelperMic(sentinel.micDeviceUID)   // before the helper opens it (#192)
         // The evidence is this session's before the start could reset it (L follow-up 43).

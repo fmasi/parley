@@ -126,7 +126,6 @@ extension RecordingCoordinator {
         startStatusPoll()
         awaitingRecoveryFrames = true
         recoveryFramesAt = nil
-        restartLostAudio = true   // nothing was captured while the Mac slept
         appState.interruptionWarning = "Recording restarted — waiting for audio…"
     }
 
