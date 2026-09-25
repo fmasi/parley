@@ -37,6 +37,10 @@ public enum AudioConcatenatorError: LocalizedError {
     /// Sources that are not all `.m4a` (file names). Refused: re-encoding a mono WAV fallback into a
     /// stereo merge put one track in BOTH channels, and deleting it destroyed the only lossless copy.
     case mixedSources([String])
+    /// The chunks' start times would put implausible silence into the merge (round 5): a start that
+    /// is not finite, earlier than the first chunk's, or gaps over `maxInsertedSilenceSeconds`.
+    /// Refused before anything is written; the chunk files stay the recording's audio.
+    case implausibleTiming(String)
 
     public var errorDescription: String? {
         switch self {
@@ -44,6 +48,7 @@ public enum AudioConcatenatorError: LocalizedError {
         case .cannotLoadTrack(let msg): return "Cannot load audio track: \(msg)"
         case .exportFailed(let msg): return "Export failed: \(msg)"
         case .mixedSources(let names): return "Refusing to merge sources that are not all .m4a: \(names.joined(separator: ", "))"
+        case .implausibleTiming(let why): return "Refusing to merge: \(why)"
         }
     }
 }
@@ -59,19 +64,46 @@ public enum AudioConcatenator {
     /// differences are rotation jitter, not a hole in the recording.
     static let gapThresholdSeconds: Double = 1
 
-    /// Concatenate `sources` into a single .m4a, deleting the sources on success. Kept for callers
-    /// without chunk start times: no gaps are inserted.
-    public static func concatenate(
-        sources: [URL],
-        outputDirectory: URL,
-        outputName: String
-    ) async throws -> AudioConcatenationResult {
-        try await concatenate(
-            chunks: sources.map { ChunkAudio(url: $0, startTime: nil) },
-            outputDirectory: outputDirectory,
-            outputName: outputName,
-            deleteSources: true
-        )
+    /// The most silence a merge will insert, one gap or all of them together. A recording gap of 12
+    /// hours is already beyond any meeting; past it the timing is wrong (a clock step, a start
+    /// estimated from a file date), and padding it wrote hours of silence until the export timed out.
+    static let maxInsertedSilenceSeconds: Double = 12 * 3600
+
+    private static func hours(_ seconds: Double) -> String {
+        let h = seconds / 3600
+        return h.rounded() == h ? String(Int(h)) : String(format: "%.1f", h)
+    }
+
+    /// "gap 13.2 h > 12 h bound"; in minutes when the hours would round to the bound itself (round 8
+    /// item 4: never "12.0 h > 12 h").
+    private static func overBound(_ what: String, _ seconds: Double) -> String {
+        let shown = hours(seconds)
+        if let value = Double(shown), value > maxInsertedSilenceSeconds / 3600 {
+            return "\(what) \(shown) h > \(hours(maxInsertedSilenceSeconds)) h bound"
+        }
+        return "\(what) \(Int(seconds / 60)) min > \(Int(maxInsertedSilenceSeconds / 60)) min bound"
+    }
+
+    /// Why these start times can't be merged as a timeline, or nil when they can. `chunks` in the
+    /// order they will be inserted; `durations` their lengths.
+    static func implausibleTiming(_ chunks: [ChunkAudio], durations: [Double]) -> String? {
+        guard let origin = chunks.first?.startTime else { return nil }
+        var inserted = 0.0, total = 0.0
+        for (chunk, duration) in zip(chunks, durations) {
+            guard let start = chunk.startTime else { inserted += duration; continue }
+            let offset = start.timeIntervalSince(origin)
+            guard offset.isFinite else { return "a chunk's start time is not a real time" }
+            guard offset >= -gapThresholdSeconds else { return "a chunk starts \(Int(-offset)) s before the first chunk" }
+            let gap = offset - inserted
+            if gap > gapThresholdSeconds {
+                guard gap <= maxInsertedSilenceSeconds else { return overBound("gap", gap) }
+                total += gap
+                guard total <= maxInsertedSilenceSeconds else { return overBound("gaps totalling", total) }
+                inserted += gap
+            }
+            inserted += duration
+        }
+        return nil
     }
 
     /// Concatenate `chunks` into a single .m4a at `outputDirectory/<outputName>.m4a`.
@@ -129,6 +161,23 @@ public enum AudioConcatenator {
             throw AudioConcatenatorError.exportFailed("Cannot add composition track")
         }
 
+        // Load every source first, and check the timeline they make before anything is inserted or
+        // written: implausible timing is refused, the chunk files kept (round 5).
+        // The assets are kept alongside their tracks: a track whose asset is released can't be inserted.
+        var loaded: [(asset: AVURLAsset, track: AVAssetTrack, duration: CMTime)] = []
+        for chunk in chunks {
+            let asset = AVURLAsset(url: chunk.url)
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let track = tracks.first else {
+                throw AudioConcatenatorError.cannotLoadTrack(chunk.url.lastPathComponent)
+            }
+            loaded.append((asset, track, try await asset.load(.duration)))
+        }
+        if let why = implausibleTiming(chunks, durations: loaded.map(\.duration.seconds)) {
+            Logger.files.error("AudioConcatenator: refusing to merge — \(why, privacy: .public); keeping the chunk files")
+            throw AudioConcatenatorError.implausibleTiming(why)
+        }
+
         // Each chunk goes at its ABSOLUTE wall-clock offset from the first chunk: the gap is
         // measured against where the merged file actually is (`insertTime`), not the previous
         // chunk's end, so sub-second shortfalls cannot add up — every boundary stays within 1 s.
@@ -136,13 +185,8 @@ public enum AudioConcatenator {
         var sourceSeconds = 0.0
         var gapsInsertedSeconds = 0.0
         let origin = chunks.first?.startTime
-        for chunk in chunks {
-            let asset = AVURLAsset(url: chunk.url)
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let track = tracks.first else {
-                throw AudioConcatenatorError.cannotLoadTrack(chunk.url.lastPathComponent)
-            }
-            let duration = try await asset.load(.duration)
+        for (chunk, source) in zip(chunks, loaded) {
+            let (_, track, duration) = source
             if let start = chunk.startTime, let origin {
                 let gap = start.timeIntervalSince(origin) - insertTime.seconds
                 if gap > gapThresholdSeconds {

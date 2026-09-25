@@ -58,6 +58,9 @@ extension DispatchWorkItem: HealerTimer {}
 /// A sleeping one resumes at `trigger(.wake)`, or at the first liveness verdict: monitors are paused
 /// during sleep and only armed monitors give verdicts, so a verdict proves the machine is awake and
 /// the wake message was lost — dropping it would silence the tap for the rest of the session (round 2).
+/// A coreaudiod restart or a permission grant that arrives while asleep is kept and runs at the wake
+/// (H2 council, B-M1): dropped, it left the tap's objects and listeners dead until a liveness episode
+/// escalated to a tap rung.
 public final class TapHealer {
     public static let stuckSeconds: Double = 5
 
@@ -74,6 +77,9 @@ public final class TapHealer {
     private var slowRetry: HealerTimer?
     /// A rebuild threw since the tap last delivered: a give-up then also means "could not restart".
     private var rebuildFailedSinceHeartbeat = false
+    /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep: run at the wake. A restart
+    /// wins over a grant (its new tap starts with the new permission). Forgotten by a stop or a new session.
+    private var pendingWhileAsleep: TapRecoveryLadder.Trigger?
 
     public var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
     /// The ladder gave up (fast budget exhausted, or a rung failed on an exhausted ladder). `rebuildFailed`:
@@ -96,6 +102,7 @@ public final class TapHealer {
     public func startSession(tap: TapRebuilding) {
         scheduler.async {
             self.reset()
+            self.pendingWhileAsleep = nil
             self.tap = tap
             self.suspended = false
         }
@@ -111,7 +118,10 @@ public final class TapHealer {
                 return
             }
             if t == .stalled || t == .neverDelivered { self.wakeIfAsleep(on: "\(t)") }
-            guard !self.suspended else { return }
+            guard !self.suspended else {
+                self.keepForTheWake(t)
+                return
+            }
             self.apply(self.ladder.trigger(t, now: self.scheduler.now))
         }
     }
@@ -185,6 +195,7 @@ public final class TapHealer {
     public func endSession() {
         scheduler.async {
             self.reset()
+            self.pendingWhileAsleep = nil
             self.suspended = true
             self.tap = nil
         }
@@ -193,6 +204,17 @@ public final class TapHealer {
     private func wake() {
         reset()
         suspended = tap == nil
+        guard !suspended, let pending = pendingWhileAsleep else { return }
+        pendingWhileAsleep = nil
+        Logger.audio.info("Tap healer: running the \("\(pending)", privacy: .public) that arrived while asleep")
+        apply(ladder.trigger(pending, now: scheduler.now))
+    }
+
+    /// Asleep with a session running: a restart or a grant can't wait for a liveness verdict (the tap
+    /// may deliver zeros with a healthy heartbeat, and after `srst` its listeners are dead) — keep it.
+    private func keepForTheWake(_ t: TapRecoveryLadder.Trigger) {
+        guard tap != nil, t == .serviceRestarted || t == .permissionGrant else { return }
+        if pendingWhileAsleep != .serviceRestarted { pendingWhileAsleep = t }
     }
 
     /// Asleep with a session running, and a verdict arrived: the wake was missed. Resume first.

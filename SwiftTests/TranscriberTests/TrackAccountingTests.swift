@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import TranscriberCore
 
@@ -95,8 +96,88 @@ import Testing
     /// Review fix 4: pin the exact key set R1 parses by name. Characterization test — the keys
     /// were already correct, no implementation change was needed for this one.
     @Test func metadataDictionaryKeysArePinned() {
-        let keys = Set(TrackAccounting().asMetadataDictionary(status: .healthy).keys)
+        var measured = TrackAccounting()
+        measured.exactZeroSeconds = 0; measured.heartbeatCallbacks = 0
+        let keys = Set(measured.asMetadataDictionary(status: .healthy).keys)
         #expect(keys == ["status", "expected_seconds", "delivered_seconds", "exact_zero_seconds",
                           "padded_seconds", "longest_gap_seconds", "gap_count", "rebuilds", "heartbeat_callbacks"])
+    }
+
+    // MARK: - R2 council (XI bug 1, C-M10): unmeasured is not a measured 0
+
+    /// SCK measures neither exact zeros nor tap callbacks; the helper omits both keys. They stay nil
+    /// through parse, sum, detail and metadata — never a claimed 0.
+    @Test func unmeasuredZerosAndCallbacksStayUnmeasured() throws {
+        let sck = try #require(TrackAccounting(detail: ["remote_expected_seconds": "600", "remote_delivered_seconds": "600"], prefix: "remote"))
+        #expect(sck.exactZeroSeconds == nil && sck.heartbeatCallbacks == nil)
+        #expect(sck.asDetail(prefix: "remote")["remote_exact_zero_seconds"] == nil)
+        #expect(sck.asDetail(prefix: "remote")["remote_heartbeat_callbacks"] == nil)
+        let metadata = sck.asMetadataDictionary(status: .healthy)
+        #expect(metadata["exact_zero_seconds"] == nil && metadata["heartbeat_callbacks"] == nil)
+        var twoSessions = sck; twoSessions += sck
+        #expect(twoSessions.exactZeroSeconds == nil && twoSessions.heartbeatCallbacks == nil && twoSessions.expectedSeconds == 1200)
+        #expect(TrackAccounting().exactZeroSeconds == nil, "a fresh counter has measured nothing")
+    }
+
+    /// A measured value summed with an unmeasured session keeps what was measured (a lower bound on
+    /// the silence, never an invented one); a measured 0 stays 0.
+    @Test func aMeasuredValuePlusAnUnmeasuredOneKeepsTheMeasurement() throws {
+        var tap = TrackAccounting(); tap.expectedSeconds = 600; tap.exactZeroSeconds = 42; tap.heartbeatCallbacks = 60_000
+        var sum = tap
+        sum += try #require(TrackAccounting(detail: ["remote_expected_seconds": "300"], prefix: "remote"))
+        #expect(sum.exactZeroSeconds == 42 && sum.heartbeatCallbacks == 60_000 && sum.expectedSeconds == 900)
+        var zero = TrackAccounting(); zero.expectedSeconds = 1; zero.exactZeroSeconds = 0
+        #expect(TrackAccounting(detail: zero.asDetail(prefix: "local"), prefix: "local")?.exactZeroSeconds == 0)
+    }
+
+    /// C-M7: synthesized Decodable required every key, so a field added later made an older
+    /// session.json undecodable (and recovery drops an undecodable session). Absent keys decode.
+    @Test func legacyAndMinimalJsonDecodes() throws {
+        let minimal = try JSONDecoder().decode(TrackAccounting.self, from: Data(#"{"expectedSeconds": 12}"#.utf8))
+        #expect(minimal.expectedSeconds == 12 && minimal.deliveredSeconds == 0 && minimal.exactZeroSeconds == nil)
+        let legacy = try JSONDecoder().decode(TrackAccounting.self, from: Data(#"{"expectedSeconds":10,"heartbeatCallbacks":5,"deliveredSeconds":9,"exactZeroSeconds":1,"paddedSeconds":0,"longestGapSeconds":0,"gapCount":0,"rebuilds":0,"fromTheFuture":true}"#.utf8))
+        #expect(legacy.exactZeroSeconds == 1 && legacy.heartbeatCallbacks == 5)
+        var a = TrackAccounting(); a.expectedSeconds = 3; a.exactZeroSeconds = 2
+        #expect(try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(a)) == a)
+    }
+
+    /// C-M12: a tap that was never expected (nothing played) and delivered only exact zeros was
+    /// "healthy"; nothing played on this Mac, so it is idle. Real audio, or unmeasured zeros, keep it
+    /// healthy; a content anomaly still wins.
+    @Test func aNeverExpectedTapOfOnlyZerosIsIdle() {
+        var zeros = TrackAccounting(); zeros.expectedSeconds = 0.4; zeros.deliveredSeconds = 30; zeros.exactZeroSeconds = 30
+        #expect(zeros.status(isTap: true, contentAnomalies: 0) == .idle)
+        #expect(zeros.status(isTap: false, contentAnomalies: 0) == .healthy, "a mic is never idle")
+        #expect(zeros.status(isTap: true, contentAnomalies: 1) == .compromised)
+        var real = zeros; real.exactZeroSeconds = 12
+        #expect(real.status(isTap: true, contentAnomalies: 0) == .healthy)
+        var unmeasured = zeros; unmeasured.exactZeroSeconds = nil
+        #expect(unmeasured.status(isTap: true, contentAnomalies: 0) == .healthy)
+    }
+
+    /// R2b item 8: a sum of a measured session and an unmeasured one is a lower bound, and says so —
+    /// in the detail, the metadata and the provenance (whose bare integer is then left out).
+    @Test func aMixedSumIsMarkedAsALowerBound() throws {
+        var tap = TrackAccounting(); tap.expectedSeconds = 600; tap.deliveredSeconds = 600; tap.exactZeroSeconds = 42; tap.heartbeatCallbacks = 6
+        var sum = tap
+        sum += try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "300"], prefix: "remote"))
+        #expect(sum.exactZeroSeconds == 42 && sum.exactZeroIsLowerBound && sum.heartbeatCallbacksIsLowerBound)
+        let metadata = sum.asMetadataDictionary(status: .healthy)
+        #expect(metadata["exact_zero_seconds_is_lower_bound"] as? Bool == true && metadata["heartbeat_callbacks_is_lower_bound"] as? Bool == true)
+        let back = try #require(TrackAccounting(detail: sum.asDetail(prefix: "remote"), prefix: "remote"))
+        #expect(back == sum, "the mark survives the helper-to-app wire")
+        var measuredTwice = tap; measuredTwice += tap
+        #expect(!measuredTwice.exactZeroIsLowerBound && measuredTwice.asMetadataDictionary(status: .healthy)["exact_zero_seconds_is_lower_bound"] == nil)
+        let decoded = try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(sum))
+        #expect(decoded.exactZeroIsLowerBound)
+
+        var diagnostics = CaptureDiagnostics()
+        for (i, side) in [tap, try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "300"], prefix: "remote"))].enumerated() {
+            diagnostics.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: Double(i)), origin: .helper, kind: .captureStop, severity: .info,
+                                            detail: side.asDetail(prefix: "remote")))
+        }
+        let p = diagnostics.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.systemExactZeroSeconds == nil, "the bare integer can't carry the mark: left out")
+        #expect((p.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["exact_zero_seconds_is_lower_bound"] as? Bool == true)
     }
 }

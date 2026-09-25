@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum TranscriptWriter {
     /// Format seconds as HH:MM:SS,mmm (SRT format).
@@ -30,7 +31,16 @@ public enum TranscriptWriter {
             let prefix = speaker.isEmpty ? "" : "\(speaker): "
             result += "[\(ts)] \(prefix)\(text)\n"
         }
-        return result
+        return result + omissionNote(segments)
+    }
+
+    /// A trailing TXT line when segments without a usable time were left out: the file itself says so,
+    /// not only the log (round 3 item 8). Empty when nothing was left out. Not in the SRT (round 3b).
+    static func omissionNote(_ segments: [[String: Any]]) -> String {
+        let n = segments.filter { !TranscriptAssembler.hasUsableTime($0) }.count
+        guard n > 0 else { return "" }
+        let what = n == 1 ? "1 segment without a timestamp is" : "\(n) segments without timestamps are"
+        return "\nNote: \(what) in the JSON transcript.\n"
     }
 
     /// Format segments as SRT subtitle text. Flagged segments are skipped and the cue numbers stay
@@ -45,7 +55,29 @@ public enum TranscriptWriter {
             let prefix = speaker.isEmpty ? "" : "\(speaker): "
             result += "\(i + 1)\n\(start) --> \(end)\n\(prefix)\(text)\n\n"
         }
+        // Pure cues: strict SRT parsers reject anything else. The TXT carries the omission note and
+        // the JSON keeps the segments (round 3b).
         return result
+    }
+
+    /// The TXT/SRT a transcript's `output_format` asks for, when it is not on disk.
+    public static func formatFileIsMissing(forJSON jsonPath: URL) -> Bool {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let format = (json["metadata"] as? [String: Any])?["output_format"] as? String,
+              ["txt", "srt"].contains(format)
+        else { return false }
+        return !FileManager.default.fileExists(atPath: jsonPath.deletingPathExtension().appendingPathExtension(format).path)
+    }
+
+    /// Re-write the TXT/SRT from the transcript when it is missing (a finalized session's cleanup).
+    public static func writeFormatFileIfMissing(fromJSON jsonPath: URL) {
+        guard formatFileIsMissing(forJSON: jsonPath) else { return }
+        do {
+            try writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Could not re-write a transcript's text file: \(error, privacy: .private)")
+        }
     }
 
     public enum WriterError: Error {
@@ -65,6 +97,10 @@ public enum TranscriptWriter {
 
         let format = metadata["output_format"] as? String ?? "json"
         guard format != "json" else { return }
+        let untimed = segments.filter { !TranscriptAssembler.hasUsableTime($0) }.count
+        if untimed > 0 {
+            Logger.files.error("\(untimed, privacy: .public) segment(s) have no usable time — left out of the \(format, privacy: .public) (kept in the JSON, flagged)")
+        }
 
         let content: String
         switch format {

@@ -265,7 +265,7 @@ public final class ChunkRotator {
             self.currentChunkStartTime = clock.now()
             self.onRotated?()
         } catch {
-            Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .public)")
+            Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .private)")
             // Timed out: the helper may still complete it — remembered, settled before the next rotation.
             if error is CaptureCallTimeout { lateAttempts.append(nextIndex) }
             onRotationFailed?(error)

@@ -28,6 +28,9 @@ public enum TranscriptAssembler {
             "language": language,
             "num_speakers": numSpeakers.map { $0 as Any } ?? ("auto" as Any),
             "diarization": diarization,
+            // The capture-time flag (§7.2): a mic stream was captured next to the remote one. It says
+            // nothing about whether the remote side delivered audio — `capture.remote.status` is the
+            // authority for that (C-M3).
             "dual_stream": dualStream,
             "software_version": AppVersion.gitDescription,
         ]
@@ -95,19 +98,28 @@ public enum TranscriptAssembler {
         // field is never mistaken for "not disclosed".
         metadata["disclosure"] = SummaryDisclosure.airgapped.asMetadataDictionary()
 
+        // A non-finite number reaching `JSONSerialization` raises an uncatchable Objective-C exception:
+        // every finalize of the session, and every retry, would crash (C-M17). The segment and its words
+        // are kept; an unknown time is written as null — never an invented number — and flagged
+        // `time_unknown`, so every reader skips it (R2b item 5); an unknown confidence is left out.
+        let nonFinite = segments.filter { !$0.start.isFinite || !$0.end.isFinite || !($0.confidence?.isFinite ?? true) }.count
+        if nonFinite > 0 {
+            Logger.transcription.error("\(nonFinite, privacy: .public) segment(s) carried a non-finite time or confidence — written as unknown")
+        }
         let segmentDicts: [[String: Any]] = segments.map { seg in
             var dict: [String: Any] = [
-                "start": seg.start,
-                "end": seg.end,
+                "start": seg.start.isFinite ? seg.start : NSNull(),
+                "end": seg.end.isFinite ? seg.end : NSNull(),
                 "speaker": seg.speaker,
                 "text": seg.text,
             ]
             if !seg.source.isEmpty {
                 dict["source"] = seg.source
             }
-            if let confidence = seg.confidence {
+            if let confidence = seg.confidence, confidence.isFinite {
                 dict["confidence"] = confidence
             }
+            if !seg.start.isFinite || !seg.end.isFinite { dict["time_unknown"] = true }
             if let language = seg.language {
                 dict["language"] = language
             }
@@ -127,21 +139,41 @@ public enum TranscriptAssembler {
     }
 
     /// Whether a transcript JSON segment is flagged `filtered` (failed the VAD/quality gate),
-    /// `echo` (mic bleed) or `duplicate` (an abutting repeat). Flagged segments stay in the JSON
-    /// record and are hidden from everything a person reads: TXT, SRT, the summary prompt and the
-    /// rename samples (P2/P10/P11).
+    /// `echo` (mic bleed) or `duplicate` (an abutting repeat), or has no usable time (`time_unknown`,
+    /// or a start/end that is missing or non-finite). Flagged segments stay in the JSON record and
+    /// are hidden from everything a person reads: TXT, SRT, the summary prompt and the rename
+    /// samples (P2/P10/P11); re-detect keeps them untouched. A segment with no time is never shown at
+    /// 00:00:00 — skipped, never 0 (R2b item 5).
     public static func isFlagged(_ segment: [String: Any]) -> Bool {
         segment["filtered"] as? Bool == true || segment["echo"] as? Bool == true
-            || segment["duplicate"] as? Bool == true
+            || segment["duplicate"] as? Bool == true || !hasUsableTime(segment)
     }
 
+    /// A finite `start` and `end`, and not flagged `time_unknown`.
+    public static func hasUsableTime(_ segment: [String: Any]) -> Bool {
+        guard segment["time_unknown"] as? Bool != true,
+              let start = segment["start"] as? Double, let end = segment["end"] as? Double
+        else { return false }
+        return start.isFinite && end.isFinite
+    }
+
+    /// Atomic AND durable (round 3 item 2): the finalized marker written next vouches for this file,
+    /// so it must be on the disk itself, not in a cache, before the marker is.
     public static func write(_ json: [String: Any], to path: URL) throws {
         let data = try JSONSerialization.data(
             withJSONObject: json,
             options: [.prettyPrinted, .sortedKeys]
         )
-        try data.write(to: path, options: .atomic)
+        try DurableFile.replace(path, with: data)
         Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .sensitive)")
+    }
+
+    /// Whether `url` holds a readable transcript: JSON with a `metadata` object and a `segments` list.
+    public static func verifies(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return json["metadata"] is [String: Any] && json["segments"] is [[String: Any]]
     }
 
     /// Rewrite a transcript JSON's `audio_paths` / `audio_files` to reference every audio source

@@ -90,18 +90,34 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Tracks whose first real audio has been reported. Audio-queue confined.
     private var realAudioReported: Set<CaptureTrack> = []
 
+    /// Real (never padded) frames handed to each track's writer, session-wide. The write-progress
+    /// check (H2 council, A-I3) reads it off the audio queue once a second, so it is lock-only.
+    private let writtenFrameCounts = OSAllocatedUnfairLock<(mic: Int64, system: Int64)>(initialState: (0, 0))
+
+    /// Real frames written to `track` so far this session. Lock-only: any queue.
+    func writtenFrames(_ track: CaptureTrack) -> Int64 {
+        writtenFrameCounts.withLock { track == .mic ? $0.mic : $0.system }
+    }
+
+    private func noteWritten(_ frames: Int64, track: CaptureTrack) {
+        guard frames > 0 else { return }
+        writtenFrameCounts.withLock { if track == .mic { $0.mic += frames } else { $0.system += frames } }
+    }
+
     /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
     /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
 
-    /// Whether system audio is coming from the Core Audio tap rather than ScreenCaptureKit. Set by
-    /// the service once the source is resolved in `startCapture`. The tap legitimately delivers
-    /// zero buffers before a call connects (gotcha #66) — `finalizeAll()`'s frame-count-plausibility
-    /// backstop must not mistake "no call ever connected" for a dropped/missing system track.
-    var isUsingSystemTap = false
-    /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1). Set by
-    /// the service; read in `finalizeAll`, on the audio queue (lock-only on the service side).
+    /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1): what
+    /// `finalizeAll` judges the system track against. Set by the service; read on the audio queue
+    /// (lock-only on the service side).
     var systemExpectedSeconds: (() -> Double)?
+    /// Whether the remote is expected right now (the watchdog's last gate reading, lock-only). Read on
+    /// the audio queue per system append.
+    var systemGateOpen: (() -> Bool)?
+    /// System frames (real and padding) written while the gate was open: judged against
+    /// `systemExpectedSeconds` at finalize (round 2 item 17). Audio-queue confined. Never reset.
+    private var gateOpenSystemFrames = GateOpenFrameCounter()
 
     /// Monotonic timestamp (`uptimeNanoseconds`) of the last system buffer processed by
     /// `handleSystemAudio`, stamped on EVERY arrival independent of energy/loudness (#86). The
@@ -149,37 +165,57 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         ))
     }
 
+    /// Set by `finalizeAll`: this handler's session is sealed. Every append returns at once from here,
+    /// so a source that is still being stopped (up to the stop bound) writes nothing and raises no
+    /// banner or anomaly after the seal (round 2 item 8). Audio-queue confined.
+    private var sealed = false
+    /// Set from any thread when Stop's bounded seal timed out on a wedged audio queue (round 3 E): the
+    /// session has ended, so every append still queued behind the stall is dropped until the late seal.
+    private let abandoned = OSAllocatedUnfairLock(initialState: false)
+
+    /// Stop gave up waiting for the seal: drop every later append. Any thread.
+    func abandon() { abandoned.withLock { $0 = true } }
+
+    private var accepting: Bool { !sealed && !abandoned.withLock { $0 } }
+
     func finalizeAll() {
+        sealed = true
+        // A seal that runs late, after Stop gave up on it and ended the session (round 4 M1): the headers
+        // are still written, but nothing reports into whichever session is current now — no write-failure
+        // or write-success callback, no end-of-recording backstop.
+        let late = abandoned.withLock { $0 }
+        if late {
+            for writer in [systemWriter, micWriter] {
+                writer.onWriteFailure = nil
+                writer.onWriteSucceeded = nil
+            }
+        }
         systemWriter.finalize()
         micWriter.finalize()
-        // Session-wide backstop (#196): compare each track's TOTAL frame count against how long the
-        // session has actually been running. Catches gaps that padding itself skipped (an implausible
-        // timeline delta) and anything else nobody has thought of yet — the same "don't need to know
-        // the mechanism" property that makes PadRatioMonitor useful, at the whole-recording scope.
+        guard !late else { return }
+        // Session-wide backstop (#196): compare each track's TOTAL frame count against how long it
+        // should hold. Catches gaps that padding itself skipped (an implausible timeline delta) and
+        // anything else nobody has thought of yet — the same "don't need to know the mechanism" property
+        // that makes PadRatioMonitor useful, at the whole-recording scope. The system track is judged
+        // against its EXPECTED (gate-open) time, never elapsed time (H2 council, A-I8): nothing pads the
+        // idle after a call ends, and one never expected (gotcha #66) is not judged at all.
         let elapsedComponents = sessionStartTime.duration(to: .now).components
         let elapsed = Double(elapsedComponents.seconds) + Double(elapsedComponents.attoseconds) / 1e18
-        noteFrameCountMismatch(FrameCountPlausibility.check(
-            track: "mic", framesWritten: totalMicFramesWritten,
-            rate: AudioConverter.outputSampleRate, elapsedSeconds: elapsed
-        ))
-        // Skip the system-track check only for a tap recording that was never EXPECTED to deliver
-        // (Q4.5): nothing else played output for the whole session (gotcha #66), so no frames is
-        // correct. A tap that was expected and delivered nothing is exactly what this must catch.
-        if !(isUsingSystemTap && (systemExpectedSeconds?() ?? 0) < 1) {
-            noteFrameCountMismatch(FrameCountPlausibility.check(
-                track: "system", framesWritten: totalSystemFramesWritten,
-                rate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate, elapsedSeconds: elapsed
-            ))
-        }
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: totalMicFramesWritten, micRate: AudioConverter.outputSampleRate,
+            systemFrames: gateOpenSystemFrames.frames, systemRate: systemFormatInfo?.rate ?? AudioConverter.outputSampleRate,
+            elapsedSeconds: elapsed, systemExpectedSeconds: systemExpectedSeconds?() ?? 0)
+        verdicts.forEach(noteFrameCountMismatch)
     }
 
-    /// Surface a track whose total recorded frames diverge implausibly from session elapsed time.
-    private func noteFrameCountMismatch(_ verdict: FrameCountPlausibility.Verdict?) {
-        guard let verdict else { return }
+    /// Surface a track whose total recorded frames diverge implausibly from the time it should hold
+    /// (elapsed for the mic, expected for the system track).
+    private func noteFrameCountMismatch(_ verdict: FrameCountPlausibility.Verdict) {
+        let basis = verdict.track == "system" ? "expected" : "elapsed"
         Logger.audio.error(
             """
             \(verdict.track, privacy: .public) track holds \(Int(verdict.actualSeconds), privacy: .public)s of audio \
-            after \(Int(verdict.elapsedSeconds), privacy: .public)s of wall-clock recording — \
+            after \(Int(verdict.elapsedSeconds), privacy: .public)s of \(basis, privacy: .public) recording time — \
             \(Int(verdict.deficitSeconds), privacy: .public)s unaccounted for.
             """
         )
@@ -188,6 +224,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             "actual_seconds": "\(Int(verdict.actualSeconds))",
             "elapsed_seconds": "\(Int(verdict.elapsedSeconds))",
             "deficit_seconds": "\(Int(verdict.deficitSeconds))",
+            "basis": basis,
         ])
     }
 
@@ -261,6 +298,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - System audio
 
     private func handleSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard accepting else { return }
         // Liveness stamp (#86) moved BELOW the sticky format gate — see the stamp site after it.
         //
         // It used to be stamped here, on every arrival, before any format-drop early return. That
@@ -369,6 +407,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             totalSystemFramesWritten += Int64(count)
             dataFrames = Int64(count)
         }
+        noteWritten(dataFrames, track: .system)
+        gateOpenSystemFrames.add(sysPad + dataFrames, gateOpen: systemGateOpen?() ?? true)
         notePadding(
             systemPadMonitor.record(padFrames: sysPad, dataFrames: dataFrames, rate: sysRate),
             track: "system")
@@ -381,6 +421,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
     /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
     func appendSystemSamples(_ samples: [Int16], pts: CMTime) {
+        guard accepting else { return }
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
@@ -409,6 +450,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
         systemFramesWritten += Int64(samples.count)
         totalSystemFramesWritten += Int64(samples.count)
+        noteWritten(Int64(samples.count), track: .system)
+        gateOpenSystemFrames.add(pad + Int64(samples.count), gateOpen: systemGateOpen?() ?? true)
         // The tap path is where the 2026-08-04 corruption was written. This is its tripwire.
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
@@ -421,6 +464,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// called on the capture service's audio queue — the same serial queue as system-audio callbacks,
     /// writer swaps, and finalize — so all writer access stays single-threaded.
     func appendMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        guard accepting else { return }
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
         else { return }
@@ -588,6 +632,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
         micFramesWritten += Int64(samples.count)
         totalMicFramesWritten += Int64(samples.count)
+        noteWritten(Int64(samples.count), track: .mic)
         notePadding(
             micPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count),
                                  rate: AudioConverter.outputSampleRate),

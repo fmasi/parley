@@ -513,6 +513,46 @@ import Testing
         }
     }
 
+    // MARK: - H2 round 2 item 12: a failed mic follow is an acknowledgeable helper alarm
+
+    @Test func micFollowFailedIsAnAcknowledgeableHelperAlarmScopedToTheRecording() {
+        let kind = AlarmKind.micFollowFailed
+        #expect(kind.isAcknowledgeable)
+        #expect(kind.isHelperOwned, "the helper raises it and its snapshots carry it")
+        #expect(kind.track == .mic)
+        #expect(!kind.outlivesRecording, "per recording: it goes when the recording ends")
+    }
+
+    /// The helper keeps the alarm until a later follow succeeds; the user's acknowledgement must hold
+    /// against the helper's next snapshots of that same episode, and a new episode shows again.
+    @Test func anAcknowledgedHelperAlarmStaysAcknowledgedUntilItsNextEpisode() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.micFollowFailed, at: t0, episode: 1)]))
+        #expect(r.alarms[.micFollowFailed] != nil)
+        r.acknowledge(.micFollowFailed)
+        #expect(r.alarms[.micFollowFailed] == nil)
+        r.apply(snapshot(h1, [alarm(.micFollowFailed, at: t0, episode: 1)]))
+        #expect(r.alarms[.micFollowFailed] == nil, "the same episode, already acknowledged")
+        r.apply(snapshot(h1, [alarm(.micFollowFailed, at: t0 + 60, episode: 2)]))
+        #expect(r.alarms[.micFollowFailed] != nil, "a new failure shows again")
+    }
+
+    /// Episodes count per helper registry: the next recording's first failure is episode 1 again.
+    @Test func aNewHelperRegistryForgetsTheAcknowledgement() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.micFollowFailed, at: t0, episode: 1)]))
+        r.acknowledge(.micFollowFailed)
+        r.apply(snapshot(h2, [alarm(.micFollowFailed, at: t0 + 600, episode: 1)]))
+        #expect(r.alarms[.micFollowFailed] != nil)
+    }
+
+    @Test func onlyAcknowledgeableKindsCanBeAcknowledged() {
+        var r = CaptureAlarmRegistry()
+        r.apply(snapshot(h1, [alarm(.micNotDelivering, at: t0)]))
+        r.acknowledge(.micNotDelivering)
+        #expect(r.alarms[.micNotDelivering] != nil, "a live condition clears only when it clears")
+    }
+
     // MARK: - Helpers
 
     /// `kind` raised by helper h1, then left stale by its replacement h2.

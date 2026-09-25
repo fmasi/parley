@@ -38,7 +38,7 @@ public actor ModelManifestService {
             commitSha = head.sha
             lastModifiedISO = head.lastModified
         } catch {
-            Logger.config.warning("Manifest: HF head lookup failed (\(error.localizedDescription, privacy: .public)) — recording manifest with empty commit SHA")
+            Logger.config.warning("Manifest: HF head lookup failed (\(error, privacy: .private)) — recording manifest with empty commit SHA")
         }
         // Truncate to whole seconds so the Date survives ISO8601 round-trip without
         // sub-second drift (ISO8601DateEncodingStrategy drops fractional seconds).

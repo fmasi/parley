@@ -630,7 +630,7 @@ public final class RecordingCoordinator {
         do {
             try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
         } catch {
-            Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .public)")
+            Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .private)")
             warnRecoveryNotUpdated()
         }
     }

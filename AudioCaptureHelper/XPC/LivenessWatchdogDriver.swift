@@ -15,6 +15,9 @@ final class LivenessWatchdogDriver {
     let queue = DispatchQueue(label: "audio-capture.liveness-watchdog")
     private var timer: DispatchSourceTimer?
     private var monitors = LivenessWatchdogDriver.freshMonitors()
+    /// The sleep pause and its exits (A-I7; round 2 items 11, 13, 18): the app's wake, IOKit's full wake,
+    /// a promotion seen on a tick, or the bounded expiry — whichever comes first, once. Queue-confined.
+    private var sleepPause = SleepPauseClock()
     private let outputActivity = OutputActivityProbe()
     private let gateOpenLock = OSAllocatedUnfairLock<Bool>(initialState: true)
 
@@ -24,6 +27,17 @@ final class LivenessWatchdogDriver {
     var onVerdict: ((CaptureTrack, TrackLivenessMonitor.Verdict) -> Void)?
     /// The gate state on every tick (for coverage accounting, H6): (gateOpen, nowNanos).
     var onGate: ((Bool, UInt64) -> Void)?
+    /// After every tick's verdicts, on `queue`: (nowNanos, gateOpen). The service's counter checks — the
+    /// mic reopen deadline and write progress (H2 council) — ride the same 1 Hz tick, no timer of their
+    /// own. Not while paused for sleep: nothing is judged then.
+    var onTick: ((UInt64, Bool) -> Void)?
+    /// The sleep pause ended — by whichever exit came first, exactly once — on `queue`, with the mic work
+    /// that waited for it and the reason: both monitors are already re-armed; the service resumes the
+    /// healer and the mic.
+    var onResumed: ((Set<SleepPauseClock.MicWork>, String) -> Void)?
+    /// Read on each tick WHILE paused only: whether the machine is in a full (user) wake — the graphics
+    /// capability — so a DarkWake promoted to a full wake without a second power-on still wakes (item 18).
+    var fullWakeProbe: (() -> Bool?)?
     /// The last tick's gate reading. Cheap and lock-only, so `trackHealth()` (H6) can read it from
     /// the audio queue; the probe itself is a HAL read and must not run there.
     var lastGateOpen: Bool { gateOpenLock.withLock { $0 } }
@@ -57,13 +71,63 @@ final class LivenessWatchdogDriver {
         queue.async { [weak self] in self?.monitors[track]?.arm(nowNanos: now) }
     }
 
-    /// Sleep: nothing is judged until the next arm. The tick keeps running (an owed
-    /// `.cleared(.gateClosed)` is still delivered), the OS pauses it with the machine.
-    func pause() {
+    /// Sleep (the app's or IOKit's; idempotent): nothing is judged until the pause ends (see
+    /// `SleepPauseClock`). The tick keeps running (an owed `.cleared(.gateClosed)` is still delivered);
+    /// the OS pauses it with the machine. `expiryStartsNow`: no power notifications, so the only exit
+    /// besides the app's wake is 30 s of awake uptime from here (round 1's behaviour).
+    func pause(expiryStartsNow: Bool, from source: SleepPauseClock.SleepSource) {
+        let now = DispatchTime.now().uptimeNanoseconds
         queue.async { [weak self] in
             guard let self else { return }
+            self.sleepPause.pause(nowNanos: now, expiryStartsNow: expiryStartsNow, from: source)
             for track in CaptureTrack.allCases { self.monitors[track]?.pause() }
         }
+    }
+
+    /// The app's wake. A second wake — the pause already ended by IOKit's full wake or the expiry — is
+    /// ignored (item 13).
+    func wake() {
+        queue.async { [weak self] in
+            guard let self, let work = self.sleepPause.wake() else { return }
+            self.resume(work, reason: "wake")
+        }
+    }
+
+    /// IOKit's power-on (item 18): a confirmed full wake is an implicit wake; an unclassified one starts
+    /// the expiry clock; a DarkWake leaves the pause alone.
+    func poweredOn(fullWake: Bool?) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let work = self.sleepPause.poweredOn(fullWake: fullWake, nowNanos: now) {
+                self.resume(work, reason: "implicit wake: \(self.sleepPause.lastWakeReason?.rawValue ?? "full wake")")
+            } else if self.sleepPause.isPaused {
+                Logger.audio.info("Power-on while paused for sleep (\(fullWake == false ? "DarkWake" : "unclassified", privacy: .public)) — pause kept")
+            }
+        }
+    }
+
+    /// Mic work that must not run across a sleep (item 11): kept for the wake while paused, else `run`
+    /// now. `run` is called on `queue`.
+    func deferMicWork(_ work: SleepPauseClock.MicWork, otherwise run: @escaping () -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if self.sleepPause.deferMicWork(work) {
+                Logger.audio.info("Mic work kept for the wake: \("\(work)", privacy: .public)")
+            } else {
+                run()
+            }
+        }
+    }
+
+    /// Paused for sleep. Call on `queue` only.
+    var isPausedForSleep: Bool { sleepPause.isPaused }
+
+    /// The pause ended: both tracks are judged from now (first frames due in 5 s).
+    private func resume(_ work: Set<SleepPauseClock.MicWork>, reason: String) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        for track in CaptureTrack.allCases { monitors[track]?.arm(nowNanos: now) }
+        onResumed?(work, reason)
     }
 
     /// An aggregate listener (`goin`→0, `stpd`, `diff`) said IO may have stopped. Accelerators never
@@ -94,10 +158,19 @@ final class LivenessWatchdogDriver {
     private func stopLocked() {
         timer?.cancel(); timer = nil
         monitors = Self.freshMonitors()
+        sleepPause = SleepPauseClock()
     }
 
     private func tick() {
         let now = DispatchTime.now().uptimeNanoseconds
+        // While paused: a DarkWake promoted to a full wake, or the expiry after an unclassified power-on
+        // (uptime does not advance in sleep), ends the pause (A-I7, item 18). The probe runs only here.
+        if sleepPause.isPaused, let work = sleepPause.tick(nowNanos: now, fullWake: fullWakeProbe?()) {
+            // "promoted" vs "expired" — the X1 check compares these against `pmset -g log` (round 4 M3).
+            let reason = sleepPause.lastWakeReason?.rawValue ?? "unknown"
+            Logger.audio.info("Implicit wake — \(reason, privacy: .public) — resuming liveness")
+            resume(work, reason: "implicit wake: \(reason)")
+        }
         let gateOpen = outputActivity.othersRunningOutput()
         gateOpenLock.withLock { $0 = gateOpen }
         onGate?(gateOpen, now)
@@ -108,5 +181,6 @@ final class LivenessWatchdogDriver {
             monitors[track] = m
             if v != .healthy { onVerdict?(track, v) }
         }
+        if !sleepPause.isPaused { onTick?(now, gateOpen) }
     }
 }

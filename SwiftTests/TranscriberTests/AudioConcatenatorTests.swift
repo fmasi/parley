@@ -1,3 +1,4 @@
+// RED-FIRST-EXEMPT: R2c (C-M19) removed the dead AudioConcatenator.concatenate(sources:), which deleted its sources unconditionally; its five callers here were converted to concatenate(chunks:deleteSources: true), a pure refactor of existing tests
 import Testing
 import Foundation
 import AVFoundation
@@ -160,9 +161,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source, durationSeconds: 1.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source],
+            chunks: [source].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "output"
+            outputName: "output",
+            deleteSources: true
         )
 
         #expect(result.outputPath == source)
@@ -190,9 +192,10 @@ struct AudioConcatenatorTests {
         }
 
         let result = try await AudioConcatenator.concatenate(
-            sources: sources,
+            chunks: sources.map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         #expect(result.outputPath.lastPathComponent == "merged.m4a")
@@ -216,9 +219,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source2, durationSeconds: 1.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source1, source2],
+            chunks: [source1, source2].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         #expect(!FileManager.default.fileExists(atPath: source1.path))
@@ -238,9 +242,10 @@ struct AudioConcatenatorTests {
         try await Self.createTestM4a(at: source2, durationSeconds: 3.0)
 
         let result = try await AudioConcatenator.concatenate(
-            sources: [source1, source2],
+            chunks: [source1, source2].map { ChunkAudio(url: $0, startTime: nil) },
             outputDirectory: dir,
-            outputName: "merged"
+            outputName: "merged",
+            deleteSources: true
         )
 
         let asset = AVURLAsset(url: result.outputPath)
@@ -259,9 +264,10 @@ struct AudioConcatenatorTests {
 
         do {
             _ = try await AudioConcatenator.concatenate(
-                sources: [],
+                chunks: [],
                 outputDirectory: dir,
-                outputName: "output"
+                outputName: "output",
+                deleteSources: true
             )
             Issue.record("Expected concatenate to throw on empty sources")
         } catch AudioConcatenatorError.noSources {
@@ -430,4 +436,58 @@ struct AudioConcatenatorTests {
         #expect((meta["merged_audio"] as? [String: Any])?["reused_existing"] as? Bool == true)
         #expect(FileManager.default.fileExists(atPath: merged.path), "the merged file is protected from the quota")
     }
+
+    // MARK: - Round 5: implausible timing
+
+    private func refuses(_ chunks: [ChunkAudio]) async -> Bool {
+        do {
+            _ = try await AudioConcatenator.concatenate(chunks: chunks, outputDirectory: chunks[0].url.deletingLastPathComponent(),
+                                                        outputName: "c", deleteSources: true)
+            return false
+        } catch AudioConcatenatorError.implausibleTiming {
+            return true
+        } catch {
+            Issue.record("unexpected error: \(error)")
+            return false
+        }
+    }
+
+    /// A start time decades (or just 13 hours) away from the rest was merged by inserting that much
+    /// silence — an export that hit its 300 s timeout. Refused instead, and the chunk files are kept.
+    @Test(.timeLimit(.minutes(1)))
+    func implausibleGapsAreRefusedAndTheChunksKept() async throws {
+        let dir = try tempDir("implausible"); defer { try? FileManager.default.removeItem(at: dir) }
+        let urls = (0..<3).map { dir.appendingPathComponent("c-\($0).m4a") }
+        for url in urls { try await Self.createTestM4a(at: url, durationSeconds: 1) }
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0), ChunkAudio(url: urls[1], startTime: t0.addingTimeInterval(13 * 3600))]),
+                "one gap over 12 h")
+        #expect(await refuses((0..<3).map { ChunkAudio(url: urls[$0], startTime: t0.addingTimeInterval(Double($0) * 7 * 3600)) }),
+                "gaps adding up to over 12 h")
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0),
+                               ChunkAudio(url: urls[1], startTime: Date(timeIntervalSinceReferenceDate: .infinity))]),
+                "a non-finite start")
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0.addingTimeInterval(10)), ChunkAudio(url: urls[1], startTime: nil),
+                               ChunkAudio(url: urls[2], startTime: t0)]),
+                "a start before the first chunk's")
+        #expect(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "every chunk file is kept")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("c.m4a").path), "nothing was written")
+        let r = try await AudioConcatenator.concatenate(
+            chunks: [ChunkAudio(url: urls[0], startTime: t0), ChunkAudio(url: urls[1], startTime: t0.addingTimeInterval(3))],
+            outputDirectory: dir, outputName: "c", deleteSources: false)
+        #expect(abs(r.gapsInsertedSeconds - 2) < 0.1, "a plausible gap still merges")
+    }
+
+    /// Round 8 item 4: a gap just over the bound must never read "12.0 h > 12 h" — minutes then.
+    @Test func aGapJustOverTheBoundIsNeverWordedAsTheBound() {
+        let t0 = Date(timeIntervalSince1970: 0)
+        let a = URL(fileURLWithPath: "/tmp/a.m4a"), b = URL(fileURLWithPath: "/tmp/b.m4a")
+        let why = AudioConcatenator.implausibleTiming([ChunkAudio(url: a, startTime: t0), ChunkAudio(url: b, startTime: t0.addingTimeInterval(12 * 3600 + 61))],
+                                                       durations: [1, 1])
+        #expect(why == "gap 721 min > 720 min bound")
+        let clear = AudioConcatenator.implausibleTiming([ChunkAudio(url: a, startTime: t0), ChunkAudio(url: b, startTime: t0.addingTimeInterval(13.2 * 3600 + 1))],
+                                                         durations: [1, 1])
+        #expect(clear == "gap 13.2 h > 12 h bound")
+    }
 }
+

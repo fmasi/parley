@@ -23,8 +23,9 @@ public enum TranscriptRediarizer {
         source: String,
         relabeled: [LabeledSegment]
     ) -> [[String: Any]] {
-        // Flagged segments (`filtered` / `echo`) on this channel are kept exactly as they were:
-        // they are not relabeled, and replacing the channel wholesale must not drop them (P10/P11).
+        // Flagged segments (`filtered` / `echo` / `duplicate`, or no usable time) on this channel are
+        // kept exactly as they were: they are not relabeled, and replacing the channel wholesale must
+        // not drop them (P10/P11, R2b item 5).
         var kept = segments.filter { ($0["source"] as? String) != source || TranscriptAssembler.isFlagged($0) }
         kept.append(contentsOf: relabeled.map { seg in
             var dict: [String: Any] = [
@@ -42,7 +43,11 @@ public enum TranscriptRediarizer {
             if seg.duplicate { dict["duplicate"] = true }
             return dict
         })
-        return kept.sorted { ($0["start"] as? Double ?? 0) < ($1["start"] as? Double ?? 0) }
+        // Timed segments in time order; a segment with no usable time is never placed at 0 — it
+        // follows them, in its original order.
+        let timed = kept.filter(TranscriptAssembler.hasUsableTime)
+            .sorted { ($0["start"] as? Double ?? 0) < ($1["start"] as? Double ?? 0) }
+        return timed + kept.filter { !TranscriptAssembler.hasUsableTime($0) }
     }
 
     /// Metadata key holding the names a re-detect cleared, so a mistaken one is recoverable.
@@ -348,9 +353,9 @@ public enum TranscriptRediarizer {
         // otherwise be gone. If it cannot be written, the transcript is not overwritten either.
         let backup = backupURL(for: url)
         if !FileManager.default.fileExists(atPath: backup.path) {
-            try data.write(to: backup, options: .atomic)
+            try DurableFile.replace(backup, with: data)   // round 4 item 6
         }
-        try out.write(to: url, options: .atomic)
+        try DurableFile.replace(url, with: out)
         Logger.transcription.info(
             "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
         return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)

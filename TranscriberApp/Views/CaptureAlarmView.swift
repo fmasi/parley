@@ -21,6 +21,7 @@ extension AlarmKind {
         switch self {
         case .crashProtectionOff: return "Crash protection is off"
         case .micNotDelivering, .micDigitalSilence: return "Your microphone isn’t being recorded"
+        case .micFollowFailed: return "Couldn’t switch microphones"
         case .remoteNotDelivering, .remoteRecoveryFailed, .remotePermissionDenied, .remoteCantConfirm:
             return "The other side may not be recorded"
         case .diskLow, .diskWriteFailure, .rotationFailed, .sessionWriteFailed: return "Recording to disk is in trouble"

@@ -28,6 +28,12 @@ public enum MeetingSummarizer {
 
         Logger.transcription.info("Generating summary for '\(metadata.sessionName)' (\(segments.count) segments)")
 
+        // #138 / C-I6: the transcript testifies BEFORE its content leaves the machine. Stamped only
+        // after a written summary, a request that timed out after sending (the documented -1001
+        // case) left `transcript_transmitted: false` on a transcript that went to a remote endpoint.
+        // If the stamp cannot be written, nothing is sent.
+        try Self.stampDisclosure(.attempted(endpoint: endpoint), into: transcriptPath)
+
         let response = try await provider.summarizeDetailed(segments: segments, metadata: metadata)
 
         // Parley's own statement of what was not captured comes first, deterministically: a model
@@ -47,8 +53,7 @@ public enum MeetingSummarizer {
             .appendingPathComponent(baseName + "-summary.md")
         try stamped.write(to: summaryPath, atomically: true, encoding: .utf8)
 
-        // #138: the content was sent to `endpoint` to produce this summary — update the
-        // transcript's disclosure from its airgapped default so the artifact testifies to it.
+        // #138: the summary exists — the final state of the disclosure stamped above.
         try Self.stampDisclosure(.generated(endpoint: endpoint), into: transcriptPath)
 
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
@@ -58,14 +63,35 @@ public enum MeetingSummarizer {
 
     /// Rewrite the transcript JSON's `metadata.disclosure` block in place (#138), preserving all
     /// other keys. Atomic. A transcript with no readable metadata is left unchanged.
+    ///
+    /// Never un-says a disclosure: once `transcript_transmitted` or `summary_generated` is true it
+    /// stays true, and every host the content was sent to stays in `transcript_transmitted_to` — a
+    /// re-summary on this Mac must not make a transcript that left the machine read "airgapped".
+    /// `summary_endpoint` names the endpoint that generated the summary (changed only by a
+    /// generation), a separate fact (R2b item 6).
     static func stampDisclosure(_ disclosure: SummaryDisclosure, into transcriptPath: URL) throws {
         let data = try Data(contentsOf: transcriptPath)
         guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         var metadata = (json["metadata"] as? [String: Any]) ?? [:]
-        metadata["disclosure"] = disclosure.asMetadataDictionary()
+        let previous = metadata["disclosure"] as? [String: Any]
+        let wasTransmitted = previous?["transcript_transmitted"] as? Bool == true
+        let wasGenerated = previous?["summary_generated"] as? Bool == true
+        let previousEndpoint = previous?["summary_endpoint"] as? String
+        // A disclosure written before the host list existed: its endpoint is where it was sent.
+        let previousHosts = previous?["transcript_transmitted_to"] as? [String]
+            ?? (wasTransmitted ? [previousEndpoint].compactMap { $0 } : [])
+        var hosts = previousHosts
+        for host in disclosure.transcriptTransmittedTo where !hosts.contains(host) { hosts.append(host) }
+        let stamped = SummaryDisclosure(
+            summaryGenerated: disclosure.summaryGenerated || wasGenerated,
+            summaryEndpoint: disclosure.summaryGenerated ? disclosure.summaryEndpoint : (wasGenerated ? previousEndpoint : nil),
+            transcriptTransmitted: disclosure.transcriptTransmitted || wasTransmitted,
+            transcriptTransmittedTo: hosts
+        )
+        metadata["disclosure"] = stamped.asMetadataDictionary()
         json["metadata"] = metadata
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: transcriptPath, options: .atomic)
+        try DurableFile.replace(transcriptPath, with: out)   // round 4 item 6
     }
 
     /// Convenience: create provider from config + summarize. Never throws; returns a
@@ -200,11 +226,13 @@ public enum MeetingSummarizer {
         let gaps = capture?["gaps"] as? [[String: Any]] ?? []
 
         // Flagged segments (VAD-filtered noise, mic-bleed echo) are kept in the record but are not
-        // what anybody said to the meeting: the model never sees them (P10/P11).
+        // what anybody said to the meeting: the model never sees them (P10/P11). Nor does it see a
+        // segment with no usable time (R2b item 5) — never placed at 00:00:00 — and the header says
+        // how many were left out.
         let segments = rawSegments.filter { !TranscriptAssembler.isFlagged($0) }.map { seg in
             SummarySegment(
-                start: seg["start"] as? Double ?? 0,
-                end: seg["end"] as? Double ?? 0,
+                start: seg["start"] as? Double ?? .nan,   // unreachable: flagged when not a Double
+                end: seg["end"] as? Double ?? .nan,
                 speaker: seg["speaker"] as? String ?? "",
                 text: seg["text"] as? String ?? "",
                 source: seg["source"] as? String ?? ""
@@ -219,8 +247,9 @@ public enum MeetingSummarizer {
             }
         }
 
-        // From every segment, flagged or not: the meeting lasted as long as its last recorded moment.
-        let duration = rawSegments.last?["end"] as? Double ?? 0
+        // From every segment, flagged or not: the meeting lasted as long as its last recorded moment
+        // (the latest real end — a segment with no usable time says nothing about it).
+        let duration = rawSegments.compactMap { $0["end"] as? Double }.filter(\.isFinite).max() ?? 0
         let sessionName = path.deletingPathExtension().lastPathComponent
 
         let metadata = SummaryMetadata(
@@ -236,7 +265,9 @@ public enum MeetingSummarizer {
             // than let silence read as "complete".
             coverageNotRecorded: metadata_raw?["processing_issues"] != nil && capture?["remote"] == nil && capture?["local"] == nil,
             gapCount: gaps.count,
-            gapSeconds: gaps.reduce(0) { $0 + (validSeconds($1["seconds"]) ?? 0) }
+            gapSeconds: gaps.reduce(0) { $0 + (validSeconds($1["seconds"]) ?? 0) },
+            untimedSegmentCount: rawSegments.filter { !TranscriptAssembler.hasUsableTime($0) }.count,
+            captureReconstructed: provenance?["reconstructed"] as? Bool == true
         )
 
         return (segments, metadata)
@@ -257,7 +288,8 @@ public enum MeetingSummarizer {
             permissionDenied: isRemote ? provenance?["system_permission_denied_confirmed"] as? Bool : nil,
             // This side's own content anomalies — the session-wide `quality_anomaly_count` would
             // blame one side for the other's faults.
-            anomalyCount: side["content_anomaly_count"] as? Int
+            anomalyCount: side["content_anomaly_count"] as? Int,
+            exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true
         )
     }
 

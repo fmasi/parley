@@ -9,20 +9,20 @@ import Foundation
 @Suite struct CaptureQualityNoticeTests {
 
     @Test func cleanCaptureKeepsTheNormalTitle() {
-        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0) == "Transcription Complete")
-        #expect(CaptureQualityNotice.completionBody(fileName: "meeting.json", anomalyCount: 0)
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 1) == "Transcription Complete")
+        #expect(CaptureQualityNotice.completionBody(fileName: "meeting.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 1)
                 == "meeting.json")
     }
 
     @Test func anomaliesChangeTheTitle() {
-        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 1)
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 1, problemChunkCount: 0, segmentCount: 1)
                 == "Transcription Complete — capture anomalies")
     }
 
     @Test func bodyNamesTheCountAndPluralisesProperly() {
-        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 1)
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 1, problemChunkCount: 0, segmentCount: 1)
                 .contains("1 capture anomaly"))
-        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 3)
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 3, problemChunkCount: 0, segmentCount: 1)
                 .contains("3 capture anomalies"))
     }
 
@@ -60,7 +60,7 @@ import Foundation
         defer { try? FileManager.default.removeItem(at: url) }
         let count = CaptureQualityNotice.anomalyCount(inTranscriptAt: url)
         #expect(count == 1)
-        #expect(CaptureQualityNotice.completionTitle(anomalyCount: count)
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: count, problemChunkCount: 0, segmentCount: 1)
                 == "Transcription Complete — capture anomalies")
     }
 
@@ -87,13 +87,41 @@ import Foundation
         ])
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: url) == 0)
-        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0) == "Transcription Complete")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 1) == "Transcription Complete")
     }
 
-    @Test func unreadableFileIsNotAnAlarm() {
-        let missing = FileManager.default.temporaryDirectory
-            .appendingPathComponent("does-not-exist-\(UUID().uuidString).json")
-        #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: missing) == 0)
+    /// R2 follow-up 2: a transcript that can't be re-read was reported as plain "Transcription
+    /// Complete" — every reader answered "nothing wrong" (0, 0, 1) for a file it never read. Not an
+    /// alarm about the audio, but never a clean bill either: the notice says it could not check.
+    @Test func anUnreadableTranscriptIsNeverPlainComplete() throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("does-not-exist-\(UUID().uuidString).json")
+        let garbage = FileManager.default.temporaryDirectory.appendingPathComponent("garbage-\(UUID().uuidString).json")
+        try Data("{not json".utf8).write(to: garbage)
+        defer { try? FileManager.default.removeItem(at: garbage) }
+        for url in [missing, garbage] {
+            let (a, p, s) = (CaptureQualityNotice.anomalyCount(inTranscriptAt: url), CaptureQualityNotice.problemChunkCount(inTranscriptAt: url),
+                             CaptureQualityNotice.segmentCount(inTranscriptAt: url))
+            #expect(a == CaptureQualityNotice.unreadable && p == CaptureQualityNotice.unreadable && s == CaptureQualityNotice.unreadable)
+            #expect(CaptureQualityNotice.completionTitle(anomalyCount: a, problemChunkCount: p, segmentCount: s)
+                    == "Transcription finished — Parley couldn't re-read the transcript to check it")
+            #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: a, problemChunkCount: p, segmentCount: s)
+                    == "m.json — Parley couldn't re-read the transcript to check it")
+        }
+        // Any one reader failing is enough (the file can change between reads): never plain "Complete".
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: CaptureQualityNotice.unreadable)
+                == "Transcription finished — Parley couldn't re-read the transcript to check it")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: CaptureQualityNotice.unreadable, problemChunkCount: 0, segmentCount: 5)
+                != "Transcription Complete")
+    }
+
+    /// A readable transcript that simply predates a field is still read as "nothing recorded" — the
+    /// unreadable answer is for a file that could not be read at all.
+    @Test func aReadableTranscriptWithoutTheFieldsIsNotUnreadable() throws {
+        let url = try writeTranscript(["metadata": ["engine": "fluid_audio"], "segments": [["start": 0, "end": 1, "text": "x", "speaker": "S"]]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.anomalyCount(inTranscriptAt: url) == 0)
+        #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 0)
+        #expect(CaptureQualityNotice.segmentCount(inTranscriptAt: url) == 1)
     }
 
     // MARK: - Processing problems and empty transcripts (§7.3)

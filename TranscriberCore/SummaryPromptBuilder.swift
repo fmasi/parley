@@ -18,7 +18,7 @@ enum SummaryPromptBuilder {
     /// "concurrent remote segments", which would contradict the header.
     static func systemMessage(metadata: SummaryMetadata) -> String {
         let remote = metadata.remoteCapture.map { verdict($0, isRemote: true) }
-        let noRemoteAudio: Set<SideVerdict> = [.notCaptured, .idle, .permissionDeniedSilence, .uncertainSilence]
+        let noRemoteAudio: Set<SideVerdict> = [.notCaptured, .idle, .permissionDeniedSilence, .uncertainSilence, .onlyDigitalSilence]
         return systemMessage(dualStream: metadata.dualStream && !(remote.map(noRemoteAudio.contains) ?? false))
     }
 
@@ -40,8 +40,8 @@ enum SummaryPromptBuilder {
     }
 
     /// The header line(s) about what was captured, newline-joined, or nil when there is nothing to
-    /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, "coverage
-    /// not recorded", recording gaps.
+    /// say (both sides healthy, or an untracked transcript). Order: remote, microphone, the
+    /// reconstructed caveat, "coverage not recorded", segments with no recorded time, recording gaps.
     static func captureLine(_ metadata: SummaryMetadata) -> String? {
         let lines = captureLines(metadata).map(\.text)
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
@@ -60,8 +60,11 @@ enum SummaryPromptBuilder {
 
     /// How one side's capture reads, from its recorded status and facts.
     enum SideVerdict: Hashable {
-        case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, uncertainSilence, localSilence,
-             localPartialSilence, compromised, unknown
+        case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, permissionDeniedPartialSilence,
+             uncertainSilence, localSilence, localPartialSilence, compromised, unknown,
+             /// A healthy remote side that received only exact digital zeros (A-I2 ruling): information,
+             /// never a failure claim.
+             onlyDigitalSilence
     }
 
     /// `compromised` is split by WHY, because one word cannot cover them honestly: a shortfall is
@@ -69,9 +72,23 @@ enum SummaryPromptBuilder {
     /// the permission denial was confirmed, and "uncertain" otherwise (the other side may simply
     /// have been muted — never claim a fault that can't be confirmed, never claim health either);
     /// anything else is "captured, but compromised". An unreadable status is "unknown" (fail closed).
+    ///
+    /// Remote side, confirmed denial: "not captured" only when under a second of real audio remains;
+    /// a permission lost part-way through the call is "partly captured" (C-I2 — #220's shape was 29 of
+    /// 52 minutes lost, the rest captured).
+    ///
+    /// A HEALTHY remote side whose every delivered second was exact digital zero: the tap checks the
+    /// permission on any sustained run of zeros, and one it can't confirm or finds denied is reported
+    /// as a denial — a content anomaly, so the side would not be healthy. Healthy means granted: the
+    /// owner's muted-remote case, one neutral line, never a failure word (A-I2 ruling).
     static func verdict(_ note: CaptureSideNote, isRemote: Bool) -> SideVerdict {
         switch TrackAccounting.Status(rawValue: note.status) {
-        case .healthy: return .healthy
+        case .healthy:
+            if isRemote, note.permissionDenied != true, let zeros = clampedZeros(note), zeros >= 1,
+               note.deliveredSeconds - zeros < 1 {
+                return .onlyDigitalSilence
+            }
+            return .healthy
         // `idle` is a tap-only verdict (nothing played on this Mac); a mic is never idle.
         case .idle: return isRemote ? .idle : .healthy
         case .neverDelivered: return .notCaptured
@@ -79,7 +96,10 @@ enum SummaryPromptBuilder {
         case .compromised:
             if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
             if let zeros = clampedZeros(note), isSignificant(zeros, of: note.deliveredSeconds) {
-                if isRemote { return note.permissionDenied == true ? .permissionDeniedSilence : .uncertainSilence }
+                if isRemote {
+                    guard note.permissionDenied == true else { return .uncertainSilence }
+                    return zeros < note.deliveredSeconds - 1 ? .permissionDeniedPartialSilence : .permissionDeniedSilence
+                }
                 // "Only digital silence" only when under a second of non-zero audio remains — a mic
                 // that died 5 minutes into an hour DID record the user for those 5 minutes.
                 return note.deliveredSeconds - zeros < 1 ? .localSilence : .localPartialSilence
@@ -110,8 +130,20 @@ enum SummaryPromptBuilder {
             metadata.remoteCapture.flatMap { sideLine("Remote audio", $0, isRemote: true) },
             metadata.localCapture.flatMap { sideLine("Your microphone", $0, isRemote: false) },
         ].compactMap { $0 }
+        if metadata.captureReconstructed {
+            lines.append(CaptureHeaderLine(
+                // Deterministic (round 7 item 6): never on the strength of a model obeying the rule.
+                text: "Capture facts were reconstructed after a crash and may be incomplete", warrantsBanner: true))
+        }
         if metadata.coverageNotRecorded {
             lines.append(CaptureHeaderLine(text: "Capture coverage was not recorded", warrantsBanner: false))
+        }
+        if metadata.untimedSegmentCount > 0 {
+            let n = metadata.untimedSegmentCount
+            lines.append(CaptureHeaderLine(
+                text: "Transcript: \(n) segment\(n == 1 ? " has" : "s have") no recorded time and \(n == 1 ? "was" : "were") left out of this summary",
+                warrantsBanner: true
+            ))
         }
         if metadata.gapCount > 0 {
             lines.append(CaptureHeaderLine(
@@ -126,7 +158,8 @@ enum SummaryPromptBuilder {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
         let amounts = "(\(delivered) s delivered of \(expected) s expected)"
         let zeros = clampedZeros(note)
-        let silence = zeros.map(seconds) ?? "?"
+        // A figure summed over measured and unmeasured sessions is only a lower bound (round 3 item 5).
+        let silence = (note.exactZeroIsLowerBound ? "at least " : "") + (zeros.map(seconds) ?? "?")
         // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
         // not hide how much.
         let silenceSuffix = (zeros ?? 0).rounded() >= 1 && (zeros ?? 0).isFinite
@@ -146,6 +179,12 @@ enum SummaryPromptBuilder {
             // "not granted" is true for both a denial and a permission never answered (TCC
             // `notDetermined`) — the two statuses that count as a confirmed denial.
             text = "\(label): not captured — system audio permission was not granted; \(silence) s of digital silence were recorded instead"
+        case .permissionDeniedPartialSilence:
+            // Not every silent second is attributed to the denial (R2b item 7, owner-level wording):
+            // some may be the other side being quiet.
+            text = "\(label): partly captured — \(silence) s of \(delivered) s was digital silence; system audio permission was not granted for part of the call"
+        case .onlyDigitalSilence:
+            return CaptureHeaderLine(text: "\(label): only digital silence was received (the other side may have been muted)", warrantsBanner: false)
         case .uncertainSilence:
             text = "\(label): uncertain — \(silence) s were exact digital silence and Parley could not confirm the permission; the other side may have been muted, or not captured"
         case .localSilence: text = "\(label): recorded only digital silence (\(silence) s)"
@@ -244,7 +283,8 @@ enum SummaryPromptBuilder {
     - Do not include small talk, greetings, or off-topic banter
     - Keep the total summary under 500 words
     - Use professional, concise language
-    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, compromised, recorded only digital silence, or partly digital silence, state that in the Summary section before anything else.
+    - If a "Remote audio" or "Your microphone" line says a side was not captured, partly captured, uncertain, compromised, or partly digital silence — or a "Your microphone" line says it recorded only digital silence — state that in the Summary section before anything else.
+    - A "Remote audio: only digital silence was received" line is information, not a fault: never describe it as a capture failure.
     """
 
     static let dualStreamHint = """

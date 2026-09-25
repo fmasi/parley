@@ -267,6 +267,19 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// (and in provenance written before this field).
     public let localContentAnomalyCount: Int?
     public let remoteContentAnomalyCount: Int?
+    /// The transcript was rebuilt by a recovery run (its original was unreadable), and these capture
+    /// facts come from that run's diagnostics, not the recording's: they may be incomplete (round 4
+    /// item 7).
+    public var reconstructed = false
+
+    static let reconstructedNote = "Capture facts come from the recovery run that rebuilt this transcript, not from the recording itself; they may be incomplete."
+
+    /// This stamp, marked as coming from a recovery run's rebuild.
+    public func markedReconstructed() -> CaptureProvenance {
+        var copy = self
+        copy.reconstructed = true
+        return copy
+    }
 
     enum CodingKeys: String, CodingKey {
         case engine
@@ -289,6 +302,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case systemPermissionDeniedConfirmed = "system_permission_denied_confirmed"
         case localContentAnomalyCount = "local_content_anomaly_count"
         case remoteContentAnomalyCount = "remote_content_anomaly_count"
+        case reconstructed
     }
 
     public init(
@@ -366,6 +380,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         systemPermissionDeniedConfirmed = try c.decodeIfPresent(Bool.self, forKey: .systemPermissionDeniedConfirmed) ?? false
         localContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .localContentAnomalyCount)
         remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
+        reconstructed = try c.decodeIfPresent(Bool.self, forKey: .reconstructed) ?? false
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -381,6 +396,10 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
             "events_dropped": eventsDropped,
             "system_permission_denied_confirmed": systemPermissionDeniedConfirmed,
         ]
+        if reconstructed {
+            d["reconstructed"] = true
+            d["reconstructed_note"] = Self.reconstructedNote
+        }
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
         if let micDevice { d["mic_device"] = micDevice }
@@ -462,6 +481,16 @@ public struct CaptureDiagnostics: Sendable {
     /// which merges first present the events.
     private var lastConfirmedDenial: Date?
     private var lastPermissionRestore: Date?
+    /// The user-facing notice's two fields (XI bug 2), same out-of-ring lifetime: scanned from the
+    /// evicting ring, a compromised recording read "Transcription Complete" once its evidence aged
+    /// out. Any denial (confirmed or not) counts for `systemAudioUnrecovered`.
+    private var qualityAnomalyTally = 0
+    /// Every anomaly and every handled route change (R2b item 8), out of ring for the same reason:
+    /// `anomaly_count` is the superset of `quality_anomaly_count` and must never drop below it.
+    private var anomalyTally = 0
+    private var routeChangeTally = 0
+    private var sawSystemAudioUnrecovered = false
+    private var lastDenial: Date?
 
     /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
     /// events the ring already evicted (read back from the live log) alongside events the ring
@@ -495,6 +524,11 @@ public struct CaptureDiagnostics: Sendable {
         guard countedKeys.insert(CaptureEvent.dedupKey(e)).inserted else { return }
         if e.kind == .retry { retryCount += 1 }
         if e.kind == .launchRecovery { launchRecoveries += 1 }
+        if CaptureEventKind.qualityCompromising.contains(e.kind) { qualityAnomalyTally += 1 }
+        if e.severity == .anomaly { anomalyTally += 1 }
+        if e.kind == .restartInPlace { routeChangeTally += 1 }
+        if e.kind == .systemAudioUnrecovered { sawSystemAudioUnrecovered = true }
+        if e.kind == .systemAudioPermissionDenied { lastDenial = max(lastDenial ?? e.timestamp, e.timestamp) }
         if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
             contentAnomalyTallies[track, default: 0] += 1
         }
@@ -508,7 +542,10 @@ public struct CaptureDiagnostics: Sendable {
             if let helper = e.detail["helper_session"] { stoppedHelperSessions.insert(helper) }
             for prefix in ["local", "remote"] {
                 if let parsed = TrackAccounting(detail: e.detail, prefix: prefix) {
-                    coverageTallies[prefix, default: TrackAccounting()] += parsed
+                    // The first session is the tally itself: summed onto an empty counter it would
+                    // read as "measured + unmeasured" and be marked a lower bound.
+                    if var tally = coverageTallies[prefix] { tally += parsed; coverageTallies[prefix] = tally }
+                    else { coverageTallies[prefix] = parsed }
                 }
             }
         }
@@ -547,6 +584,11 @@ public struct CaptureDiagnostics: Sendable {
         stoppedHelperSessions.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
+        qualityAnomalyTally = 0
+        anomalyTally = 0
+        routeChangeTally = 0
+        sawSystemAudioUnrecovered = false
+        lastDenial = nil
         countedKeys.removeAll()
         droppedKeys.removeAll()
     }
@@ -556,35 +598,44 @@ public struct CaptureDiagnostics: Sendable {
     /// idempotent per event (fix round 1), so an event the ring already held or had already evicted
     /// is a safe no-op the second time, and a repeated merge of the same disk log can never
     /// double-count a retry or inflate `droppedCount` (scan B P3.6(2)).
+    /// Merge a helper drain as it came off the wire. Events this build cannot decode (a kind from a
+    /// newer helper) are skipped and counted into `droppedCount`, so `events_dropped` admits them
+    /// (R2b item 8). Callers should prefer this to `merge(events(from:))`, which cannot count them.
+    public mutating func mergeDrained(_ data: Data) {
+        let (events, undecodable) = Self.decodeLossy(data)
+        droppedCount += undecodable
+        if !events.isEmpty { merge(events) }
+    }
+
     public mutating func merge(_ other: [CaptureEvent]) {
         let combined = (events + other).sorted { $0.timestamp < $1.timestamp }
         clear()
         for event in combined { record(event) }
     }
 
-    public var isAnomalous: Bool { events.contains { $0.severity == .anomaly } }
+    /// Whether `<session>.diag.jsonl` is written: from the out-of-ring tally, so a session whose
+    /// anomalies were evicted still writes it (round 3 item 6).
+    public var isAnomalous: Bool { anomalyTally > 0 }
     /// Count handled benign route changes via the in-place restart they each trigger. (The pinned
     /// 48kHz/mono system tap never emits `.formatChanged`, so counting that would always read 0 for
     /// the AirPods HFP↔A2DP scenario this exists to surface — council F5.)
-    public var routeChangeCount: Int { events.lazy.filter { $0.kind == .restartInPlace }.count }
+    /// Out-of-ring, once per event (R2b item 8).
+    public var routeChangeCount: Int { routeChangeTally }
     public var didRecover: Bool { launchRecoveries > 0 }
-    public var anomalyCount: Int { events.lazy.filter { $0.severity == .anomaly }.count }
+    /// Out-of-ring, once per event (R2b item 8): never below `qualityAnomalyCount`.
+    public var anomalyCount: Int { anomalyTally }
     /// Anomalies that mean the CONTENT may be wrong, as opposed to something that happened and was
     /// handled. This is what the user-facing quality notice reads — see `qualityCompromising`.
-    public var qualityAnomalyCount: Int {
-        events.lazy.filter { CaptureEventKind.qualityCompromising.contains($0.kind) }.count
-    }
+    /// Out-of-ring and once per event: correct after eviction, `clear()` and a re-merge (XI bug 2).
+    public var qualityAnomalyCount: Int { qualityAnomalyTally }
     /// True when the mid-recording system stream was declared unrecoverable during the session (#86).
     /// True when the remote side stopped being captured and did not come back. That includes a
     /// System Audio Recording denial that was never restored: the 2026-09-23 recording reported
-    /// `false` here while holding no remote audio at all (#220).
+    /// `false` here while holding no remote audio at all (#220). Out-of-ring, like the count above.
     public var systemAudioUnrecovered: Bool {
-        if events.contains(where: { $0.kind == .systemAudioUnrecovered }) { return true }
-        guard let denied = events.lastIndex(where: { $0.kind == .systemAudioPermissionDenied }) else {
-            return false
-        }
-        let restored = events.lastIndex(where: { $0.kind == .systemAudioPermissionRestored })
-        return restored.map { $0 < denied } ?? true
+        if sawSystemAudioUnrecovered { return true }
+        guard let denied = lastDenial else { return false }
+        return lastPermissionRestore.map { $0 < denied } ?? true
     }
 
     /// The permission statuses that CONFIRM a denial: TCC answered "not granted". `unconfirmed` (the
@@ -612,9 +663,26 @@ public struct CaptureDiagnostics: Sendable {
         (try? Self.makeEncoder().encode(events)) ?? Data()
     }
 
-    /// Decode events transported across XPC. Returns `[]` on any failure (fail-soft).
+    /// Decode events transported across XPC. Returns `[]` when the payload is unreadable (fail-soft).
+    /// One event this build can't decode (a kind from a newer helper) is skipped and logged; it used
+    /// to fail the whole drain and lose every event of the session (C-M7).
     public static func events(from data: Data) -> [CaptureEvent] {
-        (try? makeDecoder().decode([CaptureEvent].self, from: data)) ?? []
+        decodeLossy(data).events
+    }
+
+    private static func decodeLossy(_ data: Data) -> (events: [CaptureEvent], undecodable: Int) {
+        guard let decoded = try? makeDecoder().decode([Lossy].self, from: data) else { return ([], 0) }
+        let events = decoded.compactMap(\.event)
+        if events.count < decoded.count {
+            Logger.state.error("Skipped \(decoded.count - events.count, privacy: .public) capture event(s) this build cannot read")
+        }
+        return (events, decoded.count - events.count)
+    }
+
+    /// One array element that may not decode as a `CaptureEvent`.
+    private struct Lossy: Decodable {
+        let event: CaptureEvent?
+        init(from decoder: Decoder) throws { event = try? CaptureEvent(from: decoder) }
     }
 
     /// Which side an event is about: its `track`/`source` detail, else the kind's own side.
@@ -662,7 +730,12 @@ public struct CaptureDiagnostics: Sendable {
             qualityAnomalyCount: qualityAnomalyCount,
             systemAudioUnrecovered: systemAudioUnrecovered,
             systemDeliveredSeconds: remote.map { Int($0.deliveredSeconds.rounded()) } ?? tapTrackSeconds("system_delivered_seconds"),
-            systemExactZeroSeconds: remote.map { Int($0.exactZeroSeconds.rounded()) } ?? tapTrackSeconds("system_exact_zero_seconds"),
+            // Per-track coverage when there is some — and then only what it measured (SCK measures
+            // no exact zeros: nil, never 0, XI bug 1); the legacy key otherwise.
+            // A lower bound can't be stated by the bare integer: it is left out, and the coverage
+            // carries the value with its mark (R2b item 8).
+            systemExactZeroSeconds: remote.map { r in r.exactZeroIsLowerBound ? nil : r.exactZeroSeconds.map { Int($0.rounded()) } }
+                ?? tapTrackSeconds("system_exact_zero_seconds"),
             localCoverage: local,
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
@@ -699,11 +772,16 @@ public final class LockedDiagnostics: @unchecked Sendable {
 
     /// Empty the ring's EVENTS (an in-session restart, same as `CaptureDiagnostics.clear()` — see
     /// its doc) so a skipped finalize (crash) can't carry the previous session's events into the
-    /// next one. The helper never reads `makeProvenance()`/`retryCount`/`droppedCount` from its own
-    /// ring — only the app does, after draining — so there is no `resetSession()` wrapper here: the
-    /// helper's out-of-ring counters are recorded but never consumed on this side.
+    /// next one.
     public func clear() {
         lock.withLock { $0.clear() }
+    }
+
+    /// A NEW capture session in the helper (council B-M14a): `clear()` plus every out-of-ring counter,
+    /// tally and dedup key. The helper never consumes those (only the app does, after draining), but
+    /// the dedup keys otherwise grow for the helper's whole lifetime.
+    public func resetSession() {
+        lock.withLock { $0.resetSession() }
     }
 
     /// Snapshot the ring for transport and clear it, atomically.

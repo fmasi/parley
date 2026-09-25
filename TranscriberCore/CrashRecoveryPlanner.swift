@@ -5,27 +5,93 @@ public enum CrashRecoveryPlanner {
         public let index: Int; public let baseName: String
         public init(index: Int, baseName: String) { self.index = index; self.baseName = baseName }
     }
-    /// Scan `outputDirectory` for `<sessionId>-N.wav` chunk files (excluding the `_mic.wav`
-    /// companion), returning each discovered index alongside its base name (no extension).
-    /// Shared by `orphanChunks` and `nextFreeChunkIndex` so both use identical name parsing.
-    private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String)] {
+    /// Scan `outputDirectory` for `<sessionId>-N.wav` and `<sessionId>-N.m4a` chunk files (excluding
+    /// the `_mic.wav` companion), returning each discovered index once, alongside its base name (no
+    /// extension) and whether a WAV exists for it. Shared by `orphanChunks` and `nextFreeChunkIndex`
+    /// so both use identical name parsing.
+    private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
         let prefix = "\(sessionId)-"
-        var found: [(index: Int, baseName: String)] = []
-        for name in names where name.hasSuffix(".wav") && !name.hasSuffix("_mic.wav") && name.hasPrefix(prefix) {
+        var found: [Int: (baseName: String, hasWav: Bool)] = [:]
+        for name in names where name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") {
+            let isWav = name.hasSuffix(".wav")
+            guard isWav || name.hasSuffix(".m4a") else { continue }
             let stem = String(name.dropLast(4))
             guard let idx = Int(stem.dropFirst(prefix.count)) else { continue }
-            found.append((index: idx, baseName: stem))
+            found[idx] = (stem, isWav || (found[idx]?.hasWav ?? false))
         }
-        return found
+        return found.map { (index: $0.key, baseName: $0.value.baseName, hasWav: $0.value.hasWav) }
     }
+
+    /// Every archive of `sessionId` in the folder, registered or not: `<id>.m4a` (a merge) and
+    /// `<id>-<n>.m4a` (chunks), by the same name rule as the orphan scan. What a quota pass must never
+    /// delete while the session is being processed (round 8 item 1).
+    public static func sessionArchives(outputDirectory: URL, sessionId: String) -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        let prefix = "\(sessionId)-"
+        return names.filter { name in
+            guard name.hasSuffix(".m4a") else { return false }
+            if name == "\(sessionId).m4a" { return true }
+            guard name.hasPrefix(prefix) else { return false }
+            return Int(name.dropFirst(prefix.count).dropLast(".m4a".count)) != nil
+        }.map { outputDirectory.appendingPathComponent($0) }
+    }
+
+    /// Chunks on disk that `session.json` does not hold. An archive with no WAV counts (C-I4: a crash
+    /// between archiving a chunk and writing session.json left only its `.m4a`; `ChunkProcessor`
+    /// transcribes it from the archive). A FINALIZED session has no orphans at all: its WAVs (kept by
+    /// preserve_source_wav, or after a failed recognition) and archives are its record's audio, and
+    /// re-ingesting them re-finalized over the finished transcript (R2a item 12).
     public static func orphanChunks(outputDirectory: URL, sessionId: String, completedIndices: Set<Int>) -> [OrphanChunk] {
+        guard !isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) else { return [] }
+        return unregisteredChunks(outputDirectory: outputDirectory, sessionId: sessionId, completedIndices: completedIndices)
+    }
+
+    /// Chunks on disk not in `completedIndices`, finalized or not: what a rebuild of a finalized
+    /// session with an unreadable transcript must also take (round 4 item 3).
+    static func unregisteredChunks(outputDirectory: URL, sessionId: String, completedIndices: Set<Int>) -> [OrphanChunk] {
         onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
             .filter { !completedIndices.contains($0.index) }
             .map { OrphanChunk(index: $0.index, baseName: $0.baseName) }
             .sorted { $0.index < $1.index }
     }
+
+    /// Whether `sessionId` was finalized: its durable marker, or — for a session finalized before the
+    /// marker existed — its transcript `<sessionId>.json`. Recovery never re-ingests or re-finalizes
+    /// such a session (R2a item 12).
+    public static func isFinalized(outputDirectory: URL, sessionId: String) -> Bool {
+        SessionState.isMarkedFinalized(directory: outputDirectory, sessionId: sessionId)
+            || FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("\(sessionId).json").path)
+    }
+
+    /// For a finalized session whose transcript verifies: remove its leftover session state, sweep its
+    /// temp files and re-write a missing TXT/SRT — silently, with no rename dialog and no summary.
+    /// What a launch that finds such a session's recovery file calls (stream L's gate), instead of a
+    /// full recovery (round 4 item 1). False when the session is not finalized with a readable
+    /// transcript; nothing is touched then.
+    @discardableResult
+    public static func cleanupFinalized(outputDirectory: URL, sessionId: String) -> Bool {
+        let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
+        guard isFinalized(outputDirectory: outputDirectory, sessionId: sessionId), TranscriptAssembler.verifies(transcript) else { return false }
+        SessionState.sweepTemporaries(directory: outputDirectory, sessionId: sessionId)
+        SessionState.delete(directory: outputDirectory, sessionId: sessionId)
+        TranscriptWriter.writeFormatFileIfMissing(fromJSON: transcript)
+        return true
+    }
+
+    /// Whether recovery has work to do. For a finalized session: its leftovers (session state, a
+    /// missing TXT/SRT) when the transcript verifies — `cleanupFinalized` does it (round 4 item 1) —
+    /// or, when the transcript can't be read back and its own session state is there, a rebuild
+    /// (round 3 item 2).
     public static func isChunkedSessionRecoverable(outputDirectory: URL, sessionId: String) -> Bool {
+        if isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
+            let transcript = outputDirectory.appendingPathComponent("\(sessionId).json")
+            let state = SessionState.read(directory: outputDirectory, sessionId: sessionId)
+            if TranscriptAssembler.verifies(transcript) {
+                return state != nil || TranscriptWriter.formatFileIsMissing(forJSON: transcript)
+            }
+            return state.map { !$0.chunks.isEmpty } ?? false
+        }
         let state = SessionState.read(directory: outputDirectory, sessionId: sessionId)
         if let state, !state.chunks.isEmpty { return true }
         let completed = Set(state?.chunks.map(\.index) ?? [])
@@ -34,10 +100,12 @@ public enum CrashRecoveryPlanner {
 
     /// The next chunk index guaranteed not to collide with any chunk index already known to this
     /// session — either recorded as completed in `session.json` or present as a `<sessionId>-N.wav`
-    /// file on disk. Restart-capture sites (crash-relaunch, no-live-rotator XPC crash) must name
-    /// their new WAV with this index, never with the legacy segment counter: the segment counter
-    /// and the chunk-index namespace can collide, and colliding either drops the restart file as
-    /// "already completed" or truncates an in-progress chunk's WAV on create (#135).
+    /// or `.m4a` file on disk (C-M16: an index whose only artefact was its archive was reusable, and
+    /// the archiver then removed that archive as stale output). Restart-capture sites (crash-relaunch,
+    /// no-live-rotator XPC crash) must name their new WAV with this index, never with the legacy
+    /// segment counter: the segment counter and the chunk-index namespace can collide, and colliding
+    /// either drops the restart file as "already completed" or truncates an in-progress chunk's WAV
+    /// on create (#135).
     public static func nextFreeChunkIndex(outputDirectory: URL, sessionId: String) -> Int {
         let completed = SessionState.read(directory: outputDirectory, sessionId: sessionId)?.chunks.map(\.index) ?? []
         let onDisk = onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId).map(\.index)

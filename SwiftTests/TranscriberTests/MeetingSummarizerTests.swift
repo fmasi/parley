@@ -558,3 +558,169 @@ private final class CapturingProvider: SummaryProvider, @unchecked Sendable {
         handler(segments, metadata)
     }
 }
+
+/// C-I6 (R2 council): the disclosure was stamped only after a summary was written, so a request
+/// that timed out AFTER the transcript left the machine kept `transcript_transmitted: false`.
+struct MeetingSummarizerDisclosureTests {
+    private func transcript() throws -> (dir: URL, path: URL) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("disclosure-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("meeting.json")
+        try TranscriptAssembler.write(TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: 0, end: 2, speaker: "Alice", text: "Ship it Friday", source: "")], audioPaths: [],
+            outputFormat: "json", language: "en", numSpeakers: nil, diarization: false, dualStream: false), to: path)
+        return (dir, path)
+    }
+
+    private func disclosure(_ path: URL) throws -> [String: Any] {
+        let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+        return try #require((json["metadata"] as? [String: Any])?["disclosure"] as? [String: Any])
+    }
+
+    private final class Probe: SummaryProvider, @unchecked Sendable {
+        let path: URL
+        let failure: (any Error)?
+        var seen: [String: Any]?
+        init(path: URL, failure: (any Error)? = nil) { self.path = path; self.failure = failure }
+        func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+            let json = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any]
+            seen = (json?["metadata"] as? [String: Any])?["disclosure"] as? [String: Any]
+            if let failure { throw failure }
+            return "### Summary\nDone."
+        }
+    }
+
+    /// The record says "sent" before the request goes, not after an answer comes back.
+    @Test func theAttemptIsStampedBeforeTheRequestLeaves() async throws {
+        let (dir, path) = try transcript(); defer { try? FileManager.default.removeItem(at: dir) }
+        let probe = Probe(path: path)
+        try await MeetingSummarizer.summarize(transcriptPath: path, provider: probe, endpoint: "https://api.example.com/v1")
+        #expect(probe.seen?["transcript_transmitted"] as? Bool == true)
+        #expect(probe.seen?["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"])
+        #expect(probe.seen?["summary_generated"] as? Bool == false)
+        #expect(probe.seen?["summary_endpoint"] == nil, "nothing has generated a summary yet")
+        let final = try disclosure(path)
+        #expect(final["summary_generated"] as? Bool == true && final["transcript_transmitted"] as? Bool == true)
+        #expect(final["summary_endpoint"] as? String == "remote (api.example.com)")
+    }
+
+    /// A timeout after sending (the documented -1001 case) must never leave `false`.
+    @Test func aFailureAfterSendingLeavesTheTransmissionOnRecord() async throws {
+        let (dir, path) = try transcript(); defer { try? FileManager.default.removeItem(at: dir) }
+        let outcome = await MeetingSummarizer.runSummary(transcriptPath: path, provider: Probe(path: path, failure: URLError(.timedOut)),
+                                                         endpoint: "https://api.example.com/v1")
+        guard case .failed = outcome else { Issue.record("expected a failure, got \(outcome)"); return }
+        let d = try disclosure(path)
+        #expect(d["transcript_transmitted"] as? Bool == true)
+        #expect(d["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"])
+        #expect(d["summary_generated"] as? Bool == false)
+        #expect(d["summary_endpoint"] == nil, "no summary was generated")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("meeting-summary.md").path))
+    }
+
+    /// A later summary on this Mac never clears an earlier transmission from the record — and the two
+    /// facts are recorded apart (R2b item 6): where the transcript was SENT, and which endpoint
+    /// GENERATED the current summary.
+    @Test func aLaterLocalSummaryNeverClearsAnEarlierTransmission() async throws {
+        let (dir, path) = try transcript(); defer { try? FileManager.default.removeItem(at: dir) }
+        try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "https://api.example.com/v1")
+        _ = await MeetingSummarizer.runSummary(transcriptPath: path, provider: Probe(path: path, failure: URLError(.timedOut)),
+                                               endpoint: "http://127.0.0.1:1234")
+        try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "http://127.0.0.1:1234")
+        let d = try disclosure(path)
+        #expect(d["transcript_transmitted"] as? Bool == true, "it was sent once; that stays on record")
+        #expect(d["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)"], "where it was sent")
+        #expect(d["summary_generated"] as? Bool == true)
+        #expect(d["summary_endpoint"] as? String == "local (127.0.0.1:1234)", "the endpoint that generated the summary on disk")
+        try await MeetingSummarizer.summarize(transcriptPath: path, provider: Probe(path: path), endpoint: "https://llm.example.org/v1")
+        #expect(try disclosure(path)["transcript_transmitted_to"] as? [String] == ["remote (api.example.com)", "remote (llm.example.org)"],
+                "every host, once each, in order")
+    }
+
+    /// Local only: attempted, never transmitted, and the endpoint is named.
+    @Test func aLocalAttemptIsRecordedAsNotTransmitted() async throws {
+        let (dir, path) = try transcript(); defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await MeetingSummarizer.runSummary(transcriptPath: path, provider: Probe(path: path, failure: URLError(.timedOut)),
+                                               endpoint: "http://127.0.0.1:1234")
+        let d = try disclosure(path)
+        #expect(d["transcript_transmitted"] as? Bool == false && d["summary_generated"] as? Bool == false)
+        #expect(d["transcript_transmitted_to"] as? [String] == [])
+        #expect(d["summary_endpoint"] == nil)
+    }
+}
+
+/// R2b item 5: a segment with no usable time was fed to the model at 00:00:00 (and could make the
+/// meeting 0 s long). It is left out of the summary input, and the summary says so.
+struct MeetingSummarizerTimelessSegmentTests {
+    @Test func aSegmentWithoutATimeIsLeftOutAndSaidSo() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("timeless-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let json: [String: Any] = ["metadata": ["dual_stream": false] as [String: Any], "segments": [
+            ["start": 1.0, "end": 60.0, "speaker": "Alice", "text": "timed"],
+            ["start": NSNull(), "end": NSNull(), "speaker": "Alice", "text": "lost in time", "time_unknown": true],
+        ]]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let (segments, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(segments.map(\.text) == ["timed"])
+        #expect(metadata.untimedSegmentCount == 1)
+        #expect(metadata.durationSeconds == 60, "the last segment has no time: the duration is the latest real end")
+        let line = "Transcript: 1 segment has no recorded time and was left out of this summary"
+        #expect(SummaryPromptBuilder.captureLine(metadata) == line)
+        #expect(SummaryPromptBuilder.captureBanner(metadata)?.contains("> \(line)") == true)
+    }
+}
+
+/// Round 3 item 5: the lower-bound mark is read off the transcript.
+struct MeetingSummarizerLowerBoundTests {
+    @Test func theLowerBoundMarkIsRead() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("lower-bound-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let remote: [String: Any] = ["status": "compromised", "expected_seconds": 600.0, "delivered_seconds": 600.0,
+                                     "exact_zero_seconds": 300.0, "exact_zero_seconds_is_lower_bound": true]
+        let json: [String: Any] = ["metadata": ["capture": ["remote": remote]], "segments": [["start": 0.0, "end": 1.0, "speaker": "A", "text": "hi"]]]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        let (_, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(metadata.remoteCapture?.exactZeroIsLowerBound == true)
+    }
+}
+
+/// Round 4 item 6: every rewrite of a finalized transcript is durable — the marker must never vouch
+/// for a transcript a power loss can take back.
+struct TranscriptRewritesAreDurableTests {
+    @Test func renamesAndDisclosuresAreFullySynced() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("durable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("m.json")
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "speaker": "Remote Speaker 1", "text": "hi"]]]).write(to: url)
+        DurableFile.startRecordingSyncsForTesting(under: dir)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: dir) }
+        let before = DurableFile.syncedForTesting.count
+        #expect(TranscriptRenamer.applyRenames(["Remote Speaker 1": "Alice"], jsonPath: url))
+        try MeetingSummarizer.stampDisclosure(.attempted(endpoint: "http://127.0.0.1:1"), into: url)
+        #expect(DurableFile.syncedForTesting.dropFirst(before).filter { $0 == url.path }.count == 2)
+    }
+}
+
+/// Round 6 item 4: a rebuilt record's capture facts come from the recovery run. The summary header
+/// carries that caveat.
+struct MeetingSummarizerReconstructedTests {
+    @Test func aReconstructedRecordSaysSoInTheHeader() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("reconstructed-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let provenance = CaptureProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil,
+                                           routeChanges: 0, retries: 0, recovered: true, anomalyCount: 0).markedReconstructed()
+        try TranscriptAssembler.write(TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: 0, end: 1, speaker: "A", text: "hi", source: "")], audioPaths: [], outputFormat: "json",
+            language: "en", numSpeakers: nil, diarization: false, dualStream: false, provenance: provenance), to: url)
+        let (_, metadata) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
+        #expect(metadata.captureReconstructed)
+        #expect(SummaryPromptBuilder.captureLine(metadata)?.contains("Capture facts were reconstructed after a crash and may be incomplete") == true)
+        // Round 7 item 6: in the deterministic banner, never on the strength of a model obeying.
+        #expect(SummaryPromptBuilder.captureBanner(metadata)?.contains("> Capture facts were reconstructed after a crash and may be incomplete") == true)
+        #expect(SummaryPromptBuilder.captureLine(SummaryMetadata(sessionName: "s", date: Date(), durationSeconds: 1, speakers: [])) == nil,
+                "no caveat for a record that was not rebuilt")
+    }
+}
+

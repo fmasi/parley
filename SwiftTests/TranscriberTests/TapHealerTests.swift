@@ -273,6 +273,65 @@ import Testing
         #expect(r.tap.rebuilds.last?.rung == .rebuildAggregate, "a fresh episode")
     }
 
+    // MARK: - H2 council (B-M1): a coreaudiod restart or a grant between sleep and wake
+
+    /// `srst` arrives while the healer is suspended for sleep: dropping it left the tap's objects (and
+    /// its listeners, `srst` included) dead until a liveness episode escalated to a tap rung. It runs on
+    /// the wake — or on the pause's expiry, which wakes the healer the same way.
+    @Test func aServiceRestartWhileAsleepRunsOnWake() {
+        let r = rig()
+        r.healer.cancelAll()                  // sleep
+        r.healer.trigger(.serviceRestarted)
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty, "nothing runs while asleep")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.count == 1)
+        #expect(r.tap.rebuilds.last?.rung == .rebuildTap, "the top rung: every old object id is dead")
+    }
+
+    @Test func aPermissionGrantWhileAsleepRunsOnWake() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.permissionGrant)
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate])
+    }
+
+    /// Both pending: the service restart's new tap covers the grant too.
+    @Test func aRestartAndAGrantWhileAsleepRunOneTapRung() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.trigger(.permissionGrant)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildTap])
+    }
+
+    @Test func aVerdictAfterAMissedWakeAlsoRunsThePendingRestart() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.trigger(.stalled)            // the wake was lost
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildTap])
+    }
+
+    @Test func aPendingRestartDoesNotOutliveTheSession() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.endSession()
+        r.healer.startSession(tap: r.tap)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 5)
+        #expect(r.tap.rebuilds.isEmpty, "a stopped session's restart never reaches the next one")
+    }
+
     @Test func aVerdictAfterAStopIsStillIgnored() {
         let r = rig()
         r.healer.endSession()

@@ -302,7 +302,7 @@ public final class TranscriptionRunner {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
 
         // #93: archive EVERY contributing segment to its own stereo AAC (L=mic, R=system),
@@ -324,10 +324,10 @@ public final class TranscriptionRunner {
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
-                    protectedFile: archived.last
+                    protectedFiles: archived   // every file the transcript lists (round 7 item 1)
                 )
             } catch {
-                Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+                Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
             }
         }
 
@@ -411,6 +411,13 @@ public final class TranscriptionRunner {
             SpeakerAssignment.tagWithSourcePrefix(&allSegments)
         }
 
+        // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
+        // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
+        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV.
+        if !(config.preserveSourceWAV ?? false) {
+            Self.removeLeftoverWAVs(of: sortedChunks, in: outputDirectory)
+        }
+
         // 5. Audio paths from chunks — must be in index order so AudioConcatenator
         // stitches them chronologically. (#56)
         let chunkAudioPaths = sortedChunks.map {
@@ -422,20 +429,39 @@ public final class TranscriptionRunner {
         // merged audio stays on the transcript's wall-clock timeline (P9).
         let audioPaths: [URL]
         var mergedAudio: [String: Any]?
+        var finalizeIssues: [SessionIssue] = []
         // Where the transcript placed each audio file on its wall-clock timeline (seconds from the
         // meeting start, as TranscriptMerger does) — re-detect rebuilds the same timeline from it.
         let perChunkOffsets = sortedChunks.map { $0.startTime.timeIntervalSince(sessionState.meetingStart) }
         var chunkOffsets = perChunkOffsets
         // A finalize RE-RUN after the first run merged the chunks and deleted them: the surviving
         // `<session>.m4a` is the recording's audio — list it, say so, and let the quota protect it.
+        // A chunk whose own file still exists is NOT in it (a rebuild ingested it after the merge):
+        // it is listed too, in time order with its offset, so every segment has audio behind it
+        // (round 6 item 1). Not re-merged: the merged file is the only copy of the chunks it holds.
         let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
-        let sourcesGone = !chunkAudioPaths.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
-        if chunkAudioPaths.count > 1, sourcesGone, TranscriptAssembler.duration(of: mergedURL) > 0 {
-            Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it")
-            audioPaths = [mergedURL]
-            chunkOffsets = [perChunkOffsets.min() ?? 0]
+        let present = chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
+        let sourcesGone = present.contains(false)
+        let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
+        if chunkAudioPaths.count > 1, sourcesGone, mergedSeconds > 0 {
+            // The merged file starts at the earliest chunk. A chunk is outside it only when it ENDS
+            // past the merged file's end — never merely because its own file survived: with
+            // preserve_source_wav on, the merged chunks' files survive too (round 7 item 2). The
+            // merge keeps every chunk within one gap threshold of its wall-clock offset (sub-second
+            // gaps are not padded), so a chunk inside it ends no later than the merged end plus that
+            // threshold; one after it ends a whole chunk later (round 8 item 3: a tiny final chunk
+            // was listed twice when measured from its start).
+            let mergedOffset = perChunkOffsets.min() ?? 0
+            let mergedEnd = mergedOffset + mergedSeconds + AudioConcatenator.gapThresholdSeconds
+            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present)
+                .filter { $0.1 && $0.0.1 + TranscriptAssembler.duration(of: $0.0.0) > mergedEnd }.map(\.0)
+            let listed = ([(mergedURL, mergedOffset)] + alongside).sorted { $0.1 < $1.1 }
+            Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it, with \(alongside.count, privacy: .public) chunk file(s) not in it")
+            audioPaths = listed.map(\.0)
+            chunkOffsets = listed.map(\.1)
             var previous = Self.previousMergedAudio(transcriptAt: outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")) ?? [:]
             previous["reused_existing"] = true
+            if !alongside.isEmpty { previous["chunks_not_in_merge"] = alongside.count }
             mergedAudio = previous
         } else if config.mergeChunkedAudio && chunkAudioPaths.count > 1 {
             do {
@@ -457,10 +483,16 @@ public final class TranscriptionRunner {
                 Logger.files.info(
                     "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .sensitive) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
+            } catch AudioConcatenatorError.implausibleTiming(let why) {
+                // Refused before anything was written: the chunk files are the audio, and the record
+                // says why they were not merged (round 5), with the reason (round 7 item 3).
+                Logger.files.error("Audio not merged — implausible chunk timing (\(why, privacy: .public)); keeping separate files")
+                audioPaths = chunkAudioPaths
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .mergeSkippedImplausibleTiming, track: nil, count: nil, detail: why)))
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
                 // so on throw the chunk files are still intact. The error can name files: private.
-                Logger.files.error("Audio concatenation failed (\(type(of: error), privacy: .public)), keeping separate files: \(error, privacy: .private)")
+                Logger.files.error("Audio concatenation failed, keeping separate files: \(error, privacy: .private)")
                 audioPaths = chunkAudioPaths
             }
         } else {
@@ -476,9 +508,31 @@ public final class TranscriptionRunner {
         default: detectedLanguage = "multilingual"
         }
 
+        // 6b. Storage quota enforcement, before the record is written so it can say what the quota
+        // could not do. Never a file backing this record: every listed audio file, every chunk file,
+        // and every archive of the session in the folder (rounds 7-8 item 1). Protecting only the
+        // last listed file let a rebuild's quota pass delete the merged file — the only copy of the
+        // earlier chunks.
+        do {
+            let report = try StorageManager.enforceQuotaReport(
+                in: outputDirectory,
+                limitHours: config.audioArchiveLimitHours,
+                bitrateKbps: config.archiveBitrateKbps,
+                protectedFiles: audioPaths + chunkAudioPaths + [mergedURL]
+                    + CrashRecoveryPlanner.sessionArchives(outputDirectory: outputDirectory, sessionId: sessionState.sessionId)
+            )
+            if report.protectedOverrunBytes > 0,
+               !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                    code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(report.protectedOverrunBytes) bytes over the quota")))
+            }
+        } catch {
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+        }
+
         // 7. Assemble JSON
         let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
-        let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues)
+        let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues + finalizeIssues)
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
             audioPaths: audioPaths,
@@ -501,34 +555,49 @@ public final class TranscriptionRunner {
 
         let baseName = sessionState.sessionId
         let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
+        SessionState.sweepTemporaries(directory: outputDirectory, sessionId: baseName)
         try TranscriptAssembler.write(json, to: jsonPath)
+        // Durably: this session is finished. A lingering recovery file must never re-finalize over it
+        // (R2a item 12). A failure here leaves the transcript itself as the (weaker) marker.
+        do {
+            try SessionState.markFinalized(directory: outputDirectory, sessionId: baseName, transcript: jsonPath.lastPathComponent)
+        } catch {
+            Logger.state.error("Could not mark the session finalized: \(error, privacy: .private)")
+        }
 
         // 8. Write format file
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
-        }
-
-        // 9. Storage quota enforcement
-        do {
-            try StorageManager.enforceQuota(
-                in: outputDirectory,
-                limitHours: config.audioArchiveLimitHours,
-                bitrateKbps: config.archiveBitrateKbps,
-                protectedFile: audioPaths.last
-            )
-        } catch {
-            Logger.files.error("Quota enforcement failed: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
 
         // 10. Clean up session.json
-        SessionState.delete(directory: outputDirectory)
+        SessionState.delete(directory: outputDirectory, sessionId: sessionState.sessionId)
 
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// See step 4b of `finalize`.
+    static func removeLeftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) {
+        let fm = FileManager.default
+        for chunk in chunks where chunk.audioPath.hasSuffix(".m4a") && !chunk.issues.contains(where: { $0.code == .asrFailed }) {
+            guard fm.fileExists(atPath: directory.appendingPathComponent(chunk.audioPath).path) else { continue }
+            let base = (chunk.audioPath as NSString).deletingPathExtension
+            for name in [base + ".wav", base + "_mic.wav"] {
+                let url = directory.appendingPathComponent(name)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                do {
+                    try fm.removeItem(at: url)
+                    Logger.files.info("Removed a leftover WAV of archived chunk \(chunk.index, privacy: .public)")
+                } catch {
+                    Logger.files.error("Could not remove a leftover WAV of chunk \(chunk.index, privacy: .public): \(error, privacy: .private)")
+                }
+            }
+        }
     }
 
     /// The `merged_audio` block of a transcript an earlier finalize wrote, if any.
@@ -547,6 +616,7 @@ public final class TranscriptionRunner {
             if let chunk { d["chunk"] = chunk }
             if let track = issue.track { d["track"] = track }
             if let count = issue.count { d["count"] = count }
+            if let detail = issue.detail { d["detail"] = detail }
             return d
         }
         return chunks.flatMap { c in c.issues.map { dictionary(chunk: c.index, issue: $0) } }
@@ -620,23 +690,29 @@ public final class TranscriptionRunner {
         if failSetupForTesting { throw SetupFailure.forTesting }
         let (transcriber, diarizer) = try prepareEngine(config: config)
 
-        var sessionState = seededState ?? SessionState(
+        let fresh = SessionState(
             sessionId: sessionBaseName,
             meetingStart: Date(),
             engine: config.engine.rawValue,
             chunkDurationMinutes: config.validatedChunkDuration,
             chunks: []
         )
-        // A seed from another session is accepted — refusing would lose the chunks it holds — but
-        // never silently: it is logged and recorded as a problem. An engine change between crash and
-        // resume (a Settings change) is recorded as information only.
+        var sessionState = seededState ?? fresh
+        // A seed from ANOTHER session is refused (C-I5): accepted, it kept the other id, so this
+        // recording finalized as the other's `<id>.json`, merged into the other's `<id>.m4a` and
+        // took the other meeting's chunks into its record. This session continues from its OWN state
+        // when that is on disk (R2a M3: never an empty overwrite of it), else starts fresh; the
+        // refusal is recorded as a problem. The seed's own file is untouched and stays recoverable
+        // under its id. An engine change between crash and resume (a Settings change) is recorded as
+        // information only, and still seeds.
         if let seededState, seededState.sessionId != sessionBaseName {
+            let own = SessionState.read(directory: outputDirectory, sessionId: sessionBaseName)
             Logger.state.error(
-                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — resuming anyway"
+                "Seeded session \(seededState.sessionId, privacy: .sensitive) does not match \(sessionBaseName, privacy: .sensitive) — not seeding; continuing from \(own == nil ? "a fresh state" : "this session's own state", privacy: .public)"
             )
+            sessionState = own ?? fresh
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .seedMismatch, track: nil, count: nil)))
-        }
-        if let seededState, seededState.engine != config.engine.rawValue {
+        } else if let seededState, seededState.engine != config.engine.rawValue {
             Logger.state.info(
                 "Seeded session was transcribed with \(seededState.engine, privacy: .public); resuming with \(config.engine.rawValue, privacy: .public)"
             )

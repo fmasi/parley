@@ -10,7 +10,8 @@ public enum DeadlineError: Error, Equatable {
 // drive it.
 
 /// `body`, or `DeadlineError.timedOut(label)` once `seconds` of the clock's time have passed. The body runs
-/// on after a timeout, but its result is dropped; a body that finishes first cancels the deadline.
+/// on after a timeout (a stop that finishes late still seals its files), but its result is dropped. A body
+/// that finishes first cancels the deadline, so no wakeup is left pending (H2 round 2, council B-M13).
 public func withDeadline<T: Sendable, C: Clock>(
     seconds: Double, label: String, clock: C = SuspendingClock(),
     _ body: @escaping @Sendable () async throws -> T

@@ -35,9 +35,12 @@ public struct CaptureSideNote: Equatable, Sendable {
     /// Content-compromising capture anomalies recorded on THIS side (`content_anomaly_count`); nil
     /// when not recorded.
     public let anomalyCount: Int?
+    /// `exactZeroSeconds` sums measured and unmeasured sessions: at least that much (round 3 item 5).
+    public let exactZeroIsLowerBound: Bool
 
     public init(status: String, deliveredSeconds: Double, expectedSeconds: Double,
-                exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil) {
+                exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil, exactZeroIsLowerBound: Bool = false) {
+        self.exactZeroIsLowerBound = exactZeroIsLowerBound
         self.status = status
         self.deliveredSeconds = deliveredSeconds
         self.expectedSeconds = expectedSeconds
@@ -63,11 +66,18 @@ public struct SummaryMetadata: Sendable {
     /// Periods with nothing recorded (relaunch, sleep) from `metadata.capture.gaps`.
     public let gapCount: Int
     public let gapSeconds: Double
+    /// Segments left out of the summary input because they have no usable time (R2b item 5): the
+    /// summary says so rather than leave their words out silently.
+    public let untimedSegmentCount: Int
+    /// The record was rebuilt by a recovery run: its capture facts come from that run and may be
+    /// incomplete (`capture_provenance.reconstructed`, round 6 item 4).
+    public let captureReconstructed: Bool
 
     public init(sessionName: String, date: Date, durationSeconds: Double, speakers: [String],
                 dualStream: Bool = false, echoSegmentsRemoved: Int = 0,
                 remoteCapture: CaptureSideNote? = nil, localCapture: CaptureSideNote? = nil,
-                coverageNotRecorded: Bool = false, gapCount: Int = 0, gapSeconds: Double = 0) {
+                coverageNotRecorded: Bool = false, gapCount: Int = 0, gapSeconds: Double = 0, untimedSegmentCount: Int = 0,
+                captureReconstructed: Bool = false) {
         self.sessionName = sessionName
         self.date = date
         self.durationSeconds = durationSeconds
@@ -79,6 +89,8 @@ public struct SummaryMetadata: Sendable {
         self.coverageNotRecorded = coverageNotRecorded
         self.gapCount = gapCount
         self.gapSeconds = gapSeconds
+        self.untimedSegmentCount = untimedSegmentCount
+        self.captureReconstructed = captureReconstructed
     }
 }
 

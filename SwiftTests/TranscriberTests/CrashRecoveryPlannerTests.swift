@@ -224,4 +224,40 @@ struct CrashRecoveryPlannerTests {
         #expect(plan.newSentinel.chunkIndex == 6)
         #expect(plan.newSentinel.segment == 4)
     }
+
+    // MARK: - R2 council (C-I4, C-M16): an archived chunk not in session.json
+
+    /// C-I4: a crash between archiving a chunk (WAVs deleted) and writing session.json left its
+    /// `.m4a` invisible to recovery. An unregistered `<id>-N.m4a` is an orphan too.
+    @Test func anUnregisteredM4aIsAnOrphan() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0])
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-0.m4a"))   // registered: not an orphan
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-1.m4a"))
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-2.m4a"))   // WAV and archive: one orphan
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: [0])
+                == [.init(index: 1, baseName: "m-1"), .init(index: 2, baseName: "m-2")])
+    }
+
+    /// Once a session is finalized (its transcript exists), its chunk archives are its audio, not orphans.
+    @Test func aFinalizedSessionsArchivesAreNotOrphans() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-0.m4a"))
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("m.json"))
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: []).isEmpty)
+        #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+    }
+
+    /// C-M16: an index whose only artefact is `.m4a` was reusable by restart naming, and the archiver
+    /// then removed that `.m4a` as stale output. Every on-disk artefact holds its index.
+    @Test func nextFreeIndexCountsArchives() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-4.m4a"))
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("m.json"))   // even after finalize
+        #expect(CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: dir, sessionId: "m") == 5)
+    }
 }

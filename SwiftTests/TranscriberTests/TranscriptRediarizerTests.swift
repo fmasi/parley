@@ -351,6 +351,21 @@ struct TranscriptRediarizerProgressTests {
         }
     }
 
+    /// Round 4 item 6: the re-detect's backup and rewrite are durable.
+    @Test("the backup and the rewritten transcript are fully synced")
+    func rewritesAreDurable() async throws {
+        let (transcript, cleanup) = try makeMicOnlyRecording()
+        defer { cleanup() }
+        let dir = transcript.deletingLastPathComponent()
+        DurableFile.startRecordingSyncsForTesting(under: dir)
+        defer { DurableFile.stopRecordingSyncsForTesting(under: dir) }
+        let before = DurableFile.syncedForTesting.count
+        _ = try await TranscriptRediarizer.rediarize(transcript: transcript, source: "local", speakerCount: 1, diarizer: FakeDiarizer())
+        let synced = DurableFile.syncedForTesting.dropFirst(before)
+        #expect(synced.contains(transcript.path))
+        #expect(synced.contains(TranscriptRediarizer.backupURL(for: transcript).path))
+    }
+
     @Test("reports decodingAudio then detectingSpeakers, with the diarizer's own fraction forwarded")
     func progressSequenceMatchesDiarizerCallback() async throws {
         let (transcript, cleanup) = try makeMicOnlyRecording()
@@ -878,5 +893,27 @@ struct TranscriptRediarizerTimelineTests {
     @Test func unreadableChunksStillCountTowardTheBound() {
         #expect(TranscriptRediarizer.timelineBound(fileLengths: [nil, 6], cachedDurations: [10, 6], gapSeconds: [], offsets: nil) == 16 + 10)
         #expect(TranscriptRediarizer.timelineBound(fileLengths: [nil, 6], cachedDurations: [], gapSeconds: [], offsets: nil) == 12 + 6)
+    }
+}
+
+/// R2b item 5.
+@Suite struct TranscriptRediarizerTimelessSegmentTests {
+    private func seg(_ start: Double, _ end: Double, _ speaker: String, _ source: String, _ text: String) -> [String: Any] {
+        ["start": start, "end": end, "speaker": speaker, "source": source, "text": text, "confidence": 0.9]
+    }
+    private func labeled(_ start: Double, _ end: Double, _ speaker: String, _ text: String) -> LabeledSegment {
+        LabeledSegment(start: start, end: end, speaker: speaker, text: text, source: "local", confidence: 0.9)
+    }
+
+    /// R2b item 5: re-detect replaced the channel wholesale and its relabel input skipped a segment
+    /// with no time, so the words were DROPPED. It is kept untouched, after the timed ones (never at 0).
+    @Test("a segment without a time is kept untouched, never dropped or moved to 0")
+    func aTimelessSegmentSurvivesRedetect() {
+        var timeless = seg(0, 0, "Local Speaker 1", "local", "no time")
+        timeless["start"] = NSNull(); timeless["end"] = NSNull(); timeless["time_unknown"] = true
+        let original = [seg(3, 5, "Local Speaker 1", "local", "a"), timeless, seg(5, 10, "Remote Speaker 1", "remote", "b")]
+        let merged = TranscriptRediarizer.mergeRelabeled(into: original, source: "local", relabeled: [labeled(3, 5, "Local Speaker 2", "a")])
+        #expect(merged.map { $0["text"] as? String } == ["a", "b", "no time"])
+        #expect(merged.last?["speaker"] as? String == "Local Speaker 1" && merged.last?["start"] is NSNull)
     }
 }
