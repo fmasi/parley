@@ -403,7 +403,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Mic: heal on the first silence verdict of an episode, heal AND alarm on the second (C5).
     private func handleMicLiveness(_ verdict: TrackLivenessMonitor.Verdict) {
         if let (kind, message) = livenessBanner(track: .mic, verdict: verdict) { onQualityAnomaly?(kind.rawValue, message) }
-        let alarmMessage = "The microphone isn’t delivering any audio. Try another microphone from the menu."
+        let alarmMessage = "The microphone isn’t delivering any audio. Check Microphone access for Parley in System Settings, or try another microphone from the menu."
         switch micHealPolicy.onVerdict(verdict, now: Double(DispatchTime.now().uptimeNanoseconds) / 1e9) {
         case .heal:
             healMic()
@@ -463,11 +463,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // The reopen itself has not returned (gotcha #68): the mic's analog of the tap's stuck rung.
             Logger.audio.error("Microphone reopen still running after \(deadline, privacy: .public)s — alarming")
             record(.recoveryStuck, .anomaly, ["track": CaptureTrack.mic.rawValue, "seconds": "\(deadline)"])
-            raiseAlarm(.micNotDelivering, "The microphone could not be reopened and isn’t delivering any audio. Try another microphone from the menu.")
+            raiseAlarm(.micNotDelivering, "The microphone could not be reopened and isn’t delivering any audio. Check Microphone access for Parley in System Settings, or try another microphone from the menu.")
         case .alarm:
             // It returned, so the re-armed monitor records its own verdict; only the alarm is ours (item 15).
             Logger.audio.error("Microphone reopened but delivered nothing within \(deadline, privacy: .public)s — alarming")
-            raiseAlarm(.micNotDelivering, "The microphone was reopened but isn’t delivering any audio. Try another microphone from the menu.")
+            raiseAlarm(.micNotDelivering, "The microphone was reopened but isn’t delivering any audio. Check Microphone access for Parley in System Settings, or try another microphone from the menu.")
         case .clear:
             clearDeliveryAlarm(.micNotDelivering)
         default:
@@ -743,7 +743,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                         let desc = "\(error)"
                         if desc.contains("permission") || desc.contains("denied")
                             || desc.contains("notAuthorized") || desc.contains("Microphone access") {
-                            answer(false, "Permission denied — grant Screen Recording and Microphone access in System Settings")
+                            // Name the permissions this source needs (final review E-M1): the tap needs no
+                            // Screen Recording.
+                            answer(false, source == .coreAudioTap
+                                ? "Permission denied — grant Microphone access (and System Audio Recording for the other side) in System Settings"
+                                : "Permission denied — grant Screen Recording and Microphone access in System Settings")
                         } else {
                             answer(false, "Capture failed: \(error.localizedDescription)")
                         }
@@ -1429,7 +1433,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     Logger.audio.error("Microphone unavailable mid-session: \(info.reason, privacy: .public)")
                     self.record(.restartFailed, .anomaly, ["source": "mic", "reason": info.reason])
                     // The heal gave up, so no second verdict will come: alarm now (scan C11).
-                    self.raiseAlarm(.micNotDelivering, "The microphone stopped delivering audio and could not be reopened. Try another microphone from the menu.")
+                    self.raiseAlarm(.micNotDelivering, "The microphone stopped delivering audio and could not be reopened. Check Microphone access for Parley in System Settings, or try another microphone from the menu.")
                 }
             }
         }
