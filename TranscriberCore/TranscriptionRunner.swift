@@ -55,9 +55,9 @@ public final class TranscriptionRunner {
     /// long meeting's record — but never unbounded. Past it the write is not waited for: `FolderNotAnswering`, and nothing
     /// is claimed.
     public var folderWriteSeconds: Double = 30
-    /// The leftover WAVs' deletes (L review 215): run after the record is written, never inside a bounded read. Tests slow
-    /// them.
-    var leftoverRemoval: @Sendable ([ProcessedChunk], URL) -> Void = { TranscriptionRunner.removeLeftoverWAVs(of: $0, in: $1) }
+    /// The leftover WAVs' deletes (L review 215): run after the record is written, never inside a bounded read — the list the
+    /// look found (L review 240). Tests slow them.
+    var leftoverRemoval: @Sendable ([URL]) -> Void = { TranscriptionRunner.removeLeftoverWAVs($0) }
     private enum SetupFailure: Error { case forTesting }
 
     private let wavHeaderSize = 44
@@ -485,8 +485,9 @@ public final class TranscriptionRunner {
 
         // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
         // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
-        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV. Deleted once the record
-        // is written (L review 215), below.
+        // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV. Listed INSIDE the look,
+        // while each archive is still beside them (L review 240) — the merge deletes the archives — and deleted from that list
+        // once the record is written (L review 215), below.
         // Which chunk files are there (5b) — and, for a re-run whose chunks an earlier finalize merged, the merged
         // file's length, the surviving chunks' and that finalize's merged-audio block: one look at the folder, off the main
         // actor, bounded (L reviews 158, 185) — a folder that does not answer is never finalized blind.
@@ -499,13 +500,19 @@ public final class TranscriptionRunner {
             // Its own guard (L review 197): a session already finalized — its transcript verifies — is never finalized again
             // over it, whatever a gate upstream could or could not look at. Its leftovers are cleaned up (R2), and that is all.
             if CrashRecoveryPlanner.isFinalized(outputDirectory: outputDirectory, sessionId: finalizingId), TranscriptAssembler.verifies(transcriptURL) {
-                CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDirectory, sessionId: finalizingId)
                 return FinalizeLook(present: [], alreadyFinalized: true)
             }
-            return Self.lookBeforeFinalize(chunkAudioPaths: chunkAudioPaths, mergedURL: mergedURL, transcriptURL: transcriptURL)
+            var look = Self.lookBeforeFinalize(chunkAudioPaths: chunkAudioPaths, mergedURL: mergedURL, transcriptURL: transcriptURL)
+            look.leftoverWAVs = removeLeftovers ? Self.leftoverWAVs(of: leftoverChunks, in: outputDirectory) : []
+            return look
         }) else { throw FolderNotAnswering() }
         if look.alreadyFinalized {
             Logger.state.error("A finalize found its session already finalized — its transcript is kept as it is, never written over")
+            // Its cleanup is a mutation (L reviews 215, 241): queued after the look, never inside its bound — and it checks
+            // again, there, that the session is finalized and its transcript verifies.
+            folderReads.enqueue("transcript: cleanup finalized", folder: outputDirectory.path) {
+                _ = CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDirectory, sessionId: finalizingId)
+            }
             throw SessionAlreadyFinalized(transcript: transcriptURL.lastPathComponent)
         }
         let present = look.present
@@ -680,9 +687,11 @@ public final class TranscriptionRunner {
         }
         try written.get()
         // 4b's deletes, fire-and-forget on the folder's queue once the record is written (L review 215): a mutation never
-        // held under a bounded read, so a slow but healthy share is never called "not answering" for it.
-        if removeLeftovers {
-            folderReads.enqueue("transcript: leftover WAVs", folder: outputDirectory.path) { removal(leftoverChunks, outputDirectory) }
+        // held under a bounded read, so a slow but healthy share is never called "not answering" for it. The list the look
+        // found, never looked at again — the merge may have deleted the archives since (L review 240).
+        let leftovers = look.leftoverWAVs
+        if !leftovers.isEmpty {
+            folderReads.enqueue("transcript: leftover WAVs", folder: outputDirectory.path) { removal(leftovers) }
         }
 
         let elapsed = ContinuousClock.now - startTime
@@ -702,6 +711,8 @@ public final class TranscriptionRunner {
         /// Per chunk, its length when its file is there (0 otherwise).
         var chunkSeconds: [Double] = []
         var previousMergedAudio: [String: Any]?
+        /// The leftover WAVs beside their chunk's archive, as the look found them (L review 240).
+        var leftoverWAVs: [URL] = []
     }
 
     nonisolated static func lookBeforeFinalize(chunkAudioPaths: [URL], mergedURL: URL, transcriptURL: URL) -> FinalizeLook {
@@ -748,21 +759,27 @@ public final class TranscriptionRunner {
         SessionState.delete(directory: directory, sessionId: sessionId)
     }
 
-    /// See step 4b of `finalize`.
-    nonisolated static func removeLeftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) {
+    /// See step 4b of `finalize`: the WAVs left beside an archived, registered chunk's archive — its archive there now. Blocking
+    /// file work: only inside the finalize's look (L review 240).
+    nonisolated static func leftoverWAVs(of chunks: [ProcessedChunk], in directory: URL) -> [URL] {
         let fm = FileManager.default
-        for chunk in chunks where chunk.audioPath.hasSuffix(".m4a") && !chunk.issues.contains(where: { $0.code == .asrFailed }) {
-            guard fm.fileExists(atPath: directory.appendingPathComponent(chunk.audioPath).path) else { continue }
-            let base = (chunk.audioPath as NSString).deletingPathExtension
-            for name in [base + ".wav", base + "_mic.wav"] {
-                let url = directory.appendingPathComponent(name)
-                guard fm.fileExists(atPath: url.path) else { continue }
-                do {
-                    try fm.removeItem(at: url)
-                    Logger.files.info("Removed a leftover WAV of archived chunk \(chunk.index, privacy: .public)")
-                } catch {
-                    Logger.files.error("Could not remove a leftover WAV of chunk \(chunk.index, privacy: .public): \(error, privacy: .private)")
-                }
+        return chunks.filter { $0.audioPath.hasSuffix(".m4a") && !$0.issues.contains(where: { $0.code == .asrFailed }) }
+            .filter { fm.fileExists(atPath: directory.appendingPathComponent($0.audioPath).path) }
+            .flatMap { chunk -> [URL] in
+                let base = (chunk.audioPath as NSString).deletingPathExtension
+                return [base + ".wav", base + "_mic.wav"].map { directory.appendingPathComponent($0) }.filter { fm.fileExists(atPath: $0.path) }
+            }
+    }
+
+    /// Deletes the leftover WAVs the look listed — never looking for their archive again: the merge may have deleted it, its
+    /// audio kept in the merged file (L review 240).
+    nonisolated static func removeLeftoverWAVs(_ wavs: [URL]) {
+        for url in wavs {
+            do {
+                try FileManager.default.removeItem(at: url)
+                Logger.files.info("Removed a leftover WAV of an archived chunk")
+            } catch {
+                Logger.files.error("Could not remove a leftover WAV: \(error, privacy: .private)")
             }
         }
     }

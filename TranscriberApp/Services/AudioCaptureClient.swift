@@ -439,7 +439,7 @@ final class AudioCaptureClient {
         let conn = try getConnection()
         // Bounded at 10 s (§8.8). The reply text is passed on as-is: the coordinator reads it in one place
         // (`RecordingCoordinator.helperReply`) — a dead capture, a refusal while stopping, or neither.
-        let paths: (systemPath: String, micPath: String) = try await bounded("rotateChunk", seconds: 10) { done in
+        let paths: (systemPath: String, micPath: String) = try await bounded("rotateChunk", seconds: ChunkRotator.rotateCallSeconds) { done in   // one bound, the rotator's (L review 241)
             let proxy = conn.remoteObjectProxyWithErrorHandler { error in
                 done(.failure(CaptureError.rotateChunkFailed("XPC connection failed: \(error.localizedDescription)")))
             } as! AudioCaptureProtocol

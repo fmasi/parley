@@ -528,8 +528,11 @@ import Testing
         await h.coordinator.stopRecording()
         #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["unchecked_chunks"] == "1" })
         #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "stop" })
-        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        // Its own row, never under "Recording STOPPED" (L review 241: 219's kind), in the singular for one chunk.
+        #expect(h.appState.activeAlarms[.recordingStopped] == nil)
+        let row = try #require(h.appState.activeAlarms[.audioAfterTranscript]?.message)
         #expect(row.contains("\(call.sessionId)-1.wav") && row.contains("not transcribed"), "\(row)")
+        #expect(row.contains("If it is in") && !row.contains("they"), "\(row)")
     }
 }
 
@@ -634,24 +637,35 @@ import Testing
     }
 
     /// L review 215: the leftover WAVs' deletes run after the looks, never inside a bounded read — a slow delete on a healthy
-    /// share never makes the transcript "not answering". They still run.
+    /// share never makes the transcript "not answering". They still run — with the merge ON, the default (L review 240): the
+    /// merge deletes the archives first, and the leftovers found beside them are deleted all the same.
     @Test func slowLeftoverDeletesNeverMakeTheFolderNotAnswering() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        try RecoveryFixtures.writeSessionJSON(dir: d, sessionId: "f", meetingStart: Date(), chunkIndices: [0])
-        try Data("archive".utf8).write(to: d.appendingPathComponent("f-0.m4a"))
+        let start = Date().addingTimeInterval(-60)
+        let processor = ChunkProcessor(config: .default, outputDirectory: d,
+            sessionState: SessionState(sessionId: "f", meetingStart: start, engine: "fluid_audio", chunkDurationMinutes: 1),
+            transcriber: FakeEngine(), diarizer: FakeDiarizer())
+        for i in 0...1 {   // two chunks, archived: the merge runs
+            try RecoveryFixtures.writeFakeWav(at: d.appendingPathComponent("f-\(i).wav"), seconds: 1)
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(index: i, systemPath: d.appendingPathComponent("f-\(i).wav").path,
+                                                                         micPath: d.appendingPathComponent("f-\(i)_mic.wav").path,
+                                                                         startTime: start.addingTimeInterval(Double(i))))
+        }
+        let state = await processor.getSessionState()
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("f-0.m4a").path))
         try Harness.headerOnlyWAV().write(to: d.appendingPathComponent("f-0.wav"))   // a leftover beside its archive
-        let state = try #require(SessionState.read(directory: d, sessionId: "f"))
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)")
         runner.folderReadSeconds = 0.2
         let removed = Harness.Box(false)
-        runner.leftoverRemoval = { chunks, folder in
+        runner.leftoverRemoval = { wavs in
             Thread.sleep(forTimeInterval: 0.4)   // a slow share
-            TranscriptionRunner.removeLeftoverWAVs(of: chunks, in: folder)
+            TranscriptionRunner.removeLeftoverWAVs(wavs)
             removed.value = true
         }
         let result = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
         #expect(FileManager.default.fileExists(atPath: result.jsonPath.path), "written, never \"not answering\"")
+        #expect(FileManager.default.fileExists(atPath: d.appendingPathComponent("f.m4a").path), "merged")
         await Harness.until { removed.value }
         #expect(removed.value && !FileManager.default.fileExists(atPath: d.appendingPathComponent("f-0.wav").path), "the leftover still goes")
     }

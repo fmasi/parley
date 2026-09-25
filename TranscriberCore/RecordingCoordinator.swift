@@ -2868,13 +2868,14 @@ public final class RecordingCoordinator {
     }
 
     /// The Stop could not check whether late chunks the helper may have recorded are on disk (L review 213): recorded, and
-    /// said in a row naming their files — kept there if they are, not transcribed.
+    /// said in a row naming their files — kept there if they are, not transcribed. Its own row, "Audio kept after a
+    /// transcript" (L reviews 219, 241): nothing stopped, and it never takes the Stop's own "Recording STOPPED" row.
     private func lateChunksUnchecked(_ indices: [Int]) {
         captureClient.record(.folderNotAnswering, .anomaly, ["during": "stop", "unchecked_chunks": indices.map(String.init).joined(separator: ",")])
         guard let location = transcriptionRunner.chunkRotator?.sessionLocation else { return }
         let files = indices.map { "\(location.sessionId)-\($0).wav" }
-        reportStopped(RecoveryMessages.lateChunksUnchecked(files: files, folder: abbreviatedDisplayPath(location.outputDir.path)),
-                      recovered: false)
+        reportAudioAfterTranscript(RecoveryMessages.lateChunksUnchecked(files: files, folder: abbreviatedDisplayPath(location.outputDir.path)),
+                                   session: Self.sessionKey(of: location))
     }
 
     /// R2's hook: `session.json` could not be written — after a chunk, or (nil) a session-level change such

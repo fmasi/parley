@@ -118,6 +118,8 @@ extension RecordingCoordinator {
     }
 
     /// A rotation seals the chunk that spans the sleep; the timer, the poll and "Resumed"'s wait for frames restart.
+    /// `rotateNow()` before `startChunkRotation()` is safe (L review 241): the sleep stopped the rotator, and the rotation it
+    /// queues runs in a Task — only after this synchronous turn, by which `start()` has cleared the stop flag it checks.
     func resumeMonitoringAfterWake() {
         transcriptionRunner.chunkRotator?.rotateNow()
         transcriptionRunner.startChunkRotation()

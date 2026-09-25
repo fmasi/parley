@@ -581,6 +581,14 @@ struct ChunkRotatorTests {
         let plan = await r.recoverFromCrash()
         #expect(plan.recoveryIndex >= 2, "never meeting-1: \(plan.recoveryIndex)")
         #expect(try Data(contentsOf: dir.appendingPathComponent("meeting-1.wav")) == audio, "N+1's file is untouched")
+        // L review 239: meeting-1 could not be checked — it is kept for the next look that answers, never dropped: the
+        // restarted capture's first rotation emits it from its own files.
+        hung.release()
+        r.folderReads = FolderReads(label: "rotator-g-\(UUID().uuidString)")
+        helper.writing = "meeting-\(plan.recoveryIndex)"
+        await r.rotateForTesting()
+        #expect(finalized.value.map(\.index).contains(1), "the late chunk is emitted: \(finalized.value)")
+        #expect(finalized.value.first { $0.index == 1 }?.system == "meeting-1.wav", "from its own files")
         // … and a rotate that failed with any other error: its name was asked for too.
         let failing = ChunkRotator(captureClient: ThrowingRotationClient(), outputDirectory: dir.path, sessionBaseName: "other",
                                    chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0), onChunkFinalized: { _ in })
@@ -734,5 +742,99 @@ struct ChunkRotatorTests {
         await r.rotateForTesting()
         #expect(await r.reconcileLateRotation())
         #expect(rotated.value == 0, "not a rotation")
+    }
+
+    // MARK: - L round G (239, 241)
+
+    /// A client that fails its first `failures` rotates with a non-timeout error, then answers as the helper does — creating
+    /// the file it is given — and records every name asked for.
+    private final class FailsThenAnswers: ChunkRotationClient {
+        let dir: URL
+        var failures: Int
+        var requested: [String] = []
+        var writing = "meeting-0"
+        init(dir: URL, failures: Int) { self.dir = dir; self.failures = failures }
+        func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+            requested.append(newBaseName)
+            if failures > 0 { failures -= 1; throw ThrowingRotationClient.Boom() }
+            let sealed = writing
+            writing = newBaseName
+            for suffix in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(newBaseName + suffix)) }
+            return (dir.appendingPathComponent(sealed + ".wav").path, dir.appendingPathComponent(sealed + "_mic.wav").path)
+        }
+    }
+
+    /// L review 241: a look that answers probes the next free name from the shared counter — past every name ever asked
+    /// for — never from below it, where a chunk file already on disk beyond it would be missed and truncated.
+    @Test func anAnsweredLookProbesFromTheCounter() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let client = FailsThenAnswers(dir: dir, failures: 1)
+        let r = rotator(client, dir: dir, finalized: Box([]), rotated: Box(0))
+        await r.rotateForTesting()   // meeting-1 asked for: failed (not a timeout)
+        let kept = Data(repeating: 9, count: 1_024)
+        try kept.write(to: dir.appendingPathComponent("meeting-2.wav"))   // a chunk file already there
+        await r.rotateForTesting()
+        #expect(client.requested == ["meeting-1", "meeting-3"], "\(client.requested)")
+        #expect(try Data(contentsOf: dir.appendingPathComponent("meeting-2.wav")) == kept, "never truncated")
+    }
+
+    /// L review 241 (pinned, 207): a rotation after a non-timeout failure, whose look does not answer, still names a chunk past
+    /// the one the failed rotate asked for.
+    @Test func aRotationPastAFailureWithAHungLookNamesPastIt() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let client = FailsThenAnswers(dir: dir, failures: 1)
+        let r = rotator(client, dir: dir, finalized: Box([]), rotated: Box(0))
+        await r.rotateForTesting()   // meeting-1: failed
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        r.folderReads = hanging(hung)
+        r.folderProbeSeconds = 0.2
+        await r.rotateForTesting()
+        #expect(client.requested == ["meeting-1", "meeting-2"], "\(client.requested)")
+    }
+
+    /// L reviews 212, 241: a late chunk no look could check, emitted once a look answers, starts no earlier than it was ASKED
+    /// for — its asked-at kept while it waits — even when its file says it was created before that.
+    @Test func anUncheckedLateChunkStartsNoEarlierThanItWasAskedFor() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        final class TwoLandLate: ChunkRotationClient {
+            let dir: URL
+            var calls = 0
+            var writing = "meeting-0"
+            init(dir: URL) { self.dir = dir }
+            func create(_ base: String) throws { for s in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(base + s)) } }
+            func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+                calls += 1
+                if calls <= 2 { throw CaptureCallTimeout(call: "rotateChunk", seconds: 10) }
+                if calls == 3 { try create("meeting-1"); try create("meeting-2"); writing = "meeting-2" }
+                let sealed = writing
+                writing = newBaseName
+                try create(newBaseName)
+                return (dir.appendingPathComponent(sealed + ".wav").path, dir.appendingPathComponent(sealed + "_mic.wav").path)
+            }
+        }
+        let starts = Box<[Int: Date]>([:])
+        let began = Date(timeIntervalSince1970: 1_000)
+        let r = ChunkRotator(captureClient: TwoLandLate(dir: dir), outputDirectory: dir.path, sessionBaseName: "meeting",
+                             chunkDurationMinutes: 10, startTime: began, onChunkFinalized: { starts.value[$0.index] = $0.startTime })
+        await r.rotateForTesting()   // meeting-1: timed out
+        await r.rotateForTesting()   // meeting-2: timed out
+        let looks = Box(0)
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        r.folderReads = FolderReads(label: "rotator-hung-\(UUID().uuidString)", beforeEachRead: { name in
+            looks.value += 1
+            if looks.value == 2 { hung.hangIfNamed(name) }
+        })
+        r.folderProbeSeconds = 0.2
+        await r.rotateForTesting()   // names meeting-2; the look for meeting-1 does not answer
+        hung.release()
+        _ = await r.folderReads.read("settle", folder: dir.path, seconds: 5) { 0 }
+        // Its file says it was created before the rotator even began — before it was asked for.
+        try FileManager.default.setAttributes([.creationDate: began.addingTimeInterval(-100)],
+                                              ofItemAtPath: dir.appendingPathComponent("meeting-1.wav").path)
+        await r.rotateForTesting()
+        let start = try #require(starts.value[1], "chunk 1 emitted")
+        #expect(start >= began, "never before it was asked for: \(start)")
     }
 }

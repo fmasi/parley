@@ -367,8 +367,10 @@ public enum RecoveryMessages {
     /// recording folder was not answering (L review 213): said — kept on disk if they are there, not transcribed.
     public static func lateChunksUnchecked(files: [String], folder: String) -> String {
         let named = files.joined(separator: ", ")
-        let what = files.count == 1 ? "a chunk" : "\(files.count) chunks"
-        return "Parley couldn’t check \(what) the capture helper may have recorded during a rotation that timed out (\(named)) — the recording folder wasn’t answering. If they are in \(folder), their audio is kept there, not transcribed."
+        let one = files.count == 1
+        let what = one ? "a chunk" : "\(files.count) chunks"
+        let kept = one ? "If it is in \(folder), its audio is kept there" : "If they are in \(folder), their audio is kept there"
+        return "Parley couldn’t check \(what) the capture helper may have recorded during a rotation that timed out (\(named)) — the recording folder wasn’t answering. \(kept), not transcribed."
     }
 
     /// A pending pass skipped its salvages because the capture helper's drain did not answer (L reviews 142, 201): the

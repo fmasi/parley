@@ -282,3 +282,46 @@ final class StuckSentinelQueue: @unchecked Sendable {
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 2, "both kept")
     }
 }
+
+// MARK: - The late-chunks row's wording (241)
+
+@Suite struct LateChunksWordingRoundGTests {
+    /// L review 241: one chunk is "it", several are "they".
+    @Test func theLateChunksRowAgreesInNumber() {
+        let one = RecoveryMessages.lateChunksUnchecked(files: ["m-1.wav"], folder: "~/Rec")
+        #expect(one.contains("a chunk") && one.contains("If it is in ~/Rec, its audio is kept there"), "\(one)")
+        let two = RecoveryMessages.lateChunksUnchecked(files: ["m-1.wav", "m-2.wav"], folder: "~/Rec")
+        #expect(two.contains("2 chunks") && two.contains("If they are in ~/Rec, their audio is kept there"), "\(two)")
+    }
+}
+
+// MARK: - A finalize's cleanup is a mutation after its look (241)
+
+@MainActor
+@Suite struct FinalizeCleanupRoundGTests {
+    /// L review 241 (215): a finalize that finds its session already finalized cleans its leftovers up as a mutation queued
+    /// AFTER its bounded look — never inside it — and still never writes over the transcript.
+    @Test func anAlreadyFinalizedSessionsCleanupRunsAfterTheLook() async throws {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("runner-g-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: d) }
+        try RecoveryFixtures.writeSessionJSON(dir: d, sessionId: "f", meetingStart: Date(), chunkIndices: [0])
+        let state = try #require(SessionState.read(directory: d, sessionId: "f"))
+        let runner = TranscriptionRunner()
+        runner.folderReads = FolderReads(label: "runner-g-\(UUID().uuidString)")
+        let first = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
+        let written = try Data(contentsOf: first.jsonPath)
+        try SessionState.write(state, directory: d)   // a leftover progress file
+        let labels = Harness.Box<[String]>([]), lock = NSLock()
+        runner.folderReads = FolderReads(label: "runner-g-\(UUID().uuidString)", beforeEachRead: { label in
+            lock.withLock { labels.value.append(label) }
+        })
+        await #expect(throws: SessionAlreadyFinalized.self) {
+            _ = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
+        }
+        await Harness.until { SessionState.read(directory: d, sessionId: "f") == nil }
+        #expect(lock.withLock { labels.value }.contains("transcript: cleanup finalized"), "\(lock.withLock { labels.value })")
+        #expect(SessionState.read(directory: d, sessionId: "f") == nil, "cleaned up")
+        #expect(try Data(contentsOf: first.jsonPath) == written, "never written over")
+    }
+}
