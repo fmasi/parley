@@ -44,12 +44,15 @@ extension RecordingCoordinator {
         var isVolumeRoot: @Sendable (URL) -> Bool
         /// The destination of the symbolic link at this path (without following it), nil when it is not one.
         var symlinkDestination: @Sendable (URL) -> String? = { _ in nil }
+        /// Whether the item at this path belongs to root (L review 179): an automount point's.
+        var ownerIsRoot: @Sendable (URL) -> Bool = { _ in false }
 
         static let live = FolderProbe(
             exists: { FileManager.default.fileExists(atPath: $0.path) },
             isWritable: { FileManager.default.isWritableFile(atPath: $0.path) },
             isVolumeRoot: { (try? $0.resourceValues(forKeys: [.isVolumeKey]))?.isVolume == true },
-            symlinkDestination: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0.path) }
+            symlinkDestination: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0.path) },
+            ownerIsRoot: { ((try? FileManager.default.attributesOfItem(atPath: $0.path))?[.ownerAccountID] as? NSNumber)?.intValue == 0 }
         )
     }
 
@@ -73,7 +76,9 @@ extension RecordingCoordinator {
     ///
     /// A symbolic-link cycle (40 links followed) is unreachable, never "reachable" (L review 125). Once any mount
     /// check has passed, an unwritable nearest ancestor is a permissions problem — a read-only volume is not a
-    /// missing drive (L review 126).
+    /// missing drive (L review 126) — except under an automount root (`/Network`, `/net`, `/mnt`): there a folder that
+    /// is not there, below an ancestor that is root's and cannot be written, is a share that is not mounted —
+    /// unreachable (L review 179).
     nonisolated static func folderStatus(_ dir: URL, probe: FolderProbe = .live) -> FolderStatus {
         let (resolved, cycle) = resolution(dir, probe: probe)
         guard !cycle else { return .unreachable }
@@ -83,8 +88,14 @@ extension RecordingCoordinator {
             guard probe.exists(mount), probe.isVolumeRoot(mount) else { return .unreachable }
         }
         if probe.exists(resolved) { return probe.isWritable(resolved) ? .reachable : .notWritable }
-        return probe.isWritable(nearestExistingDirectory(resolved, probe: probe)) ? .reachable : .notWritable
+        let ancestor = nearestExistingDirectory(resolved, probe: probe)
+        if probe.isWritable(ancestor) { return .reachable }
+        if parts.count >= 3, parts[0] == "/", automountRoots.contains(parts[1]), probe.ownerIsRoot(ancestor) { return .unreachable }
+        return .notWritable
     }
+
+    /// Where macOS mounts network shares on demand (autofs): `/Network/Servers`, `/net/<host>`, and the conventional `/mnt`.
+    nonisolated static let automountRoots: Set<String> = ["Network", "net", "mnt"]
 
     nonisolated static func folderReachable(_ dir: URL, probe: FolderProbe = .live) -> Bool {
         folderStatus(dir, probe: probe) == .reachable
@@ -217,37 +228,61 @@ extension RecordingCoordinator {
         /// When that older-format recording was last written: the later of its two files (L review 86).
         let legacyLastWrite: Date?
         /// A finalized session's audio written after its transcript, which the transcript does not list (L review
-        /// 137): its length, in seconds.
-        var lateAudioSeconds: Double = 0
+        /// 137); nil: none.
+        var lateAudio: LateAudio?
     }
 
-    /// Chunk audio of a FINALIZED session written after its transcript — later than the transcript file, and not
-    /// among the files it lists — is noted in the record (`metadata.audio_after_transcript`), once (L review 137).
-    /// Returns its length in seconds (0: none). Blocking file work: only through the bounded folder reader.
-    nonisolated static func noteAudioAfterTranscript(outputDir: URL, sessionId: String) -> Double {
+    /// Audio of a finished session recorded after its transcript was written (L reviews 137, 176, 181).
+    struct LateAudio: Equatable, Sendable {
+        /// The chunk files, by name.
+        let files: [String]
+        /// Their length; nil when a file's length could not be read — never a guess.
+        let seconds: Double?
+        /// The transcript they are not in, by name.
+        let transcript: String
+    }
+
+    /// The note's key for the reference time: the transcript's modification time as the FIRST look found it (L review 176).
+    nonisolated static let lateAudioReferenceKey = "transcript_modified_at"
+
+    /// Chunk audio of a FINALIZED session written after its transcript — later than the transcript as first written, and
+    /// not among the files it lists — is noted in the record (`metadata.audio_after_transcript`), once (L review 137).
+    /// Later is judged from a FIXED reference (L review 176): the transcript's time as the first look found it, kept in the
+    /// note — never its modification time now, which the note's own write moves. So every pass finds the same files, and
+    /// a pass cut short after the note (a Start, a timeout) never loses the row. A file with no audio in it (a header, or
+    /// less) is not late audio. Returns nil when there is none. Blocking file work: only through the bounded folder reader.
+    nonisolated static func noteAudioAfterTranscript(outputDir: URL, sessionId: String) -> LateAudio? {
+        let fm = FileManager.default
         let transcriptURL = outputDir.appendingPathComponent("\(sessionId).json")
-        guard let written = (try? FileManager.default.attributesOfItem(atPath: transcriptURL.path))?[.modificationDate] as? Date,
+        guard let modified = (try? fm.attributesOfItem(atPath: transcriptURL.path))?[.modificationDate] as? Date,
               let data = try? Data(contentsOf: transcriptURL),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var metadata = json["metadata"] as? [String: Any] else { return 0 }
+              var metadata = json["metadata"] as? [String: Any] else { return nil }
+        let note = metadata["audio_after_transcript"] as? [String: Any]
+        let written = (note?[lateAudioReferenceKey] as? Double).map(Date.init(timeIntervalSince1970:)) ?? modified
         let listed = Set(metadata["audio_files"] as? [String] ?? [])
         let prefix = "\(sessionId)-"
-        let names = ((try? FileManager.default.contentsOfDirectory(atPath: outputDir.path)) ?? []).filter { name in
+        let names = ((try? fm.contentsOfDirectory(atPath: outputDir.path)) ?? []).filter { name in
             name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") && (name.hasSuffix(".wav") || name.hasSuffix(".m4a"))
                 && Int(name.dropFirst(prefix.count).dropLast(4)) != nil && !listed.contains(name)
         }
         let late = names.filter { name in
-            let modified = (try? FileManager.default.attributesOfItem(atPath: outputDir.appendingPathComponent(name).path))?[.modificationDate] as? Date
-            return (modified ?? .distantPast) > written
+            let attributes = try? fm.attributesOfItem(atPath: outputDir.appendingPathComponent(name).path)
+            let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+            return size > 44 && (attributes?[.modificationDate] as? Date ?? .distantPast) > written
         }.sorted()
-        guard !late.isEmpty else { return 0 }
-        let seconds = late.reduce(0.0) { $0 + TranscriptAssembler.duration(of: outputDir.appendingPathComponent($1)) }
-        if (metadata["audio_after_transcript"] as? [String: Any])?["files"] as? [String] != late {
-            metadata["audio_after_transcript"] = [
+        guard !late.isEmpty else { return nil }
+        let durations = late.map { TranscriptAssembler.duration(of: outputDir.appendingPathComponent($0)) }
+        // A file whose length cannot be read makes the total unknown: said so, never made up (L review 181).
+        let seconds: Double? = durations.contains { $0 <= 0 } ? nil : durations.reduce(0, +)
+        if note?["files"] as? [String] != late || note?[lateAudioReferenceKey] == nil {
+            var noted: [String: Any] = [
                 "files": late,
-                "seconds": seconds,
+                lateAudioReferenceKey: written.timeIntervalSince1970,
                 "note": "Audio recorded after this transcript was written is kept beside it, not transcribed.",
-            ] as [String: Any]
+            ]
+            if let seconds { noted["seconds"] = seconds }
+            metadata["audio_after_transcript"] = noted
             json["metadata"] = metadata
             do {
                 try TranscriptAssembler.write(json, to: transcriptURL)
@@ -255,7 +290,7 @@ extension RecordingCoordinator {
                 Logger.files.error("Could not note the audio recorded after the transcript: \(error, privacy: .private)")
             }
         }
-        return max(seconds, 1)
+        return LateAudio(files: late, seconds: seconds, transcript: transcriptURL.lastPathComponent)
     }
 
     nonisolated static func scanForSalvage(sentinel: RecordingSentinel, outputDir: URL) -> SalvageScan {
@@ -265,7 +300,7 @@ extension RecordingCoordinator {
             // Verified: cleaned up here (no rename, no summary) and done. Unreadable: rebuilt by the salvage (93b).
             if CrashRecoveryPlanner.cleanupFinalized(outputDirectory: outputDir, sessionId: sessionId) {
                 return SalvageScan(finalized: .cleanedUp, stoppedAt: Date(), chunkCount: 0, legacyAudio: false, legacyLastWrite: nil,
-                                   lateAudioSeconds: noteAudioAfterTranscript(outputDir: outputDir, sessionId: sessionId))
+                                   lateAudio: noteAudioAfterTranscript(outputDir: outputDir, sessionId: sessionId))
             }
             finalized = .damaged
         }

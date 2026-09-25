@@ -303,6 +303,8 @@ struct Harness {
     let notified: Box<[(title: String, body: String)]> = Box([])
     let criticals: Box<[(title: String, body: String)]> = Box([])
     let presented: Box<[URL]> = Box([])
+    /// Runs as each transcript is presented, after it is recorded in `presented` — as the app's rename panel would.
+    let onPresent: Box<((URL) -> Void)?> = Box(nil)
     let repairRequests: Box<Int> = Box(0)
     /// What the repair path answers: true = its window presented (L round 4, item 4).
     let repairPresents: Box<Bool> = Box(true)
@@ -327,7 +329,7 @@ struct Harness {
         config = ConfigManager(configDir: tmp)  // empty dir -> Config.default
         let notified = notified
         let criticals = criticals
-        let presented = presented
+        let presented = presented, onPresent = onPresent
         let repairRequests = repairRequests
         let repairPresents = repairPresents
         let freeBytes = freeBytes, diskReadHook = diskReadHook
@@ -339,7 +341,7 @@ struct Harness {
             sentinelDirectory: tmp,
             notify: { notified.value.append(($0, $1)) },
             notifyCritical: { criticals.value.append(($0, $1)) },
-            presentTranscript: { url, _ in presented.value.append(url) },
+            presentTranscript: { url, _ in presented.value.append(url); onPresent.value?(url) },
             onSystemAudioPermissionDenied: { repairRequests.value += 1; return repairPresents.value },
             engineFactory: { _ in (FakeEngine(), FakeDiarizer()) },
             recordingMicrophone: recordingMic,

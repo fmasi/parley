@@ -2520,10 +2520,10 @@ public final class RecordingCoordinator {
             forgetSession(sentinel)
             captureClient.captureEnded()
             // Audio written AFTER the transcript, which it does not list, is never silent (L review 137): the scan
-            // noted it in the record; the row says where it is kept.
-            if scan.lateAudioSeconds > 0 {
-                let minutes = max(1, Int((scan.lateAudioSeconds / 60).rounded()))
-                reportStopped("Recording STOPPED — \(minutes) min of audio recorded after its transcript was written \(minutes == 1 ? "is" : "are") kept in \(abbreviatedDisplayPath(outputDir.path)), not transcribed.",
+            // noted it in the record; the row says how much, beside which transcript, and where it is kept (L review 181).
+            if let late = scan.lateAudio {
+                reportStopped(RecoveryMessages.audioAfterTranscript(seconds: late.seconds, transcript: late.transcript,
+                                                                    folder: abbreviatedDisplayPath(outputDir.path)),
                               recovered: false)
             }
             return

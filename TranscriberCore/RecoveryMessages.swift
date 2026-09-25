@@ -265,6 +265,19 @@ public enum RecoveryMessages {
         }
     }
 
+    /// Audio recorded after a finished recording's transcript was written (L reviews 137, 181): how much — seconds under a
+    /// minute, "length unknown" when it could not be read — beside which transcript, and where it is kept. Nothing just
+    /// stopped: no "Recording STOPPED".
+    public static func audioAfterTranscript(seconds: Double?, transcript: String, folder: String) -> String {
+        let length: String
+        switch seconds {
+        case nil: length = "Audio (length unknown)"
+        case let s? where s < 59.5: length = "\(max(1, Int(s.rounded()))) s of audio"
+        case let s?: length = "\(Int((s / 60).rounded())) min of audio"
+        }
+        return "\(length) recorded after \(transcript) was written is kept in \(folder), not transcribed."
+    }
+
     /// Review fix 9: the wall clock can step back across a crash/resume pair; the reported gap is
     /// clamped to ≥ 0 rather than printing a negative duration.
     public static func resumedAfterCrash(crashedAt: Date, resumedAt: Date) -> String {

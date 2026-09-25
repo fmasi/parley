@@ -28,9 +28,6 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// How long a panel's transcript read may take before the panel is skipped (L review 134).
-    static let parseDeadlineSeconds: Double = 10
-
     /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed.
     func enqueue(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         queue.enqueue((jsonPath, onDismiss))
@@ -52,15 +49,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // transcript on every "Re-detect" press — the file open+parse that used to happen
         // synchronously on the main actor for the "this will clear your names" warning (#207).
         //
-        // The parse is bounded, on the folder-read queue (L review 134): a recordings folder that does not answer
-        // skips this panel with a note — never a rename queue wedged behind it. A superseded show still ends its
-        // item, so the queue moves on.
+        // The parse is bounded (L review 134): a recordings folder that does not answer skips this panel with a note —
+        // never a rename queue wedged behind it. On the rename's OWN reader (L review 175), never the coordinator's: a
+        // slow parse never keeps a recovery read of the same folder waiting. A superseded show still ends its item, so the
+        // queue moves on.
         showTask = Task { @MainActor in
             defer { self.endPreparing(request) }
-            let parsed = await FolderReads.shared.read("rename: transcript", folder: jsonPath.deletingLastPathComponent().path,
-                                                       seconds: Self.parseDeadlineSeconds) {
-                Self.parseSpeakersAndChannelNames(from: jsonPath)
-            }
+            let parsed = await RenameReads.shared.read(transcript: jsonPath) { Self.parseSpeakersAndChannelNames(from: $0) }
             guard !Task.isCancelled else {
                 onDismiss?()
                 return
