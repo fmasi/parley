@@ -88,7 +88,11 @@ public struct SalvageOutcome: Equatable, Sendable {
 
 public enum RecoveryMessages {
     private static let clockFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+        // The zone as it is when the time is said, not at first use: a long-running app crosses time zones (final review
+        // A-M9 / deferred C9).
+        f.timeZone = .autoupdatingCurrent
+        return f
     }()
 
     public static func clock(_ date: Date) -> String { clockFormatter.string(from: date) }
