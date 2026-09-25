@@ -513,7 +513,7 @@ struct MenuView: View {
         )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                Logger.state.error("Notification failed: \(error, privacy: .public)")
+                Logger.state.error("Notification failed: \(error, privacy: .private)")
             }
         }
     }

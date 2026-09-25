@@ -246,9 +246,7 @@ final class AudioCaptureClient {
             Logger.audio.error("The capture helper did not answer drainDiagnostics within 3 s")
             return false
         }
-        if let data {
-            evidence.mergeHelperEvents(CaptureDiagnostics.events(from: data))
-        }
+        if let data { evidence.mergeHelperDrain(data) }
         return true
     }
 
@@ -442,7 +440,7 @@ final class AudioCaptureClient {
         let reply: Result<Bool, Error> = await boundedReply("restartSystemAudio", seconds: 3) { done in
             let proxy = conn.remoteObjectProxyWithErrorHandler { _ in done(.success(false)) } as! AudioCaptureProtocol
             proxy.restartSystemAudio { success, error in
-                if let error { Logger.audio.info("System audio restart skipped: \(error, privacy: .public)") }
+                if let error { Logger.audio.info("System audio restart skipped: \(error, privacy: .private)") }
                 done(.success(success))
             }
         }

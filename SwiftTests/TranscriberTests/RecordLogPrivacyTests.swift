@@ -56,8 +56,12 @@ import Testing
                 reason: "helper file (stream H2); already .private on cr/h2 68a21a3"),
         Allowed(file: "CaptureAlarm.swift", line: #"Logger.audio.error("Capture status snapshot could not be encoded: \(error, privacy: .public)")"#,
                 reason: "alarm registry (stream H2); an EncodingError, reported to H2"),
-        Allowed(file: "RecordingCoordinator.swift", line: #"Logger.state.error("Restart failed: \(error, privacy: .public)")"#,
-                reason: "stream L's site; its context changed on cr/l, reported to L"),
+        // App sources (L review 95): enum values, no path, no free text.
+        Allowed(file: "AppTerminationDelegate.swift",
+                line: #"Logger.state.info("Termination (\(String(describing: kind), privacy: .public)) with work in flight — stopping the helper first, bounded")"#,
+                reason: "TerminationPolicy.Kind enum"),
+        Allowed(file: "AudioCaptureClient.swift", line: #"Logger.audio.debug("XPC status ping: \(String(describing: state), privacy: .public)")"#,
+                reason: "HelperCaptureState enum"),
     ]
 
     static func isAllowed(file: String, line: Substring) -> Bool {
@@ -111,6 +115,29 @@ import Testing
                 for body in Self.interpolations(in: line) {
                     guard let expression = Self.leakyPublicExpression(body) else { continue }
                     if Self.isAllowed(file: file, line: line) { continue }
+                    offenders.append("\(file):\(offset + 1) \(expression)")
+                }
+            }
+        }
+        #expect(offenders.isEmpty, "logged .public: \(offenders)")
+    }
+
+    static var app: URL { core.deletingLastPathComponent().appendingPathComponent("TranscriberApp") }
+
+    /// L review 95: the app target's sources follow the same rule — its XPC client logs the helper's errors,
+    /// which name the recording's files. A source scan too (the test target cannot import the app).
+    @Test func noAppFileLogsAPathOrAnErrorPublicly() throws {
+        let enumerator = try #require(FileManager.default.enumerator(atPath: Self.app.path))
+        let files = enumerator.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.sorted()
+        #expect(files.count > 20, "the scan must see all of the app, not a subset")
+        var offenders: [String] = []
+        for file in files {
+            let source = try String(contentsOf: Self.app.appendingPathComponent(file), encoding: .utf8)
+            let name = URL(fileURLWithPath: file).lastPathComponent
+            for (offset, line) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                for body in Self.interpolations(in: line) {
+                    guard let expression = Self.leakyPublicExpression(body) else { continue }
+                    if Self.isAllowed(file: name, line: line) { continue }
                     offenders.append("\(file):\(offset + 1) \(expression)")
                 }
             }

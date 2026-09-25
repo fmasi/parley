@@ -266,8 +266,12 @@ public final class ChunkRotator {
             self.onRotated?()
         } catch {
             Logger.audio.error("ChunkRotator: failed to rotate chunk \(oldIndex, privacy: .public) → \(nextIndex, privacy: .public): \(error, privacy: .private)")
-            // Timed out: the helper may still complete it — remembered, settled before the next rotation.
-            if error is CaptureCallTimeout { lateAttempts.append(nextIndex) }
+            // Timed out — the client's deadline, or the helper's own "Rotation timed out" (its writer swap overran
+            // and may land late; L review 91b): the helper may still complete it — remembered, settled before the
+            // next rotation. A refusal, not a dead capture.
+            if error is CaptureCallTimeout || error.localizedDescription == CaptureReplies.rotationTimedOut {
+                lateAttempts.append(nextIndex)
+            }
             onRotationFailed?(error)
         }
     }

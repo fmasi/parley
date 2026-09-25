@@ -182,6 +182,8 @@ struct ChunkRotatorTests {
         let dir: URL
         var writing: String
         var lateOnce: Bool
+        /// What the late attempt answers: the client's own timeout, or the helper's `rotationTimedOut` reply.
+        var lateError: Error = CaptureCallTimeout(call: "rotateChunk", seconds: 10)
         var requested: [String] = []
         /// Held open by a test to overlap two rotations.
         var gate: (() async -> Void)?
@@ -192,7 +194,7 @@ struct ChunkRotatorTests {
             let sealed = writing
             writing = newBaseName
             for suffix in [".wav", "_mic.wav"] { try Data().write(to: dir.appendingPathComponent(newBaseName + suffix)) }
-            if lateOnce { lateOnce = false; throw CaptureCallTimeout(call: "rotateChunk", seconds: 10) }
+            if lateOnce { lateOnce = false; throw lateError }
             return (dir.appendingPathComponent(sealed + ".wav").path, dir.appendingPathComponent(sealed + "_mic.wav").path)
         }
     }
@@ -220,6 +222,24 @@ struct ChunkRotatorTests {
         #expect(finalized.value.map(\.system) == ["meeting-0.wav", "meeting-1.wav"], "each chunk from its own files")
         #expect(helper.requested == ["meeting-1", "meeting-2"])
         #expect(rotator.currentChunkInfo.index == 2 && rotator.currentBaseName == "meeting-2")
+    }
+
+    /// L review 91b: the helper's own "Rotation timed out" (its writer swap overran and may land late) is a
+    /// refused rotation, not a dead capture — remembered like the client's timeout, and reconciled the same way.
+    @Test func aRotationTheHelperSaysTimedOutIsReconciledLikeATimeout() async throws {
+        struct HelperReply: Error, LocalizedError { var errorDescription: String? { CaptureReplies.rotationTimedOut } }
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let helper = DiskHelper(dir: dir, writing: "meeting-0", lateOnce: true)
+        helper.lateError = HelperReply()
+        let finalized = Box<[(index: Int, system: String)]>([])
+        let rotator = ChunkRotator(captureClient: helper, outputDirectory: dir.path, sessionBaseName: "meeting",
+                                   chunkDurationMinutes: 10, startTime: Date(timeIntervalSince1970: 0),
+                                   onChunkFinalized: { finalized.value.append(($0.index, URL(fileURLWithPath: $0.systemPath).lastPathComponent)) })
+        await rotator.rotateForTesting()   // "Rotation timed out" — and the swap landed late
+        await rotator.rotateForTesting()
+        #expect(finalized.value.map(\.index) == [0, 1])
+        #expect(finalized.value.map(\.system) == ["meeting-0.wav", "meeting-1.wav"], "each chunk from its own files")
+        #expect(rotator.currentBaseName == "meeting-2")
     }
 
     /// L9 review 46, at stop: the stop's own reconcile emits the chunk the late rotation sealed and adopts the

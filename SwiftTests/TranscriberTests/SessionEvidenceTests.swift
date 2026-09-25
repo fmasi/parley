@@ -37,6 +37,25 @@ import Testing
 
     /// CRITICAL (council A-C1 / C-C1): two recordings in one app run. The second record holds only its
     /// own facts — never the first one's coverage, confirmed denial, retries or recovery.
+    /// L review 93 (R2 item 8): a helper drain goes through `mergeDrained`, so an event this build cannot
+    /// decode (a kind from a newer helper) is admitted in `events_dropped` — never silently missing.
+    @Test func anUndecodableDrainedEventIsCountedAsDropped() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        var helperRing = CaptureDiagnostics()
+        helperRing.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .helper, kind: .rateDrift, severity: .anomaly,
+                                       detail: ["source": "system-tap"]))
+        var wire = try #require(try JSONSerialization.jsonObject(with: helperRing.snapshotData()) as? [[String: Any]])
+        var newer = wire[0]
+        newer["kind"] = "aKindFromANewerHelper"
+        wire.append(newer)
+        evidence.mergeHelperDrain(try JSONSerialization.data(withJSONObject: wire))
+        let record = evidence.finalize(sessionId: "s", directory: d)
+        #expect(record.droppedCount == 1, "the undecodable event is admitted")
+        #expect(record.events.contains { $0.kind == .rateDrift }, "the rest of the drain is kept")
+    }
+
     @Test func aSecondRecordingCarriesOnlyItsOwnFacts() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let evidence = SessionEvidence()

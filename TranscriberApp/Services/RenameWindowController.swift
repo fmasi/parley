@@ -240,7 +240,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
     }
 }

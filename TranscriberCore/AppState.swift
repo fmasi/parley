@@ -78,8 +78,10 @@ public final class AppState {
     @discardableResult
     public func raiseAppAlarm(_ kind: AlarmKind, message: String, now: Date = Date()) -> Bool { alarms.raise(kind, message: message, now: now) }
     public func clearAppAlarm(_ kind: AlarmKind) { _ = alarms.clear(kind) }
-    /// Only past events (`isAcknowledgeable`) can be dismissed; a live condition clears only when it ends.
-    public func acknowledge(_ kind: AlarmKind) { guard kind.isAcknowledgeable else { return }; _ = alarms.clear(kind) }
+    /// Only past events (`isAcknowledgeable`) can be dismissed; a live condition clears only when it ends. Through
+    /// the registry's `acknowledge` (L review 91): a helper-owned one stays dismissed across that helper's next
+    /// snapshots of the same episode.
+    public func acknowledge(_ kind: AlarmKind) { alarms.acknowledge(kind) }
     public func markNotified(_ kind: AlarmKind, now: Date = Date()) { alarms.markNotified(kind, now: now) }
     /// The helper's evidence (§6.2): each clears only the stale kinds it disproves on that track.
     public func noteFirstFrames(track: CaptureTrack, helperSessionId: String) { alarms.noteFirstFrames(track: track, helperSessionId: helperSessionId) }

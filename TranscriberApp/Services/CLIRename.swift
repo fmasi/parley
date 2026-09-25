@@ -67,7 +67,7 @@ enum CLIRename {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
         print("Done.")
     }
@@ -87,7 +87,7 @@ enum CLIRename {
                 of: file, from: start, to: start + duration, isLocal: isLocal
             )
         } catch {
-            Logger.transcription.error("Sample preview failed: \(error, privacy: .public)")
+            Logger.transcription.error("Sample preview failed: \(error, privacy: .private)")
             return
         }
         defer { try? FileManager.default.removeItem(at: preview) }

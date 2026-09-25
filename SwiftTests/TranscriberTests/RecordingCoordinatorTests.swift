@@ -196,12 +196,18 @@ private struct FakeCaptureError: Error, LocalizedError {
 
 /// The helper's reply to a rotate when it is not capturing: the capture is dead (§8.7).
 private struct NoCaptureError: Error, LocalizedError {
-    var errorDescription: String? { "No capture in progress" }
+    var errorDescription: String? { CaptureReplies.noCaptureInProgress }
 }
 
 /// The helper's reply to a rotate while it is stopping (council B-I3, stream H2): not a dead capture.
 private struct RefusedStoppingError: Error, LocalizedError {
-    var errorDescription: String? { "refused: stopping" }
+    var errorDescription: String? { CaptureReplies.refusedStopping }
+}
+
+/// Any other helper reply, by its wire text (a `CaptureReplies` constant).
+private struct HelperReplyError: Error, LocalizedError {
+    let reply: String
+    var errorDescription: String? { reply }
 }
 
 @MainActor
@@ -3113,11 +3119,18 @@ private struct Harness {
         #expect(h.client.startCalls.count == 1 && h.appState.activeAlarms[.rotationFailed] == nil)
     }
 
-    /// The one place that reads the helper's rotate replies (to be pointed at H2's `CaptureReplies`).
-    @Test func rotateRepliesAreClassifiedInOnePlace() {
-        #expect(RecordingCoordinator.rotateFailure("No capture in progress") == .captureDead)
-        #expect(RecordingCoordinator.rotateFailure("refused: stopping") == .refusedWhileStopping)
-        #expect(RecordingCoordinator.rotateFailure("XPC connection failed: boom") == .other)
+    /// L review 91 (item 48): the one place that reads the helper's replies matches every one the app acts on
+    /// exactly, by its `CaptureReplies` constant — never by a guess at its wording.
+    @Test func everyHelperReplyIsMatchedByItsConstant() {
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.noCaptureInProgress) == .notCapturing)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.refusedStopping) == .stopping)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.rotationTimedOut) == .rotationTimedOut)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.alreadyInProgress) == .alreadyCapturing)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.cancelledWhileStarting) == .startCancelled)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.startCancelled) == .startCancelled)
+        #expect(RecordingCoordinator.helperReply(CaptureReplies.startTimedOut) == .startTimedOut)
+        #expect(RecordingCoordinator.helperReply("refused: stopping") == .other, "the helper's real wording only")
+        #expect(RecordingCoordinator.helperReply("XPC connection failed: boom") == .other)
     }
 
     /// L8 review: a rotate that fails while a Stop is in flight (the drain before the helper's stop) is
@@ -4479,5 +4492,89 @@ private struct Harness {
         // The positive control (L review 78): with the recovery over, the timer refreshes it again.
         await Harness.until { RecordingSentinel.read(directory: h.tmp)?.lastAliveAt != stale }
         #expect(RecordingSentinel.read(directory: h.tmp)?.lastAliveAt != stale)
+    }
+}
+
+// MARK: - L round A: the H2 + R2 merge wiring (items 26, 91)
+
+@MainActor
+@Suite struct RecordingCoordinatorMergeWiringTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    /// L review 91: a stop answered "Refused: capture is starting or stopping" is a stop already under way in
+    /// the helper — asked again within the bound, never read as a helper that will not let go (which would
+    /// hold the session and say it could not be stopped).
+    @Test func aStopRefusedWhileTheHelperIsStoppingIsAskedAgain() async throws {
+        let h = try Harness()
+        defer { try? FileManager.default.removeItem(at: h.tmp) }
+        let s = try h.writeSentinel()
+        try RecordingSentinel.writePending([s], directory: h.tmp)
+        RecordingSentinel.delete(directory: h.tmp)
+        let client = h.client
+        client.onStop = { client.stopError = client.stopCalls == 1 ? RefusedStoppingError() : nil }
+        await h.coordinator.retryPendingSessions()
+        #expect(h.client.stopCalls == 2, "asked again")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "salvaged once the helper let go")
+        #expect(h.appState.activeAlarms[.recordingStopped]?.message.contains("couldn’t stop") != true)
+    }
+
+    /// L review 91 (item 48): the helper abandoned a start at its own deadline — the audio system, said as
+    /// such, never the wire text.
+    @Test func aStartTheHelperAbandonedIsSaidAsTheAudioSystem() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.client.startError = HelperReplyError(reply: CaptureReplies.startTimedOut)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.appState.errorMessage == "Parley couldn’t start recording — the audio system didn’t respond.")
+        #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// … a stop or disconnect during the start cancelled it: said, and nothing is left behind.
+    @Test func aStartCancelledWhileStartingSaysSo() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.client.startError = HelperReplyError(reply: CaptureReplies.cancelledWhileStarting)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.appState.errorMessage == "Parley couldn’t start recording — the start was cancelled.")
+        #expect(RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// … and "Capture already in progress": the helper is still busy with an earlier capture (a held
+    /// session's). Said as such, and the mic that capture holds stays marked (#192) — never released by a
+    /// start that did not get the helper.
+    @Test func aStartRefusedBecauseTheHelperIsBusyKeepsItsMicMarked() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        h.recordingMic.set("held-mic")   // an earlier capture the helper has not let go of
+        h.client.startError = HelperReplyError(reply: CaptureReplies.alreadyInProgress)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "new-mic")
+        #expect(h.appState.errorMessage == "Parley couldn’t start recording — the capture helper is still busy with an earlier recording.")
+        #expect(h.recordingMic.current == .some("held-mic"))
+        #expect(h.client.stopCalls == 0, "the busy capture is not this start's to stop")
+    }
+
+    /// L follow-up 26 (R2's `onSessionWriteSucceeded`): `sessionWriteFailed` clears on the next SUCCESSFUL
+    /// session.json write — it is not stuck until the recording ends.
+    @Test func aSuccessfulSessionWriteClearsTheWriteAlarm() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let outDir = try #require(h.client.startCalls.first).outputDirectory
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: outDir.path)
+        await h.runner.recordCaptureGap(CaptureGap(start: Date().addingTimeInterval(-9), end: Date().addingTimeInterval(-8), reason: "sleep"))
+        #expect(h.appState.activeAlarms[.sessionWriteFailed] != nil)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: outDir.path)
+        await h.runner.recordCaptureGap(CaptureGap(start: Date().addingTimeInterval(-5), end: Date(), reason: "sleep"))
+        #expect(h.appState.activeAlarms[.sessionWriteFailed] == nil, "the progress file is written again")
+        #expect(h.appState.isRecording)
     }
 }

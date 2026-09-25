@@ -306,6 +306,18 @@ struct AppStateTests {
         #expect(state.activeAlarms[.diskLow] != nil)
     }
 
+    /// L review 91 (H2 round 2 item 12): the user's acknowledgement of a HELPER-owned past event goes through the
+    /// registry's `acknowledge`, so the helper's next snapshot of the same episode never brings the row back.
+    @Test func anAcknowledgedHelperAlarmStaysAcknowledgedAcrossItsSnapshots() {
+        let state = AppState()
+        state.phase = .recording(since: Date())
+        state.applyHelperSnapshot(snapshot("1000-0", 1, [.micFollowFailed]))
+        #expect(state.activeAlarms[.micFollowFailed] != nil)
+        state.acknowledge(.micFollowFailed)
+        state.applyHelperSnapshot(snapshot("1000-0", 2, [.micFollowFailed]))
+        #expect(state.activeAlarms[.micFollowFailed] == nil, "the same episode, already acknowledged")
+    }
+
     /// §6.2 (F2 ruling): a restarted helper's empty snapshot keeps the old alarms until ITS evidence
     /// disproves each one — first frames for a delivery kind, real audio for a content kind.
     @Test func aNewHelperKeepsAlarmsUntilItsEvidenceOnThatTrack() {

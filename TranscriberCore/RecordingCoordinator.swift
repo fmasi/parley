@@ -190,6 +190,8 @@ public final class RecordingCoordinator {
     public var isStartInFlight: Bool { startAnnounced || startRunning }
     private var startAnnounced = false
     private var startRunning = false
+    /// A start refused because the helper is busy with an earlier capture: the pending retry runs once it is over.
+    private var retryAfterStart = false
     /// The helper crashed (or failed fatally) while a start awaited it: the phase was still `.idle`, and
     /// the client reports a crash once per capture generation, so dropping it would leave a dead
     /// recording. Handled as soon as the recording is up; moot if the start fails.
@@ -363,6 +365,10 @@ public final class RecordingCoordinator {
             // A crash reported during this start — even during its failure path's helper stop — is this
             // start's, handled or moot by now: never inherited (L follow-up 29).
             crashDuringStart = false
+            if retryAfterStart {
+                retryAfterStart = false
+                Task { await self.retryPendingSessions() }
+            }
         }
         Logger.state.info("Recording started — session: \(sessionName, privacy: .sensitive)")
         appState.errorMessage = nil
@@ -456,6 +462,8 @@ public final class RecordingCoordinator {
         var captureStarted = false
         // The helper was asked to start: a start that timed out may still commit, so it is stopped too.
         var helperStartIssued = false
+        // The mic marked before this start (a held session's, say): put back if the helper was busy with it.
+        var micBefore: String?? = nil
 
         do {
             let sentinel = RecordingSentinel(
@@ -472,6 +480,7 @@ public final class RecordingCoordinator {
             try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
 
             // Before the helper opens the mic, so no meter opens it meanwhile (#192).
+            micBefore = recordingMicrophone.current
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
@@ -510,12 +519,21 @@ public final class RecordingCoordinator {
         } catch {
             crashDuringStart = false   // moot: this failure path ends the recording
             // Said first, at the deadline — not after the stop below, which may take its own bound (L9 review
-            // 47). The start stays in flight until that stop returns: no new Start races it.
-            if error is CaptureCallTimeout {
+            // 47). The start stays in flight until that stop returns: no new Start races it. The helper's own
+            // replies are said in words, never as the wire text (L review 91).
+            let reply = Self.helperReply(error.localizedDescription)
+            switch reply {
+            case _ where error is CaptureCallTimeout, .startTimedOut:
                 reportUnresponsiveStart()
-            } else {
-                appState.errorMessage = error.localizedDescription
-                notify("Recording Failed", error.localizedDescription)
+            case .startCancelled:
+                reportFailedStart("Parley couldn’t start recording — the start was cancelled.")
+            case .alreadyCapturing:
+                // An earlier capture the helper has not let go of (a held session's): the pending retry stops
+                // and finishes it — kicked once this start is over.
+                reportFailedStart("Parley couldn’t start recording — the capture helper is still busy with an earlier recording.")
+                retryAfterStart = true
+            default:
+                reportFailedStart(error.localizedDescription)
             }
             // The helper is capturing (a later step failed), or its start timed out and may still commit:
             // stop it — bounded — BEFORE the mic marker is released, so no meter opens the mic the helper
@@ -524,7 +542,8 @@ public final class RecordingCoordinator {
                                                          error: error, label: "stop after failed start")
             captureClient.captureEnded()   // the recording never began: disarm crash detection (C1)
             if helperLetGo {
-                clearHelperMic()
+                // A busy helper still holds the mic of the capture it is busy with: that marker stays (#192).
+                if reply == .alreadyCapturing { restoreHelperMic(micBefore) } else { clearHelperMic() }
                 RecordingSentinel.delete(directory: sentinelDirectory)
                 // No recording exists: no evidence of one either — never an orphan live log (L11 review 68).
                 captureClient.discardSessionEvidence(sessionId: naming.chunkBaseName, directory: outputDir)
@@ -547,9 +566,17 @@ public final class RecordingCoordinator {
 
     /// The start ran out of its deadline: the audio system, not the user, is stuck — said plainly.
     private func reportUnresponsiveStart() {
-        let message = "Parley couldn’t start recording — the audio system didn’t respond."
+        reportFailedStart("Parley couldn’t start recording — the audio system didn’t respond.")
+    }
+
+    private func reportFailedStart(_ message: String) {
         appState.errorMessage = message
         notify("Recording Failed", message)
+    }
+
+    /// Put the recording-mic marker back as it was (`.none`: nothing marked).
+    private func restoreHelperMic(_ marked: String??) {
+        if case .some(let id) = marked { setHelperMic(id) } else { clearHelperMic() }
     }
 
     /// What is left until `deadline`, in awake seconds (never zero: a spent deadline still times out at once).
@@ -1245,21 +1272,39 @@ public final class RecordingCoordinator {
     ///
     /// A timeout pulls the last lever (L9 review 45): the XPC connection is dropped, so the helper's
     /// invalidation handler stops and finalizes its capture. Still false — nothing confirmed it let go.
+    ///
+    /// "Refused: capture is starting or stopping" is a stop already under way in the helper (it ends within its
+    /// own 6 s): asked again, shortly, within the same bound (L review 91) — never read as a helper that will not
+    /// let go.
     private func boundedHelperStop(_ label: String) async -> Bool {
-        do {
-            try await bounded(label, seconds: Self.seconds(helperStopDeadline)) { try await self.stopHelper() }
-            return true
-        } catch is CaptureCallTimeout {
-            Logger.state.error("The capture helper did not stop (\(label, privacy: .public)) — it may still be capturing; dropping the connection")
-            captureClient.dropConnection()
-            return false
-        } catch {
-            if Self.rotateFailure(error.localizedDescription) == .captureDead { return true }   // "No capture in progress"
-            Logger.state.error("The capture helper's stop failed (\(label, privacy: .public)): \(error, privacy: .private)")
-            captureClient.record(.streamStopError, .anomaly, ["source": "app", "call": label, "error": error.localizedDescription])
-            return false
+        let deadline = SuspendingClock.now + helperStopDeadline
+        while true {
+            do {
+                try await bounded(label, seconds: Self.seconds(until: deadline)) { try await self.stopHelper() }
+                return true
+            } catch is CaptureCallTimeout {
+                Logger.state.error("The capture helper did not stop (\(label, privacy: .public)) — it may still be capturing; dropping the connection")
+                captureClient.dropConnection()
+                return false
+            } catch {
+                switch Self.helperReply(error.localizedDescription) {
+                case .notCapturing, .startCancelled:
+                    return true   // nothing is capturing: it has let go
+                case .stopping where SuspendingClock.now + stopReaskInterval < deadline:
+                    Logger.state.info("The capture helper is already stopping (\(label, privacy: .public)) — asking again shortly")
+                    try? await Task.sleep(for: stopReaskInterval)
+                    continue
+                default:
+                    Logger.state.error("The capture helper's stop failed (\(label, privacy: .public)): \(error, privacy: .private)")
+                    captureClient.record(.streamStopError, .anomaly, ["source": "app", "call": label, "error": error.localizedDescription])
+                    return false
+                }
+            }
         }
     }
+
+    /// How soon a stop the helper refused because it is already stopping is asked again (L review 91).
+    var stopReaskInterval: Duration = .milliseconds(250)
 
     /// A start site failed (§8.6) — the recording's start, the crash restart, the relaunch's resume: the one
     /// rule for all three (L9 review 44). The helper's capture is running (a later step failed), or its start
@@ -1418,7 +1463,7 @@ public final class RecordingCoordinator {
         } catch {
             // FIRST, before any await: disarm crash detection (as the give-up branch does).
             captureClient.captureEnded()
-            Logger.state.error("Restart failed: \(error, privacy: .public)")
+            Logger.state.error("Restart failed: \(error, privacy: .private)")
             awaitingRecoveryFrames = false
             // Never a capturing helper behind an idle app (L9 review 44): a restart that captured, or whose
             // start timed out and may still commit, is stopped (bounded) before the salvage.
@@ -2417,6 +2462,8 @@ public final class RecordingCoordinator {
         }
         transcriptionRunner.chunkRotator?.onRotationFailed = { [weak self] error in self?.rotationFailed(error) }
         transcriptionRunner.chunkProcessor?.onSessionWriteFailure = { [weak self] index in self?.sessionWriteFailed(chunk: index) }
+        // The progress file is written again: its alarm is over (L follow-up 26, R2's hook).
+        transcriptionRunner.chunkProcessor?.onSessionWriteSucceeded = { [weak self] in self?.appState.clearAppAlarm(.sessionWriteFailed) }
     }
 
     /// A rotation worked: rotation is not broken any more, and the disk is checked for the next chunk —
@@ -2465,22 +2512,41 @@ public final class RecordingCoordinator {
         }
     }
 
-    /// What a failed rotate's reply means (§8.7, council B-I3).
-    enum RotateFailure: Equatable {
-        /// "No capture in progress": the helper is not capturing — a dead capture, the crash path.
-        case captureDead
-        /// The helper refused because it is stopping: the recording is ending, not dead.
-        case refusedWhileStopping
-        /// Anything else (a timeout, a writer error): an ordinary rotation failure.
+    /// A helper reply the app acts on (§8.6, §8.7; H2's `CaptureReplies`).
+    enum HelperReply: Equatable {
+        /// "No capture in progress": nothing is capturing. On a rotate a dead capture (the crash path); on a
+        /// stop, the helper has let go.
+        case notCapturing
+        /// "Refused: capture is starting or stopping": a stop is under way in the helper. A rotate is refused,
+        /// not dead (council B-I3); a second stop is asked again shortly.
+        case stopping
+        /// "Rotation timed out": the writer swap overran and may land late — a refused rotation, reconciled like
+        /// the client's own timeout (L review 91b).
+        case rotationTimedOut
+        /// "Capture already in progress": the helper still holds an earlier capture (a held session's).
+        case alreadyCapturing
+        /// The start was cancelled by a stop or a disconnect during it ("Capture cancelled — stopped while
+        /// starting"), or — the stop's reply — the start it arrived during ended ("Capture start cancelled"):
+        /// nothing is capturing.
+        case startCancelled
+        /// "Capture start timed out": the helper abandoned the start at its own deadline — the audio system.
+        case startTimedOut
+        /// Anything else (a timeout, a writer error, an XPC failure).
         case other
     }
 
-    /// The one place that reads the helper's rotate replies. Point it at stream H2's `CaptureReplies`
-    /// constants when H2 merges; until then it matches their wording.
-    nonisolated static func rotateFailure(_ reply: String) -> RotateFailure {
-        if reply.contains("No capture in progress") { return .captureDead }
-        if reply.localizedCaseInsensitiveContains("refused: stopping") { return .refusedWhileStopping }
-        return .other
+    /// The one place that reads the helper's replies (L review 91, item 48): matched EXACTLY, by H2's
+    /// `CaptureReplies` constants — the errors carry the helper's text as it is.
+    nonisolated static func helperReply(_ reply: String) -> HelperReply {
+        switch reply {
+        case CaptureReplies.noCaptureInProgress: return .notCapturing
+        case CaptureReplies.refusedStopping: return .stopping
+        case CaptureReplies.rotationTimedOut: return .rotationTimedOut
+        case CaptureReplies.alreadyInProgress: return .alreadyCapturing
+        case CaptureReplies.cancelledWhileStarting, CaptureReplies.startCancelled: return .startCancelled
+        case CaptureReplies.startTimedOut: return .startTimedOut
+        default: return .other
+        }
     }
 
     /// A rotation threw. The current chunk keeps recording under its index; the alarm says the file may
@@ -2491,9 +2557,9 @@ public final class RecordingCoordinator {
         // paths own the capture, and a rotation "failure" then is neither an anomaly nor an alarm.
         guard appState.isRecording, !stopInFlight, !recoveryInFlight else { return }
         let reason = error.localizedDescription
-        let failure = Self.rotateFailure(reason)
+        let failure = Self.helperReply(reason)
         // The helper refused because it is stopping: the recording is ending, not dead (council B-I3).
-        guard failure != .refusedWhileStopping else {
+        guard failure != .stopping else {
             Logger.state.info("A rotation was refused: the helper is stopping")
             return
         }
@@ -2501,7 +2567,7 @@ public final class RecordingCoordinator {
         if appState.raiseAppAlarm(.rotationFailed, message: "A chunk rotation failed — the current chunk keeps recording, but the file may not rotate again.") {
             presentAlarms()
         }
-        guard failure == .captureDead else { return }
+        guard failure == .notCapturing else { return }
         Logger.state.error("A rotation found the helper not capturing — crash recovery")
         Task {
             guard self.appState.isRecording else { return }

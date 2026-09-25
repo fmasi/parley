@@ -78,6 +78,15 @@ public final class SessionEvidence {
         for event in events { liveLog?.append(event) }
     }
 
+    /// A helper drain as it came off the wire (R2 item 8, L review 93): through `mergeDrained`, so an event this
+    /// build cannot decode (a kind from a newer helper) is counted into `events_dropped`, never silently lost.
+    /// The decoded events go to the live log too.
+    public func mergeHelperDrain(_ data: Data) {
+        diagnostics.mergeDrained(data)
+        guard let liveLog else { return }
+        for event in CaptureDiagnostics.events(from: data) { liveLog.append(event) }
+    }
+
     /// A status pull: its coverage becomes that helper session's latest. Only a CAPTURING helper's: a pull
     /// that raced a stop reports the whole expected time with nothing delivered (L11 review 67).
     public func noteCoverage(_ snapshot: CaptureStatusSnapshot, at date: Date = Date()) {

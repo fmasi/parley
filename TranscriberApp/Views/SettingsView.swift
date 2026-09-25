@@ -138,7 +138,7 @@ struct SettingsView: View {
                 return
             } catch {
                 apiKeyLoadFailed = true
-                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
+                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .private)")
             }
             apiKeyLoaded = true
 

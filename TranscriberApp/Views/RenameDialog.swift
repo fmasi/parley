@@ -544,7 +544,7 @@ struct RenameDialog: View {
                 of: url, from: start, to: end, isLocal: isLocal
             )
         } catch {
-            Logger.audio.error("playSample: \(String(describing: error), privacy: .public)")
+            Logger.audio.error("playSample: \(String(describing: error), privacy: .private)")
             return
         }
 
