@@ -369,10 +369,10 @@ struct Harness {
         coordinator.folderReads = FolderReads(label: "rc-tests-\(UUID().uuidString)")
     }
 
-    /// Polls `condition` (up to about 2 s): a deadline, never a fixed number of yields.
-    static func until(_ condition: () -> Bool) async {
+    /// Polls `condition` (up to about `seconds`, 2 by default): a deadline, never a fixed number of yields.
+    static func until(within seconds: Double = 2, _ condition: () -> Bool) async {
         var waited = 0
-        while !condition(), waited < 400 {
+        while !condition(), waited < Int(seconds * 200) {
             try? await Task.sleep(nanoseconds: 5_000_000)
             waited += 1
         }

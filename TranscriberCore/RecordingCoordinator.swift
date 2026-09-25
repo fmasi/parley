@@ -125,10 +125,14 @@ public final class RecordingCoordinator {
     /// The user's Quit is stopping the recording: the menu says "Quitting…".
     public internal(set) var isQuitting = false
     /// The Quit left a session HELD — the helper would not stop it (L review 223): the LaunchAgent stays installed, so the
-    /// next launch finishes it.
+    /// next launch finishes it. Decided from what is on disk at every exit of the Quit (L review 257).
     public internal(set) var keepsLaunchAgentOnQuit = false
-    /// A session was held while the Quit waited (L review 223).
+    /// A session was held while the Quit waited (L review 223): what the Quit's decision falls back to when the recovery file
+    /// does not answer its look (L review 257).
     var quitLeftAHeldSession = false
+    /// Helper stops asked for and not answered yet (L review 257): the helper has not let go of the capture it was asked to
+    /// stop.
+    var helperStopsUnanswered = 0
     /// An exit's flush of the live logs ran out of its bound (L review 195): the folder is not answering, and the app's own
     /// last flush (`applicationWillTerminate`) is skipped — it would only hold the exit past its bound again.
     public internal(set) var exitFlushTimedOut = false
@@ -350,7 +354,8 @@ public final class RecordingCoordinator {
         timeFormatter.dateFormat = "HHmmss"
         let timestamp = timeFormatter.string(from: now)
 
-        let sanitized = sanitizeFilename(sessionName)
+        // Capped (L review 262): every file named from the session — its summary, its records — fits in 255 bytes.
+        let sanitized = fittedFilename(sanitizeFilename(sessionName), maxBytes: maxSessionIdBytes - timestamp.utf8.count - 1)
         let chunkBaseName = sanitized.isEmpty ? timestamp : "\(timestamp)-\(sanitized)"
         let baseName = "\(chunkBaseName)-0"  // 0-indexed for chunk discovery
         return (dayDir, sanitized, chunkBaseName, baseName)
@@ -1429,7 +1434,11 @@ public final class RecordingCoordinator {
     func stopHelper() async throws { _ = try await helperStop() }
     /// The helper calls a bounded (`@Sendable`) body makes: main-actor methods, so the body never touches
     /// the client itself.
-    private func helperStop() async throws -> AudioPaths { try await captureClient.stop() }
+    private func helperStop() async throws -> AudioPaths {
+        helperStopsUnanswered += 1
+        defer { helperStopsUnanswered -= 1 }
+        return try await captureClient.stop()
+    }
     private func startHelper(outputDirectory: URL, baseName: String, microphoneDeviceId: String?,
                              systemAudioSource: SystemAudioSource, options: CaptureOptions, sessionId: String) async throws {
         try await captureClient.start(outputDirectory: outputDirectory, baseName: baseName, microphoneDeviceId: microphoneDeviceId,

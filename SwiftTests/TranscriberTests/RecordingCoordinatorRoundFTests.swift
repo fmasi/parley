@@ -138,7 +138,8 @@ struct SlowRead: Sendable {
     }
 
     /// L review 227, IMPORTANT: a quota pass slower than its bound — it walks the whole recording root and deletes files — is
-    /// NOT fatal: the transcript is written, and the record says the quota was not checked.
+    /// NOT fatal: the transcript is written. Since L review 251 the pass runs after the record is written, so the record
+    /// cannot say it (round H's `aSlowQuotaPassNeverFailsTheStop` pins the order).
     @Test func aSlowQuotaPassIsNeverFatal() async throws {
         let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
         let state = try session(in: d)
@@ -147,8 +148,8 @@ struct SlowRead: Sendable {
         runner.folderReads = FolderReads(label: "runner-f-\(UUID().uuidString)", beforeEachRead: { slow.delayIfNamed($0) })
         runner.folderWriteSeconds = 1
         let result = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
-        let codes = try issues(result.jsonPath), lengths = try metadata(result.jsonPath)["chunk_durations"] as? [Double]
-        #expect(codes.contains(ChunkIssue.Code.quotaNotChecked.rawValue), "\(codes)")
+        let lengths = try metadata(result.jsonPath)["chunk_durations"] as? [Double]
+        #expect(FileManager.default.fileExists(atPath: result.jsonPath.path), "written")
         #expect(lengths != nil, "the lengths were read")
     }
 

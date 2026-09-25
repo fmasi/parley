@@ -333,7 +333,17 @@ public final class SessionEvidence {
     /// `RENAME_EXCL` — EEXIST takes the next name — so a `stat` that lies (a share's stale cache) never lets it replace a
     /// record another process wrote. A `stat` that errs with anything but ENOENT (EIO, ESTALE, ETIMEDOUT) is a name taken,
     /// never a free one. A volume without the exclusive rename (exFAT, SMB: ENOTSUP) checks, then renames, under a lock.
+    /// A record's temporary (L reviews 245, 268): short — a long title never makes it too long to create — and its session's,
+    /// `.<fitted id>.diag.<UUID>.tmp`, so the session's next record sweeps one a write that died left.
+    nonisolated static func temporaryName(sessionId: String) -> String { DurableFile.temporaryName(for: "\(sessionId).diag") }
+
     nonisolated static func writeRecord(_ data: Data, sessionId: String, directory: URL, own: OwnRecords, files: RecordFiles) throws -> URL {
+        // A temporary a write of this session's record left when it died (L review 268): the records are written one at a
+        // time, on the folder's queue, so any one there now is stale.
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        where DurableFile.isTemporary(name, for: "\(sessionId).diag") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
         for n in 0..<recordNameLimit {
             let name = n == 0 ? "\(sessionId).diag.jsonl" : n == 1 ? "\(sessionId).relaunch.diag.jsonl" : "\(sessionId).relaunch-\(n).diag.jsonl"
             let url = directory.appendingPathComponent(name)
@@ -346,8 +356,8 @@ public final class SessionEvidence {
                 if looked != 0 { Logger.files.error("A record name could not be looked at (errno \(looked, privacy: .public)) — taken as used") }
                 continue
             }
-            // Short (L review 245): a long title's record name never makes its temporary one too long.
-            let temporary = directory.appendingPathComponent(".\(UUID().uuidString.prefix(16)).tmp")
+            // Short, and its session's (L reviews 245, 268): a long title's record name never makes its temporary one too long.
+            let temporary = directory.appendingPathComponent(temporaryName(sessionId: sessionId))
             try data.write(to: temporary)
             switch files.renameExclusively(temporary.path, url.path) {
             case 0:

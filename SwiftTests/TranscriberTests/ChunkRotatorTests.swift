@@ -343,10 +343,10 @@ struct ChunkRotatorTests {
 
     // MARK: - L round B (113, 115, 118)
 
-    private func rotator(_ client: any ChunkRotationClient, dir: URL, startIndex: Int = 0,
+    private func rotator(_ client: any ChunkRotationClient, dir: URL, startIndex: Int = 0, startTime: Date = Date(timeIntervalSince1970: 0),
                          finalized: Box<[(index: Int, system: String)]>, rotated: Box<Int>) -> ChunkRotator {
         let r = ChunkRotator(captureClient: client, outputDirectory: dir.path, sessionBaseName: "meeting",
-                             chunkDurationMinutes: 10, startIndex: startIndex, startTime: Date(timeIntervalSince1970: 0),
+                             chunkDurationMinutes: 10, startIndex: startIndex, startTime: startTime,
                              onChunkFinalized: { finalized.value.append(($0.index, URL(fileURLWithPath: $0.systemPath).lastPathComponent)) })
         r.onRotated = { rotated.value += 1 }
         return r
@@ -649,8 +649,11 @@ struct ChunkRotatorTests {
         let helper = OverranHelper(dir: dir)
         helper.createsFiles = { $0 <= 2 }
         let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
-        let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
+        // Anchored now, so its clock and the test's agree (to the scheduling slack below).
+        let r = rotator(helper, dir: dir, startTime: Date(), finalized: finalized, rotated: rotated)
+        let askedAt = Date().addingTimeInterval(-0.05)
         await r.rotateForTesting()   // meeting-1 asked for: overran, its files on disk
+        let nextAskedAt = Date().addingTimeInterval(0.05)
         await r.rotateForTesting()   // the look adopts meeting-1; meeting-2 asked for: overran, its files on disk
         await r.rotateForTesting()   // the look adopts meeting-2; meeting-3 asked for: overran, nothing on disk
         let current = r.currentChunkInfo
@@ -663,7 +666,8 @@ struct ChunkRotatorTests {
                                            micPath: dir.appendingPathComponent("meeting-1_mic.wav").path)
         #expect(last.index == 1 && r.currentChunkInfo.index == 1)
         #expect(last.startTime < current.startTime, "its own start, never the current chunk's: \(last.startTime) vs \(current.startTime)")
-        #expect(last.startTime >= Date(timeIntervalSince1970: 0))
+        // Chunk 1's OWN start (L review 260): at or after it was asked for, and before chunk 2 was.
+        #expect(last.startTime >= askedAt && last.startTime <= nextAskedAt, "\(last.startTime) not in [\(askedAt), \(nextAskedAt)]")
     }
 
     /// L review 213: late chunks between the current chunk and the one the Stop's reply names, which a look that did not

@@ -203,6 +203,7 @@ extension RecordingCoordinator {
         let alreadyStopping = stopInFlight || stopRequestedDuringRecovery
         guard appState.isRecording || userStartInFlight || alreadyStopping || relaunchFoundCapture else {
             await markExitDuringFinalize(by: SuspendingClock.now + exitMarkBound)
+            await decideLaunchAgentKeep(by: SuspendingClock.now + exitMarkBound)   // an idle Quit too (L review 257)
             return true
         }
         if !alreadyStopping {
@@ -222,13 +223,37 @@ extension RecordingCoordinator {
         let deadline = SuspendingClock.now + quitStopBound
         await stopForExit(bound: quitStopBound)
         await markExitDuringFinalize(by: max(deadline, SuspendingClock.now + exitMarkBound))
-        // The Quit left a session HELD — the helper would not stop it (L review 223): said, never a silent exit, and the
-        // LaunchAgent is kept so the next launch finishes it.
-        if quitLeftAHeldSession {
-            keepsLaunchAgentOnQuit = true
-            notify("Quitting Parley", "A previous recording is still being stopped; Parley will finish it next time.")
-        }
+        await decideLaunchAgentKeep(by: max(deadline, SuspendingClock.now + exitMarkBound))
         return true
+    }
+
+    /// Whether the Quit leaves a session the helper still holds (L reviews 223, 257): decided from what is ON DISK at every
+    /// exit of the Quit — never from whether a hold happened to land while the Quit waited (one landing while its alert was
+    /// up, or after its bound ran out, used to be missed). Kept when a pending session — or the slot's — is held, or the
+    /// slot is marked stopping while the helper has not answered its stop: said, never a silent exit, and the LaunchAgent
+    /// stays so the next launch finishes it. The look is bounded by the exit's `deadline` (never past `exitMarkBound`); one
+    /// that does not answer falls back to what this run knows — a hold during the Quit, or a helper stop not answered.
+    func decideLaunchAgentKeep(by deadline: SuspendingClock.Instant) async {
+        let directory = sentinelDirectory, helperHoldsOn = helperStopsUnanswered > 0
+        var onDisk: (held: Bool, stopping: Bool)?
+        if !sentinelIO.isStalled {
+            let bound = min(exitMarkBound, max(.zero, deadline - .now))
+            onDisk = await sentinelIO.run("quit: held sessions", seconds: max(0.001, Self.seconds(bound))) {
+                let slot = RecordingSentinel.read(directory: directory)
+                let sessions = RecordingSentinel.readPending(directory: directory) + [slot].compactMap { $0 }
+                return (held: sessions.contains { $0.heldReason != nil }, stopping: slot?.stopping == true)
+            }
+        }
+        let keep: Bool
+        if let onDisk {
+            keep = onDisk.held || (onDisk.stopping && helperHoldsOn)
+        } else {
+            Logger.state.error("The recovery file did not answer the Quit's look for a held recording — deciding from what this run knows")
+            keep = quitLeftAHeldSession || helperHoldsOn
+        }
+        keepsLaunchAgentOnQuit = keep
+        guard keep else { return }
+        notify("Quitting Parley", "A previous recording is still being stopped; Parley will finish it next time.")
     }
 
     /// Logout, shutdown, restart, or a quit from outside Parley (Activity Monitor, `osascript`, Sparkle): the

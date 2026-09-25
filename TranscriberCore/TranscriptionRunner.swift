@@ -357,26 +357,30 @@ public final class TranscriptionRunner {
                 preserveSourceWAV: config.preserveSourceWAV ?? false
             )
             Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
-            // The transcript's audio paths and the quota: on the folder's queue, bounded (L review 217). Unanswered, the
-            // transcript is written all the same — its paths may still name the WAVs until the update lands.
-            let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps
-            let updated = await folderReads.read("transcript: archive paths and quota", folder: outputDirectory.path, key: runKey + "#archive",
+            // The transcript's audio paths: on the folder's queue, bounded (L review 217). Unanswered, the transcript is
+            // written all the same — its paths may still name the WAVs until the update lands.
+            let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps, writeSeconds = folderWriteSeconds
+            let updated = await folderReads.read("transcript: archive paths", folder: outputDirectory.path, key: runKey + "#archive",
                                                  seconds: folderWriteSeconds) { () -> Bool in
                 TranscriptAssembler.reconcileAudioPaths(in: jsonPath, to: archived)
+                return true
+            }
+            if updated == nil {
+                Logger.files.error("The transcript's archive paths did not answer — the recording folder is not answering")
+            }
+            // The quota, fire-and-forget and bounded, as finalize's (L review 251): a slow share's walk never holds a read.
+            folderReads.enqueue("transcript: quota", folder: outputDirectory.path) {
                 do {
-                    try StorageManager.enforceQuota(
+                    _ = try StorageManager.enforceQuotaReport(
                         in: outputDirectory,
                         limitHours: limitHours,
                         bitrateKbps: bitrateKbps,
-                        protectedFiles: archived   // every file the transcript lists (round 7 item 1)
+                        protectedFiles: archived,   // every file the transcript lists (round 7 item 1)
+                        deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
                     )
                 } catch {
                     Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
                 }
-                return true
-            }
-            if updated == nil {
-                Logger.files.error("The transcript's archive paths and the quota did not answer — the recording folder is not answering")
             }
         }
 
@@ -609,14 +613,8 @@ public final class TranscriptionRunner {
         default: detectedLanguage = "multilingual"
         }
 
-        // 6b. The lengths the record lists, and the storage quota, before the record is written so it can say what the quota
-        // could not do. Never a file backing this record: every listed audio file, every chunk file, and every archive of the
-        // session in the folder (rounds 7-8 item 1). Protecting only the last listed file let a rebuild's quota pass delete
-        // the merged file — the only copy of the earlier chunks. Both on the folder's queue, bounded — never on the main
-        // actor (L review 185) — and neither is FATAL (L review 227): the quota pass walks the whole recording root and
-        // deletes files, so a slow but healthy share must never make a Stop "not answering". Lengths that do not answer are
-        // written unknown (left out: readers measure the files), a quota pass that does not finish within the write bound is
-        // recorded, and the transcript is written all the same.
+        // 6b. The lengths the record lists: on the folder's queue, bounded — never on the main actor (L review 185) — and
+        // never FATAL (L review 227): lengths that do not answer are written unknown (left out: readers measure the files).
         let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps, sessionId = sessionState.sessionId
         let protectedFiles = audioPaths + chunkAudioPaths + [mergedURL], listedAudio = audioPaths
         let lengths = await folderReads.read("transcript: lengths", folder: outputDirectory.path,
@@ -627,23 +625,6 @@ public final class TranscriptionRunner {
             Logger.files.error("The listed audio's lengths did not answer within \(self.folderReadSeconds, privacy: .public) s — written unknown")
             finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .audioLengthsUnknown, track: nil, count: nil,
                                                                              detail: "the recording folder did not answer within \(Int(folderReadSeconds)) s")))
-        }
-        let quota = await folderReads.outcome("transcript: quota", folder: outputDirectory.path,
-                                              key: outputDirectory.path + "#finalize-quota:" + sessionId, seconds: folderWriteSeconds, {
-            Self.quota(in: outputDirectory, sessionId: sessionId, limitHours: limitHours, bitrateKbps: bitrateKbps, protectedFiles: protectedFiles)
-        })
-        switch quota {
-        case .answered(let overrun?) where overrun > 0:
-            if !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
-                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
-                    code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(overrun) bytes over the quota")))
-            }
-        case .answered:
-            break
-        case .timedOut:
-            Logger.files.error("The storage quota pass did not finish within \(self.folderWriteSeconds, privacy: .public) s — the transcript is written all the same")
-            finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .quotaNotChecked, track: nil, count: nil,
-                                                                             detail: "the quota pass did not finish within \(Int(folderWriteSeconds)) s")))
         }
 
         // 7. Assemble JSON
@@ -693,6 +674,16 @@ public final class TranscriptionRunner {
         if !leftovers.isEmpty {
             folderReads.enqueue("transcript: leftover WAVs", folder: outputDirectory.path) { removal(leftovers) }
         }
+        // The storage quota, the same way (L review 251): it walks the whole recording root and deletes files, so it runs only
+        // once the record is written — never queued ahead of the write, where a slow share's walk made the Stop "not
+        // answering" — and it stops walking at its own bound. Never a file backing this record: every listed audio file,
+        // every chunk file, and every archive of the session in the folder (rounds 7-8 item 1). What it finds is logged: the
+        // record is already written (each chunk's own pass records an overrun in it).
+        let writeSeconds = folderWriteSeconds
+        folderReads.enqueue("transcript: quota", folder: outputDirectory.path) {
+            _ = Self.quota(in: outputDirectory, sessionId: sessionId, limitHours: limitHours, bitrateKbps: bitrateKbps, protectedFiles: protectedFiles,
+                           deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000)))
+        }
 
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
@@ -725,14 +716,21 @@ public final class TranscriptionRunner {
                             previousMergedAudio: previousMergedAudio(transcriptAt: transcriptURL))
     }
 
-    /// The quota pass (L reviews 185, 227): the protected overrun, or nil when the pass failed (logged). It deletes files:
-    /// run only through `folderReads`, under the write bound.
-    nonisolated static func quota(in directory: URL, sessionId: String, limitHours: Int, bitrateKbps: Int, protectedFiles: [URL]) -> Int? {
+    /// The quota pass (L reviews 185, 227, 251): the protected overrun, or nil when the pass failed or stopped at `deadline`
+    /// (logged). It deletes files: run only through `folderReads.enqueue`, after the record is written.
+    nonisolated static func quota(in directory: URL, sessionId: String, limitHours: Int, bitrateKbps: Int, protectedFiles: [URL],
+                                  deadline: SuspendingClock.Instant) -> Int? {
         do {
-            return try StorageManager.enforceQuotaReport(
+            let report = try StorageManager.enforceQuotaReport(
                 in: directory, limitHours: limitHours, bitrateKbps: bitrateKbps,
-                protectedFiles: protectedFiles + CrashRecoveryPlanner.sessionArchives(outputDirectory: directory, sessionId: sessionId)
-            ).protectedOverrunBytes
+                protectedFiles: protectedFiles + CrashRecoveryPlanner.sessionArchives(outputDirectory: directory, sessionId: sessionId),
+                deadline: deadline
+            )
+            guard report.finished else { return nil }
+            if report.protectedOverrunBytes > 0 {
+                Logger.files.error("This session's own audio keeps the recording folder \(report.protectedOverrunBytes, privacy: .public) bytes over the storage quota")
+            }
+            return report.protectedOverrunBytes
         } catch {
             Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
             return nil

@@ -224,13 +224,15 @@ import Testing
             outputDirectory: dir, sessionId: "sess", config: h.config.config, transcriber: FakeEngine(), diarizer: FakeDiarizer(),
             runner: h.runner))
         try SessionState.write(state, directory: dir)   // the leftover progress file
-        // Written two minutes ago: its stamp (L review 220) and its file's time say so.
+        // Written two minutes ago: its stamp (L review 220), its file's time and its finalized marker's (L review 256) say so.
         var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
         var metadata = try #require(json["metadata"] as? [String: Any])
         metadata[TranscriptAssembler.writtenAtKey] = TranscriptAssembler.formatWrittenAt(Date().addingTimeInterval(-120))
         json["metadata"] = metadata
         try TranscriptAssembler.write(json, to: result.jsonPath)
-        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-120)], ofItemAtPath: result.jsonPath.path)
+        for written in [result.jsonPath, dir.appendingPathComponent(".sess.finalized")] {
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-120)], ofItemAtPath: written.path)
+        }
         let lateURL = dir.appendingPathComponent(late.name)
         if let seconds = late.seconds { try RecoveryFixtures.writeFakeWav(at: lateURL, seconds: seconds) } else { try Data(repeating: 7, count: 4_096).write(to: lateURL) }
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: lateURL.path)

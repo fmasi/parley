@@ -275,12 +275,14 @@ extension RecordingCoordinator {
 
     /// Chunk audio of a FINALIZED session written after its transcript — later than the transcript as first written, and
     /// not among the files it lists — is noted in the record (`metadata.audio_after_transcript`), once (L review 137).
-    /// Later is judged from a FIXED reference: the write time finalize stamped in the record (`transcript_written_at`, L
-    /// review 220) — never moved by a rename or the disclosure's stamp before the first look. A transcript written before
-    /// that stamp existed falls back to its time as the first look found it, kept in the note (L review 176) — never its
-    /// modification time now, which the note's own write moves. So every pass finds the same files, and a pass cut short
-    /// after the note (a Start, a timeout) never loses the row. A file with no audio in it (a header, or less) is not late
-    /// audio. Returns nil when there is none. Blocking file work: only through the bounded folder reader.
+    /// Later is judged from a FIXED reference in the FILES' own clock (L review 256): the finalized marker's time, written
+    /// with the transcript on the same volume as the chunk files — never the Mac's clock against a share's file times, and
+    /// never moved by a rename or the disclosure's stamp before the first look (L review 220). Without a marker: the write
+    /// time finalize stamped in the record (`transcript_written_at`); then, for a transcript written before either existed,
+    /// its time as the first look found it, kept in the note (L review 176) — never its modification time now, which the
+    /// note's own write moves. So every pass finds the same files, and a pass cut short after the note (a Start, a timeout)
+    /// never loses the row. A file with no audio in it (a header, or less) is not late audio. Returns nil when there is
+    /// none. Blocking file work: only through the bounded folder reader.
     nonisolated static func noteAudioAfterTranscript(outputDir: URL, sessionId: String) -> LateAudio? {
         let fm = FileManager.default
         let transcriptURL = outputDir.appendingPathComponent("\(sessionId).json")
@@ -289,7 +291,8 @@ extension RecordingCoordinator {
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var metadata = json["metadata"] as? [String: Any] else { return nil }
         let note = metadata["audio_after_transcript"] as? [String: Any]
-        let written = (metadata[TranscriptAssembler.writtenAtKey] as? String).flatMap(TranscriptAssembler.parseWrittenAt)
+        let written = SessionState.finalizedMarkerModified(directory: outputDir, sessionId: sessionId)
+            ?? (metadata[TranscriptAssembler.writtenAtKey] as? String).flatMap(TranscriptAssembler.parseWrittenAt)
             ?? (note?[lateAudioReferenceKey] as? Double).map(Date.init(timeIntervalSince1970:)) ?? modified
         let listed = Set(metadata["audio_files"] as? [String] ?? [])
         let prefix = "\(sessionId)-"

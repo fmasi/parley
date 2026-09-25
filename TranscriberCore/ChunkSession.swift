@@ -67,9 +67,6 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// The storage quota could not be met without deleting this session's own audio, which it
         /// never does (round 8 item 2). Informational: nothing is missing; the folder is over quota.
         public static let quotaExceededByCurrentSession = Code(rawValue: "quota_exceeded_by_current_session")
-        /// The storage quota pass did not finish within its bound — a slow share (L review 227): the transcript was written
-        /// all the same. Informational: nothing is missing; the folder may be over quota.
-        public static let quotaNotChecked = Code(rawValue: "quota_not_checked")
         /// The listed audio's lengths could not be read within their bound (L review 227): the record's `chunk_durations`
         /// are left out — unknown, never made up — and readers measure the files themselves. Informational.
         public static let audioLengthsUnknown = Code(rawValue: "audio_lengths_unknown")
@@ -346,9 +343,25 @@ enum DurableFile {
     /// Test seam: every path fully synced while a test was recording, in order.
     static var syncedForTesting: [String] { lock.withLock { synced } }
 
+    /// A durable write's temporary for `final` (L reviews 262, 268): SHORT — a long file name never makes its temporary too
+    /// long to create — yet it keeps a prefix of its file's name (the whole name, fitted), so the session's sweep finds it.
+    /// `.<fitted name>.<UUID>.tmp`.
+    static func temporaryName(for final: String) -> String { "\(temporaryPrefix(for: final))\(UUID().uuidString).tmp" }
+
+    /// What every temporary for `final` begins with: `.<fitted name>.`.
+    static func temporaryPrefix(for final: String) -> String { ".\(fittedFilename(final, maxBytes: 64))." }
+
+    /// Whether `name` is a temporary a durable write of `final` left: this form, or the one before it (`<final>.<UUID>.tmp`).
+    static func isTemporary(_ name: String, for final: String) -> Bool {
+        for prefix in [temporaryPrefix(for: final), final + "."] where name.hasPrefix(prefix) && name.hasSuffix(".tmp") {
+            if UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(".tmp".count))) != nil { return true }
+        }
+        return false
+    }
+
     static func replace(_ url: URL, with data: Data) throws {
         let directory = url.deletingLastPathComponent()
-        let tmp = directory.appendingPathComponent("\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let tmp = directory.appendingPathComponent(temporaryName(for: url.lastPathComponent))
         do {
             try write(data, toNewFile: tmp, recordingAs: url)
             guard Darwin.rename(tmp.path, url.path) == 0 else { throw posixError(errno) }
@@ -601,27 +614,23 @@ public struct SessionState: Codable {
         return renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 ? 0 : errno
     }
 
-    /// Temp files an interrupted durable write left for this session: `session.json.<uuid>.tmp`,
-    /// `<id>.json.<uuid>.tmp` (the transcript) and `.<id>.finalized.<uuid>.tmp` (round 4 item 5).
+    /// Temp files an interrupted durable write left for this session — session.json's, the transcript's (`<id>.json`) and the
+    /// finalized marker's (`.<id>.finalized`), round 4 item 5 — in either form (`DurableFile.isTemporary`, L review 268).
     /// Under the lock; called at finalize and at recovery.
     public static func sweepTemporaries(directory: URL, sessionId: String) {
         ioLock.lock(); defer { ioLock.unlock() }
         let finals = [fileName, "\(sessionId).json", ".\(sessionId).finalized"]
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        for name in names where name.hasSuffix(".tmp") {
-            for final in finals where name.hasPrefix(final + ".") {
-                let middle = name.dropFirst(final.count + 1).dropLast(".tmp".count)
-                guard UUID(uuidString: String(middle)) != nil else { continue }
-                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
-            }
+        for name in names where finals.contains(where: { DurableFile.isTemporary(name, for: $0) }) {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 
-    /// `session.json.<uuid>.tmp` left by a write that died. Only this process writes session.json and
-    /// every write holds `ioLock`, so any temp file seen here is stale.
+    /// session.json's temporaries left by a write that died. Only this process writes session.json and every write holds
+    /// `ioLock`, so any temp file seen here is stale.
     private static func sweepStaleTemporaryFiles(in directory: URL) {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        for name in names where name.hasPrefix("\(fileName).") && name.hasSuffix(".tmp") {
+        for name in names where DurableFile.isTemporary(name, for: fileName) {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
@@ -711,5 +720,11 @@ public struct SessionState: Codable {
     /// Whether `sessionId` was marked finalized.
     public static func isMarkedFinalized(directory: URL, sessionId: String) -> Bool {
         FileManager.default.fileExists(atPath: finalizedMarkerURL(directory: directory, sessionId: sessionId).path)
+    }
+
+    /// When the finalized marker was written, in the FOLDER's own clock (L review 256): the same write as the transcript's, so
+    /// the reference late audio is judged from never compares the Mac's clock with a share's file times. nil without one.
+    static func finalizedMarkerModified(directory: URL, sessionId: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: finalizedMarkerURL(directory: directory, sessionId: sessionId).path))?[.modificationDate] as? Date
     }
 }
