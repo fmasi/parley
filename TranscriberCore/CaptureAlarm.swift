@@ -198,6 +198,17 @@ public struct CaptureAlarmRegistry: Equatable, Sendable {
         return true
     }
 
+    /// A pass's row, part by part (L review 271): raised whole when the kind is not up — every part, two sessions whose
+    /// sentences read the same included (L review 180) — else each part the row does not say yet is added, never a sentence
+    /// the row already says. True when the row changed.
+    @discardableResult
+    public mutating func raise(_ kind: AlarmKind, parts: [String], now: Date) -> Bool {
+        guard alarms[kind] != nil else { return raise(kind, message: parts.joined(separator: " "), now: now) }
+        var changed = false
+        for part in parts where raise(kind, message: part, now: now) { changed = true }
+        return changed
+    }
+
     /// A per-session row's message REVISED (L review 255): `old`, one recording's, is replaced by `new` where the row still
     /// says it — never left beside it; otherwise `new` is raised (or added). True when the row changed.
     @discardableResult

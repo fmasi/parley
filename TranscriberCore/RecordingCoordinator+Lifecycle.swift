@@ -227,29 +227,30 @@ extension RecordingCoordinator {
         return true
     }
 
-    /// Whether the Quit leaves a session the helper still holds (L reviews 223, 257): decided from what is ON DISK at every
-    /// exit of the Quit — never from whether a hold happened to land while the Quit waited (one landing while its alert was
-    /// up, or after its bound ran out, used to be missed). Kept when a pending session — or the slot's — is held, or the
-    /// slot is marked stopping while the helper has not answered its stop: said, never a silent exit, and the LaunchAgent
-    /// stays so the next launch finishes it. The look is bounded by the exit's `deadline` (never past `exitMarkBound`); one
-    /// that does not answer falls back to what this run knows — a hold during the Quit, or a helper stop not answered.
+    /// Whether the Quit leaves a session the helper still holds (L reviews 223, 257, 269): decided from what is ON DISK at
+    /// every exit of the Quit — never from whether a hold happened to land while the Quit waited (one landing while its alert
+    /// was up, or after its bound ran out, used to be missed). Kept when a pending session — or the slot's — is held, or is a
+    /// session whose stop attempt has not seen its helper let go (`sessionsNotLetGo`: from the attempt's start — the refusal
+    /// re-asks and the wait before a hold included — until the helper lets go or the hold is written): said, never a silent
+    /// exit, and the LaunchAgent stays so the next launch finishes it. The look is bounded by the exit's `deadline` (never past
+    /// `exitMarkBound`); one that does not answer falls back to what this run knows — a hold during the Quit, or a session
+    /// not let go.
     func decideLaunchAgentKeep(by deadline: SuspendingClock.Instant) async {
-        let directory = sentinelDirectory, helperHoldsOn = helperStopsUnanswered > 0
-        var onDisk: (held: Bool, stopping: Bool)?
+        let directory = sentinelDirectory, notLetGo = sessionsNotLetGo
+        var onDisk: Bool?
         if !sentinelIO.isStalled {
             let bound = min(exitMarkBound, max(.zero, deadline - .now))
             onDisk = await sentinelIO.run("quit: held sessions", seconds: max(0.001, Self.seconds(bound))) {
-                let slot = RecordingSentinel.read(directory: directory)
-                let sessions = RecordingSentinel.readPending(directory: directory) + [slot].compactMap { $0 }
-                return (held: sessions.contains { $0.heldReason != nil }, stopping: slot?.stopping == true)
+                let sessions = RecordingSentinel.readPending(directory: directory) + [RecordingSentinel.read(directory: directory)].compactMap { $0 }
+                return sessions.contains { $0.heldReason != nil || notLetGo.contains($0.sessionKey) }
             }
         }
         let keep: Bool
         if let onDisk {
-            keep = onDisk.held || (onDisk.stopping && helperHoldsOn)
+            keep = onDisk
         } else {
             Logger.state.error("The recovery file did not answer the Quit's look for a held recording — deciding from what this run knows")
-            keep = quitLeftAHeldSession || helperHoldsOn
+            keep = quitLeftAHeldSession || !notLetGo.isEmpty
         }
         keepsLaunchAgentOnQuit = keep
         guard keep else { return }

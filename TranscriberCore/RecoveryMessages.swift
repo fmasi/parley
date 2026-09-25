@@ -351,16 +351,24 @@ public enum RecoveryMessages {
 
     /// What makes a transcription engine ready (L review 230): Setup or a model download — or, for one that cannot be made
     /// on this macOS (or that no download of Parley's makes ready), another engine chosen in Settings.
-    public enum EngineRemedy: Sendable, Equatable { case setupOrDownload, chooseAnotherEngine }
+    public enum EngineRemedy: Sendable, Equatable {
+        case setupOrDownload, chooseAnotherEngine
+        /// The readiness look did not answer in time (L review 270): nothing is known yet — Parley checks again.
+        case checkAgain
+    }
 
     /// A salvage whose transcription engine is not ready (L review 178): nothing about the audio failed — it is kept, and
     /// transcribed once the engine is ready — and what makes it ready (L review 230).
     public static func waitingForEngine(at: Date, folder: String, why: String, remedy: EngineRemedy = .setupOrDownload) -> String {
+        let kept = "A recording that stopped at \(clock(at)) is kept in \(folder), untranscribed: "
         let then = switch remedy {
         case .setupOrDownload: "Parley will transcribe it once the engine is ready — after Setup or a model download."
         case .chooseAnotherEngine: "To transcribe it, choose another engine in Settings — Parley will transcribe it then."
+        case .checkAgain: "Parley will check again, and transcribe it once the engine is ready."
         }
-        return "A recording that stopped at \(clock(at)) is kept in \(folder), untranscribed: the transcription engine isn’t ready (\(why.trimmingCharacters(in: CharacterSet(charactersIn: ". ")))). " + then
+        // Only what is known (L review 270): a look that did not answer says nothing about the engine.
+        guard remedy != .checkAgain else { return kept + "Parley couldn’t check the speech model yet — it didn’t answer in time. " + then }
+        return kept + "the transcription engine isn’t ready (\(why.trimmingCharacters(in: CharacterSet(charactersIn: ". ")))). " + then
     }
 
     /// Chunks the helper may have recorded during a rotation that timed out, which the Stop could not check because the

@@ -31,9 +31,15 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         SpeechAnalyzerLocale.isAmong(language, await inventory.installedLocales())
     }
 
+    /// Why it is not ready, honestly (L review 270): a locale this Mac does not support at all is "not supported" — never
+    /// "not installed", which a download would fix.
     public nonisolated func notReadyReason() async -> String {
         guard let language else { return "Apple Speech needs a language, and has no language setting yet (#223)" }
-        return "its \(SpeechAnalyzerLocale.resolve(language)) speech model is not installed on this Mac"
+        let localeID = SpeechAnalyzerLocale.resolve(language)
+        guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
+            return "its \(localeID) speech model is not supported on this Mac"
+        }
+        return "its \(localeID) speech model is not installed on this Mac"
     }
 
     /// Installs the language's speech model — a NETWORK download: only from an explicit user action (Setup, Settings),
@@ -67,11 +73,15 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         let localeID = SpeechAnalyzerLocale.resolve(language)
         let locale = Locale(identifier: localeID)
 
-        // Its on-device model must be INSTALLED, or transcription returns empty/garbage — looked at FIRST, and alone (L review
-        // 254): an installed model is a supported one, and a model that is not installed is refused at once, never after a
-        // look at what could be downloaded. It is NEVER downloaded here (L review 229): a transcription runs in a recording or
-        // a salvage, and installing is a network download only an explicit user action may start (`prepare`).
+        // Its on-device model must be INSTALLED, or transcription returns empty/garbage — looked at FIRST (L review 254): an
+        // installed model is a supported one, and needs no other look. Only a model that is not installed looks at what this
+        // Mac supports, to say which it is (L review 270): "not supported on this Mac", or "not installed". It is NEVER
+        // downloaded here (L review 229): a transcription runs in a recording or a salvage, and installing is a network
+        // download only an explicit user action may start (`prepare`).
         guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.installedLocales()) else {
+            guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
+                throw SpeechAnalyzerError.localeNotSupported(locale.identifier(.bcp47))
+            }
             Logger.transcription.error("SpeechAnalyzer: the \(locale.identifier(.bcp47), privacy: .public) model is not installed — not transcribed, never downloaded")
             throw SpeechAnalyzerError.assetNotInstalled(locale.identifier(.bcp47))
         }

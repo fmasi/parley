@@ -77,6 +77,9 @@ public final class AppState {
     }
     @discardableResult
     public func raiseAppAlarm(_ kind: AlarmKind, message: String, now: Date = Date()) -> Bool { alarms.raise(kind, message: message, now: now) }
+    /// A pass's row, part by part (L review 271): see `CaptureAlarmRegistry.raise(_:parts:now:)`.
+    @discardableResult
+    public func raiseAppAlarm(_ kind: AlarmKind, parts: [String], now: Date = Date()) -> Bool { alarms.raise(kind, parts: parts, now: now) }
     /// A per-session row's message revised (L review 255): see `CaptureAlarmRegistry.revise`.
     @discardableResult
     public func reviseAppAlarm(_ kind: AlarmKind, replacing old: String, with new: String, now: Date = Date()) -> Bool {

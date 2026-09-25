@@ -527,7 +527,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
 @MainActor
 @Suite struct SpeechAnalyzerLooksRoundHTests {
     /// L review 254: a transcription looks at the INSTALLED locales first — an installed model needs no other look — and a
-    /// model that is not installed is refused without asking what is supported.
+    /// model that is not installed is refused, the supported locales looked at only to word it (L review 270).
     @Test func aTranscriptionLooksAtTheInstalledModelsFirst() async throws {
         guard #available(macOS 26.0, *) else { return }
         let installed = LookingSpeechInventory(installed: ["en-US"])
@@ -539,7 +539,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
             _ = try await SpeechAnalyzerEngine(language: "en", inventory: missing)
                 .transcribe(audioPath: URL(fileURLWithPath: "/nonexistent.wav"), language: nil, audioSource: .system)
         }
-        #expect(missing.supportedLooks == 0, "not installed: refused at once")
+        #expect(missing.supportedLooks == 1, "not installed: the supported look only words the refusal (L review 270)")
     }
 
     /// L review 254: a salvage's readiness look is bounded — an inventory that does not answer is NOT READY: the session
@@ -557,7 +557,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         #expect(ContinuousClock.now - started < .seconds(5), "within its bound")
         #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [p.sessionKey], "kept")
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
-        #expect(row.contains("transcription engine isn’t ready"), "\(row)")
+        #expect(row.contains("couldn’t check the speech model yet"), "honestly worded (L review 270): \(row)")
     }
 }
 #endif
