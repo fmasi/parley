@@ -827,11 +827,12 @@ public final class RecordingCoordinator {
         let rotationBound = transcriptionRunner.chunkRotator?.rotationBoundSeconds ?? ChunkRotator.rotateCallSeconds
         _ = try? await withDeadline(seconds: rotationBound, label: "rotation before stop") { await self.awaitRotationInFlight() }
         var stoppedPaths: AudioPaths?
+        // The recording this Stop's attempt marks not let go (L review 269): the one key its hold, if any, also clears.
+        let attemptKey = sentinel?.sessionKey ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) } ?? currentSessionKey
         do {
             // Bounded (§8.8): a helper that never answers is salvaged from disk in the catch below. A stop already under
             // way in the helper is waited for, within the same deadline (L review 148).
-            let paths = try await userStop(session: sentinel?.sessionKey ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) }
-                                                ?? currentSessionKey)
+            let paths = try await userStop(session: attemptKey)
             stoppedPaths = paths
             clearHelperMic()   // only now has the helper let go of the mic (#192)
             // The sentinel stays (marked stopping) until the transcript exists: a crash, force-quit or
@@ -983,7 +984,7 @@ public final class RecordingCoordinator {
                     if sentinel == nil { Logger.state.error("The held Stop's session has no recovery file — held from where its pipeline was") }
                     if holdForHelper(held, message: message, cause: .stopInterrupted, reason: .stopUnderWay,
                                      because: "the Stop found another stop still under way in the capture helper") {
-                        stopAttemptEnded(location.map(Self.sessionKey(of:)))   // however the attempt named it (L review 269)
+                        stopAttemptEnded(attemptKey)   // the key the attempt marked, whatever the hold was read back as (L review 269)
                     }
                 } else {
                     Logger.state.error("The held Stop's session has no recovery file and no known folder")

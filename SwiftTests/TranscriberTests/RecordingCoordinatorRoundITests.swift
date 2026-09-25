@@ -153,3 +153,39 @@ import Testing
         #expect(row.contains("p.json") && !row.contains("isn’t ready"), "the waiting sentence is replaced: \(row)")
     }
 }
+
+// MARK: - A held refusal clears the stop attempt it marked (269, re-review)
+
+@MainActor
+@Suite struct HeldRefusalClearsItsAttemptRoundITests {
+    /// L review 269 (re-review): the user's Stop marks the key it knows — here the re-attached recording's, the recovery file
+    /// and the pipeline both gone — and the refusal it holds is read back from the recovery file as it stands then. Once that
+    /// hold is written, the attempt the Stop marked ends too: never a mark left behind that keeps the LaunchAgent at every
+    /// later Quit.
+    @Test func aHeldRefusalClearsTheKeyItsStopMarked() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        var s = try h.writeSentinel()
+        s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
+        try RecordingSentinel.write(s, directory: h.tmp)
+        h.client.isCapturingResult = true
+        h.runner.failSetupForTesting = true
+        await h.coordinator.recoverAtLaunch()
+        #expect(h.appState.isRecording && h.runner.chunkRotator == nil, "re-attached without a pipeline")
+        RecordingSentinel.delete(directory: h.tmp)   // the Stop reads no recovery file
+        h.client.stopError = RefusedStoppingError()
+        h.coordinator.stopDeadline = .milliseconds(300)
+        h.coordinator.stopReaskInterval = .milliseconds(50)
+        h.coordinator.stopReaskMinimumBudget = .milliseconds(10)
+        let once = Harness.Box(true)
+        h.client.onStop = {
+            guard once.value else { return }
+            once.value = false
+            _ = try? h.writeSentinel(sessionId: "other")   // what the recovery file holds by the time the refusal is held
+        }
+        await h.coordinator.stopRecording()
+        let held = RecordingSentinel.readPending(directory: h.tmp)
+        #expect(held.contains { $0.heldReason == .stopUnderWay }, "the hold was written: \(held.map(\.sessionKey))")
+        #expect(h.coordinator.sessionsNotLetGo.isEmpty, "no attempt left marked: \(h.coordinator.sessionsNotLetGo)")
+    }
+}
