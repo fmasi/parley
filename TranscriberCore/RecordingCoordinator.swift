@@ -1683,6 +1683,25 @@ public final class RecordingCoordinator {
             // is never read as a new crash while the salvage runs (L1 fix round 1).
             captureClient.captureEnded()
             Logger.state.error("All retries exhausted after \(self.xpcRetryCount) interruptions within the decay window")
+            // A crash verdict can be false (final review AF-11, A-I1's class): the helper may still be capturing this session,
+            // writing its live chunk. Stopped, bounded, BEFORE anything reads its files, as a failed restart's is; one that does
+            // not let go holds the session untranscribed, its mic kept marked, for the pending retry to finish.
+            let helperStop = await boundedHelperStop("stop at the retry cap", session: sentinel.sessionKey)
+            guard helperStop.letGo else {
+                await settleAbandonedPipeline()
+                // Read BEFORE the phase goes idle (L review 264), as the failed restart's hold does.
+                let held = await slotReadOffMain("crash: read") ?? sentinel
+                appState.criticalError = "Recording failed — capture crashed repeatedly. Its audio is kept; Parley will transcribe the recording once the capture helper lets go."
+                appState.phase = .idle
+                stopStatusPoll()
+                keepMicMarked = true
+                Logger.state.error("The capture helper did not let go at the retry cap — holding its session, untranscribed")
+                holdForHelper(held,
+                              message: "Parley couldn’t stop the capture after it crashed repeatedly — its audio is kept, and Parley will transcribe it once the capture helper lets go.",
+                              cause: .captureFailed, reason: .restartFailed, because: helperStop.because)
+                notifyCritical("Recording Failed", appState.criticalError ?? "")
+                return
+            }
             // council F3: salvage the live chunked session (re-ingesting the in-progress orphan,
             // since this branch returns before the normal re-ingestion below) so chunks already
             // transcribed aren't discarded with the session.

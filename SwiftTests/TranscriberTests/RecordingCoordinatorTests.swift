@@ -2266,6 +2266,27 @@ struct Harness {
         #expect(h.client.captureEndedCalls == 1)
     }
 
+    /// Final review AF-11 (A-I1's class, at the retry cap): a crash verdict can be false — the helper may still be capturing
+    /// this session. The give-up stops it, bounded, BEFORE anything reads its files; a stop that does not let go holds the
+    /// session (its mic kept marked) for the pending retry — never a transcript over a file the helper still writes.
+    @Test func aGiveUpAtTheRetryCapStopsTheHelperFirst() async throws {
+        let h = try Harness()
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries
+        h.coordinator.lastCrashAt = Date()
+        h.client.isCapturingResult = true
+        h.client.stopError = CaptureCallTimeout(call: "stop", seconds: 6)
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.startCalls.isEmpty, "no restart after the cap")
+        #expect(h.client.stopCalls == 1, "the capture is stopped before the salvage")
+        #expect(h.appState.isIdle)
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "held, never finished")
+        #expect(h.recordingMic.current == .some("mic-1"), "the mic the helper may still hold stays marked")
+        #expect(h.appState.criticalError?.contains("once the capture helper lets go") == true, "\(h.appState.criticalError ?? "nil")")
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
+    }
+
     @Test func crashAfterDecayIntervalStartsAFreshStreak() async throws {
         let h = try Harness()
         _ = try h.writeSentinel()
@@ -4732,6 +4753,49 @@ struct Harness {
         #expect(h.client.finalizeCalls.isEmpty, "nothing transcribed")
         #expect(FileManager.default.fileExists(atPath: live.path), "its audio is kept")
         #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "held")
+    }
+
+    /// Final review AF-11: the retry cap's give-up on the live pipeline never processes the live file while the helper may
+    /// still write it — a stop that does not let go holds the session with the file untouched.
+    @Test func aGiveUpAtTheRetryCapNeverProcessesTheLiveFileBeforeTheStop() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let (_, live) = try await reattachedOnALiveFile(h)
+        let processor = try #require(h.runner.chunkProcessor)
+        h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries
+        h.coordinator.lastCrashAt = Date()
+        h.client.stopError = CaptureCallTimeout(call: "stop", seconds: 6)
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.stopCalls == 1 && h.client.startCalls.isEmpty)
+        await Harness.settle()
+        await processor.awaitAllProcessed()
+        #expect(await !processor.getSessionState().chunks.contains { $0.index == 1 },
+                "the live file is not processed while the helper may still write it")
+        #expect(h.client.finalizeCalls.isEmpty, "nothing transcribed")
+        #expect(FileManager.default.fileExists(atPath: live.path), "its audio is kept")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "held")
+    }
+
+    /// Final review AF-11: once the helper let go, the give-up's salvage takes the sealed live file — never before the stop.
+    @Test func aGiveUpAtTheRetryCapProcessesTheLiveFileOnlyAfterTheHelperLetGo() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let (s, live) = try await reattachedOnALiveFile(h)
+        let processor = try #require(h.runner.chunkProcessor)
+        h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries
+        h.coordinator.lastCrashAt = Date()
+        h.client.stopResult = AudioPaths(systemAudio: live, micAudio: dir(s).appendingPathComponent("sess-1_mic.wav"))
+        let processedAtStop = Harness.Box<[Int]?>(nil), salvaged = Harness.Box<[Int]?>(nil)
+        h.client.onStop = {
+            await processor.awaitAllProcessed()
+            processedAtStop.value = await processor.getSessionState().chunks.map(\.index)
+        }
+        h.client.onFinalizeDiagnostics = { salvaged.value = await processor.getSessionState().chunks.map(\.index) }
+        await h.coordinator.handleXPCCrash()
+        #expect(h.client.stopCalls == 1 && h.client.startCalls.isEmpty)
+        #expect(processedAtStop.value.map { !$0.contains(1) } == true, "nothing processed the live file before the stop: \(String(describing: processedAtStop.value))")
+        #expect(salvaged.value?.contains(1) == true, "the sealed live file joined the salvage: \(String(describing: salvaged.value))")
+        #expect(h.appState.isIdle && h.appState.criticalError?.hasPrefix("Recording failed — capture crashed repeatedly.") == true)
     }
 
     /// Final review A-I1: once the busy helper let go, the live file — sealed now — joins the salvage; nothing processed it

@@ -63,7 +63,7 @@ public struct RecordingSentinel: Codable, Equatable, Sendable {
     public enum HeldReason: String, Codable, Sendable, Equatable {
         /// A start failed, and the helper would not stop the capture it may have begun.
         case startFailed
-        /// The capture failed mid-recording, its restart failed, and the helper would not let go.
+        /// The capture failed mid-recording, its restart failed (or was not tried: the retry cap), and the helper would not let go.
         case restartFailed
         /// The user's Stop found another stop still under way in the helper, past the Stop's deadline.
         case stopUnderWay
