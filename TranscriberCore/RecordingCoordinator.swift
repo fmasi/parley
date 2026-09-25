@@ -198,7 +198,13 @@ public final class RecordingCoordinator {
     /// turn in between counts as idle — L round 7), or running in `startRecording`, whatever the
     /// outcome. The phase is still `.idle` meanwhile, and a crash-protection hand-over (an exit) must
     /// wait; the Record control is disabled (§8.6, mirrors `stopInFlight`).
-    public var isStartInFlight: Bool { startAnnounced || startRunning }
+    /// The relaunch probing the helper — its ping, and the stops it may need — counts too (L review 112): Record is
+    /// disabled until the helper's state is settled.
+    public var isStartInFlight: Bool { startAnnounced || startRunning || relaunchProbing }
+    /// A start that is not the relaunch's own: what every relaunch step yields to after an await (L reviews 38,
+    /// 112, 129).
+    private var userStartInFlight: Bool { startAnnounced || startRunning }
+    private var relaunchProbing = false
     private var startAnnounced = false
     private var startRunning = false
     /// A start refused because the helper is busy with an earlier capture: the pending retry runs once it is over.
@@ -399,7 +405,7 @@ public final class RecordingCoordinator {
         let config = configManager.config
         let recordingDirectory = URL(fileURLWithPath: config.recordingDirectory)
         let folderBound = min(folderReadDeadline, max(.milliseconds(1), startBy - SuspendingClock.now))
-        async let folderRead = readOffMain("start: recording folder", bound: folderBound) {
+        async let folderRead = readOffMain("start: recording folder", folder: recordingDirectory, bound: folderBound) {
             let status = Self.folderStatus(recordingDirectory, probe: probe)
             return (status, status == .reachable ? freeBytesProvider(Self.nearestExistingDirectory(recordingDirectory, probe: probe)) : nil)
         }
@@ -777,7 +783,11 @@ public final class RecordingCoordinator {
                 )
 
                 let result: TranscriptionResult?
-                if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId) {
+                // Off the main actor, bounded (L review 122): a folder that does not answer is said so, and kept.
+                guard let recoverable = await readOffMain("stop: session folder", folder: sessionOutputDir, {
+                    CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId)
+                }) else { throw FolderNotAnswering() }
+                if recoverable {
                     let config = configManager.config
                     let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
                     // Drain capture diagnostics and stamp the always-present provenance into the
@@ -863,9 +873,9 @@ public final class RecordingCoordinator {
                 outcome = await finalizeAbandonedSession(at: location, reingestOrphan: !stopSucceeded)
             } else {
                 transcriptionRunner.teardownChunkedPipeline()
-                outcome = unsalvagedOutcome(at: location, why: error.localizedDescription)
+                outcome = await unsalvagedOutcome(at: location, why: error.localizedDescription)
             }
-            RecordingSentinel.delete(directory: sentinelDirectory)
+            finishSentinel(after: outcome, sentinel: sentinel)
             appState.errorMessage = error.localizedDescription
             // #155: this catch is the stop path's only signal to the user — the sentinel is deleted
             // unconditionally, so relaunching will not retry. It says what the salvage did and what is
@@ -1404,7 +1414,7 @@ public final class RecordingCoordinator {
             appState.criticalError = "Recording failed — capture crashed repeatedly. " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
-            RecordingSentinel.delete(directory: sentinelDirectory)
+            finishSentinel(after: outcome, sentinel: sentinel)
             // §7.4 P6: says what the salvage actually wrote — never "has been transcribed" when nothing was.
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
             return
@@ -1430,8 +1440,14 @@ public final class RecordingCoordinator {
             // collision-free index, so derive one directly. #135: name the restart capture in the
             // chunk-index namespace, never the legacy segment counter — the two namespaces can
             // collide. CrashRecoveryPlanner.planRestart owns the collision guard + naming
-            // sequence, shared by every no-live-pipeline restart site (#170).
-            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            // sequence, shared by every no-live-pipeline restart site (#170). Read off the main actor, bounded (L
+            // review 122): a folder that does not answer cannot name a restart safely — the recording ends, kept.
+            guard let restart = await readOffMain("crash restart: plan", folder: outputDir, {
+                CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
+            }) else {
+                await endRecordingFolderNotAnswering(sentinel)
+                return
+            }
             baseName = restart.baseName
             newSentinel = restart.newSentinel
         }
@@ -1502,13 +1518,16 @@ public final class RecordingCoordinator {
             // now) holds audio only if the restart captured: sealed by the stop, it joins the salvage — never
             // while the helper may still be writing it.
             let restartFile = transcriptionRunner.chunkRotator.map { outputDir.appendingPathComponent($0.currentBaseName + ".wav").path }
-            let reingest = helperLetGo && restartFile.map { FileManager.default.fileExists(atPath: $0) } == true
+            var reingest = false
+            if helperLetGo, let restartFile {   // off the main actor, bounded (L review 122)
+                reingest = await readOffMain("crash restart: restart file", folder: outputDir) { FileManager.default.fileExists(atPath: restartFile) } ?? false
+            }
             let outcome = await finalizeAbandonedSession(at: Self.location(of: sentinel), reingestOrphan: reingest)
             appState.criticalError = "Recording failed — could not restart capture: \(error.localizedDescription). " + RecoveryMessages.outcomeSentence(outcome)
             appState.phase = .idle
             stopStatusPoll()
             if helperLetGo {
-                RecordingSentinel.delete(directory: sentinelDirectory)
+                finishSentinel(after: outcome, sentinel: sentinel)
             } else {
                 // It may still be capturing, and hold the mic: HELD (L review 81) — salvage-only, never resumed,
                 // out of the slot the next Start writes — and finished once the helper's stop says it let go.
@@ -1586,13 +1605,27 @@ public final class RecordingCoordinator {
 
     private enum RelaunchOutcome { case handled, heldForHelper }
 
+    /// After every await of a relaunch step (L follow-up 38, L reviews 112, 129): a Start that got in meanwhile owns
+    /// the app, so the session waits for the next idle — pending, retried then — and nothing here touches that start
+    /// (not its phase, not its crash detection). False when it yielded.
+    private func yieldsToAStart(_ sentinel: RecordingSentinel) -> Bool {
+        guard !appState.isIdle || userStartInFlight else { return true }
+        Logger.state.info("A recording start is in flight — the relaunch session waits")
+        keepPending(sentinel)
+        retryPendingWhenIdle = true
+        return false
+    }
+
     private func recover(_ sentinel: RecordingSentinel) async -> RelaunchOutcome {
         Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
+        // Until the helper's state is settled, Record is disabled (L review 112).
+        relaunchProbing = true
+        defer { relaunchProbing = false }
         let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
         // Off the main actor, bounded (L review 75): a folder that does not answer is unreachable here — the
         // session waits, never salvaged as "no recorded audio".
         let probe = folderProbe
-        let folderStatus = await readOffMain("relaunch: recording folder") { Self.folderStatus(outputDir, probe: probe) } ?? .unreachable
+        let folderStatus = await readOffMain("relaunch: recording folder", folder: outputDir) { Self.folderStatus(outputDir, probe: probe) } ?? .unreachable
 
         // The callbacks are wired and crash detection armed BEFORE the ping (no start() in this process,
         // C1): a crash reported during it is heard (L round 5). Every path below that ends without a
@@ -1602,16 +1635,16 @@ public final class RecordingCoordinator {
         let helperState = await captureClient.captureState()
         // A Start pressed during the ping owns the app now (L follow-up 38): this session waits for the
         // next idle, and nothing here touches that start (not even its crash detection).
-        guard appState.isIdle, !isStartInFlight else {
-            Logger.state.info("A recording start is in flight — the relaunch session waits")
-            keepPending(sentinel)
-            return .handled
-        }
+        guard yieldsToAStart(sentinel) else { return .handled }
         // A helper that did not answer may still be capturing (L9 review 49): never re-attached to, and
         // stopped — bounded — before any salvage or resume. One that will not stop keeps the session.
-        if helperState == .unknown, !(await boundedHelperStop("stop an unanswering helper at relaunch")) {
-            holdForHelper(sentinel)
-            return .heldForHelper
+        if helperState == .unknown {
+            let letGo = await boundedHelperStop("stop an unanswering helper at relaunch")
+            guard yieldsToAStart(sentinel) else { return .handled }   // L review 112: after every await
+            if !letGo {
+                holdForHelper(sentinel)
+                return .heldForHelper
+            }
         }
         let helperCapturing = helperState == .capturing
         let decision = RelaunchDecision.decide(
@@ -1624,13 +1657,9 @@ public final class RecordingCoordinator {
         case .reattach:
             Logger.state.info("XPC service alive — re-attaching (Flow A)")
             // The session's folder, read off the main actor BEFORE the recording is re-attached (L review 75).
-            let scan = await readOffMain("re-attach: session folder") { Self.scanForReattach(sentinel: sentinel, outputDir: outputDir) }
+            let scan = await readOffMain("re-attach: session folder", folder: outputDir) { Self.scanForReattach(sentinel: sentinel, outputDir: outputDir) }
             // A Start pressed during the read owns the app now (as after the ping).
-            guard appState.isIdle, !isStartInFlight else {
-                Logger.state.info("A recording start is in flight — the relaunch session waits")
-                keepPending(sentinel)
-                return .handled
-            }
+            guard yieldsToAStart(sentinel) else { return .handled }
             // From here to the adopt, all synchronous (L review 72): a crash or a Stop can only arrive once the
             // chunk pipeline exists — the crash path then names its restart from the live rotator, and a Stop
             // finishes the recording once, on the live pipeline (the orphans are already queued in it).
@@ -1664,9 +1693,14 @@ public final class RecordingCoordinator {
             // the chunk it seals. Unconditional (L review 84): only the helper's stop answer — "No capture in
             // progress" counts — releases the session, never a ping. A helper that will not stop keeps its
             // session: a file still being written is never salvaged (L follow-up 40).
-            if reason == .wasStopping, !(await boundedHelperStop("stop after relaunch")) {
-                holdForHelper(sentinel)
-                return .heldForHelper
+            if reason == .wasStopping {
+                let letGo = await boundedHelperStop("stop after relaunch")
+                // A Start that got in during the stop owns the app now (L review 112): the session waits.
+                guard yieldsToAStart(sentinel) else { return .handled }
+                if !letGo {
+                    holdForHelper(sentinel)
+                    return .heldForHelper
+                }
             }
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
         case .salvageStale:
@@ -2001,18 +2035,14 @@ public final class RecordingCoordinator {
     var folderReadDeadline: Duration = .seconds(5)
     /// What the folder reads ask the file system. Tests inject a slow or fake one.
     var folderProbe: FolderProbe = .live
+    /// Where every blocking recording-folder read runs: one dedicated serial queue, never the cooperative pool
+    /// (L review 123). Tests inject one that hangs.
+    var folderReads: FolderReads = .shared
 
-    /// A folder or disk read off the main actor, bounded (on awake time): nil when it did not answer.
-    private func readOffMain<T>(_ label: String, bound: Duration? = nil, _ read: @escaping @Sendable () -> T) async -> T? {
-        let seconds = Self.seconds(bound ?? folderReadDeadline)
-        do {
-            return try await withDeadline(seconds: seconds, label: label) {
-                await Task.detached(priority: .userInitiated) { OffMain(read()) }.value
-            }.value
-        } catch {
-            Logger.state.error("A folder read did not answer within \(seconds, privacy: .public) s (\(label, privacy: .public))")
-            return nil
-        }
+    /// A read of `folder`, off the main actor and bounded (on awake time): nil when it did not answer — or when the
+    /// folder still has an earlier read outstanding (L review 123: `FolderReads`, one serial queue, never the pool).
+    private func readOffMain<T>(_ label: String, folder: URL, bound: Duration? = nil, _ read: @escaping @Sendable () -> T) async -> T? {
+        await folderReads.read(label, folder: folder.path, seconds: Self.seconds(bound ?? folderReadDeadline), read)
     }
 
     /// The status of each pending session's folder, read off the main actor under one bound; nil when the
@@ -2020,7 +2050,7 @@ public final class RecordingCoordinator {
     private func pendingFolderStatuses(_ sessions: [RecordingSentinel]) async -> [String: FolderStatus]? {
         let probe = folderProbe
         let folders = sessions.map { URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent() }
-        return await readOffMain("pending folders") {
+        return await readOffMain("pending folders", folder: URL(fileURLWithPath: folders.map(\.path).sorted().joined(separator: "|"))) {
             Dictionary(folders.map { ($0.path, Self.folderStatus($0, probe: probe)) }, uniquingKeysWith: { a, _ in a })
         }
     }
@@ -2037,7 +2067,7 @@ public final class RecordingCoordinator {
         // a name already on disk (its audio would be overwritten) nor mistaken for an orphan (ingested
         // mid-recording, its real finalization would be skipped as a duplicate — the rest lost). Read off the
         // main actor, bounded (L review 75): a folder that does not answer waits.
-        guard let scan = await readOffMain("resume: session folder", { Self.scanForResume(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive) }) else {
+        guard let scan = await readOffMain("resume: session folder", folder: outputDir, { Self.scanForResume(sentinel: sentinel, outputDir: outputDir, lastAlive: lastAlive) }) else {
             captureClient.captureEnded()
             keepPending(sentinel)
             await updateFolderAlarm()
@@ -2112,6 +2142,7 @@ public final class RecordingCoordinator {
                 return .heldForHelper
             }
             clearHelperMic()
+            startRunning = false   // this resume's own start is over: its salvage must not yield to it
             await salvageAtLaunch(sentinel: sentinel, outputDir: outputDir)
             return .handled
         }
@@ -2574,17 +2605,16 @@ public final class RecordingCoordinator {
         let provider = freeBytesProvider, bound = Self.seconds(rotationDiskReadDeadline), probe = folderProbe
         rotationDiskCheckGeneration += 1
         let generation = rotationDiskCheckGeneration
+        let reads = folderReads
         rotationDiskCheck = Task { [weak self] in
-            let free: Int?
-            do {
-                free = try await withDeadline(seconds: bound, label: "rotation disk read") {
-                    await Task.detached { provider(Self.nearestExistingDirectory(dir, probe: probe)) }.value
-                }
-            } catch {
+            // On the folder queue, never the cooperative pool (L review 123).
+            guard let answer = await reads.read("rotation disk read", folder: dir.path, seconds: bound, {
+                provider(Self.nearestExistingDirectory(dir, probe: probe))
+            }) else {
                 Logger.state.error("The free-space read at a rotation did not answer within \(bound, privacy: .public) s — this rotation's disk check is skipped")
                 return
             }
-            guard let self, let free, generation == self.rotationDiskCheckGeneration else { return }
+            guard let self, let free = answer, generation == self.rotationDiskCheckGeneration else { return }
             self.applyRotationDiskVerdict(free: free)
         }
     }
@@ -2692,12 +2722,15 @@ public final class RecordingCoordinator {
         // When the recording stopped, what is on disk, and an older-format file's last write — read before the
         // salvage archives (deletes) its orphan WAVs, off the main actor and bounded (L review 75). A folder that
         // does not answer is not salvaged: the session waits.
-        guard let scan = await readOffMain("salvage: session folder", { Self.scanForSalvage(sentinel: sentinel, outputDir: outputDir) }) else {
+        guard let scan = await readOffMain("salvage: session folder", folder: outputDir, { Self.scanForSalvage(sentinel: sentinel, outputDir: outputDir) }) else {
             captureClient.captureEnded()
             keepPending(sentinel)
             await updateFolderAlarm()
             return
         }
+        // A Start during the read owns the app now (L review 129): never `.transcribing` over it, never its crash
+        // detection disarmed — the session waits.
+        guard yieldsToAStart(sentinel) else { return }
         if scan.finalized == .cleanedUp {
             // Already transcribed: the recovery file lingered — a crash between the transcript and the sentinel's
             // delete, or a held session transcribed before its hold (L review 136). Its leftovers were cleaned up
@@ -2735,7 +2768,7 @@ public final class RecordingCoordinator {
                 // Chunks whose speech recognition failed are never called "transcribed" (R2 item 9, L review 93):
                 // counted from the transcript just written, off the main actor.
                 let jsonPath = result.jsonPath
-                let failures = await readOffMain("salvage: transcript") { SalvageOutcome.recognitionFailures(inTranscriptAt: jsonPath) } ?? nil
+                let failures = await readOffMain("salvage: transcript", folder: outputDir) { SalvageOutcome.recognitionFailures(inTranscriptAt: jsonPath) } ?? nil
                 outcome = SalvageOutcome(kind: .transcriptWritten(result.jsonPath), chunkCount: chunkCount,
                                          recognitionFailures: failures ?? .init())
                 captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)   // L review 97
@@ -2780,6 +2813,33 @@ public final class RecordingCoordinator {
         }
         reportStopped(message, recovered: true)
         captureClient.captureEnded()
+    }
+
+    /// A recording ended on a failure path: its recovery file goes — unless its folder did not answer, when nothing
+    /// could be checked or salvaged: then it is KEPT, salvage-only, and finished when the folder answers (L review
+    /// 122).
+    private func finishSentinel(after outcome: SalvageOutcome, sentinel: RecordingSentinel?) {
+        guard outcome.kind == .folderNotAnswering else {
+            RecordingSentinel.delete(directory: sentinelDirectory)
+            return
+        }
+        if let kept = RecordingSentinel.read(directory: sentinelDirectory) ?? sentinel { keepPending(kept, markStopping: true) }
+    }
+
+    /// The capture died and its restart could not be planned: the recording folder did not answer (L review 122).
+    /// The recording ends — said so — and its recovery file is kept, salvage-only, for when the folder answers.
+    private func endRecordingFolderNotAnswering(_ sentinel: RecordingSentinel) async {
+        captureClient.captureEnded()
+        awaitingRecoveryFrames = false
+        transcriptionRunner.stopChunkRotation()
+        transcriptionRunner.teardownChunkedPipeline()
+        keepPending(sentinel, markStopping: true)
+        let message = "Recording failed — the capture stopped, and the recording folder isn’t answering, so it could not be restarted. Its audio is kept; Parley will finish it when the folder answers."
+        appState.criticalError = message
+        appState.phase = .idle
+        stopStatusPoll()
+        notifyCritical("Recording Failed", message)
+        await updateFolderAlarm()
     }
 
     /// The session is out of the pending list AND out of the slot (L review 82) — the slot only when it holds
@@ -2843,8 +2903,9 @@ public final class RecordingCoordinator {
                            legacyLastWrite: withAudio.compactMap { $0[.modificationDate] as? Date }.max())
     }
 
-    /// Chunks of `sessionId` on disk: completed in `session.json`, plus orphan WAVs not yet in it.
-    private func chunksOnDisk(outputDir: URL, sessionId: String) -> Int {
+    /// Chunks of `sessionId` on disk: completed in `session.json`, plus orphan WAVs not yet in it. Reads the folder:
+    /// only through `readOffMain`.
+    nonisolated private static func chunksOnDisk(outputDir: URL, sessionId: String) -> Int {
         let completed = Set(SessionState.read(directory: outputDir, sessionId: sessionId)?.chunks.map(\.index) ?? [])
         return completed.count + CrashRecoveryPlanner.orphanChunks(
             outputDirectory: outputDir, sessionId: sessionId, completedIndices: completed).count
@@ -2857,9 +2918,12 @@ public final class RecordingCoordinator {
     /// Nothing transcribed (no live pipeline, or a salvage that produced nothing): say what is on disk.
     /// "Nothing to salvage" would be false when chunks are there — they are kept, just not transcribed
     /// (§7.4 P6).
-    private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) -> SalvageOutcome {
+    /// The count is read off the main actor, bounded (L review 122): a folder that does not answer is said so.
+    private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) async -> SalvageOutcome {
         guard let location else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
-        let count = chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId)
+        guard let count = await readOffMain("salvage: chunks on disk", folder: location.outputDir, {
+            Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId)
+        }) else { return SalvageOutcome(kind: .folderNotAnswering, chunkCount: 0) }
         return count > 0
             ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: count)
             : SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)
@@ -2889,7 +2953,7 @@ public final class RecordingCoordinator {
     ) async -> SalvageOutcome {
         guard let processor = transcriptionRunner.chunkProcessor else {
             transcriptionRunner.teardownChunkedPipeline()
-            return unsalvagedOutcome(at: location, why: "transcription was not running in this session")
+            return await unsalvagedOutcome(at: location, why: "transcription was not running in this session")
         }
         let outputDir = location.outputDir
         transcriptionRunner.stopChunkRotation()
@@ -2906,17 +2970,19 @@ public final class RecordingCoordinator {
         case .nothingToSalvage:
             // Nothing transcribed, yet audio may be on disk (a chunk that could not be processed):
             // report it as kept, not as "no recorded audio" (L6 fix round 1).
-            return unsalvagedOutcome(at: location, why: "its audio could not be processed")
+            return await unsalvagedOutcome(at: location, why: "its audio could not be processed")
         case .transcriptWritten:
             // The in-progress chunk was re-ingested but did not make it into the transcript: say its
-            // audio is on disk, untranscribed.
-            if let orphan, !sessionState.chunks.contains(where: { $0.index == orphan.index }),
-               FileManager.default.fileExists(atPath: outputDir.appendingPathComponent(orphan.baseName + ".wav").path) {
-                return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount, lastChunkKeptOnDisk: true,
-                                      recognitionFailures: outcome.recognitionFailures)
+            // audio is on disk, untranscribed — checked off the main actor, bounded (L review 122); unanswered, not claimed.
+            if let orphan, !sessionState.chunks.contains(where: { $0.index == orphan.index }) {
+                let wav = outputDir.appendingPathComponent(orphan.baseName + ".wav").path
+                if await readOffMain("salvage: last chunk", folder: outputDir, { FileManager.default.fileExists(atPath: wav) }) == true {
+                    return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount, lastChunkKeptOnDisk: true,
+                                          recognitionFailures: outcome.recognitionFailures)
+                }
             }
             return outcome
-        case .finalizeFailed:
+        case .finalizeFailed, .folderNotAnswering:
             return outcome
         }
     }
@@ -2975,11 +3041,13 @@ public final class RecordingCoordinator {
         // anomalies, chunks with processing problems, and an empty transcript. A plain "Transcription
         // Complete" only when it is truly clean.
         let jsonPath = result.jsonPath
-        let (anomalies, problemChunks, segments) = await Task.detached(priority: .utility) {
+        // On the folder queue, bounded (L review 122, 123): unanswered reads as "couldn't re-read the transcript".
+        let unreadable = CaptureQualityNotice.unreadable
+        let (anomalies, problemChunks, segments) = await readOffMain("completion: transcript", folder: jsonPath.deletingLastPathComponent()) {
             (CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.problemChunkCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.segmentCount(inTranscriptAt: jsonPath))
-        }.value
+        } ?? (unreadable, unreadable, unreadable)
         // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
         // async read (setting it first let a new recording start mid-read), but deferring opens the
         // mirror-image risk: the main actor is free during the suspension, so a crash handler or a
@@ -3046,15 +3114,13 @@ extension RecordingCoordinator: RecordingMicrophoneObserver {
     }
 }
 
+/// A recording-folder read did not answer within its bound (L review 122).
+struct FolderNotAnswering: Error, LocalizedError {
+    var errorDescription: String? { "the recording folder isn’t answering" }
+}
+
 /// Whether the repair path has answered, shared by the capped wait and the answer (main actor).
 @MainActor
 private final class RepairAnswer {
     var arrived = false
-}
-
-/// A value read off the main actor and handed back whole (L review 75). The reads return value types —
-/// `SessionState`, orphan lists, statuses — built on the background thread and never touched there again.
-private struct OffMain<T>: @unchecked Sendable {
-    let value: T
-    init(_ value: T) { self.value = value }
 }

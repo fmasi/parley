@@ -2,7 +2,9 @@ import Foundation
 
 /// What a salvage actually did (§7.4 P6). The message must never claim a transcript that does not exist.
 public struct SalvageOutcome: Equatable, Sendable {
-    public enum Kind: Equatable, Sendable { case transcriptWritten(URL), nothingToSalvage, finalizeFailed(String) }
+    /// `folderNotAnswering`: the recording folder did not answer, so nothing could be checked or salvaged; its audio
+    /// is kept (L review 122).
+    public enum Kind: Equatable, Sendable { case transcriptWritten(URL), nothingToSalvage, finalizeFailed(String), folderNotAnswering }
     public let kind: Kind
     public let chunkCount: Int
     /// The in-progress chunk was re-ingested but did not make it into the written transcript: its
@@ -102,6 +104,8 @@ public enum RecoveryMessages {
             }
             let (noun, _, isAre) = chunkPhrase(outcome.chunkCount)
             return "The \(noun) recorded before it \(isAre) kept on disk but could not be transcribed: \(why)."
+        case .folderNotAnswering:
+            return "The recording folder isn’t answering, so Parley could not check what was recorded — its audio is kept, and Parley will finish it when the folder answers."
         }
     }
 
@@ -134,13 +138,14 @@ public enum RecoveryMessages {
         switch outcome.kind {
         case .transcriptWritten: return "Transcript Saved After an Error"
         case .finalizeFailed: return "Transcription Failed"
-        case .nothingToSalvage: return stopSucceeded ? "Transcription Failed" : "Stopping the Recording Failed"
+        case .nothingToSalvage, .folderNotAnswering: return stopSucceeded ? "Transcription Failed" : "Stopping the Recording Failed"
         }
     }
 
     /// " (error)", omitted when the outcome sentence already names the same error.
     private static func errorClause(_ error: String, unlessIn outcome: SalvageOutcome) -> String {
         if case .finalizeFailed(let why) = outcome.kind, why == error { return "" }
+        if outcome.kind == .folderNotAnswering { return "" }   // the sentence says it
         return " (\(error))"
     }
 
