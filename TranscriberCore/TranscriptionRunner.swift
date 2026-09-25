@@ -51,6 +51,10 @@ public final class TranscriptionRunner {
     public var folderReads: FolderReads = .shared
     /// The bound on one such look, in awake seconds; a folder that does not answer throws `FolderNotAnswering`.
     public var folderReadSeconds: Double = 15
+    /// The bound on the transcript's writes (L review 185), in awake seconds: longer than a look — a slow share writes a
+    /// long meeting's record — but never unbounded. Past it the write is not waited for: `FolderNotAnswering`, and nothing
+    /// is claimed.
+    public var folderWriteSeconds: Double = 30
     private enum SetupFailure: Error { case forTesting }
 
     private let wavHeaderSize = 44
@@ -429,14 +433,18 @@ public final class TranscriptionRunner {
         // 4b. WAVs left next to an archived, registered chunk — a crash after the session.json write and
         // before their deletion (R2a M7). Never those the user keeps (preserve_source_wav), never an
         // ASR-failed chunk's (they are for re-transcription), never a chunk whose audio IS the WAV.
-        // With which chunk files are there (5b): one look at the folder, off the main actor, bounded (L review 158) —
-        // a folder that does not answer is never finalized blind.
+        // With which chunk files are there (5b) — and, for a re-run whose chunks an earlier finalize merged, the merged
+        // file's length, the surviving chunks' and that finalize's merged-audio block: one look at the folder, off the main
+        // actor, bounded (L reviews 158, 185) — a folder that does not answer is never finalized blind.
+        let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
+        let transcriptURL = outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")
         let removeLeftovers = !(config.preserveSourceWAV ?? false), leftoverChunks = sortedChunks
-        guard let present = await folderReads.read("transcript: chunk files", folder: outputDirectory.path,
-                                                   key: outputDirectory.path + "#finalize:" + sessionState.sessionId, seconds: folderReadSeconds, {
+        guard let look = await folderReads.read("transcript: chunk files", folder: outputDirectory.path,
+                                                key: outputDirectory.path + "#finalize:" + sessionState.sessionId, seconds: folderReadSeconds, {
             if removeLeftovers { Self.removeLeftoverWAVs(of: leftoverChunks, in: outputDirectory) }
-            return chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
+            return Self.lookBeforeFinalize(chunkAudioPaths: chunkAudioPaths, mergedURL: mergedURL, transcriptURL: transcriptURL)
         }) else { throw FolderNotAnswering() }
+        let present = look.present
 
         // 5b. Concatenate chunk audio files into a single archive (if enabled and more than 1 chunk).
         // Each chunk carries its start time so a gap (crash restart, sleep) is kept as silence and the
@@ -453,9 +461,8 @@ public final class TranscriptionRunner {
         // A chunk whose own file still exists is NOT in it (a rebuild ingested it after the merge):
         // it is listed too, in time order with its offset, so every segment has audio behind it
         // (round 6 item 1). Not re-merged: the merged file is the only copy of the chunks it holds.
-        let mergedURL = outputDirectory.appendingPathComponent("\(sessionState.sessionId).m4a")
         let sourcesGone = present.contains(false)
-        let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
+        let mergedSeconds = look.mergedSeconds
         if chunkAudioPaths.count > 1, sourcesGone, mergedSeconds > 0 {
             // The merged file starts at the earliest chunk. A chunk is outside it only when it ENDS
             // past the merged file's end — never merely because its own file survived: with
@@ -466,13 +473,13 @@ public final class TranscriptionRunner {
             // was listed twice when measured from its start).
             let mergedOffset = perChunkOffsets.min() ?? 0
             let mergedEnd = mergedOffset + mergedSeconds + AudioConcatenator.gapThresholdSeconds
-            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), present)
-                .filter { $0.1 && $0.0.1 + TranscriptAssembler.duration(of: $0.0.0) > mergedEnd }.map(\.0)
+            let alongside = zip(zip(chunkAudioPaths, perChunkOffsets), zip(present, look.chunkSeconds))
+                .filter { $0.1.0 && $0.0.1 + $0.1.1 > mergedEnd }.map(\.0)
             let listed = ([(mergedURL, mergedOffset)] + alongside).sorted { $0.1 < $1.1 }
             Logger.files.info("Chunk audio already merged into \(mergedURL.lastPathComponent, privacy: .sensitive) by an earlier finalize — using it, with \(alongside.count, privacy: .public) chunk file(s) not in it")
             audioPaths = listed.map(\.0)
             chunkOffsets = listed.map(\.1)
-            var previous = Self.previousMergedAudio(transcriptAt: outputDirectory.appendingPathComponent(sessionState.sessionId + ".json")) ?? [:]
+            var previous = look.previousMergedAudio ?? [:]
             previous["reused_existing"] = true
             if !alongside.isEmpty { previous["chunks_not_in_merge"] = alongside.count }
             mergedAudio = previous
@@ -525,22 +532,19 @@ public final class TranscriptionRunner {
         // could not do. Never a file backing this record: every listed audio file, every chunk file,
         // and every archive of the session in the folder (rounds 7-8 item 1). Protecting only the
         // last listed file let a rebuild's quota pass delete the merged file — the only copy of the
-        // earlier chunks.
-        do {
-            let report = try StorageManager.enforceQuotaReport(
-                in: outputDirectory,
-                limitHours: config.audioArchiveLimitHours,
-                bitrateKbps: config.archiveBitrateKbps,
-                protectedFiles: audioPaths + chunkAudioPaths + [mergedURL]
-                    + CrashRecoveryPlanner.sessionArchives(outputDirectory: outputDirectory, sessionId: sessionState.sessionId)
-            )
-            if report.protectedOverrunBytes > 0,
-               !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
-                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
-                    code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(report.protectedOverrunBytes) bytes over the quota")))
-            }
-        } catch {
-            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+        // earlier chunks. With the lengths the record lists: on the folder's queue, bounded — never on the main actor
+        // (L review 185).
+        let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps, sessionId = sessionState.sessionId
+        let protectedFiles = audioPaths + chunkAudioPaths + [mergedURL], listedAudio = audioPaths
+        guard let measured = await folderReads.read("transcript: quota and lengths", folder: outputDirectory.path,
+                                                    key: outputDirectory.path + "#finalize-measure:" + sessionId, seconds: folderReadSeconds, {
+            Self.quotaAndLengths(in: outputDirectory, sessionId: sessionId, limitHours: limitHours, bitrateKbps: bitrateKbps,
+                                 protectedFiles: protectedFiles, listedAudio: listedAudio)
+        }) else { throw FolderNotAnswering() }
+        if let overrun = measured.overrunBytes, overrun > 0,
+           !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) {
+            finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
+                code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(overrun) bytes over the quota")))
         }
 
         // 7. Assemble JSON
@@ -562,36 +566,87 @@ public final class TranscriptionRunner {
             captureGaps: sessionState.gaps,
             processingIssues: processingIssues,
             mergedAudio: mergedAudio,
-            chunkDurations: audioPaths.map(TranscriptAssembler.duration(of:)),
+            chunkDurations: measured.lengths,
             chunkOffsets: chunkOffsets
         )
 
-        let baseName = sessionState.sessionId
-        let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
-        SessionState.sweepTemporaries(directory: outputDirectory, sessionId: baseName)
-        try TranscriptAssembler.write(json, to: jsonPath)
-        // Durably: this session is finished. A lingering recovery file must never re-finalize over it
-        // (R2a item 12). A failure here leaves the transcript itself as the (weaker) marker.
-        do {
-            try SessionState.markFinalized(directory: outputDirectory, sessionId: baseName, transcript: jsonPath.lastPathComponent)
-        } catch {
-            Logger.state.error("Could not mark the session finalized: \(error, privacy: .private)")
+        // 7b–10. The record's writes — the transcript, its finalized marker, the format file, the progress file's delete —
+        // on the folder's queue, bounded, never on the main actor (L review 185): a share that stops answering mid-write
+        // leaves the UI on "Finishing…", responsive. Past the bound nothing is claimed: `FolderNotAnswering`, and the
+        // caller keeps the session for when the folder answers. The write may still land then — the finalized marker
+        // it leaves is what the next pass finds.
+        let data = try TranscriptAssembler.encode(json)
+        let jsonPath = transcriptURL
+        guard let written = await folderReads.read("transcript: write", folder: outputDirectory.path,
+                                                   key: outputDirectory.path + "#finalize-write:" + sessionId, seconds: folderWriteSeconds, {
+            Result { try Self.writeRecord(data, to: jsonPath, sessionId: sessionId, in: outputDirectory) }
+        }) else {
+            Logger.files.error("The transcript's write did not finish within \(self.folderWriteSeconds, privacy: .public) s — the recording folder is not answering")
+            throw FolderNotAnswering()
         }
-
-        // 8. Write format file
-        do {
-            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
-        } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
-        }
-
-        // 10. Clean up session.json
-        SessionState.delete(directory: outputDirectory, sessionId: sessionState.sessionId)
+        try written.get()
 
         let elapsed = ContinuousClock.now - startTime
         Logger.transcription.info("Chunked pipeline finalized — \(elapsed.components.seconds)s, \(mergeResult.chunkCount) chunks, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// What `finalize` reads of the folder before it merges (L reviews 158, 185): which chunk files are there and — only
+    /// for a re-run whose chunks an earlier finalize merged and deleted — the merged file's length, each surviving
+    /// chunk's, and that finalize's `merged_audio` block. Blocking file work: only through `folderReads`.
+    struct FinalizeLook {
+        var present: [Bool]
+        var mergedSeconds: Double = 0
+        /// Per chunk, its length when its file is there (0 otherwise).
+        var chunkSeconds: [Double] = []
+        var previousMergedAudio: [String: Any]?
+    }
+
+    nonisolated static func lookBeforeFinalize(chunkAudioPaths: [URL], mergedURL: URL, transcriptURL: URL) -> FinalizeLook {
+        let present = chunkAudioPaths.map { FileManager.default.fileExists(atPath: $0.path) }
+        guard chunkAudioPaths.count > 1, present.contains(false) else { return FinalizeLook(present: present) }
+        let mergedSeconds = TranscriptAssembler.duration(of: mergedURL)
+        guard mergedSeconds > 0 else { return FinalizeLook(present: present) }
+        return FinalizeLook(present: present, mergedSeconds: mergedSeconds,
+                            chunkSeconds: zip(chunkAudioPaths, present).map { $1 ? TranscriptAssembler.duration(of: $0) : 0 },
+                            previousMergedAudio: previousMergedAudio(transcriptAt: transcriptURL))
+    }
+
+    /// The quota pass and the lengths of the audio the record lists (L review 185): `overrunBytes` nil when the quota pass
+    /// failed (logged). Blocking file work: only through `folderReads`.
+    nonisolated static func quotaAndLengths(in directory: URL, sessionId: String, limitHours: Int, bitrateKbps: Int,
+                                            protectedFiles: [URL], listedAudio: [URL]) -> (overrunBytes: Int?, lengths: [Double]) {
+        var overrun: Int?
+        do {
+            overrun = try StorageManager.enforceQuotaReport(
+                in: directory, limitHours: limitHours, bitrateKbps: bitrateKbps,
+                protectedFiles: protectedFiles + CrashRecoveryPlanner.sessionArchives(outputDirectory: directory, sessionId: sessionId)
+            ).protectedOverrunBytes
+        } catch {
+            Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+        }
+        return (overrun, listedAudio.map(TranscriptAssembler.duration(of:)))
+    }
+
+    /// The record's writes, in order (L review 185): stray temporaries swept, the transcript written durably, then —
+    /// durably: this session is finished, so a lingering recovery file never re-finalizes over it (R2a item 12) — its
+    /// marker (a failure leaves the transcript itself as the weaker marker), the format file, and the progress file's
+    /// delete. Blocking file work: only through `folderReads`.
+    nonisolated static func writeRecord(_ data: Data, to jsonPath: URL, sessionId: String, in directory: URL) throws {
+        SessionState.sweepTemporaries(directory: directory, sessionId: sessionId)
+        try TranscriptAssembler.write(data: data, to: jsonPath)
+        do {
+            try SessionState.markFinalized(directory: directory, sessionId: sessionId, transcript: jsonPath.lastPathComponent)
+        } catch {
+            Logger.state.error("Could not mark the session finalized: \(error, privacy: .private)")
+        }
+        do {
+            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+        } catch {
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
+        }
+        SessionState.delete(directory: directory, sessionId: sessionId)
     }
 
     /// See step 4b of `finalize`.
@@ -614,7 +669,7 @@ public final class TranscriptionRunner {
     }
 
     /// The `merged_audio` block of a transcript an earlier finalize wrote, if any.
-    private static func previousMergedAudio(transcriptAt url: URL) -> [String: Any]? {
+    private nonisolated static func previousMergedAudio(transcriptAt url: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }

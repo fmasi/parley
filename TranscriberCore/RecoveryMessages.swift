@@ -299,6 +299,12 @@ public enum RecoveryMessages {
         return "Recording STOPPED at \(clock(at)) — \(why). Parley kept it until the capture helper let go of it. " + outcomeSentence(outcome)
     }
 
+    /// A recording kept because its folder stopped answering while its transcript was written, whose write landed once the
+    /// folder answered (L review 185).
+    public static func finishedOnceTheFolderAnswered(transcript: String) -> String {
+        "The recording Parley kept while its folder wasn’t answering was finished once the folder answered: its transcript is \(transcript)."
+    }
+
     /// A salvage whose transcription engine is not ready (L review 178): nothing about the audio failed — it is kept, and
     /// transcribed once the engine is ready.
     public static func waitingForEngine(at: Date, folder: String, why: String) -> String {

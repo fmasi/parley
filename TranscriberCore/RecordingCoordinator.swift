@@ -799,7 +799,9 @@ public final class RecordingCoordinator {
                 // Wait for any background chunks still processing
                 await processor.awaitAllProcessed()
 
-                // Final merge
+                // Final merge. The record is written off the main actor, bounded (L review 185): the menu says "Finishing…"
+                // meanwhile, and stays responsive.
+                appState.phase = .transcribing(progress: "Finishing…")
                 var sessionState = await processor.getSessionState()
                 let outputDir = paths.systemAudio.deletingLastPathComponent()
                 // Drain capture diagnostics, flush <session>.diag.jsonl only if anomalous, and stamp
@@ -2189,6 +2191,9 @@ public final class RecordingCoordinator {
     /// The bound on a folder or disk read off the main actor (L review 74, 75): a hung network share or a
     /// dying drive is named as the folder — never the audio system — and never stalls the UI. Tests shorten it.
     var folderReadDeadline: Duration = .seconds(5)
+    /// The bound on the transcript's writes (L review 185): longer than a read — a slow share writes a long meeting's
+    /// record — never unbounded. Tests shorten it.
+    var folderWriteDeadline: Duration = .seconds(30)
     /// What the folder reads ask the file system. Tests inject a slow or fake one.
     var folderProbe: FolderProbe = .live
     /// Where every blocking recording-folder read runs: a serial queue per volume, never the cooperative pool (L
@@ -2543,6 +2548,12 @@ public final class RecordingCoordinator {
             captureClient.commitSessionDiagnostics(sessionId: sessionId, directory: outputDir)
             forgetSession(sentinel)
             captureClient.captureEnded()
+            // Kept because its folder stopped answering — its transcript's write landed once it answered (L review 185):
+            // the user was told it would be finished, so it is said that it was, never silence.
+            if sentinel.stopCause == .folderNotAnswering {
+                reportStopped(RecoveryMessages.finishedOnceTheFolderAnswered(transcript: "\(sessionId).json"), recovered: true,
+                              session: sentinel.sessionKey)
+            }
             // Audio written AFTER the transcript, which it does not list, is never silent (L review 137): the scan
             // noted it in the record; the row says how much, beside which transcript, and where it is kept (L review 181).
             if let late = scan.lateAudio {
@@ -2802,10 +2813,12 @@ public final class RecordingCoordinator {
                                                         provenance: provenance, reads: folderReads, seconds: Self.seconds(folderReadDeadline))
     }
 
-    /// The transcript's looks at its folder go through this coordinator's reader, with its bound (L review 158).
+    /// The transcript's looks at its folder — and its writes (L review 185) — go through this coordinator's reader, with its
+    /// bounds (L review 158).
     private func useFolderReadsForTheTranscript() {
         transcriptionRunner.folderReads = folderReads
         transcriptionRunner.folderReadSeconds = Self.seconds(folderReadDeadline)
+        transcriptionRunner.folderWriteSeconds = Self.seconds(folderWriteDeadline)
     }
 
     /// The engines a launch recovery transcribes with: the injected factory (tests), else the runner's.

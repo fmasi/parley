@@ -160,10 +160,17 @@ public enum TranscriptAssembler {
     /// Atomic AND durable (round 3 item 2): the finalized marker written next vouches for this file,
     /// so it must be on the disk itself, not in a cache, before the marker is.
     public static func write(_ json: [String: Any], to path: URL) throws {
-        let data = try JSONSerialization.data(
-            withJSONObject: json,
-            options: [.prettyPrinted, .sortedKeys]
-        )
+        try write(data: encode(json), to: path)
+    }
+
+    /// The transcript as its file holds it: encoding is CPU work, done where the record is built — the write goes to the
+    /// folder's queue (L review 185).
+    public static func encode(_ json: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    /// `write`, of an encoded transcript: atomic and durable.
+    public static func write(data: Data, to path: URL) throws {
         try DurableFile.replace(path, with: data)
         Logger.files.info("JSON transcript written: \(path.lastPathComponent, privacy: .sensitive)")
     }

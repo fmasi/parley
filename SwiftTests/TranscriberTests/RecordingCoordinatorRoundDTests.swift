@@ -438,3 +438,64 @@ struct NotReadyEngine: TranscriptionEngine {
         #expect(row.contains("2 earlier recordings were recovered"), "\(row)")
     }
 }
+
+// MARK: - The transcript's writes off the main actor (185)
+
+@MainActor
+@Suite struct RecordingCoordinatorFinalizeWritesRoundDTests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    /// L review 185: the transcript's writes — the record, its marker, the format file, the progress file's delete — run on
+    /// the folder's queue, bounded, never on the main actor. A folder that stops answering while the transcript is written
+    /// leaves the UI responsive ("Finishing…"), and the outcome is honest: no success claimed, no evidence committed, the
+    /// session kept pending. When the write lands later, the next pass says the recording was finished after all.
+    @Test func aTranscriptWriteThatHangsKeepsTheUIAndTheSession() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        let mic = call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav")
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: mic)
+        let hung = HungRead("transcript: write")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderWriteDeadline = .seconds(1)
+        h.coordinator.folderReadDeadline = .milliseconds(300)
+        let coordinator = h.coordinator
+        let began = ContinuousClock.now
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until { hung.reached }
+        #expect(hung.reached, "the transcript's write runs on the folder's queue")
+        #expect(h.appState.phase == .transcribing(progress: "Finishing…"), "\(h.appState.phase)")
+        // The main actor is free while the write hangs: a main-actor ticker runs on time.
+        let tickerBegan = ContinuousClock.now
+        for _ in 0..<10 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(ContinuousClock.now - tickerBegan < .milliseconds(500), "the UI stays responsive")
+        await stopping.value
+        #expect(ContinuousClock.now - began < .seconds(4), "bounded")
+        #expect(h.appState.isIdle)
+        #expect(h.presented.value.isEmpty && h.client.commitCalls.isEmpty, "no transcript claimed, no evidence committed")
+        let body = try #require(h.criticals.value.last?.body)
+        #expect(body.contains("isn’t answering") && !body.contains("transcribed"), "\(body)")
+        let kept = try #require(RecordingSentinel.readPending(directory: h.tmp).first, "kept pending")
+        #expect(kept.stopCause == .folderNotAnswering)
+        // The folder answers: the write lands after all — and the next pass says so, once, never silently.
+        hung.release()
+        let transcript = call.outputDirectory.appendingPathComponent(call.sessionId + ".json")
+        await Harness.until { FileManager.default.fileExists(atPath: transcript.path) }
+        await Harness.until { !FileManager.default.fileExists(atPath: call.outputDirectory.appendingPathComponent("\(call.sessionId).session.json").path) }
+        h.appState.acknowledge(.recordingStopped)
+        await h.coordinator.retryPendingSessions()
+        #expect(RecordingSentinel.readPending(directory: h.tmp).isEmpty, "done")
+        let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
+        #expect(row.contains(transcript.lastPathComponent) && row.contains("once the folder answered"), "\(row)")
+    }
+}
