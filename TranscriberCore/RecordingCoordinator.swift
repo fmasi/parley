@@ -459,6 +459,7 @@ public final class RecordingCoordinator {
         // folder's problem, never the audio system's.
         let preflight = self.preflight, freeBytesProvider = self.freeBytesProvider, probe = folderProbe
         let config = configManager.config
+        noteRecordingRoot()
         let recordingDirectory = URL(fileURLWithPath: config.recordingDirectory)
         let folderBound = min(folderReadDeadline, max(.milliseconds(1), startBy - SuspendingClock.now))
         async let folderRead = readOffMain("start: recording folder", folder: recordingDirectory, bound: folderBound) {
@@ -1776,6 +1777,7 @@ public final class RecordingCoordinator {
     public func recoverAtLaunch() async {
         // Busy from here, the gate's wait included (L review 161): Record stays disabled until the helper is settled.
         relaunchProbing = true
+        noteRecordingRoot()
         if gateReservedForLaunch {
             gateReservedForLaunch = false   // held for this since the coordinator was made (L review 131)
         } else {
@@ -2227,25 +2229,47 @@ public final class RecordingCoordinator {
         // Every pending folder has an answer or a timeout of its read's OWN bound — a joined read waited within it (L review
         // 210): no early return while another folder is busy (L review 216). A timeout is "not answering", said as such.
         let folderOf = { (s: RecordingSentinel) in URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent().path }
-        let waiting: [FolderWait] = pending.compactMap {
-            if foldersNotAnswering.contains($0.sessionKey) || folders.notAnswering.contains(folderOf($0)) { return .notAnswering }
+        let waiting: [(folder: String, wait: FolderWait)] = pending.compactMap {
+            if foldersNotAnswering.contains($0.sessionKey) || folders.notAnswering.contains(folderOf($0)) { return (folderOf($0), .notAnswering) }
             switch folders.statuses[folderOf($0)] ?? .unreachable {
             case .reachable: return nil
-            case .notWritable: return .notWritable
-            case .unreachable: return .unreachable
+            case .notWritable: return (folderOf($0), .notWritable)
+            case .unreachable: return (folderOf($0), .unreachable)
             }
         }
         if waiting.isEmpty {
             appState.clearAppAlarm(.recordingFolderUnavailable)
-        } else if waiting.allSatisfy({ $0 == .notWritable }) {
-            // There, but read-only: a permissions problem, not a missing drive (L review 79).
-            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "Parley can’t write to the recording folder — check its permissions. The recording data is kept, and Parley will retry.")
-        } else if waiting.allSatisfy({ $0 == .notAnswering }) {
-            // No answer within its bound: not answering — never "not reachable" (L review 210).
-            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t answering — Parley will keep the recording data and retry.")
         } else {
-            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t reachable — Parley will keep the recording data and retry.")
+            appState.raiseAppAlarm(.recordingFolderUnavailable, message: Self.folderAlarmMessage(waiting))
         }
+    }
+
+    /// What the folder alarm says (L reviews 79, 210, 241): one state for every waiting folder is said as that state; folders in
+    /// different states are each said as their own — never one word for all.
+    private static func folderAlarmMessage(_ waiting: [(folder: String, wait: FolderWait)]) -> String {
+        let states = Set(waiting.map(\.wait))
+        if states == [.notWritable] {
+            // There, but read-only: a permissions problem, not a missing drive (L review 79).
+            return "Parley can’t write to the recording folder — check its permissions. The recording data is kept, and Parley will retry."
+        }
+        if states == [.notAnswering] {
+            // No answer within its bound: not answering — never "not reachable" (L review 210).
+            return "The recording folder isn’t answering — Parley will keep the recording data and retry."
+        }
+        if states == [.unreachable] {
+            return "The recording folder isn’t reachable — Parley will keep the recording data and retry."
+        }
+        var seen = Set<String>(), each: [String] = []
+        for (folder, wait) in waiting where seen.insert(folder).inserted {
+            let state: String
+            switch wait {
+            case .notWritable: state = "can’t be written to — check its permissions"
+            case .unreachable: state = "isn’t reachable"
+            case .notAnswering: state = "isn’t answering"
+            }
+            each.append("\(abbreviatedDisplayPath(folder)) \(state)")
+        }
+        return "Some recording folders aren’t ready: " + each.joined(separator: "; ") + ". Parley will keep the recording data and retry."
     }
 
     /// Finish every pending session whose folder is back and whose capture the helper has let go of
@@ -2253,6 +2277,7 @@ public final class RecordingCoordinator {
     /// Mac wakes, and when a recording ends. Only while idle with no start in flight — the sentinel slot
     /// and the helper are a recording's own then; asked for while busy, it runs at the next idle.
     public func retryPendingSessions() async {
+        noteRecordingRoot()
         guard !pendingSessions().isEmpty else {
             appState.clearAppAlarm(.recordingFolderUnavailable)
             return
@@ -2384,6 +2409,12 @@ public final class RecordingCoordinator {
     /// Where every blocking recording-folder read runs: a serial queue per volume, never the cooperative pool (L
     /// reviews 123, 160). Tests inject one that hangs.
     var folderReads: FolderReads = .shared
+
+    /// The recording root, as the settings name it now, is the one folder the reader resolves (L review 237): the day folders
+    /// under it are derived from it lexically.
+    private func noteRecordingRoot() {
+        folderReads.noteRecordingRoot(configManager.config.recordingDirectory)
+    }
 
     /// A read of `folder`, off the main actor and bounded (on awake time): nil when it did not answer — or when the
     /// folder still has an earlier read outstanding (L reviews 123, 160: `FolderReads`, its volume's queue, never the pool).

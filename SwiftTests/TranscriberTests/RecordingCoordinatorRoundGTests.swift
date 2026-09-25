@@ -175,3 +175,110 @@ final class StuckSentinelQueue: @unchecked Sendable {
         #expect(!h.coordinator.exitFlushTimedOut, "the Quit's own attempt")
     }
 }
+
+// MARK: - Which volume: the recording root alone is resolved, on a queue of its own (237, 238, 241)
+
+@Suite struct FolderVolumeRoundGTests {
+    private final class Gate: @unchecked Sendable {
+        private let semaphore = DispatchSemaphore(value: 0)
+        func hang() { _ = semaphore.wait(timeout: .now() + 10) }   // the watchdog: never a wedged run
+        func release() { for _ in 0..<8 { semaphore.signal() } }
+    }
+    private final class Asked: @unchecked Sendable {
+        private let lock = NSLock()
+        private var folders: [String] = []
+        var value: [String] { lock.withLock { folders } }
+        func append(_ folder: String) { lock.withLock { folders.append(folder) } }
+    }
+
+    /// L review 237: a resolution that hangs (a dying local disk under a link) never makes another folder's read wait: the
+    /// resolutions run on a queue of their own, never the one a read with no volume yet falls back to.
+    @Test func aHungResolutionNeverDelaysAnotherFoldersRead() async throws {
+        let gate = Gate()
+        defer { gate.release() }
+        let reads = FolderReads(label: "folder-reads-g-\(UUID().uuidString)", volumeOf: { folder in
+            if folder.hasPrefix("/Volumes/Dying") { gate.hang() }
+            return folder.hasPrefix("/Volumes/Dying") ? "/Volumes/Dying" : "/"
+        })
+        _ = await reads.read("dying", folder: "/Volumes/Dying/rec", seconds: 0.3) { 1 }
+        let began = ContinuousClock.now
+        let healthy = await reads.read("healthy", folder: "/Users/me/Recordings/2026-09-25", seconds: 0.5) { 2 }
+        #expect(healthy == 2, "answered")
+        #expect(ContinuousClock.now - began < .seconds(1), "within its bound")
+    }
+
+    /// L review 237: only the recording root is resolved — once — and every folder under it is derived from it lexically.
+    @Test func onlyTheRecordingRootIsResolved() async {
+        let asked = Asked()
+        let reads = FolderReads(label: "folder-reads-g-\(UUID().uuidString)", volumeOf: { asked.append($0); return "/Volumes/Rec" })
+        reads.noteRecordingRoot("/Users/me/Recordings")
+        for folder in ["/Users/me/Recordings/2026-09-25", "/Users/me/Recordings/2026-09-26", "/Users/me/Recordings"] {
+            #expect(await reads.read("day", folder: folder, seconds: 1) { 1 } == 1)
+        }
+        #expect(asked.value == ["/Users/me/Recordings"], "\(asked.value)")
+    }
+
+    /// L review 238 (214): the resolution never reads a share through the Data volume's firmlinked spelling of it, nor —
+    /// on a case-insensitive boot volume — through another case of its mount point.
+    @Test func theResolutionNeverReadsAShareThroughAnotherSpellingOfIt() {
+        let mounts: [FolderReads.Mount] = [.init(path: "/", isLocal: true), .init(path: "/System/Volumes/Data", isLocal: true),
+                                           .init(path: "/Volumes/NAS", isLocal: false)]
+        var readOnShare: [String] = []
+        func readLink(_ path: String) -> String? {
+            if path.lowercased().contains("/volumes/nas") { readOnShare.append(path) }
+            return nil
+        }
+        #expect(FolderReads.volume(of: "/System/Volumes/Data/Volumes/NAS/rec", mounts: mounts, readLink: readLink) == "/Volumes/NAS")
+        #expect(FolderReads.volume(of: "/volumes/nas/rec", mounts: mounts, readLink: readLink, caseInsensitive: true) == "/Volumes/NAS")
+        #expect(readOnShare.isEmpty, "read on the share: \(readOnShare)")
+    }
+
+    /// L review 241: a mutation nothing waits for — a cleanup's deletes on a slow share — has its own queue per volume, never
+    /// queued ahead of a read of that volume (a Start's).
+    @Test func aSlowMutationNeverDelaysARead() async throws {
+        let gate = Gate()
+        defer { gate.release() }
+        let started = DispatchSemaphore(value: 0)
+        let reads = FolderReads(label: "folder-reads-g-\(UUID().uuidString)", volumeOf: { _ in "/Volumes/Slow" })
+        reads.enqueue("slow deletes", folder: "/Volumes/Slow/rec") { started.signal(); gate.hang() }
+        _ = await Task.detached { started.wait(timeout: .now() + 5) }.value
+        let began = ContinuousClock.now
+        #expect(await reads.read("start", folder: "/Volumes/Slow/rec", seconds: 0.5) { 1 } == 1)
+        #expect(ContinuousClock.now - began < .seconds(1))
+    }
+
+    /// L review 241: an automount the mount table spells under the Data volume (`/System/Volumes/Data/home`) is the volume of
+    /// its firmlinked spelling (`/home/…`).
+    @Test func anAutomountSpelledUnderTheDataVolumeIsFound() {
+        let mounts: [FolderReads.Mount] = [.init(path: "/", isLocal: true), .init(path: "/System/Volumes/Data", isLocal: true),
+                                           .init(path: "/System/Volumes/Data/home", isLocal: false)]
+        #expect(FolderReads.lexicalVolume(of: "/home/me/Recordings", mounts: mounts, caseInsensitive: false) == "/System/Volumes/Data/home")
+        #expect(FolderReads.lexicalVolume(of: "/System/Volumes/Data/home/me", mounts: mounts, caseInsensitive: false) == "/System/Volumes/Data/home")
+    }
+}
+
+// MARK: - The folder alarm says each folder's own state (241)
+
+@MainActor
+@Suite struct FolderAlarmWordingRoundGTests {
+    /// L review 241: pending folders in DIFFERENT states — one read-only, one on a drive that is away — are each said as
+    /// what they are, never all "not reachable".
+    @Test func mixedFolderStatesAreEachSaid() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        let readOnly = try roundFPendingSession(h, "ro")
+        let away = RecordingSentinel(startedAt: Date(), sessionName: "away",
+                                     systemAudioPath: "/Volumes/NoSuchDrive-\(UUID().uuidString)/rec/away-0.wav",
+                                     micAudioPath: "/Volumes/NoSuchDrive/rec/away-0_mic.wav", stopping: true)
+        try RecordingSentinel.writePending([readOnly, away], directory: h.tmp)
+        let roFolder = URL(fileURLWithPath: readOnly.systemAudioPath).deletingLastPathComponent().path
+        let live = RecordingCoordinator.FolderProbe.live
+        h.coordinator.folderProbe = .init(exists: live.exists,
+                                          isWritable: { $0.path.hasPrefix(roFolder) ? false : live.isWritable($0) },
+                                          isVolumeRoot: live.isVolumeRoot)
+        await h.coordinator.retryPendingSessions()
+        let row = try #require(h.appState.activeAlarms[.recordingFolderUnavailable]?.message)
+        #expect(row.contains("permissions") && row.contains("isn’t reachable"), "\(row)")
+        #expect(RecordingSentinel.readPending(directory: h.tmp).count == 2, "both kept")
+    }
+}

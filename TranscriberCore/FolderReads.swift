@@ -9,11 +9,13 @@ import os
 ///
 /// One serial dispatch queue PER VOLUME (L review 160): a hung read holds its own volume's queue only — later reads of
 /// that volume wait behind it and time out, while a folder on another volume (the healthy one a Start writes to) is
-/// read at once. Which volume a folder is on is found without the caller ever touching a file system (L review 209): its
-/// path is canonicalised ONCE — its symbolic links on local volumes substituted — off the pool, on the shared "unknown"
-/// queue, under the read's own bound, and cached; each read then matches it LEXICALLY against the kernel's mount table as
-/// it stands (`MNT_NOWAIT`), its firmlinked and case-insensitive spellings included (L review 214). A folder whose
-/// canonicalisation did not answer in time reads on the "unknown" queue.
+/// read at once. Which volume a folder is on is found without the caller ever touching a file system (L review 209): only
+/// the RECORDING ROOT is canonicalised — once, its symbolic links on local volumes substituted — and every folder under
+/// it is derived from it LEXICALLY (L review 237); a folder under no root noted is its own root. The canonicalisations run
+/// off the pool, on a queue of their own — concurrent, so one that hangs never delays another, and never shared with a
+/// read — under the read's own bound, and are cached; each read then matches its path LEXICALLY against the kernel's
+/// mount table as it stands (`MNT_NOWAIT`), its firmlinked and case-insensitive spellings included (L reviews 214, 238). A
+/// folder whose root's canonicalisation has not answered reads on that root's own fallback queue.
 ///
 /// At most one read per key (by default, the folder) is outstanding: a read whose key has an earlier read still
 /// unanswered is never queued behind it (it could only pile up there). It JOINS it (L review 210): it waits for that read
@@ -34,10 +36,16 @@ public final class FolderReads: @unchecked Sendable {
     }
 
     private let label: String
-    /// Guards `queues`, `outstanding`, `resolved` and `resolving`.
+    /// Guards `queues`, `mutationQueues`, `outstanding`, `roots`, `resolved` and `resolving`.
     private let lock = NSLock()
     /// One serial queue per volume, made on first use.
     private var queues: [String: DispatchQueue] = [:]
+    /// One serial, low-priority queue per volume for the mutations nothing waits for (L review 241): never ahead of a read.
+    private var mutationQueues: [String: DispatchQueue] = [:]
+    /// The recording roots noted (L review 237): each canonicalised once, the folders under it derived from it lexically.
+    private var roots: Set<String> = []
+    /// Where the roots are canonicalised (L review 237): a queue of their own, concurrent — never a read's.
+    private let resolveQueue: DispatchQueue
     /// Keys with a read queued or running: what a later read of the key joins.
     private var outstanding: [String: InFlight] = [:]
     /// Folders already resolved (L review 209): the canonical path — or, with an injected `volumeOf`, the volume.
@@ -55,6 +63,23 @@ public final class FolderReads: @unchecked Sendable {
         self.label = label
         self.volumeOf = volumeOf
         self.beforeEachRead = beforeEachRead
+        resolveQueue = DispatchQueue(label: "\(label).resolve", qos: .userInitiated, attributes: .concurrent)
+    }
+
+    /// `root` is a recording root (L review 237): it alone is canonicalised; every folder under it is derived from it.
+    public func noteRecordingRoot(_ root: String) {
+        let root = Self.normalised(root)
+        lock.withLock { _ = roots.insert(root) }
+    }
+
+    /// `path`, its `.` and `..` removed — lexically, never a file-system call.
+    private static func normalised(_ path: String) -> String { URL(fileURLWithPath: path).standardized.path }
+
+    /// The root `folder` is derived from (L review 237): the deepest recording root it lies in — or, under none, itself.
+    private func root(of folder: String) -> String {
+        let folder = Self.normalised(folder)
+        let root = lock.withLock { roots.filter { folder == $0 || folder.hasPrefix($0 == "/" ? "/" : $0 + "/") }.max { $0.count < $1.count } }
+        return root ?? folder
     }
 
     /// `read`'s answer, or nil when it did not answer within `seconds` of awake time — waiting for an earlier read of its
@@ -108,12 +133,13 @@ public final class FolderReads: @unchecked Sendable {
         }
     }
 
-    /// `work` on the folder's volume queue, never waited for (L review 215): a mutation — a cleanup's deletes — that must
-    /// never hold a bounded read, so a slow healthy share is never called "not answering" for it.
+    /// `work` on the folder's volume's MUTATION queue, never waited for (L reviews 215, 241): a mutation — a cleanup's deletes
+    /// — that must never hold a bounded read, so a slow healthy share is never called "not answering" for it. Its own
+    /// low-priority queue per volume: never queued ahead of a read, a Start's included.
     func enqueue(_ label: String, folder: String, _ work: @escaping @Sendable () -> Void) {
         let hook = beforeEachRead
         Task {
-            let queue = self.queue(forVolume: await self.volume(of: folder, by: SuspendingClock.now + .seconds(5)))
+            let queue = self.mutationQueue(forVolume: await self.volume(of: folder, by: SuspendingClock.now + .seconds(5)))
             queue.async {
                 hook?(label)
                 work()
@@ -126,6 +152,15 @@ public final class FolderReads: @unchecked Sendable {
             if let queue = queues[volume] { return queue }
             let queue = DispatchQueue(label: "\(label).\(queues.count)", qos: .userInitiated)
             queues[volume] = queue
+            return queue
+        }
+    }
+
+    private func mutationQueue(forVolume volume: String) -> DispatchQueue {
+        lock.withLock {
+            if let queue = mutationQueues[volume] { return queue }
+            let queue = DispatchQueue(label: "\(label).mutations.\(mutationQueues.count)", qos: .utility)
+            mutationQueues[volume] = queue
             return queue
         }
     }
@@ -170,33 +205,38 @@ public final class FolderReads: @unchecked Sendable {
 
     // MARK: - Which volume (L reviews 160, 209, 214)
 
-    /// The volume `folder` is on, without the caller ever waiting on a file system (L review 209): its canonical path —
-    /// resolved once, off the pool, on the "unknown" queue, within what is left of the read's bound, and cached — matched
-    /// lexically against the mount table as it stands. "unknown" when that resolution did not answer in time, or is still
-    /// out: never a second one queued behind a hung one.
+    /// The volume `folder` is on, without the caller ever waiting on a file system (L reviews 209, 237): its root's canonical
+    /// path — resolved once, off the pool, on the resolution queue, within what is left of the read's bound, and cached —
+    /// with the rest of the folder's path appended lexically, matched against the mount table as it stands. While its
+    /// root's resolution has not answered, or is still out, the root's own fallback queue: never a second resolution queued
+    /// behind a hung one, and never a queue another root's reads use.
     private func volume(of folder: String, by deadline: SuspendingClock.Instant) async -> String {
         let injected = volumeOf
-        if let cached = lock.withLock({ resolved[folder] }) {
-            return injected == nil ? Self.lexicalVolume(of: cached, mounts: Self.mountTable(), caseInsensitive: Self.bootCaseInsensitive) : cached
+        let root = root(of: folder), rest = String(Self.normalised(folder).dropFirst(root.count))
+        let fallback = "unknown:" + root
+        func volume(canonicalRoot: String) -> String {
+            guard injected == nil else { return canonicalRoot }   // a test's resolver answers the volume whole
+            let path = canonicalRoot == "/" && !rest.isEmpty ? rest : canonicalRoot + rest
+            return Self.lexicalVolume(of: path, mounts: Self.mountTable(), caseInsensitive: Self.bootCaseInsensitive)
         }
-        guard lock.withLock({ resolving.insert(folder).inserted }) else { return "unknown" }
-        let unknown = queue(forVolume: "unknown")
+        if let cached = lock.withLock({ resolved[root] }) { return volume(canonicalRoot: cached) }
+        guard lock.withLock({ resolving.insert(root).inserted }) else { return fallback }
         let answer: Result<String?, Error> = await boundedReply("folder volume", seconds: Self.remaining(deadline)) { done in
-            unknown.async { [self] in
-                let value = injected.map { $0(folder) } ?? Self.canonicalPath(of: folder)
+            self.resolveQueue.async { [self] in
+                let value = injected.map { $0(root) } ?? Self.canonicalPath(of: root)
                 lock.withLock {
-                    if let value { resolved[folder] = value }
-                    resolving.remove(folder)
+                    if let value { resolved[root] = value }
+                    resolving.remove(root)
                 }
                 done(.success(value))
             }
         }
         guard case .success(let value) = answer else {
-            Logger.state.error("Which volume a recording folder is on did not answer in time — its read goes on the shared queue")
-            return "unknown"
+            Logger.state.error("Which volume a recording folder is on did not answer in time — its read goes on its root's own queue")
+            return fallback
         }
-        guard let value else { return "unknown" }   // a link cycle
-        return injected == nil ? Self.lexicalVolume(of: value, mounts: Self.mountTable(), caseInsensitive: Self.bootCaseInsensitive) : value
+        guard let value else { return fallback }   // a link cycle
+        return volume(canonicalRoot: value)
     }
 
     /// A mounted file system as the kernel last knew it: where it is mounted, and whether it is local.
@@ -214,20 +254,23 @@ public final class FolderReads: @unchecked Sendable {
 
     /// `volume(of:)`, pure: `mounts` the mount table, `readLink` a link's destination (nil: not a link).
     static func volume(of folder: String, mounts: [Mount], readLink: (String) -> String?, caseInsensitive: Bool = false) -> String {
-        guard !mounts.isEmpty, let path = canonicalPath(of: folder, mounts: mounts, readLink: readLink) else { return "unknown" }
+        guard !mounts.isEmpty,
+              let path = canonicalPath(of: folder, mounts: mounts, readLink: readLink, caseInsensitive: caseInsensitive) else { return "unknown" }
         return lexicalVolume(of: path, mounts: mounts, caseInsensitive: caseInsensitive)
     }
 
     /// `folder`'s canonical path (L review 209): the production resolution, run only off the pool, bounded. It learns the boot
-    /// volume's case sensitivity once, too.
+    /// volume's case sensitivity once, too — and matches the mount points with it (L review 238).
     static func canonicalPath(of folder: String) -> String? {
         learnBootCaseSensitivity()
-        return canonicalPath(of: folder, mounts: mountTable(), readLink: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0) })
+        return canonicalPath(of: folder, mounts: mountTable(), readLink: { try? FileManager.default.destinationOfSymbolicLink(atPath: $0) },
+                             caseInsensitive: bootCaseInsensitive)
     }
 
     /// `folder` with every symbolic link in its path substituted while the path so far lies on a LOCAL volume — nothing on a
-    /// share is ever read (L review 160). nil for a link cycle (40 links).
-    static func canonicalPath(of folder: String, mounts: [Mount], readLink: (String) -> String?) -> String? {
+    /// share is ever read (L review 160), whatever the spelling it is reached by: the Data volume's firmlinked one, or another
+    /// case of its mount point on a case-insensitive boot volume (L review 238). nil for a link cycle (40 links).
+    static func canonicalPath(of folder: String, mounts: [Mount], readLink: (String) -> String?, caseInsensitive: Bool = false) -> String? {
         var remaining = folder.split(separator: "/").map(String.init)
         var resolved: [String] = []
         var links = 0
@@ -237,7 +280,7 @@ public final class FolderReads: @unchecked Sendable {
             if part == ".." { _ = resolved.popLast(); continue }
             let next = "/" + (resolved + [part]).joined(separator: "/")
             // On a share (or any volume that is not local) nothing more is read: the rest of the path stands as it is.
-            guard let here = mount(of: next, in: mounts, caseInsensitive: false), here.isLocal else {
+            guard let here = lexicalMount(of: next, mounts: mounts, caseInsensitive: caseInsensitive), here.isLocal else {
                 return "/" + (resolved + [part] + remaining).joined(separator: "/")
             }
             guard let destination = readLink(next) else {
@@ -260,17 +303,24 @@ public final class FolderReads: @unchecked Sendable {
     /// mount point's spelling. "unknown" with no mount table.
     static func lexicalVolume(of path: String, mounts: [Mount], caseInsensitive: Bool) -> String {
         guard !mounts.isEmpty else { return "unknown" }
-        let spelled = caseInsensitive ? path.lowercased() : path, data = caseInsensitive ? dataVolume.lowercased() : dataVolume
-        let firmlinked = spelled == data ? "/" : spelled.hasPrefix(data + "/") ? String(path.dropFirst(dataVolume.count)) : path
-        return mount(of: firmlinked, in: mounts.filter { $0.path != dataVolume }, caseInsensitive: caseInsensitive)?.path ?? "unknown"
+        return lexicalMount(of: path, mounts: mounts, caseInsensitive: caseInsensitive)?.path ?? "unknown"
     }
 
-    private static func mount(of path: String, in mounts: [Mount], caseInsensitive: Bool) -> Mount? {
-        let spelled = caseInsensitive ? path.lowercased() : path
-        return mounts.filter { mount in
-            let point = caseInsensitive ? mount.path.lowercased() : mount.path
-            return point == "/" || spelled == point || spelled.hasPrefix(point + "/")
-        }.max { $0.path.count < $1.path.count }
+    /// The mount `path` lies on, lexically (L reviews 214, 238, 241): both the path and every mount point are read in their
+    /// firmlinked spelling — the Data volume's folders at `/`, an automount the table spells under the Data volume
+    /// (`/System/Volumes/Data/home`) at `/home` — the Data volume itself standing for `/`, and case-insensitively when asked.
+    static func lexicalMount(of path: String, mounts: [Mount], caseInsensitive: Bool) -> Mount? {
+        let spell = { (p: String) in caseInsensitive ? firmlinked(p, caseInsensitive: true).lowercased() : firmlinked(p, caseInsensitive: false) }
+        let target = spell(path)
+        return mounts.filter { $0.path != dataVolume }.map { (mount: $0, point: spell($0.path)) }
+            .filter { $0.point == "/" || target == $0.point || target.hasPrefix($0.point + "/") }
+            .max { $0.point.count < $1.point.count }?.mount
+    }
+
+    /// `path` as the firmlinks spell it: `/System/Volumes/Data/…` is `/…`.
+    private static func firmlinked(_ path: String, caseInsensitive: Bool) -> String {
+        let spelled = caseInsensitive ? path.lowercased() : path, data = caseInsensitive ? dataVolume.lowercased() : dataVolume
+        return spelled == data ? "/" : spelled.hasPrefix(data + "/") ? String(path.dropFirst(dataVolume.count)) : path
     }
 
     /// Whether the boot volume — where mount points live — is case-insensitive: learned once, by the bounded resolution;

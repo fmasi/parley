@@ -54,8 +54,8 @@ final class HungRead: @unchecked Sendable {
 
     /// L reviews 164, 210, 216: a pending folder whose earlier read has not answered is waited for, within the retry's own
     /// bound — never "not reachable" on a guess. When the bound runs out, it is said as NOT ANSWERING, and the raised alarm
-    /// stays raised while the folder still does not answer.
-    @Test func aCoalescedPendingFolderReadLeavesTheAlarmAlone() async throws {
+    /// stays raised while the folder still does not answer. (Renamed in L review 241: it says what it asserts.)
+    @Test func aJoinedPendingFolderReadThatRunsOutIsSaidNotAnswering() async throws {
         let h = try Harness()
         defer { tearDown(h) }
         let folder = h.tmp.appendingPathComponent("p")

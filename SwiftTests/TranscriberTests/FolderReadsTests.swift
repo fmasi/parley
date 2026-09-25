@@ -160,7 +160,8 @@ import Testing
     // MARK: - L round E (209, 214)
 
     /// L review 209: which volume a folder is on is found without the caller ever waiting on a file system: a resolver that
-    /// hangs (a dying local disk under a link) runs off the pool, on the "unknown" queue, bounded by the read's own bound.
+    /// hangs (a dying local disk under a link) runs off the pool, bounded by the read's own bound. Since L review 237 the
+    /// resolution has a queue of its own, and the read falls back on its root's own queue, where it may still answer.
     @Test func aHungResolverNeverHangsTheCaller() async throws {
         let gate = Gate()
         defer { gate.release(4) }
@@ -168,7 +169,7 @@ import Testing
         let reads = FolderReads(label: "folder-reads-test-\(UUID().uuidString)", volumeOf: { _ in gate.hang(); return "/" })
         let began = ContinuousClock.now
         let answer = await reads.read("dying disk", folder: "/Volumes/Dying/rec", seconds: 0.3) { 1 }
-        #expect(answer == nil && ContinuousClock.now - began < .seconds(1), "bounded: the caller never waits on the resolver")
+        #expect(answer ?? 1 == 1 && ContinuousClock.now - began < .seconds(1), "bounded: the caller never waits on the resolver")
         #expect(!watchdog.fired)
     }
 
