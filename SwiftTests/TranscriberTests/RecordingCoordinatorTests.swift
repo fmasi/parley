@@ -2990,7 +2990,8 @@ struct Harness {
         #expect(h.client.startCalls.isEmpty && !h.coordinator.isStartInFlight)
         let body = try #require(h.notified.value.last?.body)
         #expect(h.notified.value.last?.title == "Recording not started")
-        #expect(body.hasPrefix("Parley couldn’t reach the recording folder — is its drive or network share available?"), "\(body)")
+        // Not answering within its own bound — never "not reachable" (L review 210).
+        #expect(body.hasPrefix("The recording folder isn’t answering — is its drive or network share still available?"), "\(body)")
         #expect(!body.contains("audio system"))
     }
 

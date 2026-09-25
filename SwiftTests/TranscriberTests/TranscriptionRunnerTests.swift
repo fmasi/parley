@@ -227,6 +227,8 @@ import Testing
                 sessionState: SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: chunks),
                 outputDirectory: dir, config: config)
             let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+            // The deletes run once the record is written, fire-and-forget (L review 215).
+            if !preserve { await Harness.until { !exists(archivedSys) && !exists(archivedMic) } }
             #expect(exists(archivedSys) == preserve && exists(archivedMic) == preserve, "preserve_source_wav: \(preserve)")
             #expect(exists(failedSys), "an ASR-failed chunk keeps its WAV for re-transcription")
             #expect(exists(wavOnly), "a chunk whose audio IS the WAV keeps it")

@@ -469,8 +469,10 @@ public final class RecordingCoordinator {
         // user copy names the folder, never a meeting.
         let folderName = abbreviatedDisplayPath(config.recordingDirectory)
         guard let (folderStatus, freeBytes) = folder else {
+            // Only this read's own bound ran out — an earlier read of the folder is joined, never taken for an answer (L review
+            // 210): not answering, never "not reachable".
             Logger.state.error("Recording not started: the recording folder did not answer")
-            refuseStart("Parley couldn’t reach the recording folder — is its drive or network share available? (\(folderName))")
+            refuseStart("The recording folder isn’t answering — is its drive or network share still available? (\(folderName))")
             return
         }
         switch folderStatus {
@@ -1842,7 +1844,10 @@ public final class RecordingCoordinator {
         // Off the main actor, bounded (L review 75): a folder that does not answer is unreachable here — the
         // session waits, never salvaged as "no recorded audio".
         let probe = folderProbe
-        let folderStatus = await readOffMain("relaunch: recording folder", folder: outputDir) { Self.folderStatus(outputDir, probe: probe) } ?? .unreachable
+        let read = await readOffMain("relaunch: recording folder", folder: outputDir) { Self.folderStatus(outputDir, probe: probe) }
+        // No answer within its own bound: the session waits, its folder said NOT ANSWERING — never "not reachable" (L review 210).
+        if read == nil { foldersNotAnswering.insert(sentinel.sessionKey) }
+        let folderStatus = read ?? .unreachable
         // A Start pressed during the read owns the app: checked BEFORE anything is armed or pinged (L review 161).
         guard stillOwnsTheSession(sentinel) else { return .handled }
 
@@ -2135,23 +2140,30 @@ public final class RecordingCoordinator {
         await updateFolderAlarm()
     }
 
+    /// Why a pending session's folder is not ready (L reviews 79, 210).
+    private enum FolderWait: Equatable { case notWritable, unreachable, notAnswering }
+
     private func applyFolderAlarm(pending: [RecordingSentinel], folders: PendingFolders) {
         foldersNotAnswering.formIntersection(pending.map(\.sessionKey))   // a session no longer pending is resolved
-        // A folder with no answer YET — an earlier read of it is still out — says nothing either way (L review 164): the
-        // alarm is left as it is, never raised as "not reachable" nor cleared on a guess.
+        // Every pending folder has an answer or a timeout of its read's OWN bound — a joined read waited within it (L review
+        // 210): no early return while another folder is busy (L review 216). A timeout is "not answering", said as such.
         let folderOf = { (s: RecordingSentinel) in URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent().path }
-        if pending.contains(where: { !foldersNotAnswering.contains($0.sessionKey) && folders.noAnswerYet.contains(folderOf($0)) }) {
-            Logger.state.info("A pending folder has no answer yet — its alarm is left as it is")
-            return
+        let waiting: [FolderWait] = pending.compactMap {
+            if foldersNotAnswering.contains($0.sessionKey) || folders.notAnswering.contains(folderOf($0)) { return .notAnswering }
+            switch folders.statuses[folderOf($0)] ?? .unreachable {
+            case .reachable: return nil
+            case .notWritable: return .notWritable
+            case .unreachable: return .unreachable
+            }
         }
-        let waiting: [FolderStatus] = pending.map {
-            foldersNotAnswering.contains($0.sessionKey) ? .unreachable : folders.statuses[folderOf($0)] ?? .unreachable
-        }.filter { $0 != .reachable }
         if waiting.isEmpty {
             appState.clearAppAlarm(.recordingFolderUnavailable)
         } else if waiting.allSatisfy({ $0 == .notWritable }) {
             // There, but read-only: a permissions problem, not a missing drive (L review 79).
             appState.raiseAppAlarm(.recordingFolderUnavailable, message: "Parley can’t write to the recording folder — check its permissions. The recording data is kept, and Parley will retry.")
+        } else if waiting.allSatisfy({ $0 == .notAnswering }) {
+            // No answer within its bound: not answering — never "not reachable" (L review 210).
+            appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t answering — Parley will keep the recording data and retry.")
         } else {
             appState.raiseAppAlarm(.recordingFolderUnavailable, message: "The recording folder isn’t reachable — Parley will keep the recording data and retry.")
         }
@@ -2278,6 +2290,10 @@ public final class RecordingCoordinator {
     /// The bound on the transcript's writes (L review 185): longer than a read — a slow share writes a long meeting's
     /// record — never unbounded. Tests shorten it.
     var folderWriteDeadline: Duration = .seconds(30)
+    /// The bound on the rebuild's composite look — its sweeps, the damaged record moved aside, the session's state and its
+    /// orphans read (L review 215): longer than one read, so a slow but healthy share is never called "not answering".
+    /// Tests shorten it.
+    var folderPrepareDeadline: Duration = .seconds(15)
     /// What the folder reads ask the file system. Tests inject a slow or fake one.
     var folderProbe: FolderProbe = .live
     /// Where every blocking recording-folder read runs: a serial queue per volume, never the cooperative pool (L
@@ -2290,11 +2306,11 @@ public final class RecordingCoordinator {
         await folderReads.read(label, folder: folder.path, seconds: Self.seconds(bound ?? folderReadDeadline), read)
     }
 
-    /// What the pending sessions' folders answered, by folder path (L reviews 75, 164). A read that timed out is
-    /// `.unreachable`; a folder whose earlier read has not answered yet is in `noAnswerYet` — neither reachable nor not.
+    /// What the pending sessions' folders answered, by folder path (L reviews 75, 164, 210). A folder whose read did not
+    /// answer within its own bound — joining an earlier read of it included — is in `notAnswering`, never given a status.
     struct PendingFolders {
         var statuses: [String: FolderStatus] = [:]
-        var noAnswerYet: Set<String> = []
+        var notAnswering: Set<String> = []
     }
 
     /// The status of each pending session's folder: each read on its own, concurrently — every one on its volume's
@@ -2312,8 +2328,7 @@ public final class RecordingCoordinator {
             for await (path, outcome) in group {
                 switch outcome {
                 case .answered(let status): result.statuses[path] = status
-                case .timedOut: result.statuses[path] = .unreachable
-                case .busy: result.noAnswerYet.insert(path)
+                case .timedOut: result.notAnswering.insert(path)
                 }
             }
             return result
@@ -2761,8 +2776,9 @@ public final class RecordingCoordinator {
                 }
             }
         } catch is FolderNotAnswering {
-            // The folder stopped answering mid-salvage (L review 158): nothing was written, and the session waits — kept,
-            // its folder said not to answer — never salvaged as failed.
+            // The folder stopped answering mid-salvage (L review 158): nothing was CONFIRMED written — a write that did not
+            // answer may still land (L review 185), and the next pass's finalized gate then finds it — and the session waits:
+            // kept, its folder said not to answer, never salvaged as failed.
             Logger.state.error("The salvage's folder did not answer — the session waits")
             if case .transcribing = appState.phase { appState.phase = .idle }
             await waitForUnansweringFolder(sentinel)
@@ -2967,7 +2983,8 @@ public final class RecordingCoordinator {
         useFolderReadsForTheTranscript()
         return try await ChunkedSessionRecovery.recover(outputDirectory: outputDirectory, sessionId: sessionId, config: config,
                                                         transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                                                        provenance: provenance, reads: folderReads, seconds: Self.seconds(folderReadDeadline))
+                                                        provenance: provenance, reads: folderReads, seconds: Self.seconds(folderReadDeadline),
+                                                        prepareSeconds: Self.seconds(folderPrepareDeadline))
     }
 
     /// The transcript's looks at its folder — and its writes (L review 185) — go through this coordinator's reader, with its

@@ -247,6 +247,7 @@ import Testing
             if name == "recovery: session folder" { Thread.sleep(forTimeInterval: 0.3) }
         })
         h.coordinator.folderReadDeadline = .milliseconds(200)
+        h.coordinator.folderPrepareDeadline = .milliseconds(200)
         await h.coordinator.stopRecording()
         let kept = try #require(pending(h).first, "kept")
         #expect(kept.sessionKey == s.sessionKey && kept.stopCause == .folderNotAnswering)
@@ -527,5 +528,146 @@ import Testing
         #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "stop" })
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
         #expect(row.contains("\(call.sessionId)-1.wav") && row.contains("not transcribed"), "\(row)")
+    }
+}
+
+// MARK: - Folder reads: joined, bounded, honest (209, 210, 215, 216)
+
+@MainActor
+@Suite struct RecordingCoordinatorFolderReadsRoundETests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+    private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
+
+    /// L review 210: a Start during a slow read of the SAME folder — a wake's pending retry reading it — waits for that
+    /// read's answer within its own bound, and starts: "no answer yet" is never "not reachable".
+    @Test func aStartDuringASlowRetryReadOfItsFolderWaitsForItsAnswer() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let rec = h.tmp.appendingPathComponent("rec")
+        try FileManager.default.createDirectory(at: rec, withIntermediateDirectories: true)
+        h.config.update { $0.recordingDirectory = rec.path }
+        try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: rec.appendingPathComponent("p-0.wav").path,
+                                                              micAudioPath: rec.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
+                                           directory: h.tmp)
+        let slow = Harness.Box(false)
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { name in
+            guard name == "pending folder" else { return }
+            slow.value = true
+            Thread.sleep(forTimeInterval: 0.3)   // slow, and answering
+        })
+        let coordinator = h.coordinator
+        let retry = Task { await coordinator.retryPendingSessions() }   // the wake's retry
+        await Harness.until { slow.value }
+        await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        #expect(h.appState.isRecording, "\(String(describing: h.appState.errorMessage))")
+        await retry.value
+    }
+
+    /// … and only the Start's own bound running out is "not answering" — said as such, never "not reachable".
+    @Test func aStartWhoseFolderDoesNotAnswerSaysSo() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        let hung = HungRead("start: recording folder")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderReadDeadline = .milliseconds(200)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let said = try #require(h.appState.errorMessage)
+        #expect(said.contains("isn’t answering") && !said.contains("reach"), "\(said)")
+    }
+
+    /// L review 215: the rebuild's composite look — its sweeps and moves, its reads — has a longer bound than a single read:
+    /// a slow but healthy share is finished, never "not answering".
+    @Test func aSlowButAnsweringRebuildIsFinished() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let dir = h.tmp.appendingPathComponent("p")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "p", meetingStart: Date(), chunkIndices: [0])
+        try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: dir.appendingPathComponent("p-0.wav").path,
+                                                              micAudioPath: dir.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
+                                           directory: h.tmp)
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { name in
+            if name == "recovery: session folder" { Thread.sleep(forTimeInterval: 0.4) }
+        })
+        h.coordinator.folderReadDeadline = .milliseconds(200)
+        h.coordinator.folderPrepareDeadline = .seconds(2)
+        await h.coordinator.retryPendingSessions()
+        #expect(h.presented.value.map(\.lastPathComponent) == ["p.json"] && pending(h).isEmpty, "finished")
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] == nil, "never \"not answering\"")
+    }
+
+    /// L review 216: the rotator reads its folder through the coordinator's reader, and a look that does not answer is on
+    /// record as the folder not answering — the recording goes on.
+    @Test func theRotatorsLooksGoThroughTheCoordinatorsReader() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        let hung = HungRead("rotation: chunk files")
+        defer { hung.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let rotator = try #require(h.runner.chunkRotator)
+        #expect(rotator.folderReads === h.coordinator.folderReads, "the coordinator's reader")
+        rotator.folderProbeSeconds = 0.2
+        await rotator.rotateForTesting()
+        #expect(hung.reached && h.client.rotateCalls == 1 && h.appState.isRecording, "never blocked: rotated by the counter")
+        #expect(h.client.recordedEvents.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "rotation" })
+    }
+}
+
+// MARK: - The transcript's looks and writes (215, 216)
+
+@MainActor
+@Suite struct TranscriptionRunnerReadsRoundETests {
+    private func dir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("runner-e-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// L review 215: the leftover WAVs' deletes run after the looks, never inside a bounded read — a slow delete on a healthy
+    /// share never makes the transcript "not answering". They still run.
+    @Test func slowLeftoverDeletesNeverMakeTheFolderNotAnswering() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        try RecoveryFixtures.writeSessionJSON(dir: d, sessionId: "f", meetingStart: Date(), chunkIndices: [0])
+        try Data("archive".utf8).write(to: d.appendingPathComponent("f-0.m4a"))
+        try Harness.headerOnlyWAV().write(to: d.appendingPathComponent("f-0.wav"))   // a leftover beside its archive
+        let state = try #require(SessionState.read(directory: d, sessionId: "f"))
+        let runner = TranscriptionRunner()
+        runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)")
+        runner.folderReadSeconds = 0.2
+        let removed = Harness.Box(false)
+        runner.leftoverRemoval = { chunks, folder in
+            Thread.sleep(forTimeInterval: 0.4)   // a slow share
+            TranscriptionRunner.removeLeftoverWAVs(of: chunks, in: folder)
+            removed.value = true
+        }
+        let result = try await runner.finalize(sessionState: state, outputDirectory: d, config: .default)
+        #expect(FileManager.default.fileExists(atPath: result.jsonPath.path), "written, never \"not answering\"")
+        await Harness.until { removed.value }
+        #expect(removed.value && !FileManager.default.fileExists(atPath: d.appendingPathComponent("f-0.wav").path), "the leftover still goes")
+    }
+
+    /// L review 216 (pinned): `run`'s look at the microphone file is bounded — a folder that does not answer throws, never
+    /// a transcript written blind.
+    @Test func theLegacyRunsMicLookIsBounded() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        let hung = HungRead("transcript: mic file")
+        defer { hung.release() }
+        let runner = TranscriptionRunner()
+        runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        runner.folderReadSeconds = 0.2
+        await #expect(throws: FolderNotAnswering.self) {
+            _ = try await runner.run(systemAudio: sys, micAudio: mic, outputDirectory: d, config: .default)
+        }
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("older.json").path))
     }
 }

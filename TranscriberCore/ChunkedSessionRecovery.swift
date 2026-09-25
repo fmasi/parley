@@ -19,14 +19,16 @@ public enum ChunkedSessionRecovery {
     }
 
     /// The recovery's reads of the folder run through `reads`, bounded by `seconds` of awake time, never on the main actor
-    /// (L review 158): a folder that does not answer throws `FolderNotAnswering` — nothing is transcribed, nothing lost.
+    /// (L review 158): a folder that does not answer throws `FolderNotAnswering` — nothing is transcribed, nothing lost. The
+    /// composite `prepare` — sweeps, a move aside, the state and orphan reads — gets its own, longer bound, `prepareSeconds`
+    /// (L review 215).
     public static func recover(outputDirectory: URL, sessionId: String, config: Config,
                         transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?,
                         runner: TranscriptionRunner, provenance: CaptureProvenance? = nil,
-                        reads: FolderReads = .shared, seconds: Double = 15) async throws -> TranscriptionResult? {
+                        reads: FolderReads = .shared, seconds: Double = 15, prepareSeconds: Double = 15) async throws -> TranscriptionResult? {
         let engine = config.engine.rawValue, chunkMinutes = config.validatedChunkDuration
         guard let prepared = await reads.read("recovery: session folder", folder: outputDirectory.path,
-                                              key: outputDirectory.path + "#recovery:" + sessionId, seconds: seconds, {
+                                              key: outputDirectory.path + "#recovery:" + sessionId, seconds: prepareSeconds, {
             Result { try prepare(outputDirectory: outputDirectory, sessionId: sessionId, engine: engine, chunkMinutes: chunkMinutes) }
         }) else { throw FolderNotAnswering() }
         let (baseState, orphans, rebuilding): (SessionState, [(chunk: CrashRecoveryPlanner.OrphanChunk, start: Date)], Bool)

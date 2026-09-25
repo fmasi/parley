@@ -52,8 +52,9 @@ final class HungRead: @unchecked Sendable {
         _ = await deadRead.value
     }
 
-    /// L review 164: a pending folder whose read is coalesced — an earlier read of it has not answered YET — is "no
-    /// answer yet": the folder alarm is left as it was, never raised as "not reachable".
+    /// L reviews 164, 210, 216: a pending folder whose earlier read has not answered is waited for, within the retry's own
+    /// bound — never "not reachable" on a guess. When the bound runs out, it is said as NOT ANSWERING, and the raised alarm
+    /// stays raised while the folder still does not answer.
     @Test func aCoalescedPendingFolderReadLeavesTheAlarmAlone() async throws {
         let h = try Harness()
         defer { tearDown(h) }
@@ -68,9 +69,13 @@ final class HungRead: @unchecked Sendable {
         let reads = h.coordinator.folderReads
         let earlier = Task { await reads.read("earlier read", folder: folder.path, seconds: 5) { 0 } }
         await Harness.until { hung.reached }
+        h.coordinator.folderReadDeadline = .milliseconds(200)
         await h.coordinator.retryPendingSessions()
-        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] == nil, "no answer yet is not \"unreachable\"")
+        let raised = try #require(h.appState.activeAlarms[.recordingFolderUnavailable]?.message, "its own bound ran out: said")
+        #expect(raised.contains("isn’t answering") && !raised.contains("reachable"), "\(raised)")
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "still pending")
+        await h.coordinator.retryPendingSessions()   // the next event, the folder still not answering
+        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil, "a raised alarm stays raised")
         hung.release()
         _ = await earlier.value
     }
@@ -790,6 +795,7 @@ final class HungRead: @unchecked Sendable {
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
+        h.coordinator.folderPrepareDeadline = .milliseconds(150)
         await h.coordinator.retryPendingSessions()
         #expect(pending(h).map(\.sessionKey) == [p.sessionKey], "it waits")
         #expect(h.presented.value.isEmpty && h.client.commitCalls.isEmpty)
