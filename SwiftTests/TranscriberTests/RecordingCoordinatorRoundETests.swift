@@ -671,3 +671,130 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("older.json").path))
     }
 }
+
+// MARK: - The main actor never waits on the recovery file, nor on a legacy transcript's folder (217)
+
+@MainActor
+@Suite struct RecordingCoordinatorMainActorIORoundETests {
+    private func tearDown(_ h: Harness) {
+        h.runner.stopChunkRotation()
+        h.runner.teardownChunkedPipeline()
+        try? FileManager.default.removeItem(at: h.tmp)
+    }
+
+    /// A recovery-file queue whose operation named `label` hangs for up to a second, once.
+    private func hanging(_ label: String) -> (io: SentinelIO, gate: DispatchSemaphore, reached: Harness.Box<Bool>) {
+        let gate = DispatchSemaphore(value: 0), reached = Harness.Box(false)
+        let io = SentinelIO(label: "rc-e-sentinel-\(UUID().uuidString)", beforeEach: { name in
+            guard name == label, !reached.value else { return }
+            reached.value = true
+            _ = gate.wait(timeout: .now() + 1)   // the watchdog
+        })
+        return (io, gate, reached)
+    }
+
+    /// A main-actor ticker: ten 10 ms sleeps, and how long they took.
+    private func ticker() -> Task<Duration, Never> {
+        Task { @MainActor in
+            let began = ContinuousClock.now
+            for _ in 0..<10 { try? await Task.sleep(for: .milliseconds(10)) }
+            return ContinuousClock.now - began
+        }
+    }
+
+    /// L review 217: the start's write of the recovery file runs off the main actor — a slow Application Support folder
+    /// never freezes the UI.
+    @Test func theStartsRecoveryFileWriteRunsOffTheMainActor() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        let (io, gate, reached) = hanging("start: write")
+        h.coordinator.sentinelIO = io
+        let coordinator = h.coordinator
+        let ticks = ticker()
+        let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
+        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
+        #expect(reached.value)
+        gate.signal()
+        await starting.value
+        #expect(h.appState.isRecording && RecordingSentinel.read(directory: h.tmp) != nil)
+    }
+
+    /// … and so do the Stop's read, mark and delete of it.
+    @Test func theStopsRecoveryFileIORunsOffTheMainActor() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let (io, gate, reached) = hanging("stop: read")
+        h.coordinator.sentinelIO = io
+        let coordinator = h.coordinator
+        let ticks = ticker()
+        let stopping = Task { await coordinator.stopRecording() }
+        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
+        #expect(reached.value)
+        gate.signal()
+        await stopping.value
+        #expect(h.appState.isIdle)
+    }
+
+    /// … and a crash recovery's read of it.
+    @Test func aCrashRecoverysRecoveryFileReadRunsOffTheMainActor() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let (io, gate, reached) = hanging("crash: read")
+        h.coordinator.sentinelIO = io
+        let coordinator = h.coordinator
+        let ticks = ticker()
+        let recovering = Task { await coordinator.handleXPCCrash() }
+        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
+        #expect(reached.value)
+        gate.signal()
+        await recovering.value
+    }
+
+    /// … and every rotation's liveness write: queued, never waited for.
+    @Test func aRotationsLivenessWriteNeverBlocksTheMainActor() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { tearDown(h) }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let (io, gate, reached) = hanging("liveness")
+        h.coordinator.sentinelIO = io
+        let rotator = try #require(h.runner.chunkRotator)
+        let ticks = ticker()
+        let rotating = Task { await rotator.rotateForTesting() }
+        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
+        await rotating.value
+        await Harness.until { reached.value }
+        #expect(reached.value && h.client.rotateCalls == 1)
+        gate.signal()
+    }
+}
+
+@MainActor
+@Suite struct TranscriptionRunnerRunRoundETests {
+    /// L review 217: the legacy single-file transcript's discovery, header repair and size reads run on the folder's queue,
+    /// bounded — a folder that does not answer throws, never a main actor frozen, never a transcript written blind.
+    @Test func theLegacyRunsDiscoveryIsBoundedAndOffTheMainActor() async throws {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("runner-e-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: d) }
+        let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
+        try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
+        let hung = HungRead("transcript: segments")
+        defer { hung.release() }
+        let runner = TranscriptionRunner()
+        runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        runner.folderReadSeconds = 0.2
+        runner.folderWriteSeconds = 0.2
+        let began = ContinuousClock.now
+        await #expect(throws: FolderNotAnswering.self) {
+            _ = try await runner.run(systemAudio: sys, micAudio: mic, outputDirectory: d, config: .default)
+        }
+        #expect(hung.reached && ContinuousClock.now - began < .seconds(2), "bounded, on the folder's queue")
+        #expect(!FileManager.default.fileExists(atPath: d.appendingPathComponent("older.json").path))
+    }
+}

@@ -2320,7 +2320,8 @@ struct Harness {
         h.appState.phase = .recording(since: Date())
         h.client.onServiceCrash?()
         var tries = 0
-        while h.client.startCalls.count < wiredStarts + 1 && tries < 1000 {
+        // The restart is over — its recovery file written off the main actor (L review 217) — before the test ends it.
+        while (h.client.startCalls.count < wiredStarts + 1 || h.coordinator.recoveryInFlight) && tries < 1000 {
             await Task.yield()
             tries += 1
         }
@@ -2437,12 +2438,14 @@ struct Harness {
                                     speakerDatabase: [:])]
         ), directory: outDir)
 
+        // As the relaunch reads it: the file keeps whole seconds, and the row's clock is formatted from that.
+        let stored = try #require(RecordingSentinel.read(directory: h.tmp))
         await coordinator.recoverAtLaunch()   // helper not capturing → Flow B, chunked
 
         let json = outDir.appendingPathComponent("sess.json")
         #expect(h.presented.value == [json], "the recovered transcript goes through the normal completion path")
         #expect(h.appState.activeAlarms[.recordingStopped]?.message == RecoveryMessages.relaunchStopped(
-            at: sentinel.startedAt, outcome: SalvageOutcome(kind: .transcriptWritten(json), chunkCount: 1)))
+            at: stored.startedAt, outcome: SalvageOutcome(kind: .transcriptWritten(json), chunkCount: 1)))
         // L6 fix round 1, item 3: presented NOW (window + one notification), not at the next recording.
         #expect(shown.value.count == 1 && shown.value.first?.new == [.recordingStopped])
         #expect(h.criticals.value.isEmpty, "exactly one notification: the presenter's")
@@ -2668,23 +2671,26 @@ struct Harness {
         let markedWhileRestarting = Harness.Box<Bool?>(nil)
         h.client.onStartAsync = {
             await coordinator.stopRecording()   // deferred: recovery is in flight
+            await coordinator.settleSentinelIOForTesting()   // the mark is queued off the main actor (L review 217)
             markedWhileRestarting.value = RecordingSentinel.read(directory: h.tmp)?.stopping
         }
         await h.coordinator.handleXPCCrash()
         #expect(markedWhileRestarting.value == true)
     }
 
-    @Test func refreshSentinelLivenessRewritesLastAliveAt() throws {
+    @Test func refreshSentinelLivenessRewritesLastAliveAt() async throws {
         let h = try Harness()
         _ = try writeSentinel(h, alive: 30)
         let now = Date(timeIntervalSince1970: 5_000)
         h.coordinator.refreshSentinelLiveness(now: now)
+        await h.coordinator.settleSentinelIOForTesting()   // queued off the main actor (L review 217)
         #expect(RecordingSentinel.read(directory: h.tmp)?.lastAliveAt == now)
     }
 
-    @Test func refreshNeverCreatesASentinel() throws {
+    @Test func refreshNeverCreatesASentinel() async throws {
         let h = try Harness()
         h.coordinator.refreshSentinelLiveness()
+        await h.coordinator.settleSentinelIOForTesting()
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
     }
 
@@ -2718,6 +2724,7 @@ struct Harness {
         written.lastAliveAt = stale
         try RecordingSentinel.write(written, directory: h.tmp)
         await h.runner.chunkRotator?.rotateForTesting()
+        await h.coordinator.settleSentinelIOForTesting()   // the liveness write is queued off the main actor (L review 217)
         #expect((RecordingSentinel.read(directory: h.tmp)?.lastAliveAt ?? stale) > stale)
     }
 

@@ -88,17 +88,22 @@ public final class TranscriptionRunner {
         }
 
         let isDualStream = micAudio != nil
-        let segments: [(system: URL, mic: URL)]
-        if let micAudio {
-            segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: micAudio)
-        } else {
-            // No mic — create tuples with system-only URLs (mic will be skipped below)
-            segments = Self.discoverSegments(systemAudio: systemAudio, micAudio: systemAudio)
-        }
-        // Repair any orphaned segment whose header was never finalized (writer killed
-        // mid-recording) so the recovered PCM is decodable — the chunked path repairs in
-        // ChunkProcessor, this is the single-file / crash-recovery / CLI path (#85).
-        repairSegmentHeaders(segments)
+        // No mic — tuples with system-only URLs (the mic is skipped below).
+        let discoveryMic = micAudio ?? systemAudio
+        let folder = systemAudio.deletingLastPathComponent().path, runKey = folder + "#run:" + systemAudio.lastPathComponent
+        // Discovery, header repair and every file size the run needs: one look on the folder's queue, bounded — never on the
+        // main actor (L review 217). The repair writes: the write bound. A folder that does not answer is never transcribed
+        // blind.
+        guard let found = await folderReads.read("transcript: segments", folder: folder, key: runKey, seconds: folderWriteSeconds, {
+            let segments = TranscriberCore.discoverSegments(systemAudio: systemAudio, micAudio: discoveryMic)
+            // Repair any orphaned segment whose header was never finalized (writer killed
+            // mid-recording) so the recovered PCM is decodable — the chunked path repairs in
+            // ChunkProcessor, this is the single-file / crash-recovery / CLI path (#85).
+            _ = repairSegmentHeaders(segments)
+            let files = segments.flatMap { [$0.system, $0.mic] }
+            return RunLook(segments: segments, sizes: Dictionary(files.map { ($0.path, Self.fileSize(of: $0)) }, uniquingKeysWith: { first, _ in first }))
+        }) else { throw FolderNotAnswering() }
+        let segments = found.segments
         var allSegments: [LabeledSegment] = []
         var audioPaths: [URL] = []
         // Captured from a single-segment embedding (length == dim) before any accumulation,
@@ -127,6 +132,7 @@ public final class TranscriptionRunner {
 
             let systemResult = try await transcribeStream(
                 audioPath: segmentPair.system,
+                fileSize: found.sizes[segmentPair.system.path] ?? 0,
                 source: "remote",
                 transcriber: transcriber,
                 label: "system\(index > 0 ? "-\(index + 1)" : "")",
@@ -152,6 +158,7 @@ public final class TranscriptionRunner {
                 if micThere {
                     let micResult = try await transcribeStream(
                         audioPath: micPath,
+                        fileSize: found.sizes[micPath.path] ?? 0,
                         source: "local",
                         transcriber: transcriber,
                         label: "mic\(index > 0 ? "-\(index + 1)" : "")",
@@ -169,7 +176,7 @@ public final class TranscriptionRunner {
 
             // #93: record this segment for archival if it carried real audio (system payload
             // past the WAV header, or a mic file existed). Skips header-only orphans.
-            let sysSize = (try? FileManager.default.attributesOfItem(atPath: segmentPair.system.path)[.size] as? Int) ?? 0
+            let sysSize = found.sizes[segmentPair.system.path] ?? 0
             if sysSize > wavHeaderSize || segmentMic != nil {
                 contributingPairs.append(AudioArchiver.SegmentPair(system: segmentPair.system, mic: segmentMic))
             }
@@ -219,9 +226,16 @@ public final class TranscriptionRunner {
         // keeps offsets monotonic (over-shooting a truncated final chunk is harmless; collapsing
         // is not).
         let chunkLengthFallback = Double(config.validatedChunkDuration) * 60
-        let segmentDurations: [Double] = zip(segments, zip(perSegmentSystem, perSegmentMic)).map { pair, streams in
+        // The segments' physical lengths and the recording's creation: read on the folder's queue, bounded (L review 217).
+        let systems = segments.map(\.system)
+        guard let lengths = await folderReads.read("transcript: segment lengths", folder: folder, key: runKey + "#lengths", seconds: folderReadSeconds, {
+            RunLengths(physical: systems.map { SpeakerSampleLocator.durations(of: [$0]).first ?? nil },
+                       created: try? systemAudio.resourceValues(forKeys: [.creationDateKey]).creationDate)
+        }) else { throw FolderNotAnswering() }
+        let segmentDurations: [Double] = zip(zip(segments, lengths.physical), zip(perSegmentSystem, perSegmentMic)).map { segment, streams in
+            let (pair, measured) = segment
             let (system, mic) = streams
-            if let firstDuration = SpeakerSampleLocator.durations(of: [pair.system]).first, let physical = firstDuration {
+            if let physical = measured {
                 return physical
             }
             Logger.transcription.warning("Recovery segment: could not read physical WAV duration for \(pair.system.lastPathComponent, privacy: .sensitive); falling back to transcript end (then configured chunk length) for the offset of the next segment")
@@ -308,18 +322,28 @@ public final class TranscriptionRunner {
             provenance: provenance,
             // No in-memory session start here (CLI / crash-recovery / single-file path), so
             // use the source audio's creation time as the recording-start stamp (#49).
-            recordedAt: (try? systemAudio.resourceValues(forKeys: [.creationDateKey]).creationDate)
+            recordedAt: lengths.created
         )
 
         let baseName = systemAudio.deletingPathExtension().lastPathComponent
         let jsonPath = outputDirectory.appendingPathComponent(baseName + ".json")
-        try TranscriptAssembler.write(json, to: jsonPath)
-
-        do {
-            try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
-        } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
+        // The transcript and its format file: on the folder's queue, bounded by the write bound (L review 217). Past it
+        // nothing is claimed — the write may still land.
+        let data = try TranscriptAssembler.encode(json)
+        guard let written = await folderReads.read("transcript: write", folder: outputDirectory.path, key: runKey + "#write", seconds: folderWriteSeconds, {
+            Result {
+                try TranscriptAssembler.write(data: data, to: jsonPath)
+                do {
+                    try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
+                } catch {
+                    Logger.files.error("Failed to write format file: \(error, privacy: .private)")
+                }
+            }
+        }) else {
+            Logger.files.error("The transcript's write did not finish within \(self.folderWriteSeconds, privacy: .public) s — the recording folder is not answering")
+            throw FolderNotAnswering()
         }
+        try written.get()
 
         // #93: archive EVERY contributing segment to its own stereo AAC (L=mic, R=system),
         // not just the base pair — a crash-recovered recording has multiple segments and the
@@ -332,18 +356,27 @@ public final class TranscriptionRunner {
                 bitrateKbps: config.archiveBitrateKbps,
                 preserveSourceWAV: config.preserveSourceWAV ?? false
             )
-            TranscriptAssembler.reconcileAudioPaths(in: jsonPath, to: archived)
             Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
-
-            do {
-                try StorageManager.enforceQuota(
-                    in: outputDirectory,
-                    limitHours: config.audioArchiveLimitHours,
-                    bitrateKbps: config.archiveBitrateKbps,
-                    protectedFiles: archived   // every file the transcript lists (round 7 item 1)
-                )
-            } catch {
-                Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+            // The transcript's audio paths and the quota: on the folder's queue, bounded (L review 217). Unanswered, the
+            // transcript is written all the same — its paths may still name the WAVs until the update lands.
+            let limitHours = config.audioArchiveLimitHours, bitrateKbps = config.archiveBitrateKbps
+            let updated = await folderReads.read("transcript: archive paths and quota", folder: outputDirectory.path, key: runKey + "#archive",
+                                                 seconds: folderWriteSeconds) { () -> Bool in
+                TranscriptAssembler.reconcileAudioPaths(in: jsonPath, to: archived)
+                do {
+                    try StorageManager.enforceQuota(
+                        in: outputDirectory,
+                        limitHours: limitHours,
+                        bitrateKbps: bitrateKbps,
+                        protectedFiles: archived   // every file the transcript lists (round 7 item 1)
+                    )
+                } catch {
+                    Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+                }
+                return true
+            }
+            if updated == nil {
+                Logger.files.error("The transcript's archive paths and the quota did not answer — the recording folder is not answering")
             }
         }
 
@@ -351,6 +384,23 @@ public final class TranscriptionRunner {
         Logger.transcription.info("Transcription pipeline complete — \(elapsed.components.seconds)s, output: \(jsonPath.lastPathComponent, privacy: .sensitive)")
 
         return TranscriptionResult(jsonPath: jsonPath)
+    }
+
+    /// What `run` reads of its folder before it transcribes (L review 217): the segments, their headers repaired, and every
+    /// file's size (0 when it cannot be read).
+    struct RunLook {
+        let segments: [(system: URL, mic: URL)]
+        let sizes: [String: Int]
+    }
+
+    /// Each segment's physical length (nil when unreadable) and the recording's creation, for `run` (L review 217).
+    struct RunLengths {
+        let physical: [TimeInterval?]
+        let created: Date?
+    }
+
+    nonisolated static func fileSize(of url: URL) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
     }
 
     /// Finalize a chunked recording session: reconcile speakers, merge chunks, write transcript.
@@ -980,15 +1030,16 @@ public final class TranscriptionRunner {
         let speakerDatabase: [String: [Float]]
     }
 
+    /// `fileSize`: the file's size, read with the run's discovery on the folder's queue (L review 217).
     private func transcribeStream(
         audioPath: URL,
+        fileSize: Int,
         source: String,
         transcriber: any TranscriptionEngine,
         label: String,
         audioSource: AudioSourceType,
         config: Config
     ) async throws -> StreamResult {
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: audioPath.path)[.size] as? Int) ?? 0
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
             return StreamResult(segments: [], speakerDatabase: [:])

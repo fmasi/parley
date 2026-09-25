@@ -242,12 +242,12 @@ extension RecordingCoordinator {
         Logger.state.info("Parley is being terminated with work in flight — stopping the helper, the finalize is left to the next launch")
         // A crash restart in flight keeps the user's stop across its sentinel rewrite.
         if recoveryInFlight { stopRequestedDuringRecovery = true }
-        markSentinelStopping()
+        await markSentinelStoppingOffMain(by: deadline)
         markExitDuringFinalize()
         _ = try? await withDeadline(seconds: Self.seconds(until: deadline), label: "termination: start in flight") {
             await self.awaitSettled { !$0.isStartInFlight }
         }
-        markSentinelStopping()   // a start that just wrote its sentinel
+        await markSentinelStoppingOffMain(by: deadline)   // a start that just wrote its sentinel
         if appState.isRecording || recoveryInFlight {
             stopStatusPoll()
             transcriptionRunner.stopChunkRotation()
@@ -277,7 +277,7 @@ extension RecordingCoordinator {
             }
         }
         // Again: a restart or a start may have rewritten the sentinel meanwhile.
-        markSentinelStopping()
+        await markSentinelStoppingOffMain(by: deadline)
         markExitDuringFinalize()
         await flushEvidenceForExit(by: deadline)   // within what is left of the bound (L review 145)
     }
@@ -296,12 +296,12 @@ extension RecordingCoordinator {
     /// quit, never "Parley crashed" (L follow-up 42). Synchronous and public (L review 85). A live recording is left
     /// alone — a logout can still be cancelled. The quit's own mark: it stands, even over `willPowerOff`'s time-boxed one.
     public func markExitDuringFinalize() {
-        guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.stopping,
+        guard var sentinel = slotRead(), sentinel.stopping,
               !sentinel.quitDuringFinalize || sentinel.quitMarkedByPowerOff else { return }
         sentinel.quitDuringFinalize = true
         sentinel.quitMarkedByPowerOff = false
         do {
-            try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+            try slotWrite(sentinel)
         } catch {
             Logger.state.error("Could not mark the recovery file as quit during finalize: \(error, privacy: .private)")
         }
@@ -312,11 +312,11 @@ extension RecordingCoordinator {
     /// `powerOffMarkWindow`: the termination itself marks it again for good (`markForTermination`, the quit), while an app
     /// still running past the window saw the logout cancelled — the mark goes, and a later crash is said as a crash.
     public func markPowerOffDuringFinalize() {
-        guard var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.stopping, !sentinel.quitDuringFinalize else { return }
+        guard var sentinel = slotRead(), sentinel.stopping, !sentinel.quitDuringFinalize else { return }
         sentinel.quitDuringFinalize = true
         sentinel.quitMarkedByPowerOff = true
         do {
-            try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+            try slotWrite(sentinel)
         } catch {
             Logger.state.error("Could not mark the recovery file as quit during finalize: \(error, privacy: .private)")
             return
@@ -333,24 +333,24 @@ extension RecordingCoordinator {
     /// from a pending entry that carried it — and a quit's own mark is left alone (L review 174).
     func withdrawPowerOffMark() {
         powerOffMarkExpiry = nil
-        if var sentinel = RecordingSentinel.read(directory: sentinelDirectory), sentinel.quitMarkedByPowerOff {
+        if var sentinel = slotRead(), sentinel.quitMarkedByPowerOff {
             sentinel.quitDuringFinalize = false
             sentinel.quitMarkedByPowerOff = false
             do {
-                try RecordingSentinel.write(sentinel, directory: sentinelDirectory)
+                try slotWrite(sentinel)
                 Logger.state.info("No logout or shutdown followed willPowerOff — the quit mark on the transcript being finished is withdrawn")
             } catch {
                 Logger.state.error("Could not withdraw the power-off quit mark: \(error, privacy: .private)")
             }
         }
-        let pending = RecordingSentinel.readPending(directory: sentinelDirectory)
+        let pending = pendingLoad().sessions
         guard pending.contains(where: \.quitMarkedByPowerOff) else { return }
         do {
-            try RecordingSentinel.writePending(pending.map {
+            try pendingWrite(pending.map {
                 var entry = $0
                 if entry.quitMarkedByPowerOff { entry.quitDuringFinalize = false; entry.quitMarkedByPowerOff = false }
                 return entry
-            }, directory: sentinelDirectory)
+            })
         } catch {
             Logger.state.error("Could not withdraw the power-off quit mark from the pending sessions: \(error, privacy: .private)")
         }
@@ -374,7 +374,7 @@ extension RecordingCoordinator {
             }
         } catch {
             Logger.state.error("A recording start was still running when the quit's bound ran out — its recovery file is marked for salvage")
-            markSentinelStopping()
+            await markSentinelStoppingOffMain()
         }
         await flushEvidenceForExit(by: deadline)
     }

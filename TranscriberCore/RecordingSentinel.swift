@@ -3,7 +3,7 @@ import os
 
 /// Persisted crash-recovery signal written at recording start, deleted on clean stop.
 /// If `~/Library/Application Support/Parley/recording.json` exists at launch, a crash occurred during recording.
-public struct RecordingSentinel: Codable, Equatable {
+public struct RecordingSentinel: Codable, Equatable, Sendable {
     public var startedAt: Date
     public var sessionName: String
     public var systemAudioPath: String
