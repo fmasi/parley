@@ -64,6 +64,10 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// scope is the owner's call, #224). Informational: the chunk's words are in the record, its
         /// audio is not on disk any more.
         public static let chunkAudioEvicted = Code(rawValue: "chunk_audio_evicted")
+        /// The chunks' start times were implausible for one timeline (a gap over 12 h, a start that
+        /// is not a real time or before the first chunk's): they were not merged, and the transcript
+        /// lists each chunk's own audio file (round 5). Informational: no audio is missing.
+        public static let mergeSkippedImplausibleTiming = Code(rawValue: "merge_skipped_implausible_timing")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An

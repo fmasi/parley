@@ -436,4 +436,46 @@ struct AudioConcatenatorTests {
         #expect((meta["merged_audio"] as? [String: Any])?["reused_existing"] as? Bool == true)
         #expect(FileManager.default.fileExists(atPath: merged.path), "the merged file is protected from the quota")
     }
+
+    // MARK: - Round 5: implausible timing
+
+    private func refuses(_ chunks: [ChunkAudio]) async -> Bool {
+        do {
+            _ = try await AudioConcatenator.concatenate(chunks: chunks, outputDirectory: chunks[0].url.deletingLastPathComponent(),
+                                                        outputName: "c", deleteSources: true)
+            return false
+        } catch AudioConcatenatorError.implausibleTiming {
+            return true
+        } catch {
+            Issue.record("unexpected error: \(error)")
+            return false
+        }
+    }
+
+    /// A start time decades (or just 13 hours) away from the rest was merged by inserting that much
+    /// silence — an export that hit its 300 s timeout. Refused instead, and the chunk files are kept.
+    @Test(.timeLimit(.minutes(1)))
+    func implausibleGapsAreRefusedAndTheChunksKept() async throws {
+        let dir = try tempDir("implausible"); defer { try? FileManager.default.removeItem(at: dir) }
+        let urls = (0..<3).map { dir.appendingPathComponent("c-\($0).m4a") }
+        for url in urls { try await Self.createTestM4a(at: url, durationSeconds: 1) }
+        let t0 = Date(timeIntervalSince1970: 0)
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0), ChunkAudio(url: urls[1], startTime: t0.addingTimeInterval(13 * 3600))]),
+                "one gap over 12 h")
+        #expect(await refuses((0..<3).map { ChunkAudio(url: urls[$0], startTime: t0.addingTimeInterval(Double($0) * 7 * 3600)) }),
+                "gaps adding up to over 12 h")
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0),
+                               ChunkAudio(url: urls[1], startTime: Date(timeIntervalSinceReferenceDate: .infinity))]),
+                "a non-finite start")
+        #expect(await refuses([ChunkAudio(url: urls[0], startTime: t0.addingTimeInterval(10)), ChunkAudio(url: urls[1], startTime: nil),
+                               ChunkAudio(url: urls[2], startTime: t0)]),
+                "a start before the first chunk's")
+        #expect(urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }, "every chunk file is kept")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("c.m4a").path), "nothing was written")
+        let r = try await AudioConcatenator.concatenate(
+            chunks: [ChunkAudio(url: urls[0], startTime: t0), ChunkAudio(url: urls[1], startTime: t0.addingTimeInterval(3))],
+            outputDirectory: dir, outputName: "c", deleteSources: false)
+        #expect(abs(r.gapsInsertedSeconds - 2) < 0.1, "a plausible gap still merges")
+    }
 }
+

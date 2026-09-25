@@ -429,6 +429,7 @@ public final class TranscriptionRunner {
         // merged audio stays on the transcript's wall-clock timeline (P9).
         let audioPaths: [URL]
         var mergedAudio: [String: Any]?
+        var finalizeIssues: [SessionIssue] = []
         // Where the transcript placed each audio file on its wall-clock timeline (seconds from the
         // meeting start, as TranscriptMerger does) — re-detect rebuilds the same timeline from it.
         let perChunkOffsets = sortedChunks.map { $0.startTime.timeIntervalSince(sessionState.meetingStart) }
@@ -464,6 +465,12 @@ public final class TranscriptionRunner {
                 Logger.files.info(
                     "Concatenated \(chunkAudioPaths.count, privacy: .public) chunks → \(concatResult.outputPath.lastPathComponent, privacy: .sensitive) (passthrough: \(concatResult.usedPassthrough, privacy: .public))"
                 )
+            } catch AudioConcatenatorError.implausibleTiming(let why) {
+                // Refused before anything was written: the chunk files are the audio, and the record
+                // says why they were not merged (round 5).
+                Logger.files.error("Audio not merged — implausible chunk timing (\(why, privacy: .public)); keeping separate files")
+                audioPaths = chunkAudioPaths
+                finalizeIssues.append(SessionIssue(chunk: nil, issue: ChunkIssue(code: .mergeSkippedImplausibleTiming, track: nil, count: nil)))
             } catch {
                 // concatenate() only deletes sources after a verified successful export,
                 // so on throw the chunk files are still intact. The error can name files: private.
@@ -485,7 +492,7 @@ public final class TranscriptionRunner {
 
         // 7. Assemble JSON
         let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
-        let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues)
+        let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues + finalizeIssues)
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
             audioPaths: audioPaths,

@@ -383,7 +383,8 @@ struct ChunkedSessionRecoveryTests {
 
     /// Item 2: the marker vouches for a transcript that does NOT parse (damaged). session.json is kept
     /// and the session is finalized again from it — never deleted on the marker's word alone.
-    @Test func anUnverifiableTranscriptKeepsSessionJsonAndIsFinalizedAgain() async throws {
+    @Test(.timeLimit(.minutes(1)))
+    func anUnverifiableTranscriptKeepsSessionJsonAndIsFinalizedAgain() async throws {
         let (dir, transcript, config, runner) = try await finalizedSession()
         defer { try? FileManager.default.removeItem(at: dir) }
         let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 1,
@@ -398,11 +399,10 @@ struct ChunkedSessionRecoveryTests {
         #expect(CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
         let relaunch = CaptureProvenance(engine: "fluid_audio", systemFormat: nil, micFormat: nil, micDevice: nil,
                                          routeChanges: 0, retries: 0, recovered: true, anomalyCount: 0)
-        // No merge: the fixture's session starts in 1970 and the orphan's start is estimated from its
-        // file's date, so merging would pad decades of silence.
-        var rebuildConfig = config
-        rebuildConfig.mergeChunkedAudio = false
-        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: rebuildConfig,
+        // The fixture's session starts in 1970 and the orphan's start is estimated from its file's
+        // date: decades apart. Round 5: the merge refuses that timing (it used to pad decades of
+        // silence until the 300 s export timeout) and the chunk files stay the transcript's audio.
+        let result = try await ChunkedSessionRecovery.recover(outputDirectory: dir, sessionId: "m", config: config,
                                                               transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: runner,
                                                               provenance: relaunch)
         let rewritten = try #require(result).jsonPath
@@ -410,6 +410,12 @@ struct ChunkedSessionRecoveryTests {
         #expect((json["segments"] as? [[String: Any]])?.compactMap { $0["text"] as? String } == ["from session.json", "hello"],
                 "round 4 item 3: the rebuild ingests the unregistered orphan too")
         #expect(SessionState.read(directory: dir, sessionId: "m") == nil, "deleted only after the new transcript was written")
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["audio_files"] as? [String] == ["m-0.m4a", "m-1.m4a"], "round 5: per-chunk audio, not a merge")
+        #expect((metadata["processing_issues"] as? [[String: Any]])?.contains { $0["code"] as? String == "merge_skipped_implausible_timing" } == true)
+        #expect(metadata["merged_audio"] == nil)
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-0.m4a").path)
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent("m-1.m4a").path))
         // Round 4 item 2: the damaged file is kept, moved aside, never overwritten.
         #expect(try Data(contentsOf: dir.appendingPathComponent("m.damaged.json")) == damaged)
         // Round 4 item 7: the rebuild's capture facts come from the relaunch — said so.
