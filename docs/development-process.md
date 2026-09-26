@@ -46,8 +46,11 @@ Fix the must-list, then push.
 
 ## 3. Then CI, and monitor it — but bound the review loop
 
-Push, open the PR, watch the checks. Resolve what's *pertinent*. The load-bearing word is
-pertinent, because an automated reviewer has a structural bias you must counter:
+Run `just ci` (the exact CI checks, locally), push, open the PR as a **draft** (CI skips drafts),
+then `gh pr ready`: that runs CI and the Claude review once. Watch the checks. Later pushes re-run
+the tests only; comment `@claude review` to ask for another review round. Resolve what's
+*pertinent*. The load-bearing word is pertinent, because an automated reviewer has a structural
+bias you must counter:
 
 **The review bot only ever adds code.** Its incentive is to find something to say, and "find
 something" almost always resolves to "add a guard / handle this edge / distinguish that case."

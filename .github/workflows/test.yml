@@ -3,7 +3,10 @@ name: Tests
 on:
   push:
     branches: [main]
+  # `ready_for_review` is listed because both jobs skip draft PRs (see their `if`): a draft is the
+  # local-work phase (`just ci`), and marking it ready (`gh pr ready`) is what runs this workflow.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Least privilege: these jobs only read the repo.
 permissions:
@@ -25,6 +28,9 @@ concurrency:
 
 jobs:
   test:
+    # Skip drafts, never push/dispatch. `test` is the ruleset's required check, and a job skipped by
+    # its `if` reports success, so a draft never blocks on it; `ready_for_review` then runs it for real.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: macos-15
     # Bound it, as `red-first` already is. Twice on 2026-09-03/04 this job sat 80+ minutes inside
     # its test step while the other jobs — running the same swift test binary against the same
@@ -140,7 +146,7 @@ jobs:
   # HEAD. Tests-only PRs and files marked 'RED-FIRST-EXEMPT: <reason>' pass trivially — see the
   # comment block in scripts/verify-regression-tests.sh for the full semantics.
   red-first:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: macos-15
     timeout-minutes: 45
 

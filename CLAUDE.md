@@ -173,6 +173,9 @@ Each recording also writes a `.diag.jsonl` beside its audio — a per-session ev
 detection, device changes, restarts, anomalies). Read it before theorising; it frequently names the
 fault outright.
 
+## CI
+CI follows the local-first standard (`~/.claude/skills/ci-guidelines`): `just ci` before pushing, draft PRs, `gh pr ready` runs CI + the Claude review once.
+
 ## Documentation
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary

@@ -213,6 +213,18 @@ docs/                  architecture, pipeline, parameters, gotchas
 - [docs/parameters.md](docs/parameters.md) — every tunable parameter, with config keys and defaults
 - [docs/gotchas.md](docs/gotchas.md) — hard-won platform gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats)
 
+## Local CI
+
+CI runs once per PR, when it's marked ready, so run the checks on your machine first:
+
+```bash
+lefthook install      # once per clone: pre-commit secrets/shell/workflow checks, pre-push `just ci`
+just ci               # exactly what CI runs (the serial Swift suite + the red-first gate), plus the app build
+/ci-review            # in Claude Code: the same review rubric CI uses (.github/claude-review-prompt.md)
+gh pr create --draft  # CI skips drafts
+gh pr ready           # runs CI and the Claude review once
+```
+
 ## Models & credits
 
 parley runs on open models that download on first use — nothing is sent to the cloud:
