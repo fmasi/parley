@@ -1,0 +1,4 @@
+# Hugging Face token committed in f5971d4 (2026-03-27), removed in 1b9b7d7. Revoked: it no longer
+# exists on the owner's Hugging Face account (checked 2026-09-28); GitHub secret-scanning alert #1
+# resolved as revoked. Ignored so full-history gitleaks scans stop failing on it.
+f5971d4f4d9248b4701642034b13b4331c930278:README.md:huggingface-access-token:45
