@@ -1,12 +1,20 @@
 # Local CI mirror (the local-first standard, ~/.claude/skills/ci-guidelines).
 # `just ci` runs what .github/workflows/test.yml runs, in the same order, with the same flags and
 # env, then builds the app bundle, which CI doesn't do. Run it before every push.
+# CI also scans the PR's new commits with gitleaks first; locally the pre-commit hook scans each
+# commit's staged changes (`just secrets`), so `just ci` doesn't repeat it.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 default: ci
 
-# test.yml's `test` + `red-first` jobs, then the app-bundle build
-ci: test red-first build
+# test.yml's `test` (workflow lint, then the suite) + `red-first` jobs, then the app-bundle build
+ci: workflows test red-first build
+
+# test.yml `test`, first step: actionlint + zizmor, the same commands CI runs (brew install actionlint zizmor)
+workflows:
+    @for t in actionlint zizmor; do command -v "$t" >/dev/null || { echo "$t missing: brew install $t" >&2; exit 1; }; done
+    actionlint
+    zizmor --min-severity high .github/workflows
 
 # --no-parallel is load-bearing: the shared media-daemon wedge (see test.yml).
 # test.yml `test`: fetch the AMI fixture, then the whole suite serially with the guard armed
@@ -28,9 +36,12 @@ red-first base="origin/main":
 build:
     python3 scripts/dev.py --build
 
-# Not part of CI: lint the workflows and the shell scripts
+# scan the staged changes for secrets (the pre-commit hook runs this)
+secrets:
+    gitleaks git --staged --redact --no-banner
+
+# Not part of CI: shellcheck the scripts
 lint:
-    actionlint
     shellcheck scripts/*.sh package_app.sh
 
 # act has no macOS backend, so test.yml (macos-15) can't run under it.

@@ -1,3 +1,8 @@
+@AGENTS.md
+
+<!-- AGENTS.md (imported above) holds the rules every agent follows: how work lands, the `just`
+     commands, the repo rules, the nevers. This file holds the project knowledge. -->
+
 # Transcriber - Project Instructions
 
 ## Environment
@@ -144,15 +149,7 @@ cd audio_capture_helper && bash build.sh
 # Produces bin/audio-capture-helper
 ```
 
-## Development Process
-**Read [docs/development-process.md](docs/development-process.md) before starting work.** In short:
-group related bugs/features into one PR → run a multi-agent **code council over the full diff BEFORE
-pushing to CI** (both councils run so far found real bugs inside the code written to fix the previous
-bug) → then CI, and monitor it → device-test anything touching capture/audio → **decide the version
-deliberately** (PATCH = bug fixes only; MINOR = any new capability, *or* a fix that materially changes
-what the transcripts say) → release, and advance that line's `release/vX.Y.x` branch.
-
-### Always identify the RUNNING build before diagnosing a recording
+## Always identify the RUNNING build before diagnosing a recording
 A bug report about a real recording is a report about **the build that produced it**, which is very
 often not the branch checked out in your working tree. Establish provenance FIRST — before reading any
 code, or you will debug a file the recording never ran:
@@ -172,9 +169,6 @@ is installed matches what you just built, so the next recording exercises the ne
 Each recording also writes a `.diag.jsonl` beside its audio — a per-session event log (format
 detection, device changes, restarts, anomalies). Read it before theorising; it frequently names the
 fault outright.
-
-## CI
-CI follows the local-first standard (`~/.claude/skills/ci-guidelines`): `just ci` before pushing, draft PRs, `gh pr ready` runs CI + the Claude review once.
 
 ## Documentation
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH

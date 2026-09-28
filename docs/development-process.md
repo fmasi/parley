@@ -48,9 +48,12 @@ Fix the must-list, then push.
 
 Run `just ci` (the exact CI checks, locally), push, open the PR as a **draft** (CI skips drafts),
 then `gh pr ready`: that runs CI and the Claude review once. Watch the checks. Later pushes re-run
-the tests only; comment `@claude review` to ask for another review round. Resolve what's
-*pertinent*. The load-bearing word is pertinent, because an automated reviewer has a structural
-bias you must counter:
+the tests only; to ask for another review round, remove and re-add the `ready-for-review` label.
+The review ends with a verdict: a **Critical** finding labels the PR `claude-blocked`, and the
+required `review / review-gate` check blocks the merge until a re-review passes (or the owner
+overrides). An `@claude review` comment gets an answer, not a verdict, so it doesn't move the gate.
+Below Critical, resolve what's *pertinent*. The load-bearing word is pertinent, because an
+automated reviewer has a structural bias you must counter:
 
 **The review bot only ever adds code.** Its incentive is to find something to say, and "find
 something" almost always resolves to "add a guard / handle this edge / distinguish that case."
