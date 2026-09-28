@@ -219,11 +219,15 @@ CI runs once per PR, when it's marked ready, so run the checks on your machine f
 
 ```bash
 lefthook install      # once per clone: pre-commit secrets/shell/workflow checks, pre-push `just ci`
-just ci               # exactly what CI runs (the serial Swift suite + the red-first gate), plus the app build
+just ci               # exactly what CI runs (workflow lint, the serial Swift suite, the red-first gate), plus the app build
 /ci-review            # in Claude Code: the same review rubric CI uses (.github/claude-review-prompt.md)
 gh pr create --draft  # CI skips drafts
 gh pr ready           # runs CI and the Claude review once
 ```
+
+A PR merges when `test`, `red-first` and `review / review-gate` are green; a Critical review
+finding keeps the gate red until a re-review passes. The full rules for contributors and coding
+agents are in [AGENTS.md](AGENTS.md).
 
 ## Models & credits
 
