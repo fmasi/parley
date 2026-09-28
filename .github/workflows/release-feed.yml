@@ -19,7 +19,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # the gh calls below use GH_TOKEN, not git credentials
 
       - name: Build the signature verifier
         run: swift build --product verify-ed-signature
