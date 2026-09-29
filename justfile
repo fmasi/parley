@@ -7,8 +7,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 default: ci
 
-# test.yml's `test` (workflow lint, then the suite) + `red-first` jobs, then the app-bundle build
-ci: workflows test red-first build
+# test.yml's `test` (workflow lint, the suite, the release tools) + `red-first` jobs, then the app-bundle build
+ci: workflows test release-tools red-first build
 
 # test.yml `test`, first step: actionlint + zizmor, the same commands CI runs (brew install actionlint zizmor)
 workflows:
@@ -25,6 +25,13 @@ test:
       -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
       -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
       -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+
+# Stdlib only (system python3 + bash 3.2); the feed test builds verify-ed-signature itself.
+# test.yml `test`, last step: the release-tooling tests that guard the Sparkle feed and appcast
+release-tools:
+    python3 -m unittest discover -s scripts -p 'test_*.py'
+    bash scripts/test-publish.sh
+    bash scripts/test-verify-release-feed.sh
 
 # CI passes the merge base with the PR's base branch, so this does too (not the raw base ref).
 # test.yml `red-first`: changed tests must be RED at the merge base, GREEN at HEAD

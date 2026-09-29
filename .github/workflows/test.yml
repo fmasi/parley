@@ -210,6 +210,17 @@ jobs:
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 
+      # The release tooling (appcast, release notes, publish.sh, the Sparkle feed verifier). A break
+      # here ships a broken auto-update feed, which every installed client fails silently. Stdlib
+      # Python + bash only, a few seconds; it runs after the suite so verify-ed-signature reuses the
+      # debug build. `just release-tools` runs the same three commands.
+      - name: Test the release tooling
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          bash scripts/test-publish.sh
+          bash scripts/test-verify-release-feed.sh
+
   # Red-first gate: the PR's changed tests must FAIL at the merge base and PASS at HEAD.
   #
   # A regression test that is green BEFORE the fix it claims to guard proves nothing — it guards
