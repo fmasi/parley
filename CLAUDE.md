@@ -115,10 +115,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/Library/Application Support/Parley/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
 - `TranscriberCore/EchoDeduplicator.swift` -- triple-confirmed echo dedup: removes local segments that are mic bleed of remote speakers (temporal overlap >50% + word overlap >70% + speaker embedding cosine >0.8)
 
-### Standalone Swift CLI (legacy, still functional)
-- `audio_capture_helper/` -- Swift Package Manager project, standalone binary for CLI use
-- Produces `bin/audio-capture-helper` via `cd audio_capture_helper && bash build.sh`
-
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)
 - System audio source is selectable via `system_audio_source` (Config): `sck` = ScreenCaptureKit (default), `core_audio_tap` = Core Audio output process tap (#103, a strict superset that also captures Continuity/VoIP calls SCK misses). Mic is captured independently either way.
@@ -141,12 +137,6 @@ swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTo
 # 1060 tests across 125 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
-```
-
-### Swift (standalone CLI helper -- legacy)
-```bash
-cd audio_capture_helper && bash build.sh
-# Produces bin/audio-capture-helper
 ```
 
 ## Always identify the RUNNING build before diagnosing a recording

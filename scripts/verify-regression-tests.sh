@@ -53,7 +53,7 @@ HEAD_SHA=$(git rev-parse HEAD)
 REPO_ROOT=$(git rev-parse --show-toplevel)
 
 TEST_DIR="SwiftTests/TranscriberTests"
-PROD_PATHS="TranscriberCore TranscriberApp AudioCaptureHelper AudioCaptureProtocol audio_capture_helper Package.swift"
+PROD_PATHS="TranscriberCore TranscriberApp AudioCaptureHelper AudioCaptureProtocol Package.swift"
 
 # Flags matching the documented `swift test` invocation (CommandLineTools frameworks).
 # --no-parallel for the same reason as the CI test job: concurrent AVFoundation/CoreML tests

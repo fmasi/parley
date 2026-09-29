@@ -4,6 +4,9 @@ This document captures every significant bug, crash, and design decision encount
 during development, along with the root cause and fix. It exists so a new Claude instance
 (or a new developer) has full context without re-discovering these issues.
 
+Many early entries date from the retired Python app (pyannote, torch, `requirements-*.txt`,
+`build_app.sh`). Those files are gone; the entries stay as history.
+
 ---
 
 ## 1. pyannote `use_auth_token` deprecated
