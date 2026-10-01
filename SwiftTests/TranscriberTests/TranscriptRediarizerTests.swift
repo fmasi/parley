@@ -585,16 +585,24 @@ struct TranscriptRediarizerTimelineTests {
         #expect(try Data(contentsOf: t) != before)
     }
 
-    /// R6 review round 1: a re-detect must not drop words — no second VAD pass.
+    /// R6 review round 1: a re-detect must not drop words — no second VAD pass. It is a relabel: the
+    /// number of segments and every text are what they were (#243).
     @Test func theUnflaggedSegmentCountIsUnchanged() async throws {
         let (t, _, cleanup) = try makeTwoChunkRecording(); defer { cleanup() }
-        func unflagged() throws -> Int {
+        try setMetadata(t, { _ in }, segments: [
+            ["start": 10.3, "end": 10.6, "text": "kept apart", "speaker": "Remote Unknown", "source": "remote", "filtered": true],
+            ["start": 2.0, "end": 3.0, "text": "this side", "speaker": "Local Speaker 1", "source": "local"],
+        ])
+        func segments() throws -> [[String: Any]] {
             let json = try JSONSerialization.jsonObject(with: Data(contentsOf: t)) as? [String: Any]
-            return (json?["segments"] as? [[String: Any]] ?? []).filter { !TranscriptAssembler.isFlagged($0) }.count
+            return json?["segments"] as? [[String: Any]] ?? []
         }
-        let before = try unflagged()
+        func texts() throws -> [String] { try segments().compactMap { $0["text"] as? String }.sorted() }
+        let before = try segments(), textsBefore = try texts()
         _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: FakeDiarizer())
-        #expect(try unflagged() == before)
+        #expect(try segments().filter { !TranscriptAssembler.isFlagged($0) }.count == before.filter { !TranscriptAssembler.isFlagged($0) }.count)
+        #expect(try segments().count == before.count)
+        #expect(try texts() == textsBefore)
     }
 
     /// R6 review round 1: without a speech map the "low diarizer quality → Unknown" step was
@@ -915,5 +923,410 @@ struct TranscriptRediarizerTimelineTests {
         let merged = TranscriptRediarizer.mergeRelabeled(into: original, source: "local", relabeled: [labeled(3, 5, "Local Speaker 2", "a")])
         #expect(merged.map { $0["text"] as? String } == ["a", "b", "no time"])
         #expect(merged.last?["speaker"] as? String == "Local Speaker 1" && merged.last?["start"] is NSNull)
+    }
+}
+
+// MARK: - The echo guard (#243)
+
+/// Re-detect at a stated count must not hand the other side's words to the user.
+///
+/// With the far side on loudspeakers its voice comes back through the mic, and the diarizer finds it
+/// as a second cluster on the local channel. A user who then says "one speaker on this side" got
+/// that cluster merged into their own: on a real call about 2,400 of the other participant's words
+/// took the user's name. Re-detect now runs the echo check on the RAW clusters, before the count is
+/// enforced, and keeps the clusters it judges echo out of the merge.
+///
+/// Every fixture here is procedural: made-up words, no recording.
+@Suite(.serialized)
+struct TranscriptRediarizerEchoGuardTests {
+
+    /// Answers every request with one fixed result — the clusters a real diarizer would have found.
+    struct ScriptedDiarizer: DiarizationProvider {
+        let result: DiarizationResult
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { result }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { result }
+    }
+
+    struct Line {
+        let start: Double, end: Double, text: String
+    }
+
+    /// `count` made-up words that appear nowhere else: "own3x0 own3x1 …".
+    static func words(_ tag: String, _ count: Int) -> String {
+        (0..<count).map { "\(tag)x\($0)" }.joined(separator: " ")
+    }
+
+    /// `count` lines of `length` seconds, one every 20 s from `offset`, each with its own words.
+    static func lines(_ tag: String, count: Int, offset: Double, length: Double, words wordCount: Int = 6) -> [Line] {
+        (0..<count).map { i in
+            Line(start: Double(i) * 20 + offset, end: Double(i) * 20 + offset + length, text: words("\(tag)\(i)", wordCount))
+        }
+    }
+
+    static func segment(_ line: Line, _ speaker: String, _ source: String, echo: Bool = false) -> [String: Any] {
+        var d: [String: Any] = ["start": line.start, "end": line.end, "speaker": speaker, "source": source, "text": line.text, "confidence": 0.9]
+        if echo { d["echo"] = true }
+        return d
+    }
+
+    static func turns(_ lines: [Line], _ speaker: String) -> [DiarizedSegment] {
+        lines.map { DiarizedSegment(start: $0.start, end: $0.end, speaker: speaker, qualityScore: 0.9) }
+    }
+
+    /// A mic channel carrying two voices: the user's `own` lines, which nobody else says, and the far
+    /// side's voice through the speakers — a copy of every `far` line at the moment the remote
+    /// channel has it (50 s), plus `residue` the remote transcript has no match for (4 s). 0.93 of
+    /// the second voice's duration repeats the other channel.
+    struct TwoVoices {
+        let own = lines("own", count: 10, offset: 0, length: 8)
+        let far = lines("far", count: 10, offset: 10, length: 5)
+        let residue = [Line(start: 200, end: 204, text: words("residue", 6))]
+
+        /// The user's voice as S1, the echo voice as S2; `echoFirst` lists the echo's turns first, so
+        /// it is the one numbered "Speaker 1".
+        func diarization(echoFirst: Bool = false) -> DiarizationResult {
+            let user = turns(own, "S1"), echo = turns(far + residue, "S2")
+            return DiarizationResult(segments: echoFirst ? echo + user : user + echo,
+                                     speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+        }
+
+        func segments(own ownLabel: String, bleed bleedLabel: String, bleedFlagged: Bool = false) -> [[String: Any]] {
+            own.map { segment($0, ownLabel, "local") }
+                + far.map { segment($0, "Remote Speaker 1", "remote") }
+                + far.map { segment($0, bleedLabel, "local", echo: bleedFlagged) }
+                + residue.map { segment($0, bleedLabel, "local") }
+        }
+    }
+
+    /// What an earlier pass left behind: this track's entries must be replaced, the rest kept.
+    static let staleEchoMetadata: [String: Any] = [
+        "echo_clusters": [
+            ["track": "local", "chunk": 0, "label": "Local Speaker 7", "verdict": "kept", "segments": 3],
+            ["track": "remote", "chunk": 0, "label": "Remote Speaker 7", "verdict": "kept", "segments": 5],
+        ],
+        "processing_issues": [
+            ["chunk": 0, "code": "echo_flagged", "track": "local", "count": 3],
+            ["chunk": 0, "code": "echo_cluster", "track": "local", "count": 4],
+            ["chunk": 1, "code": "asr_failed", "track": "remote"],
+        ],
+    ]
+
+    /// A recording with one second of audio per channel (a mic-only chunk, then a system-only one).
+    /// The scripted diarizer never looks at it; re-detect only needs each channel to have audio.
+    private func makeRecording(segments: [[String: Any]], metadata extra: [String: Any] = [:]) throws -> (transcript: URL, cleanup: () -> Void) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-echo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let files = [dir.appendingPathComponent("call-0_mic.wav"), dir.appendingPathComponent("call-1.wav")]
+        for file in files {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000)!
+            buffer.frameLength = 16000
+            try AVAudioFile(forWriting: file, settings: format.settings).write(from: buffer)
+        }
+        var metadata: [String: Any] = ["audio_paths": files.map(\.path), "chunk_durations": [1.0, 1.0]]
+        metadata.merge(extra) { _, new in new }
+        let transcript = dir.appendingPathComponent("t.json")
+        try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": segments]).write(to: transcript)
+        return (transcript, { try? FileManager.default.removeItem(at: dir) })
+    }
+
+    private func read(_ transcript: URL) throws -> (segments: [[String: Any]], metadata: [String: Any]) {
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])
+        return (try #require(json["segments"] as? [[String: Any]]), try #require(json["metadata"] as? [String: Any]))
+    }
+
+    /// One channel's segments holding these lines' texts, in time order.
+    private func found(_ lines: [Line], in segments: [[String: Any]], source: String = "local") -> [[String: Any]] {
+        let texts = Set(lines.map(\.text))
+        return segments.filter { $0["source"] as? String == source && texts.contains($0["text"] as? String ?? "") }
+    }
+    private func speakers(_ segments: [[String: Any]]) -> Set<String> { Set(segments.compactMap { $0["speaker"] as? String }) }
+    private func echoCount(_ segments: [[String: Any]]) -> Int { segments.filter { $0["echo"] as? Bool == true }.count }
+
+    /// Every segment's place and words, whatever its label or flags: what a relabel must not change.
+    private func record(_ segments: [[String: Any]]) -> [String] {
+        segments.map { "\($0["source"] as? String ?? "")|\($0["start"] as? Double ?? .nan)|\($0["end"] as? Double ?? .nan)|\($0["text"] as? String ?? "")" }.sorted()
+    }
+
+    private func clusters(_ metadata: [String: Any], track: String) -> [[String: Any]] {
+        (metadata["echo_clusters"] as? [[String: Any]] ?? []).filter { $0["track"] as? String == track }
+    }
+    private func issues(_ metadata: [String: Any]) -> [String] {
+        (metadata["processing_issues"] as? [[String: Any]] ?? []).map { issue in
+            "\(issue["code"] ?? "")/\(issue["track"] ?? "")/\(issue["count"].map { "\($0)" } ?? "-")/\(issue["chunk"].map { "\($0)" } ?? "-")"
+        }
+    }
+
+    /// The guarded result for `TwoVoices`, whatever labels the transcript started with.
+    private func expectTheEchoVoiceKeptApart(
+        _ transcript: URL, _ voices: TwoVoices, _ outcome: TranscriptRediarizer.Outcome, before: [[String: Any]],
+        user: String = "Local Speaker 1", echo: String = "Local Speaker 2"
+    ) throws {
+        let (segments, metadata) = try read(transcript)
+        // The user's own lines take the stated speaker.
+        #expect(speakers(found(voices.own, in: segments)) == [user])
+        #expect(echoCount(found(voices.own, in: segments)) == 0)
+        // The echo cluster is not merged: its matched lines are flagged, the rest keep its label.
+        #expect(speakers(found(voices.far, in: segments)) == [echo])
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(speakers(found(voices.residue, in: segments)) == [echo])
+        #expect(echoCount(found(voices.residue, in: segments)) == 0)
+        // The other channel is as it was.
+        #expect(speakers(found(voices.far, in: segments, source: "remote")) == ["Remote Speaker 1"])
+        #expect(echoCount(found(voices.far, in: segments, source: "remote")) == 0)
+        // A relabel: no segment gained, lost or reworded.
+        #expect(record(segments) == record(before))
+
+        // People, not clusters.
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 1)
+        #expect(outcome.echoFlagged == voices.far.count)
+        #expect(outcome.segmentsRelabeled == voices.own.count + voices.residue.count)
+        #expect(metadata["echo_segments_flagged"] as? Int == voices.far.count)
+
+        // This track's verdicts are the fresh ones — no chunk, the labels the segments now carry.
+        let local = clusters(metadata, track: "local")
+        #expect(local.compactMap { $0["label"] as? String }.sorted() == [user, echo].sorted())
+        #expect(local.allSatisfy { $0["chunk"] == nil })
+        let verdict = try #require(local.first { $0["label"] as? String == echo })
+        #expect(verdict["verdict"] as? String == "echo")
+        #expect(verdict["segments"] as? Int == voices.far.count + voices.residue.count)
+        #expect(verdict["matched_segments"] as? Int == voices.far.count)
+        #expect(verdict["seconds"] as? Double == 54)
+        #expect(verdict["matched_seconds"] as? Double == 50)
+        #expect((verdict["share"] as? Double ?? 0) >= 0.9)
+        #expect(verdict["matched_remote"] as? [String: Double] == ["Remote Speaker 1": 50])
+        #expect(local.first { $0["label"] as? String == user }?["verdict"] as? String == "kept")
+        #expect(clusters(metadata, track: "remote").count == 1, "another track's entries are not this re-detect's to replace")
+        #expect(issues(metadata) == ["asr_failed/remote/-/1", "echo_flagged/local/\(voices.far.count)/-", "echo_cluster/local/1/-"])
+    }
+
+    @Test("two raw clusters at a stated count of 1: the echo cluster is kept out of the merge")
+    func theEchoClusterIsNotMergedIntoTheStatedSpeaker() async throws {
+        let voices = TwoVoices()
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2")
+        let (t, cleanup) = try makeRecording(segments: before, metadata: Self.staleEchoMetadata); defer { cleanup() }
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()))
+        try expectTheEchoVoiceKeptApart(t, voices, outcome, before: before)
+    }
+
+    /// The repair path: a transcript an earlier re-detect already merged. Every local line is under
+    /// the user's label; re-detecting again must find the echo voice and take it back out.
+    @Test("re-detecting an already-merged transcript takes the echo voice back out")
+    func anAlreadyMergedTranscriptIsRepaired() async throws {
+        let voices = TwoVoices()
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+        var metadata = Self.staleEchoMetadata
+        metadata["speaker_count_local"] = 1
+        let (t, cleanup) = try makeRecording(segments: before, metadata: metadata); defer { cleanup() }
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()))
+        try expectTheEchoVoiceKeptApart(t, voices, outcome, before: before)
+    }
+
+    /// The transcript the pipeline itself writes after such a call: the matched lines already carry
+    /// `echo`, the residue does not. Judged on the residue alone the cluster would look like a person
+    /// (nothing in it matches) and be merged — so the lines already flagged as echo count as evidence.
+    @Test("lines already flagged as echo still count: the residue of an echo cluster is not merged")
+    func alreadyFlaggedLinesAreEvidence() async throws {
+        let voices = TwoVoices()
+        let noise: [String: Any] = ["start": 205.0, "end": 206.0, "speaker": "Local Unknown", "source": "local", "text": Self.words("noise", 4), "filtered": true]
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2", bleedFlagged: true) + [noise]
+        let (t, cleanup) = try makeRecording(segments: before, metadata: Self.staleEchoMetadata); defer { cleanup() }
+        // The echo voice is the first the diarizer lists, so the numbering flips: it is now
+        // "Speaker 1", and the label its flagged lines carried ("Local Speaker 2") is the user's.
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization(echoFirst: true)))
+        try expectTheEchoVoiceKeptApart(t, voices, outcome, before: before, user: "Local Speaker 2", echo: "Local Speaker 1")
+        // A segment flagged for another reason is neither evidence nor touched.
+        let kept = try #require(try read(t).segments.first { $0["filtered"] as? Bool == true })
+        #expect(kept["speaker"] as? String == "Local Unknown")
+        #expect(kept["echo"] == nil)
+    }
+
+    /// One blended cluster: the diarizer honoured the count, so there is no echo cluster to keep out.
+    /// The per-segment rule still applies.
+    @Test("one blended cluster: matches of 3+ words are flagged and keep their label; 1–2-word matches are untouched")
+    func aBlendedClusterFlagsOnlyLongMatches() async throws {
+        let own = Self.lines("own", count: 10, offset: 0, length: 8)
+        let copies = Self.lines("far", count: 3, offset: 10, length: 5)
+        let backchannels = [Line(start: 210, end: 211, text: Self.words("yes", 1)), Line(start: 230, end: 231, text: Self.words("fine", 2))]
+        // A copy the diarizer gave no turn to: unattributed, and a stated count of 1 folds
+        // unattributed speech into the stated speaker.
+        let stray = [Line(start: 250, end: 255, text: Self.words("stray", 6))]
+        let said = copies + backchannels + stray
+        let before = own.map { Self.segment($0, "Local Speaker 1", "local") }
+            + said.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + said.map { Self.segment($0, "Local Speaker 2", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let blended = DiarizationResult(segments: Self.turns(own + copies + backchannels, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: blended))
+
+        let (segments, metadata) = try read(t)
+        #expect(speakers(found(own, in: segments)) == ["Local Speaker 1"])
+        // Flagged, and NOT relabelled to the stated speaker: they keep the label they had.
+        #expect(echoCount(found(copies + stray, in: segments)) == 4)
+        #expect(speakers(found(copies + stray, in: segments)) == ["Local Speaker 2"])
+        // "Yes." on both sides at once is not an echo: relabelled like any other line.
+        #expect(echoCount(found(backchannels, in: segments)) == 0)
+        #expect(speakers(found(backchannels, in: segments)) == ["Local Speaker 1"])
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.echoFlagged == 4)
+        #expect(outcome.segmentsRelabeled == own.count + backchannels.count)
+        #expect(clusters(metadata, track: "local").allSatisfy { $0["verdict"] as? String == "kept" })
+    }
+
+    /// Speech the diarizer gave no turn to is grouped as "Unknown". When that group is mostly echo it
+    /// is an echo cluster like any other: a stated count of 1 must not fold its residue into the user.
+    @Test("unattributed speech judged echo is not folded into the stated speaker")
+    func unattributedEchoIsNotFolded() async throws {
+        let voices = TwoVoices()
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let ownOnly = DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: ownOnly))
+
+        let (segments, metadata) = try read(t)
+        #expect(speakers(found(voices.own, in: segments)) == ["Local Speaker 1"])
+        #expect(speakers(found(voices.far + voices.residue, in: segments)) == ["Local Unknown"])
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(echoCount(found(voices.residue, in: segments)) == 0)
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.echoClusters == 1)
+    }
+
+    /// The user only listened: the mic channel holds nothing but the other side's voice.
+    @Test("a channel that is one echo cluster has no speakers of its own")
+    func aChannelOfOnlyEchoCountsNobody() async throws {
+        let voices = TwoVoices()
+        let before = voices.far.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + (voices.far + voices.residue).map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let one = DiarizationResult(segments: Self.turns(voices.far + voices.residue, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: one))
+
+        let (segments, metadata) = try read(t)
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(speakers(found(voices.far + voices.residue, in: segments)) == ["Local Speaker 1"])
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 0)
+        #expect(outcome.speakerCount == 0)
+        #expect(outcome.echoClusters == 1)
+    }
+
+    /// At re-detect there are no word timings, so labelling is one segment in, one out. If that ever
+    /// stops holding, the flags could land on the wrong lines — the guard stands down instead and the
+    /// re-detect does what it did before the guard existed.
+    @Test("raw labelling that is not one-to-one skips the guard: the result is the unguarded one")
+    func aLabellingMismatchSkipsTheGuard() async throws {
+        let voices = TwoVoices()
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2")
+        let (t, cleanup) = try makeRecording(segments: before, metadata: Self.staleEchoMetadata); defer { cleanup() }
+
+        var lostOne = false
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()),
+            rawLabeling: { segments, diarization in
+                let full = TranscriptRediarizer.label(segments, against: diarization)
+                lostOne = true
+                return (Array(full.labeled.dropLast()), full.speakerDatabase)
+            })
+
+        #expect(lostOne, "the echo check labelled the raw clusters through the seam")
+        let (segments, metadata) = try read(t)
+        // The count is enforced as before: every local line is the one stated speaker, nothing flagged.
+        #expect(speakers(segments.filter { $0["source"] as? String == "local" }) == ["Local Speaker 1"])
+        #expect(echoCount(segments) == 0)
+        // No words lost.
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.segmentsRelabeled == voices.own.count + voices.far.count + voices.residue.count)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.echoFlagged == 0)
+        // No fresh verdicts, so what the transcript said about echo is left as it was.
+        #expect(clusters(metadata, track: "local").compactMap { $0["label"] as? String } == ["Local Speaker 7"])
+        #expect(issues(metadata) == ["echo_flagged/local/3/0", "echo_cluster/local/4/0", "asr_failed/remote/-/1"])
+        #expect(metadata["echo_segments_flagged"] == nil)
+    }
+
+    /// The echo check judges the mic channel against the system channel: it knows nothing about the
+    /// reverse. Re-detecting the other side is therefore exactly what it was — count enforced, no
+    /// segment flagged, the transcript's echo verdicts untouched.
+    @Test("re-detecting the remote channel runs no echo guard")
+    func theRemoteChannelIsNotGuarded() async throws {
+        // The same two voices with the channels swapped: a remote cluster repeating the local words.
+        let voices = TwoVoices()
+        func swapped(_ segment: [String: Any]) -> [String: Any] {
+            var d = segment
+            let local = segment["source"] as? String == "local"
+            d["source"] = local ? "remote" : "local"
+            d["speaker"] = (segment["speaker"] as? String ?? "")
+                .replacingOccurrences(of: local ? "Local" : "Remote", with: local ? "Remote" : "Local")
+            return d
+        }
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2").map(swapped)
+        let (t, cleanup) = try makeRecording(segments: before, metadata: Self.staleEchoMetadata); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "remote", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()))
+
+        let (segments, metadata) = try read(t)
+        #expect(speakers(segments.filter { $0["source"] as? String == "remote" }) == ["Remote Speaker 1"])
+        #expect(echoCount(segments) == 0)
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_remote"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.echoFlagged == 0)
+        #expect(clusters(metadata, track: "local").compactMap { $0["label"] as? String } == ["Local Speaker 7"])
+        #expect(clusters(metadata, track: "remote").count == 1)
+        #expect(issues(metadata) == ["echo_flagged/local/3/0", "echo_cluster/local/4/0", "asr_failed/remote/-/1"])
+        #expect(metadata["rediarized_channels"] as? [String] == ["remote"])
+    }
+
+    @Test("a re-detect never changes the number of segments or any text, at any stated count",
+          arguments: [1, 2, 3])
+    func aRedetectIsARelabel(stated: Int) async throws {
+        let voices = TwoVoices()
+        for flagged in [false, true] {
+            let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2", bleedFlagged: flagged)
+            let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+            _ = try await TranscriptRediarizer.rediarize(
+                transcript: t, source: "local", speakerCount: stated, diarizer: ScriptedDiarizer(result: voices.diarization()))
+            let after = try read(t).segments
+            #expect(after.count == before.count)
+            #expect(record(after) == record(before))
+            // Kept out of the merge at every count, and never counted as a person.
+            #expect(speakers(found(voices.residue, in: after)).isDisjoint(with: speakers(found(voices.own, in: after))))
+            #expect(try read(t).metadata["speaker_count_local"] as? Int == 1)
+        }
+    }
+
+    /// `metadata.rediarized_channels`: which channels a re-detect has rewritten. The rename path reads
+    /// it to know a channel's labels are no longer the ones the pipeline wrote.
+    @Test("rediarized_channels lists each re-detected channel once, in the order they were first re-detected")
+    func rediarizedChannelsAreRecordedOnce() async throws {
+        let before = [Self.segment(Line(start: 0.2, end: 0.8, text: Self.words("here", 3)), "Local Speaker 1", "local"),
+                      Self.segment(Line(start: 1.2, end: 1.8, text: Self.words("there", 3)), "Remote Speaker 1", "remote")]
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        #expect(try read(t).metadata["rediarized_channels"] == nil)
+        var seen: [[String]] = []
+        for channel in ["local", "remote", "local"] {
+            _ = try await TranscriptRediarizer.rediarize(transcript: t, source: channel, speakerCount: 1, diarizer: FakeDiarizer())
+            seen.append(try #require(try read(t).metadata["rediarized_channels"] as? [String]))
+        }
+        #expect(seen == [["local"], ["local", "remote"], ["local", "remote"]])
     }
 }

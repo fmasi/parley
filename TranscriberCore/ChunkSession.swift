@@ -119,6 +119,17 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
 }
 
 extension ChunkIssue {
+    /// One `metadata.processing_issues` entry, `{chunk?, code, track?, count?, detail?}` — optional
+    /// fields omitted, never written as null. `chunk` is nil for an issue that belongs to no chunk.
+    func metadataDictionary(chunk: Int?) -> [String: Any] {
+        var d: [String: Any] = ["code": code.rawValue]
+        if let chunk { d["chunk"] = chunk }
+        if let track { d["track"] = track }
+        if let count { d["count"] = count }
+        if let detail { d["detail"] = detail }
+        return d
+    }
+
     /// Over `metadata.processing_issues` entries (`{chunk?, code, …}`): how many issues affect
     /// content, and how many distinct chunks have one. Content-affecting issues with no `chunk`
     /// (session-level, e.g. a failed write after a capture gap) count as one more "chunk", so the

@@ -796,19 +796,11 @@ public final class TranscriptionRunner {
         return (json["metadata"] as? [String: Any])?["merged_audio"] as? [String: Any]
     }
 
-    /// Flatten per-chunk issues and session-level issues into the `metadata.processing_issues`
-    /// shape `{chunk, code, track?, count?}` — optional fields omitted, never written as null.
+    /// Flatten per-chunk issues and session-level issues into `metadata.processing_issues`
+    /// (`ChunkIssue.metadataDictionary`).
     static func processingIssueDictionaries(chunks: [ProcessedChunk], sessionIssues: [SessionIssue]) -> [[String: Any]] {
-        func dictionary(chunk: Int?, issue: ChunkIssue) -> [String: Any] {
-            var d: [String: Any] = ["code": issue.code.rawValue]
-            if let chunk { d["chunk"] = chunk }
-            if let track = issue.track { d["track"] = track }
-            if let count = issue.count { d["count"] = count }
-            if let detail = issue.detail { d["detail"] = detail }
-            return d
-        }
-        return chunks.flatMap { c in c.issues.map { dictionary(chunk: c.index, issue: $0) } }
-            + sessionIssues.map { dictionary(chunk: $0.chunk, issue: $0.issue) }
+        chunks.flatMap { c in c.issues.map { $0.metadataDictionary(chunk: c.index) } }
+            + sessionIssues.map { $0.issue.metadataDictionary(chunk: $0.chunk) }
     }
 
     /// `metadata.echo_clusters` for a chunked session: one entry per (chunk, local cluster), the
