@@ -121,8 +121,17 @@ public enum TranscriptRediarizer {
     // MARK: - Orchestration
 
     public struct Outcome: Sendable {
+        /// The people found on the channel: its labels that are neither "Unknown" nor an echo cluster.
         public let speakerCount: Int
+        /// The unflagged lines this re-detect gave a label to.
         public let segmentsRelabeled: Int
+        /// The raw clusters on this channel the echo check judged to be the other side's voice
+        /// through the speakers, and kept out of the merge (#243). 0 when the check did not run
+        /// (the remote channel).
+        public let echoClusters: Int
+        /// The lines on this channel that check flagged `echo`, those that already carried the flag
+        /// and were confirmed included. 0 when the check did not run.
+        public let echoFlagged: Int
     }
 
     /// A coarse phase report for a running `rediarize`, so a caller can show more than a bare
@@ -188,6 +197,15 @@ public enum TranscriptRediarizer {
     /// attribution changes. Re-transcribing would produce marginally better turn boundaries (word
     /// timings let #120 split a segment where a speaker change lands mid-sentence), but silently
     /// rewriting what was *said* to fix who said it is the wrong trade for a record people rely on.
+    ///
+    /// **On the mic channel the echo check runs before the count is enforced (#243).** With the far
+    /// side on loudspeakers its voice comes back through the mic and the diarizer finds it as a
+    /// cluster of its own. "One speaker on this side" then merged that cluster into the user: on a
+    /// real call about 2,400 of the other participant's words took the user's name. So
+    /// `EchoDeduplicator` judges the RAW clusters first, and a cluster it calls echo is kept out of
+    /// the merge: its matched lines are flagged `echo`, the rest stay under its own label, and it is
+    /// not counted as a person. It never refuses — the count is enforced on everything else — and
+    /// re-detecting a transcript that was merged that way takes the echo voice back out.
     public static func rediarize(
         transcript url: URL,
         source: String,
@@ -195,6 +213,21 @@ public enum TranscriptRediarizer {
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         onProgress: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> Outcome {
+        try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
+                            scratchDirectory: scratchDirectory, onProgress: onProgress, rawLabeling: label)
+    }
+
+    /// `rediarize`, with the echo check's labelling step as a parameter — only so a test can make it
+    /// lose a segment and see the check stand down.
+    static func rediarize(
+        transcript url: URL,
+        source: String,
+        speakerCount: Int,
+        diarizer: any DiarizationProvider,
+        scratchDirectory: URL = FileManager.default.temporaryDirectory,
+        onProgress: (@Sendable (Progress) -> Void)? = nil,
+        rawLabeling: Labeling
     ) async throws -> Outcome {
         // Refuse before touching anything. A non-positive count is not merely ignored downstream:
         // `FluidAudioDiarizer` correctly treats <= 0 as "unforced", but we still pass
@@ -265,82 +298,121 @@ public enum TranscriptRediarizer {
             // available on this route either, but the coarser phase indicator still applies.
             raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
         }
-        // No second VAD pass (P5). These segments already passed the speech/quality gate when the
-        // recording was transcribed; gating them again against a fresh speech map dropped text that
-        // had survived once, and a relabel must never lose words. A full-coverage map (every moment
-        // is speech) filters nothing but keeps the "low diarizer quality → Unknown" step, which a
-        // nil map would switch off along with the gate.
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
         // are both in hand, rather than hoping the clusterer honours the request.
-        let diarization = SpeakerCountEnforcer.enforce(raw, to: speakerCount)
+        //
+        // But first, on the mic channel, find the clusters that are not a person on this side at
+        // all (#243): the echo check runs on the RAW clusters, and those it judges echo are kept out
+        // of the merge. Enforcing first would fold the other side's voice into the stated speaker.
+        let candidates = relabelCandidates(in: rawSegments, source: source)
+        var echo = source == "local" ? echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling) : nil
+        // With the check, every candidate is labeled — a line already flagged `echo` needs its
+        // cluster's new label too. Without it, only the unflagged lines, as before the check existed.
+        func relabel() -> (pool: [Candidate], labeled: [LabeledSegment]) {
+            let pool = echo == nil ? candidates.filter { !$0.wasEcho } : candidates
+            let diarization = SpeakerCountEnforcer.enforce(raw, to: speakerCount, keeping: echo?.clusterIDs ?? [])
+            return (pool, label(pool.map(\.segment), against: diarization).labeled)
+        }
+        var (pool, labeled) = relabel()
+        if echo != nil, labeled.count != pool.count {
+            // The check's flags are carried over by position. Unreachable while its own labelling
+            // was one-to-one (the same function over the same segments); if it ever is not, the
+            // flags must not land on the wrong lines.
+            Logger.transcription.error(
+                "Re-diarize: \(labeled.count, privacy: .public) labels for \(pool.count, privacy: .public) segments — relabelling without the echo check")
+            echo = nil
+            (pool, labeled) = relabel()
+        }
         try Task.checkCancellation()
 
-        let transcriptSegments = rawSegments
-            .filter { ($0["source"] as? String) == source && !TranscriptAssembler.isFlagged($0) }
-            .compactMap { dict -> TranscriptSegment? in
-                guard let start = dict["start"] as? Double,
-                      let end = dict["end"] as? Double,
-                      let text = dict["text"] as? String else { return nil }
-                return TranscriptSegment(
-                    start: start, end: end, text: text,
-                    language: dict["language"] as? String,
-                    confidence: (dict["confidence"] as? Double).map(Float.init))
-            }
-
-        let horizon = (transcriptSegments.map(\.end).max() ?? 0) + 1
-        let result = StreamLabeling.withDiarization(
-            segments: transcriptSegments,
-            diarizationResult: diarization,
-            speechMap: [SpeechRegion(start: 0, end: horizon, probability: 1)],
-            // Gate off, quality on: with a threshold of 0 the map never filters anything — a
-            // zero-length segment included — while low diarizer quality still reads "Unknown".
-            vadSpeechThreshold: 0,
-            // nil, not the config value: `speakerCountIsUserStated: true` disables absorption
-            // outright, so passing a share would imply a knob that has no effect on this path.
-            minSpeakerShare: nil,
-            speakerCountIsUserStated: true)
-
-        var labeled = result.labeled
         // `mergeRelabeled` replaces the channel WHOLESALE, so an empty relabeling would delete every
         // segment this channel had. That is never the right outcome for a transcript that demonstrably
         // contained speech a moment ago: it means diarization or VAD returned nothing, and losing the
         // words is far worse than leaving the speaker labels as they were.
-        guard !labeled.isEmpty || transcriptSegments.isEmpty else {
+        guard !labeled.isEmpty || pool.isEmpty else {
             Logger.transcription.error(
-                "Re-diarize produced no labels for \(source, privacy: .public) from \(transcriptSegments.count, privacy: .public) segments — refusing to write")
+                "Re-diarize produced no labels for \(source, privacy: .public) from \(pool.count, privacy: .public) segments — refusing to write")
             throw RediarizeError.producedNoLabels(source)
         }
         // Before the source prefix goes on, while labels are still raw: a stated count of 1 means
         // every word on this channel belongs to that one person, including the ones the assigner
-        // could not tie to a diarization turn.
-        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount)
+        // could not tie to a diarization turn — but never to an echo cluster, and not at all when
+        // the unattributed speech was itself judged echo.
+        let echoClusterLabels = echo.map { echo in Set(pool.indices.filter(echo.isInEchoCluster).map { labeled[$0].speaker }) } ?? []
+        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels)
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 
-        json["segments"] = mergeRelabeled(into: rawSegments, source: source, relabeled: labeled)
+        let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
+        var segments = rawSegments
+        // Raw cluster label → the label its lines carry in the rewritten transcript.
+        var finalLabels: [String: String] = [:]
+        if let echo {
+            // What the check found, line by line (#243):
+            // - a line of an echo cluster carries that cluster's own label; its matched lines are
+            //   flagged, the rest are not — nothing of it is given to the stated speaker;
+            // - elsewhere, a flagged line (a match of 3+ words) is not relabelled: it keeps the label
+            //   it had, as every flagged line does. A line that already carried the flag keeps it.
+            var relabeled: [LabeledSegment] = []
+            for (i, candidate) in pool.enumerated() {
+                finalLabels[echo.rawLabels[i]] = labeled[i].speaker
+                if candidate.wasEcho {
+                    if echo.isInEchoCluster(i) { segments[candidate.index]["speaker"] = labeled[i].speaker }
+                    continue
+                }
+                var line = labeled[i]
+                if echo.result.segments[i].echo {
+                    line.echo = true
+                    if !echo.isInEchoCluster(i) { line.speaker = candidate.speaker ?? unattributed }
+                }
+                relabeled.append(line)
+            }
+            labeled = relabeled
+        }
+        segments = mergeRelabeled(into: segments, source: source, relabeled: labeled)
+        json["segments"] = segments
         // The channel's names go, they are not carried over — see `clearingChannelNames`. The
         // dialog warns before reaching here, so this is never a surprise.
         metadata = clearingChannelNames(in: metadata, source: source)
         // Persist what the diarizer actually PRODUCED, not what was requested. They diverge — on
         // 2026-09-02 a request for 2 could yield 1 — and a stored request would misreport the
         // transcript's own contents to anything reading it back, including the stepper's pre-fill.
-        // "Unknown" is an absence of attribution, not a person: counting it told the stepper there
-        // were 2 speakers on a channel holding one speaker plus some unattributable backchannels.
+        // It counts PEOPLE. "Unknown" is an absence of attribution, not a person: counting it told
+        // the stepper there were 2 speakers on a channel holding one speaker plus some
+        // unattributable backchannels. An echo cluster is the other side's voice, not a person on
+        // this one (#243). A label that only flagged lines carry is not counted either.
         // Built from `labelPrefix(for:)` so the channel-prefix format lives in one place. Note this
         // is a runtime string comparison, NOT a compile-time guarantee: if `tagWithSourcePrefix`
         // ever stops using "<Prefix><Unknown>", this silently over-counts again, so the two must
         // change together.
-        let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
-        let found = Set(labeled.map { $0.speaker }).subtracting([unattributed]).count
+        let relabeledCount = labeled.filter { !$0.isFlagged }.count
+        let echoLabels = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
+        let found = Set(labeled.filter { !$0.isFlagged }.map(\.speaker)).subtracting([unattributed]).subtracting(echoLabels).count
         metadata["speaker_count_\(source)"] = found
+        // Which channels a re-detect has rewritten: their labels are no longer the pipeline's.
+        var rediarized = metadata[rediarizedChannelsKey] as? [String] ?? []
+        if !rediarized.contains(source) { rediarized.append(source) }
+        metadata[rediarizedChannelsKey] = rediarized
         // The stated count undid any minority absorption on this channel: its `clusters_absorbed`
         // issue no longer describes the transcript (and would keep the rename dialog's hint alive).
-        // Not content-affecting, so the processing counts do not change.
+        // Not content-affecting, so the processing counts do not change. The same goes for what an
+        // earlier pass said about echo on this track, once the check has run again.
+        var stale: Set<String> = [ChunkIssue.Code.clustersAbsorbed.rawValue]
+        if let echo {
+            stale.formUnion([ChunkIssue.Code.echoFlagged.rawValue, ChunkIssue.Code.echoCluster.rawValue])
+            // One entry per raw cluster, under the label its lines now carry, and no `chunk`: the
+            // check ran over the whole channel. Clusters the count merged share a label.
+            let verdicts = (metadata["echo_clusters"] as? [[String: Any]] ?? []).filter { $0["track"] as? String != source }
+            metadata["echo_clusters"] = verdicts + echo.result.clusters.map {
+                $0.metadataDictionary(track: source, chunk: nil) { finalLabels[$0] ?? $0 }
+            }
+            TranscriptAssembler.stampEchoFlagged(segments.filter { $0["echo"] as? Bool == true }.count, in: &metadata)
+        }
         if let issues = metadata["processing_issues"] as? [[String: Any]] {
             metadata["processing_issues"] = issues.filter {
-                !($0["code"] as? String == ChunkIssue.Code.clustersAbsorbed.rawValue && $0["track"] as? String == source)
-            }
+                !(stale.contains($0["code"] as? String ?? "") && $0["track"] as? String == source)
+            } + (echo?.result.issues ?? []).map { $0.metadataDictionary(chunk: nil) }
         }
         json["metadata"] = metadata
 
@@ -356,9 +428,138 @@ public enum TranscriptRediarizer {
             try DurableFile.replace(backup, with: data)   // round 4 item 6
         }
         try DurableFile.replace(url, with: out)
+        let echoClusters = echo?.echoLabels.count ?? 0, echoFlagged = echo?.result.flaggedCount ?? 0
         Logger.transcription.info(
-            "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(labeled.count, privacy: .public) segments")
-        return Outcome(speakerCount: found, segmentsRelabeled: labeled.count)
+            "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(relabeledCount, privacy: .public) segments, \(echoClusters, privacy: .public) echo cluster(s), \(echoFlagged, privacy: .public) segment(s) flagged as echo")
+        return Outcome(speakerCount: found, segmentsRelabeled: relabeledCount, echoClusters: echoClusters, echoFlagged: echoFlagged)
+    }
+
+    // MARK: - Labelling and the echo check (#243)
+
+    /// Metadata key: the channels (`"local"` / `"remote"`) a re-detect has rewritten, each once, in
+    /// the order they were first re-detected. Absent on a transcript that never was.
+    public static let rediarizedChannelsKey = "rediarized_channels"
+
+    /// One of the channel's segments a re-detect labels.
+    private struct Candidate {
+        /// Its position in the transcript's `segments`.
+        let index: Int
+        let segment: TranscriptSegment
+        /// The label it carries before the re-detect.
+        let speaker: String?
+        /// Already flagged `echo`, and nothing else. Such a line is not relabelled as a line — it
+        /// stays flagged — but it is evidence for the echo check: the pipeline flags an echo
+        /// cluster's matched lines, and judged on the unmatched residue alone that cluster would
+        /// look like a person.
+        let wasEcho: Bool
+    }
+
+    /// The channel's segments with a time and a text that are unflagged, or flagged only as echo.
+    /// A `filtered` or `duplicate` segment is neither relabelled nor evidence.
+    private static func relabelCandidates(in segments: [[String: Any]], source: String) -> [Candidate] {
+        segments.enumerated().compactMap { index, dict in
+            guard dict["source"] as? String == source,
+                  let start = dict["start"] as? Double,
+                  let end = dict["end"] as? Double,
+                  let text = dict["text"] as? String else { return nil }
+            let flagged = TranscriptAssembler.isFlagged(dict)
+            let echoOnly = TranscriptAssembler.hasUsableTime(dict)
+                && dict["filtered"] as? Bool != true && dict["duplicate"] as? Bool != true
+            guard !flagged || echoOnly else { return nil }
+            return Candidate(
+                index: index,
+                segment: TranscriptSegment(
+                    start: start, end: end, text: text,
+                    language: dict["language"] as? String,
+                    confidence: (dict["confidence"] as? Double).map(Float.init)),
+                speaker: dict["speaker"] as? String, wasEcho: flagged)
+        }
+    }
+
+    /// Segments labelled against a diarization result, with its speaker database keyed like the labels.
+    typealias Labeling = (_ segments: [TranscriptSegment], _ diarization: DiarizationResult)
+        -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]])
+
+    /// How a re-detect labels segments: against the given clusters as they are.
+    static func label(_ segments: [TranscriptSegment], against diarization: DiarizationResult)
+        -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]]) {
+        // No second VAD pass (P5). These segments already passed the speech/quality gate when the
+        // recording was transcribed; gating them again against a fresh speech map dropped text that
+        // had survived once, and a relabel must never lose words. A full-coverage map (every moment
+        // is speech) filters nothing but keeps the "low diarizer quality → Unknown" step, which a
+        // nil map would switch off along with the gate.
+        let horizon = (segments.map(\.end).max() ?? 0) + 1
+        let result = StreamLabeling.withDiarization(
+            segments: segments,
+            diarizationResult: diarization,
+            speechMap: [SpeechRegion(start: 0, end: horizon, probability: 1)],
+            // Gate off, quality on: with a threshold of 0 the map never filters anything — a
+            // zero-length segment included — while low diarizer quality still reads "Unknown".
+            vadSpeechThreshold: 0,
+            // nil, not the config value: `speakerCountIsUserStated: true` disables absorption
+            // outright, so passing a share would imply a knob that has no effect on this path.
+            // The user's answer is authoritative: absorption exists to second-guess a count nobody
+            // supplied.
+            minSpeakerShare: nil,
+            speakerCountIsUserStated: true)
+        return (result.labeled, result.speakerDatabase)
+    }
+
+    /// What the echo check found on the diarizer's raw clusters.
+    private struct EchoCheck {
+        /// `EchoDeduplicator`'s result over the candidates, in their order, followed by the other
+        /// channel's segments.
+        let result: EchoDeduplicator.DeduplicationResult
+        /// Per candidate, the raw cluster it falls in, as the check labelled it ("Local Speaker 2").
+        let rawLabels: [String]
+        /// The raw clusters judged echo, by that label. "Local Unknown" can be one: the speech no
+        /// turn covers is judged as a group, like any cluster.
+        let echoLabels: Set<String>
+        /// The same clusters by the diarizer's own IDs — what the count enforcement keeps.
+        let clusterIDs: Set<String>
+
+        func isInEchoCluster(_ candidate: Int) -> Bool { echoLabels.contains(rawLabels[candidate]) }
+    }
+
+    /// Run `EchoDeduplicator` on the mic channel as the diarizer's RAW clusters split it, against
+    /// the other channel's unflagged segments.
+    ///
+    /// Only for the mic channel: the deduplicator judges local clusters against remote speech —
+    /// "is this the other side's voice through the speakers?" — and has no answer to the reverse.
+    ///
+    /// nil when the labelling is not one segment in, one out. At re-detect there are no word
+    /// timings, so nothing is split and it always is; if that ever stops holding the verdicts could
+    /// not be put back on the right lines, so the check stands down and the re-detect goes on
+    /// without it — a relabel must never lose or misplace words.
+    private static func echoCheck(
+        on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling
+    ) -> EchoCheck? {
+        var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
+        guard local.count == candidates.count else {
+            Logger.transcription.error(
+                "Re-diarize: the echo check is skipped — labelling the raw clusters returned \(local.count, privacy: .public) segments for \(candidates.count, privacy: .public)")
+            return nil
+        }
+        for i in local.indices { local[i].source = "local" }
+        SpeakerAssignment.tagWithSourcePrefix(&local)
+        let remote = transcript.compactMap { dict -> LabeledSegment? in
+            guard dict["source"] as? String == "remote", !TranscriptAssembler.isFlagged(dict),
+                  let start = dict["start"] as? Double,
+                  let end = dict["end"] as? Double,
+                  let text = dict["text"] as? String else { return nil }
+            return LabeledSegment(
+                start: start, end: end,
+                speaker: dict["speaker"] as? String ?? labelPrefix(for: "remote") + SpeakerAssignment.unknownSpeaker,
+                text: text, source: "remote")
+        }
+        // The raw clusters' embeddings are passed as evidence. The transcript holds none for the
+        // other channel, so no voice similarity is recorded; it decides nothing either way.
+        let result = EchoDeduplicator.deduplicate(
+            segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:])
+        let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
+        let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
+            .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
+        return EchoCheck(result: result, rawLabels: local.map(\.speaker), echoLabels: echoLabels, clusterIDs: Set(clusterIDs))
     }
 
     /// The longest a single chunk can plausibly be, and the most recorded-gap time the bound will
