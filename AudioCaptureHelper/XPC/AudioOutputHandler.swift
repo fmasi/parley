@@ -146,9 +146,52 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
          totalSystemFramesWritten - totalSystemPadFrames, totalSystemPadFrames)
     }
 
-    init(systemWriter: WavFileWriter, micWriter: WavFileWriter) {
+    // MARK: - IO cycle timing (#247)
+
+    /// Per-stage timing of every tap and mic callback, session-wide (never reset by a rotation).
+    /// Audio-queue confined, like the writers. Inline fixed-size storage: recording a cycle is clock
+    /// reads and integer arithmetic, with no allocation, lock or log.
+    private var systemIOStats = IOCycleStats()
+    private var micIOStats = IOCycleStats()
+    /// The host clock's tick length, read once here (off the audio queue).
+    private let timebase = IOCycleStats.Timebase.host()
+    /// Host-clock ticks at the first line of the mic callback being handled. Audio-queue confined.
+    private var micCycleStartTicks: UInt64 = 0
+    /// DIAGNOSTIC ONLY (`debug_skip_wav_sync`): applied to the start writers and to every rotation's.
+    private let skipWavSync: Bool
+
+    /// A copy of both tracks' callback timing. MUST be read on the audio queue.
+    func ioCycleStats() -> (mic: IOCycleStats, system: IOCycleStats) { (micIOStats, systemIOStats) }
+
+    /// Close one callback's timing: convert the ticks, add the cycle to the track's histogram and, when
+    /// it is an overrun the rate limit allows (one per 10 s per track), record the `ioOverrun` event.
+    /// On the audio queue. The common path is one clock read, seven multiply-divides and the histogram
+    /// increments. The event path (rare) builds a small dictionary and takes the ring's lock, as every
+    /// other anomaly recorded from this queue does; it runs after the cycle's end was read, so it is
+    /// not in the number it reports.
+    private func noteIOCycle(
+        track: CaptureTrack, startTicks: UInt64, queueWaitTicks: UInt64, convertTicks: UInt64,
+        stages: (pad: UInt64, write: UInt64, sync: UInt64)
+    ) {
+        let endTicks = mach_absolute_time()
+        let cycle = IOCycleStats.Cycle(
+            queueWaitNanos: timebase.nanos(queueWaitTicks), convertNanos: timebase.nanos(convertTicks),
+            padNanos: timebase.nanos(stages.pad), writeNanos: timebase.nanos(stages.write),
+            syncNanos: timebase.nanos(stages.sync),
+            totalNanos: timebase.nanos(IOCycleStats.elapsed(from: startTicks, to: endTicks)))
+        let now = timebase.nanos(endTicks)
+        let report = track == .mic ? micIOStats.record(cycle, nowNanos: now) : systemIOStats.record(cycle, nowNanos: now)
+        guard report else { return }
+        let overruns = track == .mic ? micIOStats.overrunCount : systemIOStats.overrunCount
+        diagnostics?.record(cycle.overrunEvent(track: track, overruns: overruns, at: Date()))
+    }
+
+    init(systemWriter: WavFileWriter, micWriter: WavFileWriter, skipWavSync: Bool = false) {
         self.systemWriter = systemWriter
         self.micWriter = micWriter
+        self.skipWavSync = skipWavSync
+        systemWriter.skipPeriodicSync = skipWavSync
+        micWriter.skipPeriodicSync = skipWavSync
 
         // Mic writer always gets normalized 48kHz mono Int16
         micWriter.setSampleRate(UInt32(AudioConverter.outputSampleRate))
@@ -248,6 +291,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         newMicWriter.setSampleRate(UInt32(AudioConverter.outputSampleRate))
         newMicWriter.setChannelCount(UInt16(AudioConverter.outputChannelCount))
+        newSystemWriter.skipPeriodicSync = skipWavSync
+        newMicWriter.skipPeriodicSync = skipWavSync
 
         // Atomic swap
         systemWriter = newSystemWriter
@@ -420,7 +465,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the writer is pinned once. Stamps the #86 liveness arrival and timeline-pads exactly like the SCK
     /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
     /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
-    func appendSystemSamples(_ samples: [Int16], pts: CMTime) {
+    /// `lead` is what the tap callback measured before this call (#247); the cycle is closed here, after
+    /// the write, so the service's tap-guard pass over the samples that follows is not in its total.
+    func appendSystemSamples(_ samples: [Int16], pts: CMTime, lead: TapCycleLead) {
         guard accepting else { return }
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
@@ -441,13 +488,21 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let rate = systemFormatInfo?.rate ?? AudioConverter.outputSampleRate
+        // Stage timing (#247). The writer counts the ticks it spends in `fsync`; reading that counter
+        // around the pad and around the append splits each of them into "write" and "sync".
+        let syncBefore = systemWriter.syncTicks
+        let padStartTicks = mach_absolute_time()
         let pad = timelineSilencePad(
             into: systemWriter, framesWritten: systemFramesWritten, rate: rate, pts: pts, label: "system"
         )
+        let padEndTicks = mach_absolute_time()
+        let syncAfterPad = systemWriter.syncTicks
         systemFramesWritten += pad
         totalSystemFramesWritten += pad
         totalSystemPadFrames += pad
         samples.withUnsafeBufferPointer { systemWriter.appendInt16($0) }
+        let writeEndTicks = mach_absolute_time()
+        let syncAfterWrite = systemWriter.syncTicks
         systemFramesWritten += Int64(samples.count)
         totalSystemFramesWritten += Int64(samples.count)
         noteWritten(Int64(samples.count), track: .system)
@@ -456,6 +511,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
             track: "system")
+        noteIOCycle(
+            track: .system, startTicks: lead.startTicks, queueWaitTicks: lead.queueWaitTicks,
+            convertTicks: lead.convertTicks,
+            stages: IOCycleStats.writeStages(
+                padded: pad > 0, padStart: padStartTicks, padEnd: padEndTicks, writeEnd: writeEndTicks,
+                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite))
     }
 
     // MARK: - Mic audio (normalized via AudioConverter)
@@ -464,6 +525,9 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// called on the capture service's audio queue — the same serial queue as system-audio callbacks,
     /// writer swaps, and finalize — so all writer access stays single-threaded.
     func appendMicSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+        // #247: where the mic cycle's total starts. There is no "enqueued at" time for a mic buffer
+        // (its PTS is when its first sample was captured), so the mic has no queue-wait stage.
+        micCycleStartTicks = mach_absolute_time()
         guard accepting else { return }
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
@@ -619,17 +683,25 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Append converted 48 kHz mono mic samples, first padding the mic track to its shared-timeline
     /// position so it stays aligned with system audio (#96 / council HOL-1).
     private func appendAlignedMic(_ samples: [Int16], pts: CMTime) {
+        // #247: both callers come straight from the converter, so this is the end of "convert".
+        let convertEndTicks = mach_absolute_time()
         // Liveness is judged on `MicCaptureSession`'s heartbeat (§4.2), not here.
         noteRealAudio(samples, track: .mic)
 
+        let syncBefore = micWriter.syncTicks
+        let padStartTicks = mach_absolute_time()
         let pad = timelineSilencePad(
             into: micWriter, framesWritten: micFramesWritten,
             rate: AudioConverter.outputSampleRate, pts: pts, label: "mic"
         )
+        let padEndTicks = mach_absolute_time()
+        let syncAfterPad = micWriter.syncTicks
         micFramesWritten += pad
         totalMicFramesWritten += pad
         totalMicPadFrames += pad
         samples.withUnsafeBufferPointer { micWriter.appendInt16($0) }
+        let writeEndTicks = mach_absolute_time()
+        let syncAfterWrite = micWriter.syncTicks
         micFramesWritten += Int64(samples.count)
         totalMicFramesWritten += Int64(samples.count)
         noteWritten(Int64(samples.count), track: .mic)
@@ -640,6 +712,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         if !samples.isEmpty, samples.allSatisfy({ $0 == 0 }) { micExactZeroFrames += Int64(samples.count) }
         noteExactZeroMic(
             micExactZeroMonitor.record(samples: samples, rate: AudioConverter.outputSampleRate))
+        noteIOCycle(
+            track: .mic, startTicks: micCycleStartTicks, queueWaitTicks: 0,
+            convertTicks: IOCycleStats.elapsed(from: micCycleStartTicks, to: convertEndTicks),
+            stages: IOCycleStats.writeStages(
+                padded: pad > 0, padStart: padStartTicks, padEnd: padEndTicks, writeEnd: writeEndTicks,
+                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite))
     }
 
     /// Surface a sustained run of exact-zero mic samples (#193) — a mic that is delivering but
