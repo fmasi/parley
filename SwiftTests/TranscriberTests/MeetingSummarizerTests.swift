@@ -447,6 +447,21 @@ struct MeetingSummarizerTests {
         #expect(segments.map(\.text) == ["keep"])
     }
 
+    /// #231: the reader takes the count from `echo_segments_flagged`, and from the old
+    /// `echo_segments_removed` in a transcript written before the rename.
+    @Test func readsTheEchoCountFromTheNewKeyAndFallsBackToTheOldOne() throws {
+        func count(_ metadata: [String: Any]) throws -> Int {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("echo-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": [] as [Any]]).write(to: url)
+            return try MeetingSummarizer.parseTranscriptForTesting(at: url).1.echoSegmentsFlagged
+        }
+        #expect(try count(["echo_segments_flagged": 36]) == 36)
+        #expect(try count(["echo_segments_removed": 7]) == 7, "a transcript written before the rename")
+        #expect(try count(["echo_segments_flagged": 36, "echo_segments_removed": 7]) == 36, "the new key wins")
+        #expect(try count([:]) == 0)
+    }
+
     @Test func parsesCaptureCoverageFromMetadata() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("t-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }

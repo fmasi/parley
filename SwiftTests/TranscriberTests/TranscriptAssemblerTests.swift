@@ -136,6 +136,38 @@ struct TranscriptAssemblerTests {
         #expect(gaps[0]["start"] as? String == "1970-01-01T00:00:10Z")
     }
 
+    /// #231: the count of echo-flagged segments is written under the name that says what it is, and
+    /// under its old name for one more release. Nothing is written when nothing was flagged.
+    @Test func theEchoCountIsWrittenAsFlaggedAndStillAsRemoved() throws {
+        func metadata(flagged: Int) throws -> [String: Any] {
+            try #require(TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                diarization: false, dualStream: true, echoSegmentsFlagged: flagged)["metadata"] as? [String: Any])
+        }
+        let some = try metadata(flagged: 36)
+        #expect(some["echo_segments_flagged"] as? Int == 36)
+        #expect(some["echo_segments_removed"] as? Int == 36, "kept for one release")
+        let none = try metadata(flagged: 0)
+        #expect(none["echo_segments_flagged"] == nil && none["echo_segments_removed"] == nil)
+    }
+
+    /// #242: the cluster verdicts land in `metadata.echo_clusters` as given; a path that ran no echo
+    /// dedup (nil) leaves the key out, and one that ran it over no local speech writes an empty list.
+    @Test func echoClustersLandInMetadataWhenTheDedupRan() throws {
+        func metadata(_ clusters: [[String: Any]]?) throws -> [String: Any] {
+            try #require(TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                diarization: false, dualStream: clusters != nil, echoClusters: clusters)["metadata"] as? [String: Any])
+        }
+        let entry = EchoDeduplicator.ClusterVerdict(
+            label: "Local Speaker 2", segments: 40, matchedSegments: 36, seconds: 400, matchedSeconds: 360,
+            words: 480, matchedWords: 432, share: 0.9, verdict: .echo, bestEmbeddingSimilarity: 0.68,
+            matchedRemote: ["Remote Speaker 1": 352.8]).metadataDictionary(chunk: 0)
+        let written = try #require(try metadata([entry])["echo_clusters"] as? [[String: Any]])
+        #expect(written.count == 1 && written[0]["label"] as? String == "Local Speaker 2" && written[0]["verdict"] as? String == "echo")
+        #expect(written[0]["share"] as? Double == 0.9 && written[0]["chunk"] as? Int == 0 && written[0]["track"] as? String == "local")
+        #expect(try metadata(nil)["echo_clusters"] == nil)
+        #expect((try metadata([])["echo_clusters"] as? [[String: Any]])?.isEmpty == true)
+    }
+
     @Test func processingIssuesLandInMetadataWithCounts() throws {
         let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
             diarization: false, dualStream: false,

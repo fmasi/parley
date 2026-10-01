@@ -261,6 +261,48 @@ struct ChunkProcessorTests {
         #expect(chunk.segments.filter(\.duplicate).map(\.text) == ["No."])
     }
 
+    /// #242, end to end through the real processor: the mic hears what the system audio plays (the
+    /// same numbered words 0.2 s later) for 48 s. Its segments are flagged, and the chunk keeps the
+    /// cluster's verdict and an `echo_cluster` issue — in memory and in session.json.
+    @Test func aBleedClusterIsFlaggedAndItsVerdictIsPersistedOnTheChunk() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0_mic.wav"), seconds: 1)
+        struct BleedEngine: TranscriptionEngine {
+            let name = "Bleed"
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+                let delay = audioSource == .microphone ? 0.2 : 0
+                return (0..<6).map { i in
+                    TranscriptSegment(start: Double(i) * 9 + delay, end: Double(i) * 9 + 8 + delay,
+                                      text: EchoFixture.words(i * 100, 10), language: "en")
+                }
+            }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+        // No diarizer: each stream is one speaker, with no embedding at all — the verdict needs none.
+        let processor = ChunkProcessor(config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio", chunkDurationMinutes: 10),
+            transcriber: BleedEngine(), diarizer: nil)
+        await processor.processLastChunk(chunk0(in: dir))
+
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.segments.count == 12, "flagged, never deleted")
+        #expect(chunk.segments.filter(\.echo).map(\.source) == Array(repeating: "local", count: 6))
+        #expect(chunk.echoSegmentsFlagged == 6)
+        #expect(chunk.echoClusters.map(\.label) == ["Local Speaker 1"])
+        let verdict = try #require(chunk.echoClusters.first)
+        #expect(verdict.verdict == .echo && verdict.segments == 6 && verdict.matchedSegments == 6 && verdict.share == 1)
+        #expect(abs(verdict.seconds - 48) < 0.001 && verdict.words == 60 && verdict.bestEmbeddingSimilarity == nil)
+        #expect(verdict.matchedRemote.keys.sorted() == ["Remote Speaker 1"])
+        #expect(chunk.issues.contains(ChunkIssue(code: .echoFlagged, track: "local", count: 6)))
+        #expect(chunk.issues.contains(ChunkIssue(code: .echoCluster, track: "local", count: 1)))
+
+        let stored = try #require(SessionState.read(directory: dir, sessionId: "meeting")?.chunks.first)
+        #expect(stored.echoClusters == chunk.echoClusters && stored.echoSegmentsFlagged == 6)
+        #expect(stored.issues.contains(ChunkIssue(code: .echoCluster, track: "local", count: 1)))
+    }
+
     /// R5: a quota delete that fails no longer relabels an archived chunk as "archival failed".
     @Test func aQuotaFailureDoesNotRelabelAnArchivedChunk() async throws {
         let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
