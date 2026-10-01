@@ -5943,7 +5943,10 @@ final class HungStep: @unchecked Sendable {
         h.coordinator.folderReads = self.reads { label in
             reads.note(label)
             guard label == "resume: session folder" else { return }
-            DispatchQueue.main.sync { MainActor.assumeIsolated { coordinator.folderReadDeadline = .seconds(60) } }
+            // Never from the main thread itself (a scan made there would deadlock here): `scan.hang()` then says so.
+            if !Thread.isMainThread {
+                DispatchQueue.main.sync { MainActor.assumeIsolated { coordinator.folderReadDeadline = .seconds(60) } }
+            }
             scan.hang()
         }
         h.client.onStop = { await stop.hangAwaited() }   // the other one stays pending: no salvage here
