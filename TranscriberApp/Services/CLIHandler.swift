@@ -106,6 +106,9 @@ enum CLIHandler {
         } else {
             outputDir = inputURLs[0].deletingLastPathComponent()
         }
+        // #246: before any work, so a missing --output-dir is created (and an impossible one is
+        // refused by name) up front rather than after the whole transcription, at the write.
+        try OutputDirectory.ensureExists(outputDir)
 
         // Resolve stereo channel handling for single-file AAC input
         let systemAudio: URL
