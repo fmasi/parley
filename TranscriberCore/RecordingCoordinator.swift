@@ -26,6 +26,9 @@ public final class RecordingCoordinator {
     private let notifyCritical: @MainActor (String, String) -> Void
     /// Present a completed transcript — rename dialog, then auto-summary: (jsonPath, config).
     private let presentTranscript: @MainActor (URL, Config) -> Void
+    /// The helper found the tap running without its System Audio Recording permission (#220): the
+    /// app opens its repair window. Injected because Core can't present AppKit windows.
+    private let onSystemAudioPermissionDenied: @MainActor () -> Void
 
     // MARK: - Lifecycle state (previously `@State` in MenuView)
 
@@ -71,8 +74,10 @@ public final class RecordingCoordinator {
         notify: @escaping @MainActor (String, String) -> Void,
         notifyCritical: @escaping @MainActor (String, String) -> Void,
         presentTranscript: @escaping @MainActor (URL, Config) -> Void,
+        onSystemAudioPermissionDenied: @escaping @MainActor () -> Void = {},
         recordingMicrophone: RecordingMicrophone = .shared
     ) {
+        self.onSystemAudioPermissionDenied = onSystemAudioPermissionDenied
         self.recordingMicrophone = recordingMicrophone
         self.appState = appState
         self.captureClient = captureClient
@@ -244,10 +249,20 @@ public final class RecordingCoordinator {
         // this PR adds could never appear during a normal recording. The recording is never stopped
         // by this. Also set by TranscriberApp's setupCrashHandler for the re-attach paths above —
         // keep both in sync if this wiring changes.
-        captureClient.onQualityAnomaly = { [weak self] _, message in
+        // Previously wired only on the relaunch re-attach paths (TranscriberApp.setupCrashHandler), so a
+        // normal recording whose tap rebuild failed showed nothing at all (#220 council round 2).
+        captureClient.onSystemAudioUnrecoverable = { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
-                self.appState.interruptionWarning = message
+                self.appState.noteSystemAudioLost(message: "Remote audio couldn’t be recovered — only your microphone is recording.")
+            }
+        }
+        captureClient.onQualityAnomaly = { [weak self] kind, message in
+            Task { @MainActor in
+                guard let self, self.appState.isRecording else { return }
+                if self.appState.noteQualityAnomaly(kind: kind, message: message) {
+                    self.onSystemAudioPermissionDenied()
+                }
             }
         }
 
@@ -641,6 +656,9 @@ public final class RecordingCoordinator {
                 return
             }
             xpcRetryCount = 0
+            // A fresh helper starts with a fresh permission guard: it re-reports within seconds if the
+            // other side still isn't being captured, but it can never "restore" the old helper's alarm.
+            appState.clearRemoteAudioProblem()
             appState.interruptionWarning = "Recording briefly interrupted. Resuming."
             notify(
                 "Recording Resumed",

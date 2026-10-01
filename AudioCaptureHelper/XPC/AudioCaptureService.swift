@@ -70,6 +70,24 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// teardown path.
     private let livenessWatchdog = LivenessWatchdogDriver()
 
+    /// Keeps the tap honest about its System Audio Recording permission (#220): see
+    /// `TapPermissionGuard`. Confined to `audioQueue`, like the samples that feed it.
+    private var tapGuard = TapPermissionGuard()
+    /// ~1 Hz tick for `tapGuard`, on `audioQueue`, only while capturing with the tap. The guard does
+    /// nothing on a tick unless a problem is suspected or reported. Created and cancelled on `audioQueue`.
+    private var tapGuardTimer: DispatchSourceTimer?
+    /// Bumped per tap session, so a permission check still in flight from a previous session can't
+    /// land in the next session's fresh guard. Read and written on `audioQueue`.
+    private var tapGuardEpoch = 0
+    /// Serial queue for every TCC permission read: they are synchronous IPC round-trips, so they must
+    /// never run on `audioQueue` or on `SystemTapSession`'s config queue (a slow one would delay a
+    /// rebuild), and serial so results reach the guard in the order they were asked for.
+    private let tccQueue = DispatchQueue(label: "audio-capture.tcc", qos: .utility)
+    private let guardEpoch = DispatchTime.now().uptimeNanoseconds
+    private func guardNow() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - guardEpoch) / 1_000_000_000
+    }
+
     private func record(
         _ kind: CaptureEventKind,
         _ severity: CaptureEvent.Severity,
@@ -100,6 +118,12 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             self?.record(kind, .anomaly, ["reason": message])
             self?.onQualityAnomaly?(kind.rawValue, message)
         }
+        // A tap that stops delivering while output plays gives the exact-zero detector nothing to see.
+        // In #220 the tap delivered zeros for 46 s, then no buffers at all for 51 minutes.
+        livenessWatchdog.onSystemGap = isUsingSystemTap ? { [weak self] in
+            guard let self else { return }
+            self.audioQueue.async { self.apply(self.tapGuard.deliveryGap(now: self.guardNow())) }
+        } : nil
         livenessWatchdog.start()
     }
 
@@ -211,6 +235,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     Logger.audio.info("Capture started — mic AVCaptureSession + system source \(source.rawValue, privacy: .public); awaiting frames")
                     self.stateLock.sync { self.isCapturing = true }
                     self.startLivenessWatchdog(handler: outputHandler, isUsingSystemTap: source == .coreAudioTap)
+                    if source == .coreAudioTap { self.startTapGuardTimer() }
                     reply(true, nil)
                 } catch {
                     self.cleanupAfterFailure()
@@ -247,8 +272,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
 
         Logger.audio.info("Stopping capture")
-        record(.captureStop, .info)
+        // Read BEFORE the tap is stopped below, so frames delivered in that short window (well under a
+        // second) are not in these facts: `system_exact_zero_seconds` can understate by that margin.
+        record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
+        stopTapGuardTimer()
         // Stop mic + tap delivery before finalize so no buffer lands on the audio queue after the WAV
         // headers are sealed (a late buffer would be a no-op anyway — finalize is idempotent).
         micSess?.stop()
@@ -365,6 +393,130 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         reply(diagnostics.drainData())
     }
 
+    // MARK: - #220 System Audio Recording permission
+
+    func systemAudioPermissionStatus(reply: @escaping (String) -> Void) {
+        reply(SystemAudioRecordingPermission.wireValue(SystemAudioRecordingPermission.preflight()))
+    }
+
+    /// The app saw the permission granted (its repair window resolved). Treated as one more permission
+    /// check: the guard rebuilds only if the helper itself sees the grant AND the tap needs it.
+    func restartSystemAudio(reply: @escaping (Bool, String?) -> Void) {
+        guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else {
+            reply(false, "System audio is not being captured with the Core Audio tap")
+            return
+        }
+        // Read the epoch on audioQueue asynchronously: a stalled audio queue must not block this XPC thread.
+        audioQueue.async { [weak self] in
+            guard let self else { reply(false, nil); return }
+            let epoch = self.tapGuardEpoch
+            self.tccQueue.async {
+                let status = SystemAudioRecordingPermission.preflight()
+                self.audioQueue.async {
+                    guard epoch == self.tapGuardEpoch else { reply(false, "Capture session changed"); return }
+                    let actions = self.tapGuard.permissionChecked(status, evidence: .none, now: self.guardNow())
+                    self.apply(actions)
+                    let rebuilt = actions.contains(.rebuildTap)
+                    reply(rebuilt, rebuilt ? nil : "No rebuild needed (permission \(SystemAudioRecordingPermission.wireValue(status)))")
+                }
+            }
+        }
+    }
+
+    // MARK: - Tap permission guard plumbing (all on audioQueue unless noted)
+
+    /// Permission-independent facts about the tap track for provenance: how much of what it delivered
+    /// was exact digital zero. A denied tap is 100% zeros however healthy everything else looks.
+    /// Uses `audioQueue.sync`, so it must NEVER be called from a block running on `audioQueue` (it
+    /// would deadlock). Today only `stopCapture` and `stopAndFinalize` call it, on XPC threads.
+    private func tapTrackFacts() -> [String: String] {
+        let (delivered, zero) = audioQueue.sync { (tapGuard.deliveredFrames, tapGuard.exactZeroFrames) }
+        return [
+            "system_delivered_seconds": "\(delivered / 48_000)",
+            "system_exact_zero_seconds": "\(zero / 48_000)",
+        ]
+    }
+
+    private func startTapGuardTimer() {
+        audioQueue.async {
+            self.tapGuardTimer?.cancel()
+            self.tapGuardTimer = nil
+            // A stop queued its cancel before this ran: don't arm a timer that outlives the session.
+            guard self.stateLock.sync(execute: { self.isCapturing && !self.isUserStopping && self.tapSession != nil })
+            else { return }
+            let t = DispatchSource.makeTimerSource(queue: self.audioQueue)
+            t.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
+            t.setEventHandler { [weak self] in
+                guard let self else { return }
+                // The HAL read only happens while a grant rebuild still owes proof.
+                let outputRunning = self.tapGuard.wantsOutputState
+                    ? SystemTapSession.isOutputDeviceRunningSomewhere() : nil
+                self.apply(self.tapGuard.tick(now: self.guardNow(), outputRunning: outputRunning))
+            }
+            t.resume()
+            self.tapGuardTimer = t
+        }
+    }
+
+    private func stopTapGuardTimer() {
+        audioQueue.async {
+            self.tapGuardTimer?.cancel()
+            self.tapGuardTimer = nil
+        }
+    }
+
+    /// Called from `SystemTapSession` after every successful (re)build, on its config queue. The
+    /// grant is decided when the aggregate starts, so this is when to ask.
+    private func tapDidBuild() {
+        // Off the caller's queue: a slow TCC read must not hold up the next rebuild.
+        tccQueue.async { [weak self] in
+            let status = SystemAudioRecordingPermission.preflight()
+            guard let self else { return }
+            self.audioQueue.async {
+                self.apply(self.tapGuard.tapBuilt(status: status, now: self.guardNow()))
+            }
+        }
+    }
+
+    private func apply(_ actions: [TapPermissionGuard.Action]) {
+        for action in actions {
+            switch action {
+            case .checkPermission(let evidence):
+                // A TCC IPC round-trip: never on the audio queue.
+                let epoch = tapGuardEpoch
+                tccQueue.async { [weak self] in
+                    let status = SystemAudioRecordingPermission.preflight()
+                    guard let self else { return }
+                    self.audioQueue.async {
+                        guard epoch == self.tapGuardEpoch else { return }   // a previous session's check
+                        self.apply(self.tapGuard.permissionChecked(status, evidence: evidence, now: self.guardNow()))
+                    }
+                }
+            case .rebuildTap:
+                let tap = stateLock.sync { isUserStopping ? nil : tapSession }
+                Logger.audio.info("System tap: rebuilding for the System Audio Recording permission")
+                tap?.rebuild(reason: "system audio permission")
+            case .reportDenied(let status):
+                guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
+                Logger.audio.error("System tap: System Audio Recording permission \(SystemAudioRecordingPermission.wireValue(status), privacy: .public) — the other side is not being captured")
+                record(.systemAudioPermissionDenied, .anomaly, [
+                    "status": status == nil ? "unconfirmed" : SystemAudioRecordingPermission.wireValue(status),
+                ])
+                let message = status == nil
+                    ? "Parley can’t confirm it’s capturing the other side of the call: system audio has been completely silent. If they’re talking, check System Audio Recording."
+                    : "Parley isn’t allowed to record system audio, so the other side of the call is not being captured. Your microphone is still recording. Grant System Audio Recording to fix it."
+                onQualityAnomaly?(CaptureEventKind.systemAudioPermissionDenied.rawValue, message)
+            case .reportRestored:
+                Logger.audio.info("System tap: real audio is arriving again — remote side restored")
+                record(.systemAudioPermissionRestored, .info)
+                onQualityAnomaly?(
+                    CaptureEventKind.systemAudioPermissionRestored.rawValue,
+                    "The other side of the call is being recorded again."
+                )
+            }
+        }
+    }
+
     func stopAndFinalize() {
         // Mark stopping before snapshotting the stream so an in-flight restart bails / is torn
         // down (council F1), mirroring stopCapture.
@@ -374,7 +526,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         guard capturing else { return }
         Logger.audio.info("Stopping capture due to client disconnect")
+        // Same tap-track facts as a clean stop, so a recording the app crashed out of during a
+        // denial still reports how much of its remote track was exact zeros (#220).
+        record(.captureStop, .info, tapSess == nil ? [:] : tapTrackFacts())
         livenessWatchdog.stop()
+        stopTapGuardTimer()
 
         // Stop mic + tap delivery, then finalize synchronously on the persistent audio queue so WAV
         // headers are written before the XPC service exits (I5 fix).
@@ -406,6 +562,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     private func cleanupAfterFailure() {
         livenessWatchdog.stop()
+        stopTapGuardTimer()
         // Snapshot and clear state under the lock, then run the blocking teardown (mic stopRunning,
         // writer finalize, file deletes) OUTSIDE the lock so we never hold stateLock across a blocking
         // call. Not called under stateLock, so the snapshot-then-act split is safe.
@@ -472,9 +629,17 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// rebuild failing) is NOT fatal: like a dead SCK system stream, the mic keeps recording and the
     /// system track is silence-padded — surfaced via `onSystemAudioUnrecoverable`, never a teardown.
     private func startSystemTap(handler: AudioOutputHandler) throws {
-        let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak handler] samples, pts in
-            handler?.appendSystemSamples(samples, pts: pts)
+        audioQueue.sync {
+            tapGuard = TapPermissionGuard()
+            tapGuardEpoch += 1
         }
+        let tap = SystemTapSession(deliveryQueue: audioQueue) { [weak self, weak handler] samples, pts in
+            handler?.appendSystemSamples(samples, pts: pts)
+            // Already on audioQueue.
+            guard let self else { return }
+            self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
+        }
+        tap.onBuilt = { [weak self] in self?.tapDidBuild() }
         tap.onEvent = { [weak self] kind, severity, detail in
             self?.record(kind, severity, detail)
         }
@@ -614,6 +779,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         }
         guard won else { return }
         livenessWatchdog.stop()
+        stopTapGuardTimer()
         record(.restartFailed, .anomaly, ["reason": reason])
         // Stop the decoupled mic + tap sessions too, otherwise they keep running after the system
         // stream is declared dead (council CONC-2). Stop before finalize so no buffer lands on the

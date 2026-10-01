@@ -81,6 +81,9 @@ struct MenuView: View {
                     // Auto-summarize after rename completes (so summary has real speaker names)
                     MenuView.autoSummarize(jsonPath: jsonPath, config: config)
                 }
+            },
+            onSystemAudioPermissionDenied: {
+                Task { await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence) }
             }
         ))
     }
@@ -89,8 +92,7 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 10) {
             statusHeader
 
-            if appState.criticalError != nil || appState.interruptionWarning != nil
-                || appState.truncatedErrorMessage != nil {
+            if appState.hasMenuAlerts {
                 alertBanners
             }
 
@@ -230,6 +232,17 @@ struct MenuView: View {
 
     @ViewBuilder
     private var alertBanners: some View {
+        // Sticky (#220): can't be dismissed or overwritten while the other side isn't being captured.
+        if appState.isRecording && appState.remoteAudioNotCaptured {
+            MenuActionRow(
+                icon: "speaker.slash.fill",
+                title: "The other side may not be recorded",
+                subtitle: appState.remoteAudioProblem ?? "Click to check System Audio Recording"
+            ) {
+                dismissPanel()
+                Task { await PermissionRepairWindowController.shared.verify(trigger: .userRequest) }
+            }
+        }
         if let critical = appState.criticalError {
             AlertBanner(severity: .critical, message: critical) {
                 appState.criticalError = nil
@@ -383,7 +396,12 @@ struct MenuView: View {
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator
-            Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            Task {
+                await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId)
+                // After the recording is up (never gating it): if a permission it needs is missing, the
+                // fix appears now, at the start of the meeting, not after it (#220).
+                await PermissionRepairWindowController.shared.verify(trigger: .recordStart)
+            }
         }
     }
 

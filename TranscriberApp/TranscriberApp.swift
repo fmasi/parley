@@ -23,27 +23,56 @@ final class LaunchGate {
     var permissionsReady = false
     let permissionManager: PermissionManager
 
-    init() {
-        let checker = SystemPermissionChecker()
+    init(captureClient: AudioCaptureClient) {
+        var checker = SystemPermissionChecker()
+        // Live System Audio Recording checks go through the helper: the app process's own TCC answer
+        // is cached for its lifetime (#220).
+        checker.helperSystemAudioStatus = { [weak captureClient] in
+            await captureClient?.systemAudioPermissionStatus()
+        }
         permissionManager = PermissionManager(checker: checker)
     }
 
+    /// Persisted once setup has been completed. After that a missing permission is REPAIRED, never
+    /// answered with the "Setup required" lockout (#174, #220).
+    private static let onboardingCompletedKey = "onboardingCompleted"
+
+    static func markOnboarded() {
+        UserDefaults.standard.set(true, forKey: onboardingCompletedKey)
+    }
+
     func checkAndGate(configManager: ConfigManager) async {
+        permissionManager.systemAudioSource = configManager.config.systemAudioSource
         await permissionManager.checkAll()
         let engine = configManager.config.engine
         let modelReady = !engine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
+        let onboarded = CaptureReadiness.isOnboarded(
+            flag: UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey),
+            microphoneGranted: permissionManager.microphone.isGranted
+        )
 
         // Folder access is NOT checked here — the user hasn't confirmed their
         // recording directory until they click Continue in the setup window.
         // Folder TCC is verified in SetupView.verifyFolderAccess() on Continue.
-        if permissionManager.allRequiredGranted && modelReady {
+        switch CaptureReadiness.launchDecision(
+            onboardingCompleted: onboarded,
+            missing: permissionManager.missingRequired,
+            modelReady: modelReady
+        ) {
+        case .ready:
+            Self.markOnboarded()
             permissionsReady = true
-        } else {
+        case .readyNeedsRepair:
+            Self.markOnboarded()
+            permissionsReady = true
+            await PermissionRepairWindowController.shared.verify(trigger: .launch)
+        case .onboarding:
             SetupWindowController.shared.show(
                 permissionManager: permissionManager,
                 configManager: configManager
             ) { [weak self] in
+                Self.markOnboarded()
                 self?.permissionsReady = true
             }
         }
@@ -86,8 +115,8 @@ final class ManifestHealthStore {
 @main
 struct TranscriberApp: App {
     @State private var appState = AppState()
-    @State private var launchGate = LaunchGate()
-    private let captureClient = AudioCaptureClient()
+    @State private var launchGate: LaunchGate
+    private let captureClient: AudioCaptureClient
     private let transcriptionRunner = TranscriptionRunner()
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
@@ -104,6 +133,10 @@ struct TranscriberApp: App {
     ]
 
     init() {
+        let client = AudioCaptureClient()
+        captureClient = client
+        _launchGate = State(initialValue: LaunchGate(captureClient: client))
+
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
@@ -133,8 +166,11 @@ struct TranscriberApp: App {
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
 
+        PermissionRepairWindowController.shared.configure(
+            permissionManager: launchGate.permissionManager, captureClient: client, appState: appState
+        )
+
         // Crash recovery: check sentinel before anything else
-        let client = captureClient
         let state = appState
         let runner = transcriptionRunner
         Task { @MainActor in
@@ -443,7 +479,7 @@ struct TranscriberApp: App {
         captureClient.onSystemAudioUnrecoverable = { _ in
             Task { @MainActor in
                 guard appState.isRecording else { return }
-                appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
+                appState.noteSystemAudioLost(message: "Remote audio couldn’t be recovered — only your microphone is recording.")
             }
         }
         // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a
@@ -452,10 +488,13 @@ struct TranscriberApp: App {
         // Also set by RecordingCoordinator.startRecording() — that site covers a normal recording
         // start, this one covers the launch-time crash-recovery re-attach paths (Flow A/B), which
         // never go through startRecording(). Keep both in sync if this wiring changes.
-        captureClient.onQualityAnomaly = { _, message in
+        captureClient.onQualityAnomaly = { kind, message in
             Task { @MainActor in
                 guard appState.isRecording else { return }
-                appState.interruptionWarning = message
+                // #220: the tap is running without its permission — put the fix in front of the user.
+                if appState.noteQualityAnomaly(kind: kind, message: message) {
+                    await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence)
+                }
             }
         }
         captureClient.onFatalFailure = { _ in
@@ -518,7 +557,7 @@ private struct SetupRequiredPanel: View {
             .padding(.horizontal, 4)
             .padding(.top, 2)
 
-            Text("Grant the required permissions to start recording.")
+            Text("Finish setup to start recording.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
@@ -529,6 +568,7 @@ private struct SetupRequiredPanel: View {
                     permissionManager: launchGate.permissionManager,
                     configManager: configManager
                 ) {
+                    LaunchGate.markOnboarded()
                     launchGate.permissionsReady = true
                 }
             }

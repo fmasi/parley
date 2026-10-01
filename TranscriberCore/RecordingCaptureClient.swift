@@ -31,6 +31,8 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     /// disk-full write failure) — surfaced WHILE the recording is still running (#193/#196).
     /// `kind` is the `CaptureEventKind` raw value; `message` is human-readable.
     var onQualityAnomaly: (@Sendable (String, String) -> Void)? { get set }
+    /// Fired when the helper gave up on the remote (system) stream mid-recording; the mic keeps going.
+    var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)? { get set }
 
     func start(
         outputDirectory: URL,

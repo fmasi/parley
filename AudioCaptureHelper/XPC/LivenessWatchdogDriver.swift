@@ -29,6 +29,9 @@ final class LivenessWatchdogDriver {
     var isUsingSystemTap = false
     /// Invoked (on `queue`) when either track opens a liveness gap.
     var onGap: ((CaptureEventKind, String) -> Void)?
+    /// Also invoked (on `queue`) when the SYSTEM track opens a gap, so the tap's permission guard can
+    /// check whether a denial is the cause (#220).
+    var onSystemGap: (() -> Void)?
 
     /// `start`/`stop` are called from at least four `AudioCaptureService` teardown
     /// paths with no shared lock, so a concurrent `stop()`+`stop()` or `start()`+`stop()` would be
@@ -78,6 +81,7 @@ final class LivenessWatchdogDriver {
                 nowNanos: now, lastArrivalNanos: lastSystemArrivalNanos(), gateOpen: gateOpen
             ) {
                 onGap?(.livenessGap, "System audio stopped delivering \(Int(seconds))s ago.")
+                onSystemGap?()
             }
         }
     }

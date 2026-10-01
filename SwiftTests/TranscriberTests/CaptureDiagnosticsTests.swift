@@ -48,6 +48,69 @@ struct CaptureDiagnosticsTests {
         #expect(d.isAnomalous == true)
     }
 
+    // MARK: - #220: System Audio Recording permission denial
+
+    /// A tap denied by TCC records 100% digital zeros that look structurally perfect. That is the
+    /// definition of compromised content, so it must count against the recording's quality.
+    @Test func permissionDenialIsQualityCompromising() {
+        #expect(CaptureEventKind.qualityCompromising.contains(.systemAudioPermissionDenied))
+        #expect(!CaptureEventKind.qualityCompromising.contains(.systemAudioPermissionRestored))
+    }
+
+    /// The 2026-09-23 incident's provenance said `system_audio_unrecovered: false` for a recording
+    /// with no remote audio at all. A denial that was never restored must set it.
+    @Test func unrestoredPermissionDenialMarksSystemAudioUnrecovered() {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStart, .info, at: 0, origin: .helper))
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        #expect(d.systemAudioUnrecovered == true)
+    }
+
+    @Test func restoredPermissionDenialDoesNotMarkSystemAudioUnrecovered() {
+        var d = CaptureDiagnostics()
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        d.record(event(.systemAudioPermissionRestored, .info, at: 2, origin: .helper))
+        #expect(d.systemAudioUnrecovered == false)
+        // The lost stretch still compromises the recording even though capture came back.
+        #expect(d.qualityAnomalyCount == 1)
+    }
+
+    @Test func denialAfterARestoreMarksSystemAudioUnrecoveredAgain() {
+        var d = CaptureDiagnostics()
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 1, origin: .helper))
+        d.record(event(.systemAudioPermissionRestored, .info, at: 2, origin: .helper))
+        d.record(event(.systemAudioPermissionDenied, .anomaly, at: 3, origin: .helper))
+        #expect(d.systemAudioUnrecovered == true)
+    }
+
+    /// The permission-independent fact (#220): how much of the tap track was exact digital zero.
+    @Test func provenanceCarriesTapTrackExactZeroSeconds() {
+        var d = CaptureDiagnostics()
+        d.record(CaptureEvent(timestamp: base, origin: .helper, kind: .captureStop, severity: .info,
+                              detail: ["system_delivered_seconds": "3000", "system_exact_zero_seconds": "2990"]))
+        // A crash-recovered recording has one captureStop per helper session: summed.
+        d.record(CaptureEvent(timestamp: base.addingTimeInterval(1), origin: .helper, kind: .captureStop, severity: .info,
+                              detail: ["system_delivered_seconds": "100", "system_exact_zero_seconds": "10"]))
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.systemDeliveredSeconds == 3100)
+        #expect(p.systemExactZeroSeconds == 3000)
+        #expect(p.asMetadataDictionary()["system_exact_zero_seconds"] as? Int == 3000)
+    }
+
+    @Test func provenanceOmitsTapTrackFactsWithoutTheTap() {
+        var d = CaptureDiagnostics()
+        d.record(event(.captureStop, .info, at: 0, origin: .helper))
+        let p = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.systemExactZeroSeconds == nil)
+        #expect(p.asMetadataDictionary()["system_exact_zero_seconds"] == nil)
+    }
+
+    @Test func oldProvenanceWithoutTapFactsStillDecodes() throws {
+        let json = #"{"engine":"e","route_changes":0,"retries":0,"recovered":false,"anomaly_count":0}"#
+        let p = try JSONDecoder().decode(CaptureProvenance.self, from: Data(json.utf8))
+        #expect(p.systemExactZeroSeconds == nil)
+    }
+
     @Test func countersReflectKinds() {
         // Mirrors real severities: restartInPlace/retry/launchRecovery are warnings; the route
         // disruption itself (streamStopError) is the anomaly. routeChangeCount counts the handled

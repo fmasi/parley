@@ -38,6 +38,9 @@ final class SystemTapSession {
     /// Invoked if the tap cannot be (re)built — e.g. the System Audio Recording TCC grant is missing,
     /// or an output-switch rebuild fails. The caller decides how to surface it.
     var onUnavailable: ((String) -> Void)?
+    /// Invoked on the config queue after every successful build or rebuild, so the caller can check the
+    /// System Audio Recording permission the new aggregate started with (#220).
+    var onBuilt: (() -> Void)?
 
     /// Converts each tap buffer (float32 @ output rate, stereo) → 48 kHz mono Int16. Reused across
     /// IOProc invocations; only ever touched on `deliveryQueue` (serial), so no lock needed.
@@ -355,6 +358,7 @@ final class SystemTapSession {
             "channels": "\(asbd.mChannelsPerFrame)",
             "normalized": "48000Hz/1ch",
         ])
+        onBuilt?()
     }
 
     /// The `AudioStreamBasicDescription` the aggregate device's input stream will actually deliver to
@@ -629,9 +633,16 @@ final class SystemTapSession {
         monitorQueue.asyncAfter(deadline: .now() + 0.2, execute: item)
     }
 
+    /// Rebuild the aggregate + IOProc in place, keeping the same recording. Used when the System Audio
+    /// Recording permission is granted mid-recording (#220): TCC decides access when the aggregate
+    /// starts, so a tap started while denied keeps delivering zeros until it is rebuilt.
+    func rebuild(reason: String) {
+        rebuildForOutputChange(reason: reason)
+    }
+
     /// Rebuild the aggregate + IOProc around the new default output, keeping the same global tap. Runs
     /// the actual rebuild on `configQueue` (serialized against stop and other rebuilds).
-    private func rebuildForOutputChange() {
+    private func rebuildForOutputChange(reason: String = "output device changed") {
         if stateLock.sync(execute: { isStopping }) { return }
         configQueue.async { [weak self] in
             guard let self else { return }
@@ -639,12 +650,12 @@ final class SystemTapSession {
             self.teardownIO()
             do {
                 try self.buildAggregateAndStart()
-                Logger.audio.info("System tap rebuilt around new default output")
-                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": "output device changed"])
+                Logger.audio.info("System tap rebuilt (\(reason, privacy: .public))")
+                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": reason])
             } catch {
-                Logger.audio.error("System tap rebuild after output change failed: \(error, privacy: .public)")
-                self.onEvent?(.restartFailed, .anomaly, ["source": "system-tap", "reason": "output rebuild failed", "error": "\(error)"])
-                self.onUnavailable?("System audio tap could not follow the output device change")
+                Logger.audio.error("System tap rebuild (\(reason, privacy: .public)) failed: \(error, privacy: .public)")
+                self.onEvent?(.restartFailed, .anomaly, ["source": "system-tap", "reason": "rebuild failed: \(reason)", "error": "\(error)"])
+                self.onUnavailable?("System audio tap could not be rebuilt (\(reason))")
             }
         }
     }

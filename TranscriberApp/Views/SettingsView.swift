@@ -274,7 +274,7 @@ struct SettingsView: View {
                 Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
             }
             if config.systemAudioSource == .coreAudioTap {
-                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Needs System Audio Recording permission — Parley asks for it when you save. Applies to the next recording.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -424,12 +424,15 @@ struct SettingsView: View {
                 pane: .microphone,
                 onGrant: { Task { await permissionManager.requestMicrophone() } }
             )
+            // The system-audio permission that matters depends on the capture method (#220).
+            let systemAudio: CapturePermission = permissionManager.systemAudioSource == .coreAudioTap
+                ? .systemAudioRecording : .screenRecording
             PermissionSettingsRow(
-                name: "Screen Recording",
-                detail: "Capture system audio from meeting apps",
-                status: permissionManager.screenRecording,
-                pane: .screenRecording,
-                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                name: systemAudio.displayName,
+                detail: systemAudio.detail,
+                status: permissionManager.status(of: systemAudio),
+                pane: systemAudio.pane,
+                onGrant: { Task { await grantPermission(systemAudio, using: permissionManager) } }
             )
         }
         Section("Optional") {
@@ -533,7 +536,14 @@ struct SettingsView: View {
             }
         }
         config.lastMicrophoneDeviceId = settingsMicId
+        let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }
+        permissionManager.systemAudioSource = config.systemAudioSource
+        if sourceChanged {
+            // A new capture method can need a permission the old one didn't (the tap needs System
+            // Audio Recording). Ask now, not at the next meeting (#220).
+            Task { await PermissionRepairWindowController.shared.verify(trigger: .settingsChange) }
+        }
         // Don't claim "Saved" for a summary config that was just dropped on
         // the floor: the toggle would silently be off again on next open.
         saveStatus = summaryEndpointMissing
