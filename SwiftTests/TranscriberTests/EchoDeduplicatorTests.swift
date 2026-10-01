@@ -136,7 +136,7 @@ struct EchoDeduplicatorTests {
 
     // MARK: - Deduplication
 
-    @Test func removesEchoWhenAllThreeSignalsMatch() {
+    @Test func flagsEchoWhenTimeAndTextMatch() {
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
             LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),

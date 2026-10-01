@@ -33,9 +33,17 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
-| Temporal overlap threshold | `echo_temporal_threshold` | `0.5` | Minimum fraction of temporal overlap (0–1) between a local mic segment and a remote segment to consider them candidates for deduplication. Computed as `overlap / shorter_segment`. |
-| Text similarity threshold | `echo_text_threshold` | `0.7` | Minimum Jaccard word-level similarity (0–1) between local and remote text to confirm an echo. Also used as the containment threshold (fraction of local words appearing in remote text) as a fallback for short excerpts. |
-| Embedding cosine threshold | `echo_embedding_threshold` | `0.8` | Minimum cosine similarity (0–1) between local and remote speaker embeddings to confirm the local speaker is the same person as the remote speaker. This gate runs first; segments with no embedding skip dedup entirely. |
+| Temporal overlap threshold | `echo_temporal_threshold` | `0.5` | A local mic segment and a remote segment are compared only when they overlap in time by more than this fraction (0–1) of the shorter one (`overlap / shorter_segment`). Remote segments of every remote speaker are candidates. |
+| Text similarity threshold | `echo_text_threshold` | `0.7` | A local segment MATCHES a remote one when their word-level Jaccard similarity (0–1) is above this. Also the containment threshold (fraction of the local words found in the remote text, for a short excerpt of a long remote segment) and the threshold for the Jaccard against all the overlapping remote segments joined. |
+| Embedding cosine threshold (**deprecated, ignored**) | `echo_embedding_threshold` | — | Still read and written back, so an existing config file keeps working; it no longer changes anything (#242). The voice similarity is recorded as evidence (`metadata.echo_clusters[].embedding_similarity`) and decides nothing. The key will be removed in a later release. |
+
+The cluster rule has three constants. They are **not** config keys (`EchoDeduplicator`):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `clusterShareThreshold` | `0.5` | A local cluster (one diarized speaker label on the mic side, per chunk) is echo when at least this share of its duration is in matched segments. |
+| `clusterMinimumSeconds` | `30` | A cluster with less speech than this is not judged as a cluster. |
+| `minimumWordsOutsideEchoCluster` | `3` | Outside an echo cluster, a matched segment is flagged only when it has this many words or more (whitespace-separated words holding a letter or digit). In an echo cluster every matched segment is flagged, whatever its length. |
 
 ---
 
