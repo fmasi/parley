@@ -8,7 +8,7 @@ enum RecoveryFixtures {
                 audioPath: "\(sessionId)-\(i).m4a",
                 segments: [.init(start: 0, end: 5, text: "chunk \(i)", speaker: "Speaker 1", source: "remote", qualityScore: 1)],
                 speakerDatabase: ["Speaker 1": [Float(i), 0, 0]], localSpeakerDatabase: [:],
-                echoSegmentsRemoved: 0, isDualStream: false)
+                echoSegmentsFlagged: 0, isDualStream: false)
         }
         let state = SessionState(sessionId: sessionId, meetingStart: meetingStart, engine: "fluidAudio",
                                  chunkDurationMinutes: 1, chunks: chunks)

@@ -304,16 +304,16 @@ struct MeetingSummarizerTests {
     @Test func summaryMetadataDefaultDualStreamFields() {
         let meta = SummaryMetadata(sessionName: "test", date: Date(), durationSeconds: 60, speakers: ["A"])
         #expect(meta.dualStream == false)
-        #expect(meta.echoSegmentsRemoved == 0)
+        #expect(meta.echoSegmentsFlagged == 0)
     }
 
     @Test func summaryMetadataRecordsDualStreamFields() {
         let meta = SummaryMetadata(
             sessionName: "test", date: Date(), durationSeconds: 120, speakers: ["A", "B"],
-            dualStream: true, echoSegmentsRemoved: 5
+            dualStream: true, echoSegmentsFlagged: 5
         )
         #expect(meta.dualStream == true)
-        #expect(meta.echoSegmentsRemoved == 5)
+        #expect(meta.echoSegmentsFlagged == 5)
     }
 
     @Test func summarizePopulatesDualStreamFromJSON() async throws {
@@ -346,7 +346,7 @@ struct MeetingSummarizerTests {
         try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         #expect(capturedMeta?.dualStream == true)
-        #expect(capturedMeta?.echoSegmentsRemoved == 7)
+        #expect(capturedMeta?.echoSegmentsFlagged == 7)
         #expect(capturedSegs[0].source == "local")
         #expect(capturedSegs[1].source == "remote")
     }
