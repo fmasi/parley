@@ -256,8 +256,143 @@ struct SpeakerCountEnforcerBoundaryTests {
             ],
             speakerDatabase: ["S1": [1, 0], "S2": [0, 1]])
         let out = SpeakerCountEnforcer.enforce(input, to: 2)
-        // Pins the `>` in `speech.count > speakerCount`: a future `>=` would start merging here.
+        // Pins the `>` in `live.count > speakerCount`: a future `>=` would start merging here.
         #expect(Set(out.segments.map { $0.speaker }) == ["S1", "S2"])
         #expect(out.segments.count == input.segments.count)
+    }
+}
+
+// MARK: - Clusters kept out of the merge (#243)
+
+/// A cluster judged to be echo — the other side's voice through the speakers — is not one of the
+/// people the user counted. Folding it into "the one speaker on this side" put about 2,400 of the
+/// other participant's words under the user's name on a real call. `keeping` holds such clusters
+/// out: never the cluster that is merged away, never the one merged into, never counted.
+@Suite("SpeakerCountEnforcer: kept clusters")
+struct SpeakerCountEnforcerKeepingTests {
+
+    private func embedding(_ degrees: Double) -> [Float] {
+        let r = degrees * .pi / 180
+        return [Float(Foundation.cos(r)), Float(Foundation.sin(r))]
+    }
+
+    /// S1 holds the most speech and each later cluster less; embeddings fan out by 20 degrees.
+    private func clusters(_ n: Int) -> DiarizationResult {
+        var segments: [DiarizedSegment] = []
+        var database: [String: [Float]] = [:]
+        var cursor = 0.0
+        for i in 1...n {
+            let length = Double(100 / i)
+            // Two turns per cluster, so "every turn of the cluster kept its label" is not trivially true.
+            segments.append(DiarizedSegment(start: cursor, end: cursor + length / 2, speaker: "S\(i)"))
+            segments.append(DiarizedSegment(start: cursor + length / 2, end: cursor + length, speaker: "S\(i)"))
+            database["S\(i)"] = embedding(Double(i) * 20)
+            cursor += length
+        }
+        return DiarizationResult(segments: segments, speakerDatabase: database)
+    }
+
+    private func labels(_ result: DiarizationResult) -> [String] { result.segments.map(\.speaker) }
+
+    @Test("a kept cluster is never merged away and never merged into",
+          arguments: [2, 3, 4], [1, 2])
+    func keptClusterIsNeitherVictimNorTarget(rawClusters: Int, stated: Int) {
+        let input = clusters(rawClusters)
+        // Each cluster in turn: the smallest is the natural victim, the largest the natural target.
+        for kept in 1...rawClusters {
+            let keep = "S\(kept)"
+            let out = SpeakerCountEnforcer.enforce(input, to: stated, keeping: [keep])
+            for (before, after) in zip(input.segments, out.segments) {
+                // Not a victim: its own turns keep its label. Not a target: nobody else's turn takes it.
+                #expect((before.speaker == keep) == (after.speaker == keep), "S\(kept) kept, \(rawClusters) → \(stated)")
+            }
+            #expect(out.speakerDatabase[keep] == input.speakerDatabase[keep])
+            // It does not count toward the stated number: the OTHER clusters are merged down to it.
+            let others = Set(labels(out)).subtracting([keep])
+            #expect(others.count == min(stated, rawClusters - 1), "S\(kept) kept, \(rawClusters) → \(stated)")
+            #expect(out.segments.count == input.segments.count)
+        }
+    }
+
+    @Test("the victim goes to the nearest cluster that is not kept")
+    func nearestKeptClusterIsSkipped() {
+        // S3 (10 s) is 5 degrees from S2 and 85 from S1: unguarded it joins S2. S2 is kept.
+        let input = DiarizationResult(
+            segments: [DiarizedSegment(start: 0, end: 100, speaker: "S1"),
+                       DiarizedSegment(start: 100, end: 150, speaker: "S2"),
+                       DiarizedSegment(start: 150, end: 160, speaker: "S3")],
+            speakerDatabase: ["S1": embedding(0), "S2": embedding(80), "S3": embedding(85)])
+        #expect(labels(SpeakerCountEnforcer.enforce(input, to: 2)) == ["S1", "S2", "S2"])
+        #expect(labels(SpeakerCountEnforcer.enforce(input, to: 1, keeping: ["S2"])) == ["S1", "S2", "S1"])
+    }
+
+    @Test("without embeddings the victim goes to the dominant cluster that is not kept")
+    func dominantKeptClusterIsSkipped() {
+        let input = DiarizationResult(
+            segments: [DiarizedSegment(start: 0, end: 100, speaker: "S1"),
+                       DiarizedSegment(start: 100, end: 150, speaker: "S2"),
+                       DiarizedSegment(start: 150, end: 160, speaker: "S3")],
+            speakerDatabase: [:])
+        #expect(labels(SpeakerCountEnforcer.enforce(input, to: 1, keeping: ["S1"])) == ["S1", "S2", "S2"])
+    }
+
+    @Test("when every cluster is kept nothing is merged")
+    func everyClusterKept() {
+        let input = clusters(3)
+        let out = SpeakerCountEnforcer.enforce(input, to: 1, keeping: ["S1", "S2", "S3"])
+        #expect(labels(out) == labels(input))
+        #expect(out.speakerDatabase.count == 3)
+    }
+
+    @Test("an empty keeping set, or one naming no cluster, is the two-argument call",
+          arguments: [2, 3, 4], [1, 2, 3])
+    func emptyKeepingChangesNothing(rawClusters: Int, stated: Int) {
+        let input = clusters(rawClusters)
+        let plain = SpeakerCountEnforcer.enforce(input, to: stated)
+        for keeping: Set<String> in [[], ["no such cluster"]] {
+            let out = SpeakerCountEnforcer.enforce(input, to: stated, keeping: keeping)
+            #expect(labels(out) == labels(plain))
+            #expect(out.speakerDatabase.keys.sorted() == plain.speakerDatabase.keys.sorted())
+        }
+    }
+}
+
+@Suite("SpeakerCountEnforcer.foldUnattributed: kept labels")
+struct SpeakerCountEnforcerFoldKeepingTests {
+
+    private func seg(_ speaker: String, _ start: Double) -> LabeledSegment {
+        LabeledSegment(start: start, end: start + 1, speaker: speaker, text: "x", source: "local")
+    }
+    private let unknown = SpeakerAssignment.unknownSpeaker
+
+    @Test("unattributed speech joins the stated speaker, not a kept label that comes first")
+    func foldsIntoTheStatedSpeaker() {
+        let input = [seg("Speaker 1", 0), seg(unknown, 2), seg("Speaker 2", 4)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1, keeping: ["Speaker 1"])
+        #expect(out.map(\.speaker) == ["Speaker 1", "Speaker 2", "Speaker 2"])
+    }
+
+    @Test("when the only attributed label is kept, unattributed speech stays unattributed")
+    func noStatedSpeakerMeansNoFold() {
+        // Naming it "Speaker 1" would put it under the kept (echo) label; inventing a fresh label
+        // would assert a person nobody identified.
+        let input = [seg("Speaker 1", 0), seg(unknown, 2)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1, keeping: ["Speaker 1"])
+        #expect(out.map(\.speaker) == ["Speaker 1", unknown])
+    }
+
+    @Test("when the unattributed speech is itself kept, it is not folded")
+    func keptUnknownIsNotFolded() {
+        let input = [seg("Speaker 1", 0), seg(unknown, 2)]
+        let out = SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1, keeping: [unknown])
+        #expect(out.map(\.speaker) == ["Speaker 1", unknown])
+    }
+
+    @Test("an empty keeping set is the two-argument call")
+    func emptyKeepingChangesNothing() {
+        for input in [[seg("Speaker 1", 0), seg(unknown, 2)], [seg(unknown, 0), seg(unknown, 2)]] {
+            #expect(SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1, keeping: []).map(\.speaker)
+                    == SpeakerCountEnforcer.foldUnattributed(input, statedCount: 1).map(\.speaker))
+        }
     }
 }

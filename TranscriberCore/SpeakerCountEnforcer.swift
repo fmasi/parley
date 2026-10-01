@@ -39,7 +39,13 @@ public enum SpeakerCountEnforcer {
     ///   - speakerCount: the number of speakers the user stated. `<= 0` is a no-op — the caller
     ///     already refuses it, and returning an empty or arbitrary labeling here would turn a bad
     ///     argument into a rewritten transcript.
-    public static func enforce(_ result: DiarizationResult, to speakerCount: Int) -> DiarizationResult {
+    ///   - keeping: clusters (the diarizer's own IDs) that are not one of the people the user
+    ///     counted — the other side's voice through the speakers, as judged by the echo check
+    ///     (#243). A kept cluster is never merged away, never merged into, and does not count
+    ///     toward `speakerCount`: the count is enforced on the others. Folding one into "the one
+    ///     speaker on this side" put about 2,400 of the other participant's words under the user's
+    ///     name on a real call. An ID that names no cluster is ignored.
+    public static func enforce(_ result: DiarizationResult, to speakerCount: Int, keeping: Set<String> = []) -> DiarizationResult {
         guard speakerCount > 0, !result.segments.isEmpty else { return result }
 
         // First-appearance order is carried alongside the durations so that ties resolve the same
@@ -51,11 +57,13 @@ public enum SpeakerCountEnforcer {
             if speech[s.speaker] == nil { order.append(s.speaker) }
             speech[s.speaker, default: 0] += max(0, s.end - s.start)
         }
-        guard speech.count > speakerCount else { return result }
+        // The clusters the count applies to. A kept cluster is in neither `live` nor, therefore,
+        // the candidates a victim can join.
+        var live = order.filter { !keeping.contains($0) }
+        guard live.count > speakerCount else { return result }
 
         let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
         var embeddings = result.speakerDatabase
-        var live = order
         // Original label -> the label it currently resolves to. Rewriting the whole map on each
         // merge (rather than recording victim -> target once) keeps chains correct: when a cluster
         // that has already absorbed another is itself absorbed, both move together.
@@ -116,9 +124,15 @@ public enum SpeakerCountEnforcer {
     /// Only safe at a stated count of 1, where the attribution is unambiguous: if one person is on
     /// this channel, every word on it is theirs. At 2+ we genuinely cannot say which of them spoke,
     /// and inventing an answer is the silent-wrong-answer failure this product exists to avoid.
-    public static func foldUnattributed(_ labeled: [LabeledSegment], statedCount: Int) -> [LabeledSegment] {
-        guard statedCount == 1 else { return labeled }
-        let named = labeled.map(\.speaker).filter { $0 != SpeakerAssignment.unknownSpeaker }
+    ///
+    /// - Parameter keeping: labels that are not the stated speaker — the clusters `enforce` kept
+    ///   out of the merge (#243). Unattributed speech never joins one. When the unattributed speech
+    ///   is itself kept (it was judged echo as a group), or a kept label is the only attributed one,
+    ///   nothing is folded: with the other side's voice on the channel and nobody else identified,
+    ///   "every word here is the one speaker's" no longer holds.
+    public static func foldUnattributed(_ labeled: [LabeledSegment], statedCount: Int, keeping: Set<String> = []) -> [LabeledSegment] {
+        guard statedCount == 1, !keeping.contains(SpeakerAssignment.unknownSpeaker) else { return labeled }
+        let named = labeled.map(\.speaker).filter { $0 != SpeakerAssignment.unknownSpeaker && !keeping.contains($0) }
         // No attributed speaker at all: name the channel's single speaker rather than leaving every
         // segment under a label that reads as a failure.
         // "Speaker 1" is load-bearing, not arbitrary: `tagWithSourcePrefix` turns it into
@@ -126,11 +140,11 @@ public enum SpeakerCountEnforcer {
         // `speaker_names` expect. A different string here would render as a speaker the rest of the
         // pipeline does not recognise.
         // `first`, not the most dominant: this runs only after `enforce(to: 1)`, which leaves at
-        // most one attributed label, so first IS the only one. If a caller ever folds at a stated
-        // count of 1 over an array that still holds two attributed speakers, document order would
-        // decide which one absorbs the unattributed speech — arbitrary, and worth a dominance test
-        // at that point rather than now, where it cannot arise.
-        let target = named.first ?? "Speaker 1"
+        // most one attributed label that is not kept, so first IS the only one. If a caller ever
+        // folds at a stated count of 1 over an array that still holds two such speakers, document
+        // order would decide which one absorbs the unattributed speech — arbitrary, and worth a
+        // dominance test at that point rather than now, where it cannot arise.
+        guard let target = named.first ?? (keeping.isEmpty ? "Speaker 1" : nil) else { return labeled }
         guard labeled.contains(where: { $0.speaker == SpeakerAssignment.unknownSpeaker }) else { return labeled }
         var out = labeled
         for i in out.indices where out[i].speaker == SpeakerAssignment.unknownSpeaker {
