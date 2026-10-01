@@ -555,6 +555,40 @@ get** — run them all.
 - [ ] **No warning when there is nothing to lose.** On a channel with no names at all, Re-detect
       must run straight away with no alert.
 
+## Re-detect keeps the echo voice apart (#243) — added 2026-10-01
+
+Needs the echo cluster detection above (#242). The remote audio is a public podcast or video with
+clear speech, never a real third party. `echo_meta` is the helper defined under "Echo cluster
+detection".
+
+- [ ] **R-01 A count of 1 does not hand the echo voice to you.**
+  - Do: output = the laptop speakers, mic = built-in (or a webcam mic). Play 5 minutes of remote
+    speech and talk for about half of it. Stop. Open the rename dialog: "This side" shows two
+    speakers (you, and the other side's voice through the speakers). Set "This side" to **1** and
+    press Re-detect.
+  - PASS: the echo voice is still a speaker of its own, not merged into you. In the JSON
+    (`echo_meta`): `speaker_count_local` is 1; `echo_clusters` has a `local` entry with `verdict`
+    `"echo"` and no `chunk`, and its `label` is not your label; `echo_segments` equals
+    `echo_segments_flagged`; `rediarized_channels` is `["local"]`. In the TXT, none of the remote
+    lines appears under your label, and the lines of the echo voice that are shown (the ones the
+    remote transcript has no match for) are under the echo voice's label.
+  - Log line: `Re-diarized local at 1 speakers: 1 label(s) across N segments, 1 echo cluster(s), M segment(s) flagged as echo`.
+- [ ] **R-02 Nothing is lost.** Before and after R-01's Re-detect, run
+      `python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(len(d["segments"]),sum(len(s["text"]) for s in d["segments"]))' <transcript.json>`
+      (the `.json.bak` next to it is the "before"). Both numbers are the same.
+- [ ] **R-03 Re-detecting again changes nothing.** Press Re-detect at 1 once more: the same two
+      rows, the same `echo_clusters` verdict, the same `echo_segments_flagged`.
+- [ ] **R-04 Repair of an already-merged transcript.** If you have a transcript re-detected to 1
+      with an older build after a speaker-mode call (every line of the other side under your
+      name), open it and press Re-detect at 1 again.
+  - PASS: as R-01 — the other side's lines leave your label; the matched ones are marked `echo`.
+- [ ] **R-05 Headphones: a count of 1 still merges.** Record with headphones, on a channel the
+      diarizer split into two (you plus a short fragment), set 1, Re-detect: exactly one speaker,
+      `echo_clusters` entries all `"kept"`, nothing flagged.
+- [ ] **R-06 The other side is unaffected.** Re-detect "Other side" on the R-01 transcript: the
+      `local` entries of `echo_clusters` and the `echo: true` segments are as they were;
+      `rediarized_channels` is `["local", "remote"]`.
+
 ## Mic-only recordings (#183) — added 2026-09-03
 
 - [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —

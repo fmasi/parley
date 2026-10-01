@@ -250,8 +250,16 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 **Echo** (Section 4):
 - `metadata.echo_segments_flagged` — how many local segments carry `echo: true`; written only when above 0. `metadata.echo_segments_removed` is the same number under the key's old name, still written for one release (nothing is removed).
-- `metadata.echo_clusters` — why each local cluster was or was not judged to be echo, numbers and labels only, never text: `[{track, chunk?, label, segments, matched_segments, seconds, matched_seconds, words, matched_words, share, verdict, embedding_similarity?, matched_remote}]`. One entry per (chunk, local cluster); `chunk` is absent when the dedup ran over the whole file (the single-file / CLI path). `label` and the keys of `matched_remote` (`{remote label: seconds}`) are in the transcript's global speaker namespace — the labels its segments carry at finalize; a later rename does not rewrite them. Only unflagged local segments are counted. `share` = `matched_seconds / seconds`; `verdict` is `"echo"` or `"kept"`; `embedding_similarity` is the cluster's best voice similarity to any remote speaker, evidence only, absent when there is no embedding. Written for every dual-stream transcript (`[]` when there was no local speech); absent when no mic stream was captured.
+- `metadata.echo_clusters` — why each local cluster was or was not judged to be echo, numbers and labels only, never text: `[{track, chunk?, label, segments, matched_segments, seconds, matched_seconds, words, matched_words, share, verdict, embedding_similarity?, matched_remote}]`. One entry per (chunk, local cluster); `chunk` is absent when the dedup ran over the whole file (the single-file / CLI path). `label` and the keys of `matched_remote` (`{remote label: seconds}`) are in the transcript's global speaker namespace — the labels its segments carry at finalize; a later rename does not rewrite them. Only unflagged local segments are counted. `share` = `matched_seconds / seconds`; `verdict` is `"echo"` or `"kept"`; `embedding_similarity` is the cluster's best voice similarity to any remote speaker, evidence only, absent when there is no embedding. Written for every dual-stream transcript (`[]` when there was no local speech); absent when no mic stream was captured. A re-detect of the mic channel replaces the `local` entries with its own — see "Re-detect" below.
 - `processing_issues` codes `echo_flagged` (`count` = segments) and `echo_cluster` (`count` = local clusters judged echo in that chunk), both informational.
+
+**Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
+- `metadata.speaker_count_local` / `metadata.speaker_count_remote` — how many PEOPLE the channel ended up with: its labels that are neither `Unknown` nor an echo cluster, counted over unflagged lines. Can be 0 (a mic channel that holds only the other side's voice). Absent on a transcript that was never re-detected.
+- `metadata.rediarized_channels` — the channels a re-detect has rewritten (`"local"` / `"remote"`), each once, in the order they were first re-detected. Absent on a transcript that never was. A channel listed here no longer carries the labels the pipeline wrote.
+- `metadata.echo_clusters`, after a re-detect of the mic channel: the track's entries are that pass's. No `chunk` (it runs over the whole channel); one entry per RAW cluster the diarizer returned, under the label its lines now carry, so clusters the stated count merged share a label (an echo cluster is never merged, so an `"echo"` entry's label is its own); the unattributed lines are judged as a group and appear as `Local Unknown`, or under the stated speaker's label when a count of 1 folded them in. Lines already flagged `echo` are counted as well as the unflagged ones. No `embedding_similarity`: the transcript holds no embedding for the other channel.
+- `processing_issues`, after a re-detect of the mic channel: the track's `echo_flagged` / `echo_cluster` entries are replaced by one of each for the whole channel (no `chunk`), when there is something to report. A transcript with no `processing_issues` key (the CLI path) gets none.
+- `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
+- `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable.
 
 **Merged audio and timeline**:
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
@@ -316,6 +324,30 @@ The three numbers (0.5, 30 s, 3 words) are constants, not config keys.
 - The dedup runs per chunk, before cross-chunk reconciliation: a cluster is judged within its chunk, and there is no second pass at finalize.
 - Minority absorption runs before it, so a bleed cluster under 5% of a chunk is absorbed into the user's cluster and never judged as a cluster; only the per-segment rule (3 words or more) sees it.
 - The text gates and the 3-word rule count whitespace-separated words, so they do little for a language written without spaces.
+
+### Re-detect at a stated speaker count
+
+The rename dialog lets the user state how many people were on a channel and re-detect it (`TranscriptRediarizer.rediarize`). It diarizes the channel's audio again, relabels the transcript's segments and never re-runs ASR: the number of segments and every text stay what they were.
+
+A stated count is about people. With the far side on loudspeakers the diarizer finds its voice as a cluster of its own on the mic channel, and "one speaker on this side" used to merge that cluster into the user: on a real call about 2,400 of the other participant's words took the user's name (#243). So on the mic channel the echo check runs **before** the count is enforced:
+
+1. The channel's segments are labelled with the diarizer's RAW clusters. With no word timings at re-detect this is one segment in, one out.
+2. `EchoDeduplicator.deduplicate` judges those clusters against the other channel's unflagged segments — the same rule as at transcription (above), with the default thresholds.
+3. `SpeakerCountEnforcer.enforce(_:to:keeping:)` enforces the count on the other clusters. A cluster judged echo is never merged away, never merged into and not counted.
+4. The segments are labelled with the result:
+   - a line of an echo cluster carries that cluster's own label; its matched lines are flagged `echo`, its unmatched lines are not. Nothing of it is given to the stated speaker, and at a count of 1 unattributed speech is never folded into it;
+   - in any other cluster a matched line of 3 words or more is flagged `echo` and keeps the label it had before the re-detect (a flagged line is never relabelled to a stated speaker). A 1–2-word match is an ordinary line.
+5. The metadata is rewritten as listed under "Re-detect" in the transcript metadata above; `Outcome` reports `speakerCount` (people), `segmentsRelabeled` (unflagged lines labelled), `echoClusters` and `echoFlagged`.
+
+What follows from that:
+
+- **It never refuses.** Asking for 1 on a channel with the user and an echo voice gives one person and one echo cluster; a mic channel that is nothing but echo gives 0 people.
+- **Lines already flagged `echo` count as evidence.** The pipeline flags an echo cluster's matched lines when it transcribes; judged on the unmatched rest alone, that cluster would look like a person and be merged. They keep their flag (a re-detect never removes one) and take the cluster's new label, since speaker numbers are positional and the old one may now be somebody else's. A line flagged `filtered` or `duplicate` is neither evidence nor touched.
+- **It repairs a transcript that was merged this way.** Re-detecting it again finds the echo voice in the raw clusters and takes it back out.
+- **Speech the diarizer gave no turn to is judged as a group** (`Local Unknown`). When that group is echo, a count of 1 does not fold its unmatched lines into the user.
+- **One blended cluster** (the diarizer honoured the count): there is nothing to keep out; only the per-segment rule applies.
+- **The other channel is not checked.** The deduplicator judges mic clusters against system audio and has no answer to the reverse, so re-detecting the remote channel does what it always did. One consequence: the keys of `echo_clusters[].matched_remote` are the remote labels at the time of the check, and a later re-detect of the remote channel does not rewrite them.
+- **If the raw labelling is ever not one-to-one** the check is skipped (logged as an error) and the re-detect is the unguarded one: a relabel must never lose or misplace words.
 
 ### Windowed Comparison and Containment Fallback
 
