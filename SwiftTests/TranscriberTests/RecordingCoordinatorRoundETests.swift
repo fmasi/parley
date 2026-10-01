@@ -703,24 +703,55 @@ import Testing
         try? FileManager.default.removeItem(at: h.tmp)
     }
 
-    /// A recovery-file queue whose operation named `label` hangs for up to a second, once.
-    private func hanging(_ label: String) -> (io: SentinelIO, gate: DispatchSemaphore, reached: Harness.Box<Bool>) {
-        let gate = DispatchSemaphore(value: 0), reached = Harness.Box(false)
-        let io = SentinelIO(label: "rc-e-sentinel-\(UUID().uuidString)", beforeEach: { name in
-            guard name == label, !reached.value else { return }
-            reached.value = true
-            _ = gate.wait(timeout: .now() + 1)   // the watchdog
-        })
-        return (io, gate, reached)
+    /// A recovery-file operation hung on its queue until the test releases it. Its watchdog is reached only by a test that
+    /// is already failing — a main actor blocked on the operation never gets to release it — so a regression fails
+    /// instead of wedging the run.
+    private final class Hang: @unchecked Sendable {
+        private let lock = NSLock(), gate = DispatchSemaphore(value: 0)
+        private var began = false, ended = false, onMain = false
+        var reached: Bool { lock.withLock { began } }
+        /// On the queue, hung: begun, and neither released nor let go by the watchdog.
+        var isHanging: Bool { lock.withLock { began && !ended } }
+        /// The operation ran on the main thread: the main actor made the I/O itself.
+        var ranOnMainThread: Bool { lock.withLock { onMain } }
+        func hang() {
+            let main = Thread.isMainThread
+            guard lock.withLock({ () -> Bool in
+                guard !began else { return false }
+                began = true; onMain = main
+                return true
+            }) else { return }
+            // On the main thread it is never hung: the test fails at once (`ranOnMainThread`), not after the watchdog.
+            if !main { _ = gate.wait(timeout: .now() + 20) }   // the watchdog
+            lock.withLock { ended = true }
+        }
+        func release() { gate.signal() }
     }
 
-    /// A main-actor ticker: ten 10 ms sleeps, and how long they took.
-    private func ticker() -> Task<Duration, Never> {
-        Task { @MainActor in
-            let began = ContinuousClock.now
-            for _ in 0..<10 { try? await Task.sleep(for: .milliseconds(10)) }
-            return ContinuousClock.now - began
-        }
+    /// The harness's recovery-file queue becomes one whose operation named `label` hangs, once, until released. The
+    /// coordinator's own bound on the recovery file is raised past the watchdog (a start's write has the start's deadline,
+    /// past it already), so nothing but the test's release ends the operation — or its caller's wait for it — in a run
+    /// that passes.
+    private func hanging(_ label: String, in h: Harness) -> (io: SentinelIO, hang: Hang) {
+        let hang = Hang()
+        let io = SentinelIO(label: "rc-e-sentinel-\(UUID().uuidString)", beforeEach: { if $0 == label { hang.hang() } })
+        h.coordinator.sentinelIO = io
+        h.coordinator.sentinelDeadline = .seconds(60)
+        return (io, hang)
+    }
+
+    /// The main actor keeps running while the operation hangs — proven by ORDER, never by a stopwatch (a loaded machine
+    /// stretches every sleep): this code, on the main actor, sees the operation hung; ten more main-actor turns run; and
+    /// the operation is STILL hung — not released, its watchdog not reached. A main actor that waited for it could not
+    /// have run before it ended. Nor did it wait and give up: a bounded wait that ran out would have left the queue
+    /// stalled. Nor did it make the I/O itself.
+    private func expectTheMainActorRuns(while hang: Hang, on io: SentinelIO, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        await Harness.until(within: 20) { hang.reached }
+        try #require(hang.reached, "the operation reached the recovery file's queue", sourceLocation: sourceLocation)
+        for _ in 0..<10 { try? await Task.sleep(for: .milliseconds(10)) }
+        #expect(!hang.ranOnMainThread, "never made on the main thread", sourceLocation: sourceLocation)
+        #expect(hang.isHanging, "the UI stays responsive: the main actor ran while the operation was still hung", sourceLocation: sourceLocation)
+        #expect(!io.isStalled, "the main thread never sat out a bounded wait for it", sourceLocation: sourceLocation)
     }
 
     /// L review 217: the start's write of the recovery file runs off the main actor — a slow Application Support folder
@@ -729,14 +760,12 @@ import Testing
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
-        let (io, gate, reached) = hanging("start: write")
-        h.coordinator.sentinelIO = io
+        let (io, hang) = hanging("start: write", in: h)
+        defer { hang.release() }
         let coordinator = h.coordinator
-        let ticks = ticker()
         let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
-        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
-        #expect(reached.value)
-        gate.signal()
+        try await expectTheMainActorRuns(while: hang, on: io)
+        hang.release()
         await starting.value
         #expect(h.appState.isRecording && RecordingSentinel.read(directory: h.tmp) != nil)
     }
@@ -747,14 +776,12 @@ import Testing
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        let (io, gate, reached) = hanging("stop: read")
-        h.coordinator.sentinelIO = io
+        let (io, hang) = hanging("stop: read", in: h)
+        defer { hang.release() }
         let coordinator = h.coordinator
-        let ticks = ticker()
         let stopping = Task { await coordinator.stopRecording() }
-        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
-        #expect(reached.value)
-        gate.signal()
+        try await expectTheMainActorRuns(while: hang, on: io)
+        hang.release()
         await stopping.value
         #expect(h.appState.isIdle)
     }
@@ -765,33 +792,27 @@ import Testing
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        let (io, gate, reached) = hanging("crash: read")
-        h.coordinator.sentinelIO = io
+        let (io, hang) = hanging("crash: read", in: h)
+        defer { hang.release() }
         let coordinator = h.coordinator
-        let ticks = ticker()
         let recovering = Task { await coordinator.handleXPCCrash() }
-        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
-        #expect(reached.value)
-        gate.signal()
+        try await expectTheMainActorRuns(while: hang, on: io)
+        hang.release()
         await recovering.value
     }
 
-    /// … and every rotation's liveness write: queued, never waited for.
+    /// … and every rotation's liveness write: queued, never waited for — the rotation ends while it is still hung.
     @Test func aRotationsLivenessWriteNeverBlocksTheMainActor() async throws {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        let (io, gate, reached) = hanging("liveness")
-        h.coordinator.sentinelIO = io
+        let (io, hang) = hanging("liveness", in: h)
+        defer { hang.release() }
         let rotator = try #require(h.runner.chunkRotator)
-        let ticks = ticker()
-        let rotating = Task { await rotator.rotateForTesting() }
-        #expect(await ticks.value < .milliseconds(500), "the UI stays responsive")
-        await rotating.value
-        await Harness.until { reached.value }
-        #expect(reached.value && h.client.rotateCalls == 1)
-        gate.signal()
+        await rotator.rotateForTesting()
+        try await expectTheMainActorRuns(while: hang, on: io)
+        #expect(h.client.rotateCalls == 1)
     }
 }
 
