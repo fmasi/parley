@@ -47,8 +47,17 @@ public struct LabeledSegment: Sendable {
     public var source: String
     public var confidence: Float?
     public var language: String?
+    /// Failed the VAD/quality gate (low speech AND low diarizer quality). Kept in the JSON record,
+    /// labelled `Unknown`, and hidden from TXT/SRT/summary — never deleted (P10).
+    public var filtered = false
+    /// Local mic bleed of a remote speaker (echo dedup). Kept in the JSON record, hidden from
+    /// TXT/SRT/summary — never deleted (P11).
+    public var echo = false
+    /// A repeat that abuts the previous segment (a decoder stutter, or "No. No." split at the
+    /// punctuation). Kept in the JSON record, hidden from TXT/SRT/summary — never deleted (P2).
+    public var duplicate = false
 
-    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil, language: String? = nil) {
+    public init(start: Double, end: Double, speaker: String, text: String, source: String, confidence: Float? = nil, language: String? = nil, filtered: Bool = false, echo: Bool = false, duplicate: Bool = false) {
         self.start = start
         self.end = end
         self.speaker = speaker
@@ -56,7 +65,13 @@ public struct LabeledSegment: Sendable {
         self.source = source
         self.confidence = confidence
         self.language = language
+        self.filtered = filtered
+        self.echo = echo
+        self.duplicate = duplicate
     }
+
+    /// Hidden from every human-facing rendering (TXT, SRT, summary, rename samples).
+    public var isFlagged: Bool { filtered || echo || duplicate }
 }
 
 public enum SpeakerAssignment {
@@ -67,21 +82,49 @@ public enum SpeakerAssignment {
     /// exclude it, or it will fire on nearly every real meeting and become noise.
     public static let unknownSpeaker = "Unknown"
 
-    /// Remove zero-duration and consecutively repeated segments.
-    public static func deduplicate(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
+    /// Set aside a repeat that ABUTS the previous segment (a decoder stutter — or "No. No." split
+    /// at the punctuation, which is two spoken words). A repeat further away is a real repeated
+    /// answer and stays in `segments` (P2).
+    ///
+    /// The set-aside repeats are NOT deleted: the caller labels `segments`, then puts `duplicates`
+    /// back flagged (`reattachDuplicates`) — kept in the record, hidden from what people read.
+    /// Zero-duration segments carry no audio and are dropped, counted in `zeroLength`.
+    public static func deduplicate(_ segments: [TranscriptSegment], maxGapSeconds: Double = 0.25)
+        -> (segments: [TranscriptSegment], duplicates: [TranscriptSegment], zeroLength: Int) {
         var cleaned: [TranscriptSegment] = []
-        var lastText: String?
-
+        var duplicates: [TranscriptSegment] = []
+        var zeroLength = 0
         for seg in segments {
-            if seg.start == seg.end { continue }
-            let trimmed = seg.text.trimmingCharacters(in: .whitespaces)
-            if trimmed == lastText { continue }
-            lastText = trimmed
+            if seg.start == seg.end { zeroLength += 1; continue }
+            let trimmed = seg.text.trimmingCharacters(in: .whitespaces).lowercased()
+            if let prev = cleaned.last,
+               prev.text.trimmingCharacters(in: .whitespaces).lowercased() == trimmed,
+               seg.start <= prev.end + maxGapSeconds {
+                duplicates.append(seg)
+                continue
+            }
             cleaned.append(seg)
         }
 
-        Logger.transcription.debug("Deduplicate: \(segments.count) → \(cleaned.count) segments")
-        return cleaned
+        Logger.transcription.debug("Deduplicate: \(segments.count) → \(cleaned.count) segments (\(duplicates.count) repeats flagged, \(zeroLength) zero-length dropped)")
+        return (cleaned, duplicates, zeroLength)
+    }
+
+    /// Put the repeats `deduplicate` set aside back into a labelled stream, flagged `duplicate`,
+    /// each labelled like the segment it repeats (the latest labelled segment starting at or before
+    /// it). The result is sorted by start time.
+    public static func reattachDuplicates(_ duplicates: [TranscriptSegment], to labeled: [LabeledSegment]) -> [LabeledSegment] {
+        guard !duplicates.isEmpty else { return labeled }
+        var out = labeled
+        for dup in duplicates {
+            let repeated = labeled.last { $0.start <= dup.start && !$0.duplicate }
+            out.append(LabeledSegment(
+                start: dup.start, end: dup.end, speaker: repeated?.speaker ?? unknownSpeaker,
+                text: dup.text.trimmingCharacters(in: .whitespaces), source: repeated?.source ?? "",
+                confidence: dup.confidence, language: dup.language, duplicate: true
+            ))
+        }
+        return out.sorted { $0.start < $1.start }
     }
 
     /// The diarized speaker (raw diarizer ID) that owns a word's time span: greatest time-overlap,
@@ -475,7 +518,7 @@ public enum SpeakerAssignment {
 
                     // Midpoint tiebreaker: on equal overlap, prefer the segment containing the midpoint.
                     // Unlike dominantDiarSpeaker's tiebreaker, this one intentionally has no `overlap > 0`
-                    // guard: engines call SpeakerAssignment.deduplicate() before assign() ever runs, which
+                    // guard: transcribeStream calls SpeakerAssignment.deduplicate() before assign() ever runs, which
                     // filters zero-duration segments, and splitAcrossSpeakerBoundaries' first/last pieces
                     // are anchored to the original (already-deduplicated) segment's own bounds. A zero-
                     // duration MIDDLE piece is only reachable from a zero-duration WORD — timing neither
@@ -659,18 +702,21 @@ public enum SpeakerAssignment {
                 )
             }
 
-            if shouldInclude {
-                results.append(LabeledSegment(
-                    start: seg.start, end: seg.end, speaker: finalSpeaker,
-                    text: seg.text.trimmingCharacters(in: .whitespaces),
-                    source: "", confidence: seg.confidence, language: seg.language
-                ))
-            }
+            // A segment that fails the gate is KEPT, flagged and unattributed (P10): the words are
+            // part of the record, and the gate is a guess about noise — hiding them from the
+            // readable transcript is reversible, deleting them was not.
+            results.append(LabeledSegment(
+                start: seg.start, end: seg.end,
+                speaker: shouldInclude ? finalSpeaker : unknownSpeaker,
+                text: seg.text.trimmingCharacters(in: .whitespaces),
+                source: "", confidence: seg.confidence, language: seg.language,
+                filtered: !shouldInclude
+            ))
         }
 
-        let filtered = transcriptSegments.count - results.count
+        let filtered = results.filter(\.filtered).count
         if filtered > 0 {
-            Logger.transcription.info("VAD quality filter: \(filtered) segments filtered from \(transcriptSegments.count) total")
+            Logger.transcription.info("VAD quality filter: \(filtered) of \(transcriptSegments.count) segments flagged as filtered")
         }
 
         return results
@@ -727,7 +773,10 @@ public enum SpeakerAssignment {
             guard let target = indices.map({ segments[$0].speaker })
                 .first(where: { !$0.isEmpty && $0 != "Unknown" }) else { continue }
             var collapsed = 0
-            for i in indices where segments[i].speaker.isEmpty || segments[i].speaker == "Unknown" {
+            // A `filtered` segment stays `Unknown`: it failed the gate, so attributing it to the
+            // channel's speaker would assert an identity no evidence supports (P10).
+            for i in indices where !segments[i].filtered
+                && (segments[i].speaker.isEmpty || segments[i].speaker == "Unknown") {
                 segments[i].speaker = target
                 collapsed += 1
             }

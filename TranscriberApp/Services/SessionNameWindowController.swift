@@ -20,6 +20,10 @@ final class SessionNameWindowController {
     private var panel: NSPanel?
     /// The latest show(); an earlier one still awaiting its device scan must not open a second panel.
     private var pendingRequest: UUID?
+    /// The current `show()` until its panel is up: the device scan runs before any window exists, and a
+    /// crash-protection hand-over must not exit in that gap (L round 5).
+    private var preparingRequest: UUID?
+    var isPreparing: Bool { preparingRequest != nil }
 
     func show(
         lastMicrophoneDeviceId: String?,
@@ -30,11 +34,13 @@ final class SessionNameWindowController {
         panel = nil
         let request = UUID()
         pendingRequest = request
+        preparingRequest = request
         let suggestion = SessionNameSuggestion()
         Task {
             // Scan devices off the main thread, bounded: a wedged audio device must not freeze the app
             // (#192). Past the deadline the dialog opens with the last known list.
             let scan = await AudioDeviceCatalog.shared.refreshed(timeout: 1)
+            defer { endPreparing(request) }
             guard pendingRequest == request else { return }   // superseded by a later show()
             present(scan: scan, suggestion: suggestion, lastMicrophoneDeviceId: lastMicrophoneDeviceId, onStart: onStart)
         }
@@ -46,6 +52,13 @@ final class SessionNameWindowController {
             guard pendingRequest == request else { return }   // superseded by a later show()
             suggestion.eventTitle = title
         }
+    }
+
+    /// Only the current request's end counts; a superseded one leaves the flag to its successor.
+    private func endPreparing(_ request: UUID) {
+        guard preparingRequest == request else { return }
+        preparingRequest = nil
+        NotificationCenter.default.post(name: .parleyActivityEnded, object: nil)
     }
 
     private func present(

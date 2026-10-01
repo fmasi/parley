@@ -15,6 +15,9 @@ public enum SpeechAnalyzerError: LocalizedError {
     case languageRequired
     case localeNotSupported(String)
     case assetInstallFailed(String, String)
+    /// The locale's model is not installed, and a transcription never downloads it (L review 229): only an explicit user
+    /// action installs one.
+    case assetNotInstalled(String)
 
     public var errorDescription: String? {
         switch self {
@@ -24,8 +27,22 @@ public enum SpeechAnalyzerError: LocalizedError {
             return "SpeechAnalyzer does not support the \(locale) locale on this Mac."
         case .assetInstallFailed(let locale, let reason):
             return "SpeechAnalyzer could not install the \(locale) language model: \(reason)"
+        case .assetNotInstalled(let locale):
+            return "SpeechAnalyzer's \(locale) speech model is not installed on this Mac, and Parley never downloads one while it records or recovers"
         }
     }
+}
+
+/// The on-device speech models SpeechAnalyzer transcribes with (L review 229): which locales are installed — a look, never
+/// a download — and installing one, a NETWORK download that only an explicit user action may start (Setup, Settings), never
+/// a recording or a salvage: the airgap. Injectable, so tests fake it; production's is `SpeechAnalyzerEngine`'s own.
+public protocol SpeechAssetInventory: Sendable {
+    /// The locales whose model is installed on this Mac, BCP-47.
+    func installedLocales() async -> [String]
+    /// The locales SpeechAnalyzer supports on this Mac, BCP-47.
+    func supportedLocales() async -> [String]
+    /// Download and install `locale`'s model. Only from an explicit user action.
+    func install(locale: String) async throws
 }
 
 public enum SpeechAnalyzerLocale {
@@ -58,4 +75,16 @@ public enum SpeechAnalyzerLocale {
         }
         return defaultRegion[normalized.lowercased()] ?? normalized
     }
+}
+
+extension SpeechAnalyzerLocale {
+    /// Whether `language`'s model is among `locales` (BCP-47), matched as the resolved locale (L review 229). No language is
+    /// never ready: SpeechAnalyzer cannot detect one.
+    public static func isAmong(_ language: String?, _ locales: [String]) -> Bool {
+        guard let language, !language.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        let wanted = bcp47(resolve(language))
+        return locales.contains { bcp47($0) == wanted }
+    }
+
+    static func bcp47(_ identifier: String) -> String { Locale(identifier: identifier).identifier(.bcp47) }
 }

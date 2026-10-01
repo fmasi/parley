@@ -40,6 +40,10 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
     private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+        try await summarizeDetailed(segments: segments, metadata: metadata).markdown
+    }
+
+    public func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
         // Calibrate on first encounter with this model
         await calibrateIfNeeded()
 
@@ -79,7 +83,6 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
-
         if let stats {
             Logger.transcription.info(
                 "LM Studio summary stats — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
@@ -90,18 +93,13 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
             )
-            if Self.isLikelyTruncated(contextLength: resolvedContextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens) {
-                Logger.transcription.warning(
-                    "Summary may be truncated — output used \(stats.outputTokens)/\(resolvedContextLength - stats.inputTokens) available tokens. Consider increasing context window."
-                )
-            }
         }
 
-        return content
+        return Self.detailedResponse(content: content, stats: stats, contextLength: resolvedContextLength)
     }
 
     /// Single retry with recalibrated context — no further retries to avoid loops.
-    private func retryRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+    private func retryRequest(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
         let (request, inputChars, resolvedContextLength) = try await buildRequest(segments: segments, metadata: metadata)
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -119,7 +117,6 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let (content, stats) = try Self.parseResponse(data)
-
         if let stats {
             Logger.transcription.info(
                 "LM Studio summary stats (retry) — input: \(stats.inputTokens) tokens, output: \(stats.outputTokens) tokens"
@@ -129,15 +126,22 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
                 inputChars: inputChars,
                 actualInputTokens: stats.inputTokens
             )
-            let availableOutput = resolvedContextLength - stats.inputTokens
-            if availableOutput > 0 && stats.outputTokens >= availableOutput - 5 {
-                Logger.transcription.warning(
-                    "Summary may be truncated (retry) — output used \(stats.outputTokens)/\(availableOutput) available tokens."
-                )
-            }
         }
 
-        return content
+        return Self.detailedResponse(content: content, stats: stats, contextLength: resolvedContextLength)
+    }
+
+    /// The summary plus `truncated` (P14): the output filled the space the context left for it.
+    /// Shared by the first request and the retry. No stats → nothing to judge by → not truncated.
+    static func detailedResponse(content: String, stats: TokenStats?, contextLength: Int) -> SummaryResponse {
+        guard let stats else { return SummaryResponse(markdown: content, truncated: false) }
+        let truncated = isLikelyTruncated(contextLength: contextLength, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens)
+        if truncated {
+            Logger.transcription.warning(
+                "Summary may be truncated — output used \(stats.outputTokens)/\(contextLength - stats.inputTokens) available tokens. Consider increasing context window."
+            )
+        }
+        return SummaryResponse(markdown: content, truncated: truncated)
     }
 
     private func calibrateIfNeeded() async {
@@ -190,7 +194,7 @@ public struct LMStudioSummaryProvider: SummaryProvider, Sendable {
         }
 
         let userMessage = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
-        let prompt = SummaryPromptBuilder.systemMessage(dualStream: metadata.dualStream)
+        let prompt = SummaryPromptBuilder.systemMessage(metadata: metadata)
 
         // Estimate tokens needed and auto-size context window (uses calibrated ratio if available)
         let cache = TokenRatioCache.shared

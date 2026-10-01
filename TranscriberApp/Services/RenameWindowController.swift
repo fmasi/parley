@@ -13,12 +13,33 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
     /// cannot both reach `present()` and leave an orphaned panel on screen.
     private var showTask: Task<Void, Never>?
+    /// The current `show()` until its panel is up (or it ended without one): parsing happens before any
+    /// window exists, and a crash-protection hand-over must not exit in that gap (L round 5).
+    private var preparingRequest: UUID?
+    var isPreparing: Bool { preparingRequest != nil }
+
+    /// The app's rename panels, one at a time (L review 90): a recovery pass that salvages several recordings
+    /// presents each transcript in turn, and a rename asked for from the menu waits for the one on screen —
+    /// never a panel superseding another (whose auto-summary would then never run).
+    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: (() -> Void)?)> { [weak self] item, done in
+        self?.show(jsonPath: item.jsonPath) {
+            item.onDismiss?()
+            done()
+        }
+    }
+
+    /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed.
+    func enqueue(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
+        queue.enqueue((jsonPath, onDismiss))
+    }
 
     func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.
         showTask?.cancel()
         panel?.close()
+        let request = UUID()
+        preparingRequest = request
 
         // parseSpeakers opens an AVAudioFile per chunk to measure durations — O(N) file opens, which
         // visibly stalls the menu bar before the window appears (worst on a network-mounted or cold
@@ -27,11 +48,30 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // channelNames is read here too (once, off-main) rather than by the dialog re-reading the
         // transcript on every "Re-detect" press — the file open+parse that used to happen
         // synchronously on the main actor for the "this will clear your names" warning (#207).
+        //
+        // The parse is bounded (L review 134): a recordings folder that does not answer skips this panel with a note —
+        // never a rename queue wedged behind it. On the rename's OWN reader (L review 175), never the coordinator's: a
+        // slow parse never keeps a recovery read of the same folder waiting. A superseded show still ends its item, so the
+        // queue moves on.
         showTask = Task { @MainActor in
-            let (speakers, channelNames) = await Task.detached(priority: .userInitiated) {
-                Self.parseSpeakersAndChannelNames(from: jsonPath)
-            }.value
-            guard !Task.isCancelled else { return }
+            defer { self.endPreparing(request) }
+            let parsed = await RenameReads.shared.read(transcript: jsonPath) { Self.parseSpeakersAndChannelNames(from: $0) }
+            guard !Task.isCancelled else {
+                onDismiss?()
+                return
+            }
+            guard let (speakers, channelNames) = parsed else {
+                Logger.files.error("Rename: the transcript could not be read in time — its panel is skipped")
+                let alert = NSAlert()
+                alert.messageText = "Speaker names can be set later"
+                alert.informativeText =
+                    "Parley couldn’t read \(jsonPath.lastPathComponent) in time — its folder didn’t answer. "
+                    + "Rename its speakers later with “Rename Speakers…” in the menu."
+                alert.alertStyle = .informational
+                alert.runModal()
+                onDismiss?()
+                return
+            }
             guard !speakers.isEmpty else {
                 Logger.files.error("Rename: no speakers found in \(jsonPath.lastPathComponent, privacy: .sensitive)")
                 let alert = NSAlert()
@@ -46,6 +86,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             }
             self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, onDismiss: onDismiss)
         }
+    }
+
+    /// Only the current request's end counts; a superseded one leaves the flag to its successor.
+    private func endPreparing(_ request: UUID) {
+        guard preparingRequest == request else { return }
+        preparingRequest = nil
+        NotificationCenter.default.post(name: .parleyActivityEnded, object: nil)
     }
 
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
@@ -211,7 +258,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         do {
             try TranscriptWriter.writeFormatFile(fromJSON: jsonPath)
         } catch {
-            Logger.files.error("Failed to write format file: \(error, privacy: .public)")
+            Logger.files.error("Failed to write format file: \(error, privacy: .private)")
         }
     }
 }

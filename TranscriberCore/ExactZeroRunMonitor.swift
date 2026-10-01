@@ -5,8 +5,8 @@ import Foundation
 /// Device-observed 2026-09-10 (#193): with the MacBook lid closed, the built-in mic is
 /// hardware-disabled but REMAINS the default input device and keeps delivering buffers at full
 /// rate, of exact digital zero. Every other detector stayed quiet: frames WERE delivered (no
-/// padding, `trackNeverDelivered` never fires because `dataFrames > 0`), and the WAV grew at
-/// exactly the expected byte rate — a structurally perfect, completely empty recording.
+/// padding, and the liveness watchdog sees a healthy heartbeat), and the WAV grew at exactly the
+/// expected byte rate — a structurally perfect, completely empty recording.
 ///
 /// A real microphone always has a noise floor (thermal/electrical self-noise, room tone), so a run
 /// of samples that are exactly `0` in every position has essentially no false-positive risk — unlike
@@ -20,6 +20,8 @@ public struct ExactZeroRunMonitor {
         /// A sustained run of exact-zero samples crossed the threshold. Reports ONCE per run — like
         /// `PadRatioMonitor`, a per-buffer log of a persistent condition tells nobody anything.
         case silentRun(seconds: Double)
+        /// The first non-zero batch after a REPORTED run — once per run. Clears `micDigitalSilence` (§6.1).
+        case resumed
     }
 
     /// How long a run of exact-zero samples must persist before it is reported. Named and public so
@@ -40,15 +42,17 @@ public struct ExactZeroRunMonitor {
 
     /// Feed one batch of REAL (not fabricated/padded) mic samples at `rate` Hz. Returns `.silentRun`
     /// at most once per contiguous run of exact zeros — audio resuming re-arms the detector, so a mic
-    /// that goes silent again later (lid closed, reopened, closed again) is reported again.
+    /// that goes silent again later (lid closed, reopened, closed again) is reported again. The batch
+    /// that ends a reported run returns `.resumed`.
     public mutating func record(samples: [Int16], rate: Double) -> Verdict {
         guard rate > 0, !samples.isEmpty else { return .notYet }
         if samples.allSatisfy({ $0 == 0 }) {
             consecutiveZeroFrames += Int64(samples.count)
         } else {
+            let wasReported = reported
             consecutiveZeroFrames = 0
             reported = false
-            return .notYet
+            return wasReported ? .resumed : .notYet
         }
         guard !reported else { return .notYet }
         let seconds = Double(consecutiveZeroFrames) / rate

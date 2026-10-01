@@ -19,7 +19,8 @@ public final class WavFileWriter {
     private var lastSyncTime: ContinuousClock.Instant = .now
     private static let syncInterval: Duration = .milliseconds(500)
 
-    /// Invoked (at most once per writer) when a modern throwing `FileHandle` call fails — disk full
+    /// Invoked once per failure episode (re-armed by the next successful write) when a modern
+    /// throwing `FileHandle` call fails — disk full
     /// or another I/O error (#196). Before this conversion, the legacy `FileHandle` write/seek/sync
     /// API raised an uncatchable Objective-C exception on the same fault, which could abort the
     /// whole helper process mid-meeting. Now the failure is caught, logged, and surfaced here
@@ -28,9 +29,24 @@ public final class WavFileWriter {
     /// before for the file's contents, just without the process abort.
     public var onWriteFailure: ((String) -> Void)?
     private var writeFailureReported = false
+    /// Invoked on every transition into "writing OK": the writer's FIRST successful sample write, and
+    /// the first successful one after `onWriteFailure` fired (§6.2). The first write matters on its
+    /// own: a NEW helper has had no failure, yet its first write must disprove the OLD helper's stale
+    /// `diskWriteFailure`. Same audio-queue confinement as every other mutator.
+    public var onWriteSucceeded: (() -> Void)?
+    private var writingOK = false
+    /// After a failure, a success counts as recovery only once this long has passed without another
+    /// failure (H2 council, B-M10): a volume where every `synchronize()` fails but writes succeed
+    /// otherwise raised and cleared `diskWriteFailure` twice a second, flooding the ring and the app.
+    /// A writer's FIRST success is never held. Internal: the tests shorten it.
+    var recoveryHold: Duration = .seconds(5)
+    private var lastFailureAt: ContinuousClock.Instant?
 
-    private func noteWriteFailure(_ error: Error, context: String) {
-        Logger.files.error("WAV write failure (\(context, privacy: .public)): \(self.path, privacy: .sensitive): \(error, privacy: .public)")
+    /// Internal, not private: the test seam for a write failure (a real one needs a full disk).
+    func noteWriteFailure(_ error: Error, context: String) {
+        Logger.files.error("WAV write failure (\(context, privacy: .public)): \(self.path, privacy: .sensitive): \(error, privacy: .private)")
+        writingOK = false
+        lastFailureAt = .now
         guard !writeFailureReported else { return }
         writeFailureReported = true
         // `error.localizedDescription` is bridged from NSError for a POSIX write failure and can
@@ -38,6 +54,14 @@ public final class WavFileWriter {
         // user-visible menu-bar banner (onWriteFailure -> onQualityAnomaly -> interruptionWarning).
         // The full error, path included, is already captured above in the private log.
         onWriteFailure?("Recording write failed (\(context)) — the disk may be full or unavailable.")
+    }
+
+    private func noteWriteSucceeded() {
+        guard !writingOK else { return }
+        if let last = lastFailureAt, last.duration(to: .now) < recoveryHold { return }
+        writingOK = true
+        writeFailureReported = false
+        onWriteSucceeded?()
     }
 
     public init(path: String) throws {
@@ -80,6 +104,7 @@ public final class WavFileWriter {
             return
         }
         dataByteCount += UInt32(toWrite.count)
+        noteWriteSucceeded()
         logFirstWrite()
         syncIfNeeded()
     }
@@ -96,6 +121,7 @@ public final class WavFileWriter {
             return
         }
         dataByteCount += UInt32(toWrite.count)
+        noteWriteSucceeded()
         logFirstWrite()
         syncIfNeeded()
     }
@@ -150,7 +176,7 @@ public final class WavFileWriter {
             // reaches the user-visible banner before that next write makes the corruption worse.
             defer {
                 do { try fileHandle.seekToEnd() } catch {
-                    Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .public)")
+                    Logger.files.error("WAV seekToEnd after header flush failed: \(error, privacy: .private)")
                     noteWriteFailure(error, context: "seekToEnd")
                 }
             }
@@ -229,7 +255,7 @@ public final class WavFileWriter {
             Logger.files.info("WAV header repaired: \(path, privacy: .sensitive), data size \(declaredDataSize) → \(actualDataSize) bytes")
             return true
         } catch {
-            Logger.files.error("WAV header repair failed: \(path, privacy: .sensitive): \(error, privacy: .public)")
+            Logger.files.error("WAV header repair failed: \(path, privacy: .sensitive): \(error, privacy: .private)")
             return false
         }
     }

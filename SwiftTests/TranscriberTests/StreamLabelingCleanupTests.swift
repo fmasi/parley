@@ -34,6 +34,8 @@ struct StreamLabelingCleanupTests {
             minSpeakerShare: DiarizationCleanup.defaultMinShare
         )
         #expect(Set(result.labeled.map { $0.speaker }) == ["Speaker 1"])
+        // P7: the absorption is counted so the record (`clusters_absorbed`) can say it happened.
+        #expect(result.absorbed == 1)
     }
 
     @Test("the absorbed cluster is dropped from the speaker database too")
@@ -62,6 +64,7 @@ struct StreamLabelingCleanupTests {
         )
         #expect(Set(result.labeled.map { $0.speaker }).count == 2)
         #expect(result.speakerDatabase.count == 2)
+        #expect(result.absorbed == 0)
     }
 
     @Test("two genuine speakers are labeled separately, absorption or not")

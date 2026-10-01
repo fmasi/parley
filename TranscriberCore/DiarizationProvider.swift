@@ -27,6 +27,10 @@ public struct DiarizationResult: Sendable {
 public protocol DiarizationProvider: Sendable {
     func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult
 
+    /// Whether its model is there to diarize with — a LOOK, never a download (L review 232): a salvage with audio to
+    /// recognise asks it, as Setup does, and one that is not ready keeps its session pending.
+    func isReady() async -> Bool
+
     /// Diarize pre-decoded mono samples at the provider's target sample rate (16 kHz for
     /// FluidAudio), rather than a file path.
     ///
@@ -39,4 +43,8 @@ public protocol DiarizationProvider: Sendable {
         numSpeakers: Int?,
         progress: (@Sendable (Int, Int) -> Void)?
     ) async throws -> DiarizationResult
+}
+
+extension DiarizationProvider {
+    public func isReady() async -> Bool { true }
 }

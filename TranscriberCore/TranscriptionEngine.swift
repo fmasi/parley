@@ -22,10 +22,18 @@ public protocol TranscriptionEngine: Sendable {
     /// - Returns: Array of transcript segments, chronologically ordered.
     func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment]
 
-    /// Whether this engine is ready to transcribe (model downloaded, etc.)
-    func isReady() -> Bool
+    /// Whether this engine is ready to transcribe — its model downloaded, installed — as a LOOK, never a download (L review
+    /// 229): a salvage asks it before it transcribes, and one that is not ready keeps its session pending.
+    func isReady() async -> Bool
+
+    /// Why `isReady()` is false, in words for a row: "its speech model is not downloaded" unless the engine knows better.
+    func notReadyReason() async -> String
 
     /// Prepare the engine (download models, compile CoreML, etc.)
-    /// Call during setup, not during transcription timing.
+    /// Call during setup, not during transcription timing — and only on an explicit user action: it may download.
     func prepare() async throws
+}
+
+extension TranscriptionEngine {
+    public func notReadyReason() async -> String { "its speech model is not downloaded" }
 }

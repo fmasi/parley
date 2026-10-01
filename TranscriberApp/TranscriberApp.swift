@@ -23,27 +23,56 @@ final class LaunchGate {
     var permissionsReady = false
     let permissionManager: PermissionManager
 
-    init() {
-        let checker = SystemPermissionChecker()
+    init(captureClient: AudioCaptureClient) {
+        var checker = SystemPermissionChecker()
+        // Live System Audio Recording checks go through the helper: the app process's own TCC answer
+        // is cached for its lifetime (#220).
+        checker.helperSystemAudioStatus = { [weak captureClient] in
+            await captureClient?.systemAudioPermissionStatus()
+        }
         permissionManager = PermissionManager(checker: checker)
     }
 
+    /// Persisted once setup has been completed. After that a missing permission is REPAIRED, never
+    /// answered with the "Setup required" lockout (#174, #220).
+    private static let onboardingCompletedKey = "onboardingCompleted"
+
+    static func markOnboarded() {
+        UserDefaults.standard.set(true, forKey: onboardingCompletedKey)
+    }
+
     func checkAndGate(configManager: ConfigManager) async {
+        permissionManager.systemAudioSource = configManager.config.systemAudioSource
         await permissionManager.checkAll()
         let engine = configManager.config.engine
         let modelReady = !engine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
+        let onboarded = CaptureReadiness.isOnboarded(
+            flag: UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey),
+            microphoneGranted: permissionManager.microphone.isGranted
+        )
 
         // Folder access is NOT checked here — the user hasn't confirmed their
         // recording directory until they click Continue in the setup window.
         // Folder TCC is verified in SetupView.verifyFolderAccess() on Continue.
-        if permissionManager.allRequiredGranted && modelReady {
+        switch CaptureReadiness.launchDecision(
+            onboardingCompleted: onboarded,
+            missing: permissionManager.missingRequired,
+            modelReady: modelReady
+        ) {
+        case .ready:
+            Self.markOnboarded()
             permissionsReady = true
-        } else {
+        case .readyNeedsRepair:
+            Self.markOnboarded()
+            permissionsReady = true
+            await PermissionRepairWindowController.shared.verify(trigger: .launch)
+        case .onboarding:
             SetupWindowController.shared.show(
                 permissionManager: permissionManager,
                 configManager: configManager
             ) { [weak self] in
+                Self.markOnboarded()
                 self?.permissionsReady = true
             }
         }
@@ -85,10 +114,18 @@ final class ManifestHealthStore {
 
 @main
 struct TranscriberApp: App {
-    @State private var appState = AppState()
-    @State private var launchGate = LaunchGate()
-    private let captureClient = AudioCaptureClient()
-    private let transcriptionRunner = TranscriptionRunner()
+    /// `applicationShouldTerminate`: a logout, shutdown or outside quit stops the helper first (L10 review 53).
+    @NSApplicationDelegateAdaptor(AppTerminationDelegate.self) private var terminationDelegate
+    @State private var appState: AppState
+    @State private var launchGate: LaunchGate
+    private let captureClient: AudioCaptureClient
+    /// Owns the recording lifecycle and every crash path, launch recovery included (§8.3). Built here,
+    /// once, and injected into `MenuView` — a view-owned coordinator would not exist yet at launch.
+    private let coordinator: RecordingCoordinator
+    /// Sleep and wake forwarded to the coordinator for the app's lifetime (§8.10); a volume mount and a wake retry
+    /// the pending sessions; the power-off notice only notes the termination's kind and marks a transcript being
+    /// finished — the stop happens when the quit itself arrives (L review 110).
+    private let systemEvents: SystemEventObserver
     private let configManager = ConfigManager.shared
     private let calendarService = CalendarService()
     // Recording app: never silent-install (no userDriverDelegate override) — the standard user
@@ -104,6 +141,48 @@ struct TranscriberApp: App {
     ]
 
     init() {
+        let client = AudioCaptureClient()
+        captureClient = client
+        let state = AppState()
+        _appState = State(initialValue: state)
+        let runner = TranscriptionRunner()
+        // The app-target UI side effects the coordinator needs (notifications, the critical panel, the
+        // rename dialog + auto-summary, the repair and alarm windows) are injected here.
+        coordinator = RecordingCoordinator(
+            appState: state,
+            captureClient: client,
+            transcriptionRunner: runner,
+            configManager: ConfigManager.shared,
+            notify: { title, body in
+                MenuView.postNotification(title: title, body: body)
+            },
+            notifyCritical: { title, body in
+                MenuView.sendCriticalNotification(title: title, body: body)
+            },
+            presentTranscript: { jsonPath, config in
+                // Queued: several salvaged transcripts open one rename panel at a time (L review 90).
+                RenameWindowController.shared.enqueue(jsonPath: jsonPath) {
+                    // Auto-summarize after rename completes (so summary has real speaker names)
+                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                }
+            },
+            onSystemAudioPermissionDenied: {
+                await PermissionRepairWindowController.shared.verify(trigger: .captureEvidence)
+            },
+            presentAlarmsUI: { due, new in
+                CaptureAlarmWindowController.shared.present(due, newlyRaised: new, appState: state)
+            },
+            notifyAlarm: { alarm in CaptureAlarmWindowController.shared.notify(alarm) }
+        )
+        _launchGate = State(initialValue: LaunchGate(captureClient: client))
+        Self.busyCoordinator = coordinator
+        // A recording under a process that has not handed over runs without crash relaunch: re-checked on the
+        // transition INTO a recording, so the row says so (final review A-I2).
+        coordinator.onRecordingStarted = {
+            Task { @MainActor in await Self.verifyCrashProtection(appState: state) }
+        }
+        systemEvents = SystemEventObserver(coordinator: coordinator)
+
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
@@ -112,10 +191,11 @@ struct TranscriberApp: App {
 
         // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
         // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest
-        // instance; any duplicate exits cleanly here (status 0, so KeepAlive won't relaunch it). Runs
+        // instance; any duplicate exits cleanly here (status 0, so KeepAlive won't relaunch it) —
+        // except launchd's own job arriving during a hand-over, which waits for the lock (L3). Runs
         // AFTER the CLI check so `parley transcribe`-style invocations are never blocked by a running
         // GUI app, and BEFORE Sparkle/notification/recovery setup so a doomed duplicate does no work.
-        // A real crash still recovers: the dead process isn't in the running list, so the relaunched
+        // A real crash still recovers: the kernel releases a dead process's lock, so the relaunched
         // instance sees no rival and proceeds.
         Self.yieldIfDuplicateInstance()
 
@@ -133,12 +213,15 @@ struct TranscriberApp: App {
 
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
 
-        // Crash recovery: check sentinel before anything else
-        let client = captureClient
-        let state = appState
-        let runner = transcriptionRunner
-        Task { @MainActor in
-            await Self.recoverIfNeeded(captureClient: client, appState: state, transcriptionRunner: runner)
+        PermissionRepairWindowController.shared.configure(
+            permissionManager: launchGate.permissionManager, captureClient: client, appState: appState
+        )
+
+        // Crash recovery: check sentinel before anything else. Kept in a local: the crash-protection
+        // check below waits for it, so a hand-over (an exit) can never cut short a resuming recording.
+        let c = coordinator
+        let recovery = Task { @MainActor in
+            await c.recoverAtLaunch()
         }
 
         Task.detached(priority: .background) {
@@ -167,8 +250,9 @@ struct TranscriberApp: App {
                 content.body = ManifestHealthStore.problemMessage(for: result)
                 content.sound = .default
                 // .active (not .timeSensitive): a model-integrity problem at launch is worth surfacing
-                // but isn't urgent enough to punch through Focus/DND. (The "Recording Resumed" alerts
-                // below stay .timeSensitive — those fire mid-recording when audio may be at risk.)
+                // but isn't urgent enough to punch through Focus/DND. (The "Recording Resumed" and
+                // capture-alarm notifications stay .timeSensitive — they fire mid-recording when audio
+                // may be at risk.)
                 content.interruptionLevel = .active
                 let request = UNNotificationRequest(
                     identifier: "manifest-verify", content: content, trigger: nil
@@ -183,16 +267,174 @@ struct TranscriberApp: App {
             await gate.checkAndGate(configManager: cm)
         }
 
-        if !LaunchAgentManager.isInstalled() {
-            // Async (#197): `launchctl load` is a subprocess wait; off main so app launch never
-            // blocks on it. Plain Task, not .detached: install() already hops the actual blocking
-            // wait onto DispatchQueue.global via withCheckedContinuation (LaunchAgentManager.
-            // runLaunchctl), so nothing here runs on the cooperative thread pool either way —
-            // .detached would only drop structured-task benefits for no benefit, and diverge from
-            // the plain Task {} used by both Quit paths that call the same manager.
-            Task(priority: .utility) {
-                try? await LaunchAgentManager.install()
+        // L11: launchd's opinion is what relaunches us. Verify + repair at every launch; when we are
+        // not launchd's own process (a Finder or Sparkle launch — the normal case, C2), hand over to
+        // it; say "crash protection is off" only when that is impossible or failed. After launch
+        // recovery: never hand over (exit) while a recording may be resuming. This replaces the
+        // legacy `isInstalled()` → `install()`, which ran enable + bootstrap with no lock check: no
+        // launchctl verb runs at launch outside `verifyAndRepair` / `handOverToJob`.
+        Task(priority: .utility) { @MainActor in
+            await recovery.value
+            await Self.verifyCrashProtection(appState: state)
+        }
+    }
+
+    // MARK: - Crash protection (L3, L11)
+
+    /// Persisted, not in memory: a process that hands over successfully exits, so an in-memory
+    /// `lastHandOverAt` could never enforce the cooldown (C2 round 2).
+    private static let lastHandOverKey = "LaunchAgent.lastHandOverAt"
+    /// Kickstarts that failed in this process; capped by `LaunchAgentHealth.maxHandOverAttempts`.
+    private static var failedHandOvers = 0
+    /// One check at a time — the idle watch, the cooldown retry and a recording's start can all fire — and one asked for
+    /// meanwhile runs once after it, never dropped (final review AF-10).
+    private static let crashProtectionChecks = LaunchAgentHealth.SerialCheck()
+    /// Waits for the transition to idle before re-checking (never a blind timer).
+    private static var idleWatch: IdleWatch?
+    /// Since when open windows alone have deferred the hand-over (bounded: `windowDeferralLimit`).
+    private static var windowDeferralSince: Date?
+    /// The one pending bounded re-check of a window deferral.
+    private static var windowDeferralRecheck: Task<Void, Never>?
+
+    /// The coordinator, for the busy checks: a recording start in flight (the hand-over), work an exit would
+    /// cut short (termination, every Quit). Weak: the App owns it.
+    private(set) static weak var busyCoordinator: RecordingCoordinator?
+
+    /// Whether Parley is doing work a hand-over (an exit) would cut short: a recording or its
+    /// transcription, a recording START in flight (the phase is still `.idle` while the helper starts),
+    /// post-recording work (the auto-summary), or a panel still preparing before its window exists
+    /// (rename parsing, the SessionName / MicSwitch device scans) (L3 fix round 1, L round 5).
+    @MainActor
+    static func isBusy(_ appState: AppState) -> Bool {
+        !appState.isIdle || PostRecordingWork.inFlight > 0 || (busyCoordinator?.isStartInFlight ?? false)
+            || RenameWindowController.shared.isPreparing || SessionNameWindowController.shared.isPreparing
+            || MicSwitchWindowController.shared.isPreparing
+    }
+
+    /// Any Parley window the user may be working in — Settings, the menu-bar dropdown, a panel: a
+    /// hand-over would close it mid-edit (L2/L4 fix round 2, item 6). Only real ones count: on screen, a
+    /// non-zero frame, at most at the pop-up menu level (L rounds 3-4), never the status item's own
+    /// button window. A window that stays up regardless defers the hand-over for at most
+    /// `LaunchAgentHealth.windowDeferralLimit`; after that the crash-protection row says why.
+    @MainActor
+    static func anyParleyWindowVisible() -> Bool { !deferringWindows().isEmpty }
+
+    @MainActor
+    static func deferringWindows() -> [NSWindow] {
+        NSApp.windows.filter { window in
+            LaunchAgentHealth.windowDefersHandOver(
+                isVisible: window.isVisible, width: window.frame.width, height: window.frame.height,
+                level: window.level.rawValue, maxLevel: NSWindow.Level.popUpMenu.rawValue, className: window.className)
+        }
+    }
+
+    @MainActor
+    static func verifyCrashProtection(appState: AppState) async {
+        await crashProtectionChecks.run { await checkCrashProtection(appState: appState) }
+    }
+
+    @MainActor
+    private static func checkCrashProtection(appState: AppState) async {
+        let health = await LaunchAgentManager.verifyAndRepair(holdsInstanceLock: holdsInstanceLock)
+        let defaults = UserDefaults.standard
+        let now = Date()
+        let busy = isBusy(appState)
+        let deferring = deferringWindows()
+        let windowsOpen = !deferring.isEmpty
+        if windowsOpen {
+            // What holds the hand-over back — class and level only: a window title can name a meeting (L round 6).
+            let described = deferring.map { "\($0.className)@\($0.level.rawValue)" }.joined(separator: ", ")
+            Logger.state.info("Crash-protection hand-over deferred by windows: \(described, privacy: .public)")
+        }
+        // Windows alone (no work) defer the hand-over for a bounded time: track since when.
+        if windowsOpen && !busy {
+            if windowDeferralSince == nil { windowDeferralSince = now }
+        } else {
+            windowDeferralSince = nil
+        }
+        let action = LaunchAgentHealth.crashProtectionAction(
+            state: health, holdsInstanceLock: holdsInstanceLock, isLaunchdJob: isLaunchdJob, isBusy: busy,
+            isRecording: appState.isRecording, anyWindowVisible: windowsOpen, windowDeferredFor: windowDeferralSince.map { now.timeIntervalSince($0) } ?? 0,
+            lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: now, failedHandOvers: failedHandOvers
+        )
+        switch action {
+        case .healthy:
+            appState.clearAppAlarm(.crashProtectionOff)
+        case .deferUntilIdle(let message, let recheckAfter):
+            // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling) —
+            // unless windows have held it for `windowDeferralLimit`, or a recording runs unprotected (final
+            // review A-I2): then the row says why (never silent).
+            if let message { raiseCrashProtectionOff(appState, message) } else { appState.clearAppAlarm(.crashProtectionOff) }
+            recheckCrashProtectionWhenIdle(appState: appState)
+            if let recheckAfter {
+                windowDeferralRecheck?.cancel()
+                windowDeferralRecheck = Task(priority: .utility) { @MainActor in
+                    try? await Task.sleep(for: .seconds(recheckAfter))
+                    guard !Task.isCancelled else { return }
+                    await verifyCrashProtection(appState: appState)
+                }
             }
+        case .retryAfter(let seconds, let message):
+            if let message { raiseCrashProtectionOff(appState, message) }
+            Logger.state.info("LaunchAgent hand-over cooldown — one re-check in \(Int(seconds.rounded(.up)), privacy: .public) s")
+            Task(priority: .utility) { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                await verifyCrashProtection(appState: appState)
+            }
+        case .alarm(let message):
+            Logger.state.error("Crash protection is off (\(LaunchAgentHealth.logName(for: health), privacy: .public)) — no automatic retry")
+            raiseCrashProtectionOff(appState, message)
+        case .handOver:
+            defaults.set(Date(), forKey: lastHandOverKey)   // BEFORE the kickstart: the cooldown must outlive this process
+            guard await LaunchAgentManager.handOverToJob() else {
+                failedHandOvers += 1
+                Logger.state.error("LaunchAgent hand-over failed (\(failedHandOvers, privacy: .public) of \(LaunchAgentHealth.maxHandOverAttempts, privacy: .public))")
+                crashProtectionChecks.runAgainAfterThis()   // decides: one retry after the cooldown, or the capped row
+                return
+            }
+            // Re-checked AFTER the kickstart returned: a recording, a transcript or a panel may have
+            // started meanwhile. Busy → do NOT exit: launchd's copy times out and exits 0 by itself
+            // (`SingleInstancePolicy`), and this process re-checks on the transition to idle.
+            guard !isBusy(appState), !anyParleyWindowVisible() else {
+                Logger.state.info("Became busy during the hand-over — staying; launchd's copy will exit 0")
+                recheckCrashProtectionWhenIdle(appState: appState)
+                return
+            }
+            // `kickstart -k` gave launchd's copy a fresh 10 s window to take the lock: release it and
+            // exit NOW (no NSApp.terminate, nothing awaited) — lingering past that window would leave
+            // no instance at all (C2 round 5, item 4).
+            Logger.state.info("Handed over to launchd's own job — this process exits now")
+            // `exit(0)` skips `applicationWillTerminate`: the live logs' queued lines are flushed here, bounded (L review
+            // 141) — before the lock goes, so launchd's copy never reads a log still being written.
+            if !LiveDiagnosticsLog.flushAll(within: AppTerminationDelegate.exitFlushBound) {
+                Logger.state.error("A recording folder did not answer the hand-over's flush — its last queued diagnostic lines are lost")
+            }
+            releaseInstanceLock()
+            exit(0)
+        }
+    }
+
+    /// Raising is enough: the coordinator presents a newly raised alarm at once (window + ONE
+    /// notification), then backs off (L round 3). No second notification from here.
+    @MainActor
+    private static func raiseCrashProtectionOff(_ appState: AppState, _ message: String) {
+        appState.raiseAppAlarm(.crashProtectionOff, message: message)
+    }
+
+    /// Re-check on the TRANSITION to idle: a Parley window closing (or the menu-bar panel, which hides
+    /// rather than closes, resigning key), post-recording work finishing, or the phase changing — not a
+    /// timer. One watch at a time.
+    @MainActor
+    private static func recheckCrashProtectionWhenIdle(appState: AppState) {
+        guard idleWatch == nil else { return }
+        let watch = IdleWatch(isBusy: { isBusy(appState) || anyParleyWindowVisible() }) {
+            idleWatch = nil
+            Task { @MainActor in await verifyCrashProtection(appState: appState) }
+        }
+        idleWatch = watch
+        watch.start {
+            _ = appState.phase
+            _ = busyCoordinator?.isStartInFlight
         }
     }
 
@@ -200,7 +442,23 @@ struct TranscriberApp: App {
     /// it, or dropping the last reference, releases the kernel lock), so it lives as a static here.
     private static var instanceLockFD: Int32 = -1
 
-    /// If another instance of this app is already running, exit cleanly so exactly one survives (#109).
+    /// True only when this launch's `SingleInstanceGuard.acquireLock` returned `.acquired`. Every
+    /// launchctl verb that could kill another instance (repair, hand-over, Quit's bootout) requires it:
+    /// without it this process runs unguarded and another live instance may be recording (C2 round 5).
+    private(set) static var holdsInstanceLock = false
+
+    /// launchd sets `XPC_SERVICE_NAME` to the job label for the processes it spawns (verified:
+    /// `launchctl print gui/<uid>/eu.fmasi.parley` lists `environment = { XPC_SERVICE_NAME =>
+    /// eu.fmasi.parley }`), so this is launchd's own KeepAlive job.
+    static let isLaunchdJob = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == LaunchAgentManager.label
+
+    /// If another instance of this app is already running, exit cleanly so exactly one survives (#109) —
+    /// unless THIS process is launchd's own job arriving during a hand-over (`SingleInstancePolicy`,
+    /// C2): then it waits up to 10 s for the outgoing process to exit and release the lock, instead of
+    /// yielding to a process that is about to disappear, and exits 0 if it never does (a non-zero
+    /// exit would make KeepAlive respawn it every 10 s). The wait blocks `App.init` on the main
+    /// thread, deliberately: this process has no UI yet and nothing else to do.
+    ///
     /// Uses a `flock`-based lock (unit-tested in `SingleInstanceGuard`) rather than scanning
     /// `NSRunningApplication`: a launchd-spawned duplicate runs this inside `init()` before the first
     /// instance is registered with LaunchServices, so a running-app scan sees no rival and both
@@ -209,261 +467,42 @@ struct TranscriberApp: App {
         let dir = AppPaths.dataDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let lockPath = dir.appendingPathComponent("instance.lock").path
-        switch SingleInstanceGuard.acquireLock(at: lockPath) {
+        Logger.state.info("Instance guard: launchd job = \(isLaunchdJob, privacy: .public)")
+        var attempt = SingleInstanceGuard.acquireLock(at: lockPath)
+        if case .heldByOther = attempt,
+           case .waitForLock(let seconds, let onTimeout) = SingleInstancePolicy.decide(isLaunchdJob: isLaunchdJob, lockHeldByOther: true) {
+            let deadline = Date().addingTimeInterval(seconds)
+            while case .heldByOther = attempt, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.2)
+                attempt = SingleInstanceGuard.acquireLock(at: lockPath)
+            }
+            if case .heldByOther = attempt {
+                switch onTimeout {
+                case .exitZero:
+                    Logger.state.info("launchd job: the running instance kept the lock for \(seconds, privacy: .public) s — exiting 0 (never respawned)")
+                    exit(0)
+                }
+            }
+        }
+        switch attempt {
         case .heldByOther:
             Logger.state.info("Another Parley instance is already running — this duplicate is exiting (#109).")
             exit(0)
         case .acquired(let fd):
             instanceLockFD = fd  // held for the process lifetime; intentionally never closed
+            holdsInstanceLock = true
         case .unavailable:
             Logger.state.error("Single-instance lock unavailable — proceeding unguarded (#109).")
         }
     }
 
-    @MainActor
-    private static func recoverIfNeeded(
-        captureClient: AudioCaptureClient,
-        appState: AppState,
-        transcriptionRunner: TranscriptionRunner
-    ) async {
-        guard let sentinel = RecordingSentinel.read() else { return }
-
-        Logger.state.info("Sentinel found — checking recovery (session: \(sentinel.sessionName, privacy: .sensitive), segment: \(sentinel.segment))")
-
-        // Check if sentinel is stale (from before last boot)
-        let bootTime = ProcessInfo.processInfo.systemUptime
-        let bootDate = Date().addingTimeInterval(-bootTime)
-        if sentinel.startedAt < bootDate {
-            Logger.state.info("Stale sentinel from before last boot — cleaning up")
-            RecordingSentinel.delete()
-            return
-        }
-
-        // Flow A: Is XPC service still alive and capturing?
-        let isAlive = await captureClient.isCapturing()
-        if isAlive {
-            Logger.state.info("XPC service alive — re-attaching (Flow A)")
-            appState.phase = .recording(since: sentinel.startedAt)
-            RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
-            captureClient.recordLaunchRecovery(["flow": "A", "reattach": "true"])
-            setupCrashHandler(captureClient: captureClient, appState: appState)
-            return
-        }
-
-        // Flow B: XPC is dead. A chunked session's session.json is rewritten after every
-        // completed chunk, so it survives independently of whichever single WAV
-        // AudioArchiver has since deleted — check for a recoverable chunked session FIRST,
-        // before the stat-based single-file check below (which stats a WAV that a chunked
-        // recording archives-and-deletes at the first rotation, so it would always read 0
-        // bytes and wrongly conclude "no usable audio files") (#135).
-        let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-        let sessionId = stripSegmentSuffix(sentinel.systemAudioPath)
-        if CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: outputDir, sessionId: sessionId) {
-            Logger.state.info("Recoverable chunked session found — rehydrating (Flow B, chunked)")
-            appState.phase = .transcribing(progress: "Recovering…")
-            do {
-                let config = ConfigManager.shared.config
-                let (transcriber, diarizer) = try transcriptionRunner.prepareEngine(config: config)
-                // Captured so the rename dialog + auto-summary can fire after the shared
-                // teardown below — mirrors MenuView.stopRecording, whose success branch is the only
-                // other place a recovered transcript reaches this wiring (#135 minor: relaunch
-                // recovery previously left the user with no rename prompt and no summary).
-                var recoveredJsonPath: URL?
-                // Drain capture diagnostics and stamp the always-present provenance into the
-                // recovered transcript's metadata, same as a clean stop does (#154 finding 1) —
-                // otherwise a recovered session's `sessionState.provenance` stays nil forever.
-                let provenance = await captureClient.finalizeSessionDiagnostics(
-                    sessionId: sessionId,
-                    engine: config.engine.rawValue,
-                    recordingDirectory: outputDir
-                )
-                if let result = try await ChunkedSessionRecovery.recover(
-                    outputDirectory: outputDir, sessionId: sessionId, config: config,
-                    transcriber: transcriber, diarizer: diarizer, runner: transcriptionRunner,
-                    provenance: provenance
-                ) {
-                    appState.lastJsonPath = result.jsonPath.path
-                    appState.lastTranscriptPath = result.jsonPath.path
-                    Logger.state.info("Recovered chunked session → \(result.jsonPath.lastPathComponent, privacy: .sensitive)")
-                    recoveredJsonPath = result.jsonPath
-                } else {
-                    Logger.state.info("Chunked session had nothing to recover — discarding")
-                }
-                RecordingSentinel.delete()
-                appState.phase = .idle
-                if let jsonPath = recoveredJsonPath {
-                    RenameWindowController.shared.show(jsonPath: jsonPath) {
-                        MenuView.autoSummarize(jsonPath: jsonPath, config: config)
-                    }
-                }
-            } catch {
-                Logger.state.error("Chunked session recovery failed: \(error, privacy: .private)")
-                appState.criticalError = "Recording recovery failed — the in-progress session could not be rehydrated."
-                RecordingSentinel.delete()
-                appState.phase = .idle
-                CriticalAlertController.shared.show(
-                    title: "Recovery Failed",
-                    message: "The recording session could not be rehydrated after the crash. Audio already on disk was preserved."
-                )
-            }
-            return
-        }
-
-        // Flow B (legacy, non-chunked/single-file): check for partial audio files
-        let sysSize = (try? FileManager.default.attributesOfItem(
-            atPath: sentinel.systemAudioPath
-        )[.size] as? Int) ?? 0
-
-        if sysSize > 44 {
-            Logger.state.info("Partial audio found (\(sysSize) bytes) — restarting recording (Flow B)")
-
-            let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-            let seg = sentinel.segment + 1
-            // #135: name the restart capture in the chunk-index namespace, never the legacy segment
-            // counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart owns the
-            // collision guard + naming sequence, shared by every no-live-pipeline restart site (#170).
-            let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
-            let baseName = restart.baseName
-            let newSentinel = restart.newSentinel
-
-            do {
-                try await captureClient.start(
-                    outputDirectory: outputDir,
-                    baseName: baseName,
-                    microphoneDeviceId: sentinel.micDeviceUID,
-                    systemAudioSource: ConfigManager.shared.config.systemAudioSource
-                )
-                try RecordingSentinel.write(newSentinel)
-                appState.phase = .recording(since: sentinel.startedAt)
-                RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // keep level meters off it (#192)
-                appState.interruptionWarning = "Recording was briefly interrupted. Some audio may have been lost."
-                captureClient.recordLaunchRecovery(["flow": "B", "segment": "\(seg)"])
-                setupCrashHandler(captureClient: captureClient, appState: appState)
-
-                // Send notification
-                if Bundle.main.bundleIdentifier != nil {
-                    let content = UNMutableNotificationContent()
-                    content.title = "Recording Resumed"
-                    content.body = "Recording was briefly interrupted. Some audio may have been lost."
-                    content.sound = .default
-                    content.interruptionLevel = .timeSensitive
-                    let request = UNNotificationRequest(
-                        identifier: UUID().uuidString, content: content, trigger: nil
-                    )
-                    try? await UNUserNotificationCenter.current().add(request)
-                }
-            } catch {
-                Logger.state.error("Flow B recovery failed: \(error, privacy: .public)")
-                appState.criticalError = "Recording failed — could not restart after crash recovery."
-                RecordingSentinel.delete()
-                CriticalAlertController.shared.show(
-                    title: "Recording Failed",
-                    message: "Crash recovery attempted but could not restart recording."
-                )
-            }
-        } else {
-            Logger.state.info("No usable audio files — cleaning up sentinel")
-            RecordingSentinel.delete()
-        }
-    }
-
-    @MainActor
-    private static func setupCrashHandler(
-        captureClient: AudioCaptureClient,
-        appState: AppState
-    ) {
-        // Mirror helper auto-switches into the recording-mic record, as the coordinator does for a
-        // recording it started, so level meters stay off the mic actually being captured (#192).
-        RecordingCoordinator.mirrorMicSwitches(of: captureClient, while: appState)
-        captureClient.onServiceCrash = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                guard let sentinel = RecordingSentinel.read() else { return }
-
-                let outputDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
-                // #135: name the restart capture in the chunk-index namespace, never the legacy
-                // segment counter — the two namespaces can collide. CrashRecoveryPlanner.planRestart
-                // owns the collision guard + naming sequence, shared by every no-live-pipeline
-                // restart site (#170).
-                let restart = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: outputDir)
-                let baseName = restart.baseName
-                let newSentinel = restart.newSentinel
-
-                do {
-                    RecordingMicrophone.shared.set(sentinel.micDeviceUID)   // before the helper opens it (#192)
-                    try await captureClient.start(
-                        outputDirectory: outputDir,
-                        baseName: baseName,
-                        microphoneDeviceId: sentinel.micDeviceUID,
-                        systemAudioSource: ConfigManager.shared.config.systemAudioSource
-                    )
-                    try RecordingSentinel.write(newSentinel)
-                    appState.interruptionWarning = "Recording briefly interrupted. Resuming."
-
-                    if Bundle.main.bundleIdentifier != nil {
-                        let content = UNMutableNotificationContent()
-                        content.title = "Recording Resumed"
-                        content.body = "Recording was briefly interrupted and has been restarted."
-                        content.sound = .default
-                        content.interruptionLevel = .timeSensitive
-                        let request = UNNotificationRequest(
-                            identifier: UUID().uuidString, content: content, trigger: nil
-                        )
-                        try? await UNUserNotificationCenter.current().add(request)
-                    }
-                } catch {
-                    Logger.state.error("Recovery crash handler failed: \(error, privacy: .public)")
-                    appState.criticalError = "Recording failed — capture crashed and could not restart."
-                    appState.phase = .idle
-                    RecordingMicrophone.shared.clear()
-                    RecordingSentinel.delete()
-                    CriticalAlertController.shared.show(
-                        title: "Recording Failed",
-                        message: "Capture crashed during recovery and could not restart."
-                    )
-                }
-            }
-        }
-        // #86: benign route changes during a recovered recording resume in place; only a fatal
-        // give-up escalates to the relaunch handler above.
-        captureClient.onRestartInPlace = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Audio device changed — recording resumed automatically."
-            }
-        }
-        captureClient.onBriefInterruption = {
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Recording briefly interrupted — continuing."
-            }
-        }
-        // #86: the helper could not restart the mid-recording system (remote) stream within budget.
-        // The local mic keeps recording on its own AVCaptureSession — warn, never stop.
-        captureClient.onSystemAudioUnrecoverable = { _ in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = "Remote audio couldn’t be recovered — only your microphone is recording."
-            }
-        }
-        // #193/#196: a live capture-quality anomaly (exact-zero mic run, a liveness gap, a
-        // disk-full write failure) — surfaced WHILE the recording is still running, while there is
-        // still time to react. The recording is never stopped by this.
-        // Also set by RecordingCoordinator.startRecording() — that site covers a normal recording
-        // start, this one covers the launch-time crash-recovery re-attach paths (Flow A/B), which
-        // never go through startRecording(). Keep both in sync if this wiring changes.
-        captureClient.onQualityAnomaly = { _, message in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                appState.interruptionWarning = message
-            }
-        }
-        captureClient.onFatalFailure = { _ in
-            Task { @MainActor in
-                guard appState.isRecording else { return }
-                captureClient.onServiceCrash?()
-            }
-        }
+    /// Only for the hand-over, right before `exit(0)`: launchd's copy is waiting for this lock.
+    private static func releaseInstanceLock() {
+        guard instanceLockFD >= 0 else { return }
+        flock(instanceLockFD, LOCK_UN)
+        close(instanceLockFD)
+        instanceLockFD = -1
+        holdsInstanceLock = false
     }
 
     var body: some Scene {
@@ -471,8 +510,7 @@ struct TranscriberApp: App {
             if launchGate.permissionsReady {
                 MenuView(
                     appState: appState,
-                    captureClient: captureClient,
-                    transcriptionRunner: transcriptionRunner,
+                    coordinator: coordinator,
                     configManager: configManager,
                     calendarService: calendarService,
                     updater: updaterController.updater,
@@ -491,6 +529,14 @@ struct TranscriberApp: App {
                 configManager: configManager,
                 permissionManager: launchGate.permissionManager
             )
+        }
+        // Cmd-Q from any Parley window (Settings, Setup) is the one Quit too — it asks while recording and stops
+        // first, never the app menu's plain terminate that skipped the confirm (L review 108).
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Parley") { quitParley() }
+                    .keyboardShortcut("q")
+            }
         }
     }
 }
@@ -518,7 +564,7 @@ private struct SetupRequiredPanel: View {
             .padding(.horizontal, 4)
             .padding(.top, 2)
 
-            Text("Grant the required permissions to start recording.")
+            Text("Finish setup to start recording.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
@@ -529,6 +575,7 @@ private struct SetupRequiredPanel: View {
                     permissionManager: launchGate.permissionManager,
                     configManager: configManager
                 ) {
+                    LaunchGate.markOnboarded()
                     launchGate.permissionsReady = true
                 }
             }
@@ -536,11 +583,61 @@ private struct SetupRequiredPanel: View {
             Divider()
 
             MenuActionRow(icon: "power", title: "Quit Parley") {
-                quitAfterUninstallingLaunchAgent()
+                quitParley()
             }
             .keyboardShortcut("q")
         }
         .padding(12)
         .frame(width: 320)
+    }
+}
+
+/// Fires `onIdle` once, on the first transition to "not busy": a window closing, resigning key or
+/// changing occlusion (the menu-bar panel only hides — L round 4), post-recording work finishing, or
+/// the recording phase changing (L3 fix round 1). Observers only — no timer.
+@MainActor
+private final class IdleWatch {
+    private let isBusy: @MainActor () -> Bool
+    private let onIdle: @MainActor () -> Void
+    private var tokens: [NSObjectProtocol] = []
+    private var done = false
+
+    init(isBusy: @escaping @MainActor () -> Bool, onIdle: @escaping @MainActor () -> Void) {
+        self.isBusy = isBusy
+        self.onIdle = onIdle
+    }
+
+    /// `observed`: reads the observable state whose change is also a transition (the phase, a start in
+    /// flight).
+    func start(observing observed: @escaping @MainActor () -> Void) {
+        let center = NotificationCenter.default
+        for name in [NSWindow.willCloseNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didChangeOcclusionStateNotification, .parleyActivityEnded] {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // willClose fires while the window is still up: look again on the next turn.
+                Task { @MainActor in self?.evaluate() }
+            })
+        }
+        observe(observed)
+    }
+
+    private func observe(_ observed: @escaping @MainActor () -> Void) {
+        withObservationTracking {
+            observed()
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, !self.done else { return }
+                self.evaluate()
+                if !self.done { self.observe(observed) }
+            }
+        }
+    }
+
+    private func evaluate() {
+        guard !done, !isBusy() else { return }
+        done = true
+        tokens.forEach(NotificationCenter.default.removeObserver)
+        tokens = []
+        onIdle()
     }
 }

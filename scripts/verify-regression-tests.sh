@@ -87,7 +87,9 @@ fi
 
 gated_files=""
 for f in $changed_test_files; do
-  if git show "$HEAD_SHA:$f" | grep -q 'RED-FIRST-EXEMPT:'; then
+  # grep -c, not -q: -q exits at the first match, and a large file then SIGPIPEs `git show`,
+  # which `pipefail` turns into "not exempt".
+  if git show "$HEAD_SHA:$f" | grep -c 'RED-FIRST-EXEMPT:' >/dev/null; then
     echo "exempt: $f ($(git show "$HEAD_SHA:$f" | grep -o 'RED-FIRST-EXEMPT:.*' | head -1))"
   else
     gated_files="$gated_files $f"

@@ -6,9 +6,11 @@ public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case lmstudio
 }
 
-/// Which mechanism captures system (remote) audio. `screenCaptureKit` is the shipped default;
-/// `coreAudioTap` selects the Core Audio output process tap (#103) — a strict superset that also
-/// captures Continuity/telephony + VoIP that SCK misses. Behind a flag during phase 2 rollout.
+/// Which mechanism captures system (remote) audio. `coreAudioTap` — the Core Audio output process tap
+/// (#103) — is the default for new installs (`Config.default`): a strict superset that also captures
+/// Continuity/telephony + VoIP that SCK misses. `screenCaptureKit` is the retiring legacy path (#221):
+/// still selectable, and what a pre-existing config without the key decodes to, but not a fallback —
+/// nothing switches to it on its own.
 public enum SystemAudioSource: String, Codable, Equatable, Sendable {
     case screenCaptureKit = "sck"
     case coreAudioTap = "core_audio_tap"
@@ -144,6 +146,12 @@ public struct Config: Codable, Equatable, Sendable {
     /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
     /// speaker embeddings are far more sensitive to that than speech intelligibility is.
     public var preserveSourceWAV: Bool?
+    /// Capture knobs handed to the helper as `CaptureOptions` before each start (§5, §10). `nil` =
+    /// the shipped behaviour: tap auto-start on, the exact-zero remote soft alarm off, no frame drop.
+    public var tapAutoStart: Bool?
+    public var remoteExactZeroSoftAlarmSeconds: Int?
+    /// DIAGNOSTIC ONLY (device item D-04): the helper drops every tap buffer before the heartbeat.
+    public var debugDropTapFrames: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -186,13 +194,17 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
-        systemAudioSource: .screenCaptureKit,
+        // §11.1: new installs record with the tap; the decode fallback below stays SCK for pre-existing configs.
+        systemAudioSource: .coreAudioTap,
         vadSpeechThreshold: nil,
         diarizationClusteringThreshold: nil,
         diarizationMaxSpeakers: nil,
         diarizationMinSpeakerShare: nil,
         diarizationExcludeOverlap: nil,
         preserveSourceWAV: nil,
+        tapAutoStart: nil,
+        remoteExactZeroSoftAlarmSeconds: nil,
+        debugDropTapFrames: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -222,6 +234,9 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare: Double? = nil,
         diarizationExcludeOverlap: Bool? = nil,
         preserveSourceWAV: Bool? = nil,
+        tapAutoStart: Bool? = nil,
+        remoteExactZeroSoftAlarmSeconds: Int? = nil,
+        debugDropTapFrames: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -249,6 +264,9 @@ public struct Config: Codable, Equatable, Sendable {
         self.diarizationMinSpeakerShare = diarizationMinSpeakerShare
         self.diarizationExcludeOverlap = diarizationExcludeOverlap
         self.preserveSourceWAV = preserveSourceWAV
+        self.tapAutoStart = tapAutoStart
+        self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
+        self.debugDropTapFrames = debugDropTapFrames
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -278,6 +296,9 @@ public struct Config: Codable, Equatable, Sendable {
         case diarizationMinSpeakerShare = "diarization_min_speaker_share"
         case diarizationExcludeOverlap = "diarization_exclude_overlap"
         case preserveSourceWAV = "preserve_source_wav"
+        case tapAutoStart = "tap_auto_start"
+        case remoteExactZeroSoftAlarmSeconds = "remote_exact_zero_soft_alarm_seconds"
+        case debugDropTapFrames = "debug_drop_tap_frames"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -300,6 +321,9 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
+        // Unlike system_audio_source below, a missing key here follows the CURRENT default: on
+        // macOS 26+ the old default (SpeechAnalyzer) produces blank transcripts (#223), so pinning
+        // a legacy config to it would pin a total-loss bug rather than a live setup.
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         systemAudioSource = try c.decodeIfPresent(SystemAudioSource.self, forKey: .systemAudioSource) ?? .screenCaptureKit
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
@@ -308,6 +332,9 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare = try c.decodeIfPresent(Double.self, forKey: .diarizationMinSpeakerShare)
         diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
         preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
+        tapAutoStart = try c.decodeIfPresent(Bool.self, forKey: .tapAutoStart)
+        remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
+        debugDropTapFrames = try c.decodeIfPresent(Bool.self, forKey: .debugDropTapFrames)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)

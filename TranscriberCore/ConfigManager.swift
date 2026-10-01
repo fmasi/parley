@@ -129,7 +129,7 @@ public final class ConfigManager {
                 wroteToKeychain = false
             }
         } catch {
-            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .public)")
+            Logger.config.error("Failed to migrate summary API key to Keychain — leaving config.json untouched, will retry next launch: \(String(describing: error), privacy: .private)")
             return .failed
         }
 
@@ -145,7 +145,7 @@ public final class ConfigManager {
         do {
             try rewritten.write(to: url, options: .atomic)
         } catch {
-            Logger.config.error("Migrated summary API key to Keychain but failed to write config.json — will retry next launch: \(String(describing: error), privacy: .public)")
+            Logger.config.error("Migrated summary API key to Keychain but failed to write config.json — will retry next launch: \(String(describing: error), privacy: .private)")
             return .failed
         }
 

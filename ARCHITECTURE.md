@@ -10,7 +10,7 @@ The app has three layers:
    - `<base>.wav` — system/remote audio
    - `<base>_mic.wav` — local microphone (at device native rate)
 
-3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. Two swappable engines are available: Apple SpeechAnalyzer (default, macOS 26+) and FluidAudio (Parakeet, CoreML/ANE). Engine selection is stored in config and exposed in Settings. Each audio stream is transcribed independently, segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
+3. **Swift transcription pipeline** (`TranscriberCore/`) — runs entirely in-process. Two swappable engines are available: FluidAudio (Parakeet, CoreML/ANE; the default) and Apple SpeechAnalyzer (macOS 26+; labelled "not yet usable" until #223, because the live chunk path gets blank transcripts from it). Engine selection is stored in config and exposed in Settings. Each audio stream is transcribed independently, segments are tagged `Local Speaker X` / `Remote Speaker X` and merged chronologically.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

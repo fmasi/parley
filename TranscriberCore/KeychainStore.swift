@@ -117,7 +117,7 @@ public enum SummaryAPIKeyStore {
         do {
             return try keychain.get(service: service, account: account) ?? ""
         } catch {
-            Logger.config.warning("Failed to load summary API key from Keychain: \(String(describing: error), privacy: .public)")
+            Logger.config.warning("Failed to load summary API key from Keychain: \(String(describing: error), privacy: .private)")
             return ""
         }
     }
@@ -145,7 +145,7 @@ public enum SummaryAPIKeyStore {
                 try keychain.set(value, service: service, account: account)
             }
         } catch {
-            Logger.config.warning("Failed to save summary API key to Keychain: \(String(describing: error), privacy: .public)")
+            Logger.config.warning("Failed to save summary API key to Keychain: \(String(describing: error), privacy: .private)")
         }
     }
 }

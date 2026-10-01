@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-1134%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2367%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -65,8 +65,8 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
   quality score on every segment.
 - **Two transcription engines** — FluidAudio (Parakeet — fastest, 25 EU languages) or Apple
   SpeechAnalyzer (macOS 26+; downloads a per-language model on first use). Swap them in Settings.
-- **Echo / mic-bleed removal** — strips the far-end voice that bleeds into your mic on speakers, so it
-  doesn't show up as a phantom speaker.
+- **Echo / mic-bleed removal** — flags the far-end voice that bleeds into your mic on speakers, so it
+  doesn't show up as a phantom speaker in what you read (the JSON record keeps it, marked `echo`).
 - **Crash-safe recording** — survives UI and XPC crashes with auto-relaunch, silent re-attach, and
   multi-segment stitching.
 - **Multiple outputs** — JSON, SRT, and TXT with absolute timestamps, speaker labels, confidence
@@ -108,15 +108,16 @@ faithful and private.
   stream — verified through the macOS 26 SDK headers. So the app runs two independent capture streams —
   your mic and the system output — and treats "local" (mic) and "remote" (system) as first-class. That
   constraint is *why* reliable speaker separation is possible at all.
-- **Capturing the calls a screen recorder can't see.** ScreenCaptureKit is the default for system
-  audio, but it misses Continuity (iPhone) calls and some VoIP audio. An optional Core Audio process
-  tap grabs the system output directly, so phone and app calls land in the transcript too — switchable
-  in Settings, off by default.
+- **Capturing the calls a screen recorder can't see.** ScreenCaptureKit misses Continuity (iPhone) calls
+  and some VoIP audio. A Core Audio process tap grabs the system output directly, so phone and app calls
+  land in the transcript too. The tap is the default for new installs; ScreenCaptureKit stays
+  selectable in Settings as the legacy option until #221.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
-  phantom local speaker. A triple-confirmed gate removes it: >50% temporal overlap **and** >70% word
-  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays. Across 7 real recordings that
-  gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129 segments), with zero
-  false positives.
+  phantom local speaker. A triple-confirmed gate flags it: >50% temporal overlap **and** >70% word
+  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays unflagged. A flagged line is
+  kept in the JSON record and hidden from the TXT/SRT transcript and the summary. Across 7 real
+  recordings that gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129
+  segments), with zero false positives.
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
@@ -199,9 +200,9 @@ swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engi
 ```
 TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC client, chunk processing
 TranscriberCore/       engines, diarization, echo-dedup, speaker reconciliation, summaries, transcript I/O
-AudioCaptureHelper/    XPC audio-capture service (ScreenCaptureKit, dual-stream)
+AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            1134 tests across 135 suites
+SwiftTests/            2367 tests across 264 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```

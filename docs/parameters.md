@@ -9,7 +9,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
 | Recording directory | `recording_directory` | `~/Documents/Recordings` | Directory where session WAV files and transcripts are written. |
-| System audio source | `system_audio_source` | `"sck"` | Which mechanism captures system (remote) audio. `"sck"` = ScreenCaptureKit (default). `"core_audio_tap"` = Core Audio output process tap (#103), a strict superset that also captures Continuity/iPhone and VoIP call audio ScreenCaptureKit misses; prompts for System Audio Recording permission on first use and applies to the next recording. |
+| System audio source | `system_audio_source` | `"core_audio_tap"` | Which mechanism captures system (remote) audio. `"core_audio_tap"` = Core Audio output process tap (#103), the default for new installs: a strict superset that also captures Continuity/iPhone and VoIP call audio ScreenCaptureKit misses; prompts for System Audio Recording permission on first use and applies to the next recording. `"sck"` = ScreenCaptureKit (legacy, until #221). An existing `config.json` without this key keeps decoding as `"sck"`: it was written by an SCK-era build (spec §11.1). |
 | Chunk duration | `chunk_duration_minutes` | `30` | How many minutes of audio per rotating chunk. Enforced minimum of 10 minutes (`validatedChunkDuration`). |
 | Silence detection enabled | `silence_detection_enabled` | `true` | When `true`, recording auto-stops after the silence timeout elapses without speech. |
 | Silence timeout | `silence_timeout_minutes` | `5` | Minutes of silence before auto-stop (requires `silence_detection_enabled`). |
@@ -21,7 +21,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
-| Transcription engine | `engine` | `resolved_default` | Which ASR engine to use. Values: `"speechAnalyzer"` (macOS 26+, no download), `"fluidAudio"` (Parakeet, ~500 MB download, 25 EU languages). Fresh installs resolve to `fluidAudio` on macOS 15 via `.resolvedDefault`. |
+| Transcription engine | `engine` | `"fluid_audio"` | Which ASR engine to use. Values: `"fluid_audio"` (Parakeet, ~500 MB download, 25 EU languages; the default), `"speech_analyzer"` (Apple, macOS 26+, no download; labelled "not yet usable" because it produces blank transcripts on the live chunk path until #223). A config without the key, or with an unknown value, follows the current default (`.resolvedDefault`). The chosen engine must pass a one-second preflight at Setup Continue and Settings Save (`EnginePreflight`). One exception at Save: an engine whose model is not downloaded yet has nothing to preflight, so it is saved and the Save starts its download (`EnginePreflight.saveStep`). |
 | Output format | `output_format` | `"txt"` | Transcript file format. Values: `"txt"`, `"json"`, `"srt"`. |
 | VAD speech threshold | `vad_speech_threshold` | `0.5` | Minimum VAD probability (0–1) to classify a frame as speech. Higher values are stricter and discard more uncertain frames. Applies to `VadSpeechMap` quality filtering in speaker assignment. |
 
@@ -71,7 +71,7 @@ All summary fields are nested under the `"summary"` key in config.json. The enti
 
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
-| Launch on startup | `launch_on_startup` | `true` | When `true`, installs a KeepAlive LaunchAgent at `~/Library/LaunchAgents/`. Uninstalled automatically on explicit quit. |
+| Launch on startup | `launch_on_startup` | `true` | Settings' "Launch at Login" toggle: registers Parley as a login item (`SMAppService`). Separate from crash protection: the KeepAlive LaunchAgent at `~/Library/LaunchAgents/eu.fmasi.parley.plist` is verified and repaired at every launch whatever this says, and removed on Parley's own Quit only by the instance holding the single-instance lock. |
 | Suppress capture warning | `suppress_capture_warning` | `false` | When `true`, hides the capture interruption warning dialog shown after XPC crash recovery. |
 | Chunk processing QoS | `chunk_processing_qos` | `"utility"` | `DispatchQoS` class used for background chunk processing (transcription + diarization). Values: `"userInteractive"`, `"userInitiated"`, `"utility"`, `"background"`. Unknown values fall back to `"utility"`. |
 
@@ -94,20 +94,84 @@ Diarization is performed by `FluidAudioDiarizer` (pyannote segmentation + WeSpea
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `preserve_source_wav` | bool | `false` | Keep the uncompressed source WAVs after AAC archiving, so diarization/capture can be analysed on the raw audio. **These are large (~5.5 MB/minute per stream) and `StorageManager`'s quota only evicts `.m4a` archives — it will not reclaim them.** Diagnostic use only; turn it off afterwards. |
+| `tap_auto_start` | bool | `true` | `kAudioAggregateDeviceTapAutoStartKey` for every aggregate the tap builds. `false` keeps the tap IOProc running continuously (zeros when idle), so "no callbacks" is never ambiguous (gotcha #78). The default is decided by measurement M-B (device item D-12). Sent to the helper before each start (`CaptureOptions`) and stamped into `captureStart` provenance. |
+| `remote_exact_zero_soft_alarm_seconds` | int | unset (off) | Seconds of exact-zero remote audio after which the helper says "can't confirm" (`remoteCantConfirm`). Stays off unless the M-A census shows no call app renders exact zeros for a muted remote. |
+| `debug_drop_tap_frames` | bool | `false` | DIAGNOSTIC: the helper drops every tap buffer before the heartbeat, reproducing Incident B ("expected but never delivered") on demand (device item D-04). **Never leave it on**: the remote side is not recorded while it is set. |
 
 ---
 
 ## Capture Reliability Detectors
 
-The exact-zero-mic (#193), liveness-gap, and frame-count-plausibility (#196) detectors in the XPC capture helper have hardcoded thresholds and are **not configurable via `config.json`**.
+The capture-reliability constants below are hardcoded (in `TranscriberCore` unless noted) and are **not configurable via `config.json`**. Design: `docs/superpowers/specs/2026-09-24-capture-reliability-design.md`. The only related `config.json` knobs are the three Debugging keys above.
+
+### Detection
 
 | Parameter | Location | Value | Description |
 |-----------|----------|-------|-------------|
-| Exact-zero silence threshold | `ExactZeroRunMonitor.defaultThresholdSeconds` | `12` | Seconds of sustained exact-digital-zero mic samples before the live banner fires (e.g. lid closed on the built-in mic). |
-| Liveness gap threshold | `LivenessGapDetector.defaultGapThresholdSeconds` | `3` | Seconds a track (mic or system audio) can go without delivering a buffer before the 1 Hz off-audio-queue watchdog reports a gap. |
+| Exact-zero silence threshold | `ExactZeroRunMonitor.defaultThresholdSeconds` | `12` | Seconds of sustained exact-digital-zero mic samples before `micDigitalSilence` (e.g. lid closed on the built-in mic). |
+| First-frame threshold | `TrackLivenessMonitor.init` `firstFrameThresholdSeconds` | `5` | Seconds after the monitor is armed (start, rebuild, wake) with no heartbeat before `.neverDelivered`. For the tap the clock runs only while the gate is open. |
+| Stall threshold | `TrackLivenessMonitor.init` `stallThresholdSeconds` | `3` | Seconds without a heartbeat, counted while the gate is open, before `.stalled`. Replaces `LivenessGapDetector.defaultGapThresholdSeconds` (deleted). |
+| Gate debounce | `TrackLivenessMonitor.gateCloseTicks` | `2` | Consecutive closed ticks (at 1 Hz) before the tap's "another process is running output" gate counts as closed. A one-tick dropout neither clears an episode nor restarts a clock. |
+| Watchdog tick | `LivenessWatchdogDriver` (helper) | `1` s | The liveness check and the gate probe run on this tick. The debounce counts ticks, so only the tick feeds the gate to the monitors. |
+| Accelerator check | `LivenessWatchdogDriver.accelerate` (helper) | `1` s | After an aggregate event (`goin`→0, `stpd`, `diff`, `agrp`), a stall is reported if no heartbeat arrived in this time. An accelerator never triggers a blind rebuild. |
+| Write-progress stall | `WriteProgressMonitor.stuckSeconds` | `5` | A track whose heartbeat flows but that writes nothing for this long raises its not-delivering alarm ("audio arrives but can't be recorded"). |
 | Frame-count tolerance ratio | `FrameCountPlausibility.defaultToleranceRatio` | `0.10` | Allowed fractional deviation between a track's total recorded frames and its expected count from wall-clock elapsed time, at finalize. |
 | Frame-count minimum elapsed | `FrameCountPlausibility.defaultMinimumElapsedSeconds` | `30` | Session must have run at least this long before the frame-count-vs-wall-clock check is judged (avoids false positives on very short sessions). |
 | Frame-count minimum deficit | `FrameCountPlausibility.defaultMinimumDeficitSeconds` | `15` | Minimum absolute shortfall (seconds of missing audio) before a tolerance-ratio breach is reported, so a technically-out-of-ratio but tiny gap doesn't fire. |
+
+### Healing
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Rung backoff | `TapRecoveryLadder.backoff` | `[0.25, 0.5, 1, 2]` s | Delay before each ladder run after the first, which runs at once. |
+| Fast window | `TapRecoveryLadder.fastWindowSeconds` | `15` | Rungs run within this window of the episode's start; past it the ladder gives up (alarm + slow retry). |
+| Heartbeat deadline | `TapRecoveryLadder.heartbeatDeadlineSeconds` | `3` | After a rung succeeds, a heartbeat must arrive within this long (tokened to the rung), else the next rung. |
+| Slow retry | `TapRecoveryLadder.slowRetrySeconds` | `60` | After a give-up, one tap rebuild this often while the gate stays open. |
+| Rung budget | `TapRecoveryLadder.rungBudget` | `2` | Attempts per rung (aggregate rebuild, then new tap) per episode; rebuilds the ladder did not order count too. |
+| Sustained health | `TapRecoveryLadder.sustainedHealthSeconds` (also `MicHealPolicy`) | `30` | A heal must hold this long before the episode ends and its budget is refunded; a stall sooner continues the episode. |
+| Stuck rung | `TapHealer.stuckSeconds` | `5` | A rung that has not returned within this long raises `remoteRecoveryFailed`. |
+| Mic reopen deadline | `MicHealPolicy.reopenDeadlineSeconds` | `8` | A mic reopen that has delivered no newer heartbeat by then raises `micNotDelivering` (stuck, or reopened but silent). |
+| Sleep pause expiry | `SleepPauseClock.expirySeconds` | `30` | Awake seconds after an unclassified power-on (or after the pause, without power notifications) before the liveness pause ends on its own. |
+| DarkWake pause expiry | `SleepPauseClock.darkPowerOnExpirySeconds` | `300` | The same bound after a power-on that read DarkWake (Power Nap). |
+
+### Alarms and presentation
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Notify floor | `AlarmRealarmPolicy.notifyInterval` | `120` s | Per KIND, across episodes and clears: a kind notifies at once only if it has not notified within this long. Acknowledgeable kinds notify once and never re-notify. |
+| Idle backoff | `AlarmRealarmPolicy.idleRenotifyInterval` | `120` → `600` → `3600` s | While not recording, a live alarm re-notifies after 2 min, then 10 min, then at most hourly. |
+| "Later" snooze | `CaptureReadiness.repairSnooze` | `180` s | The alarm window (and the repair window) stays closed this long after "Later", unless a new kind arrives. |
+| Repair-notification dedup | `AlarmRealarmPolicy.repairNotificationDedupWindow` | `30` s | The repair window skips its own notification when the alarm's notification for the same problem went out this recently. |
+| Status poll | `RecordingCoordinator.statusPollInterval` | `5` s | The app pulls the helper's alarm snapshot this often while recording. 3 unanswered polls in a row raise `helperUnresponsive`. |
+| Recovery confirmation | `RecordingCoordinator.recoveryConfirmationSeconds` | `60` | The XPC retry streak resets only after this long of confirmed frames following a restart. |
+
+### Lifecycle
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Helper call deadlines | `AudioCaptureClient` (app), via `Deadline.swift` | start `15`, stop `20`, rotate `10`, mic switch `10`, status / drain / configure / power event / permission `3` s | Awake time (`SuspendingClock`): a Mac that sleeps through a call never times out at wake. |
+| Helper start deadline | `CaptureLifecycle.startTimeoutSeconds` | `20` | The helper abandons a start that has not finished (longer than the app's 15 s, so the app gives up first). |
+| Helper source stop | `CaptureLifecycle.sourceStopTimeoutSeconds` | `3` | How long a helper Stop waits for mic and tap to stop before abandoning them. |
+| Writer-swap bound | `AbandonableStep.rotationTimeoutSeconds` | `3` | A rotation's writer swap on a stalled audio queue is abandoned after this (it never applies late). |
+| Resume window | `RelaunchDecision.resumeWindow` | `180` s | A relaunch strictly within this long of the last-alive time resumes the same session; otherwise it salvages and says STOPPED. |
+| Alive refresh | `RecordingCoordinator.aliveRefreshInterval` | `60` s | The sentinel's `lastAliveAt` is refreshed this often while recording, and at every rotation. |
+| Hand-over cooldown | `LaunchAgentHealth.handOverCooldown` | `30` s | Minimum time between two crash-protection hand-overs; persisted in `UserDefaults`. |
+| Hand-over attempts | `LaunchAgentHealth.maxHandOverAttempts` | `3` | Failed kickstarts per process before the row says crash protection is off. |
+| Window deferral | `LaunchAgentHealth.windowDeferralLimit` | `15` min | Open Parley windows defer the hand-over at most this long while idle; after that the row says why. |
+| Lock wait | `SingleInstancePolicy.lockWaitTimeout` | `10` s | launchd's own copy waits this long for the single-instance lock during a hand-over, then exits 0. |
+| Quit stop bound | `TerminationPolicy.userQuitBound` | `30` s | Parley's own Quit (confirmed) stops the recording within this bound before the app ends. |
+| Termination stop bound | `TerminationPolicy.terminationBound` | `5` s | A logout, shutdown, restart or outside quit stops a recording within this bound; the next launch salvages. |
+| Disk headroom | `DiskSpaceCheck.headroomBytes` | `200 MB` | Start is refused below 2 chunks + this. A chunk is `chunk_duration_minutes × 60 × 2 × 96 000` bytes. `diskLow` is raised below 1 chunk at a rotation and cleared at 2. |
+| Folder read bound | `SessionEvidence.folderDeadlineSeconds` | `5` | Bound on the record's reads of a recording folder at finalize. |
+
+### Record
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Coverage deficit | `TrackAccounting.minimumDeficitSeconds` / `deficitRatio` | `15` s and `0.10` | A side is `compromised` when its deficit (expected − delivered seconds) is at least 15 s AND at least 10 % of expected. |
+| Never delivered | `TrackAccounting.status` | expected `≥ 1` s, delivered `0` | On both tracks, checked before the content-anomaly rule. |
+| Merge gap fill | `AudioConcatenator.gapThresholdSeconds` | `1` s | A wall-clock gap between chunks longer than this is filled with silence in the merged `.m4a`. |
+| Merge bound | `AudioConcatenator.maxInsertedSilenceSeconds` | `12` h | More inserted silence than this (one gap or all together) means the timing is wrong: the merge is skipped (`merge_skipped_implausible_timing`) and each chunk's audio is listed. |
 
 ---
 

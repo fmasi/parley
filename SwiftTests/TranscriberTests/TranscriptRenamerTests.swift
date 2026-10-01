@@ -338,4 +338,32 @@ struct TranscriptRenamerTests {
             try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 1)
         }
     }
+
+    // MARK: - Flagged segments (R7 review round 1)
+
+    private func flaggedTranscript() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("flags-rename-\(UUID().uuidString).json")
+        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [
+            ["start": 0.0, "end": 2.0, "text": "real words", "speaker": "Local Speaker 1", "source": "local"],
+            ["start": 2.0, "end": 4.0, "text": "bleed of the other side", "speaker": "Local Speaker 1", "source": "local", "echo": true],
+        ]]).write(to: url)
+        return url
+    }
+
+    @Test func samplesSkipFlaggedSegments() throws {
+        let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
+        let speakers = try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 5)
+        let texts = speakers.flatMap { $0.samples.map(\.text) }
+        #expect(texts == ["real words"])
+    }
+
+    /// An echo keeps the label it had when it was flagged; after a local re-detect that label can
+    /// belong to someone else, so a rename must not reach it.
+    @Test func renamesApplyToUnflaggedSegmentsOnly() throws {
+        let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(TranscriptRenamer.applyRenames(["Local Speaker 1": "Frederic"], jsonPath: url))
+        let segs = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["segments"] as? [[String: Any]])
+        #expect(segs[0]["speaker"] as? String == "Frederic")
+        #expect(segs[1]["speaker"] as? String == "Local Speaker 1")
+    }
 }

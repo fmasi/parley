@@ -20,6 +20,7 @@ struct SettingsView: View {
     @Bindable var permissionManager: PermissionManager
     @State private var config: Config
     @State private var saveStatus: String?
+    @State private var isPreflighting = false
     @State private var statusClearTask: Task<Void, Never>?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
@@ -137,7 +138,7 @@ struct SettingsView: View {
                 return
             } catch {
                 apiKeyLoadFailed = true
-                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .public)")
+                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .private)")
             }
             apiKeyLoaded = true
 
@@ -198,7 +199,7 @@ struct SettingsView: View {
             Spacer()
             Button("Save") { save() }
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(isDownloading)
+                .disabled(isDownloading || isPreflighting)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -270,11 +271,11 @@ struct SettingsView: View {
 
         Section("System Audio") {
             Picker("Capture Method", selection: $config.systemAudioSource) {
-                Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
-                Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Core Audio Tap (default — captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Screen Recording (legacy, until #221)").tag(SystemAudioSource.screenCaptureKit)
             }
             if config.systemAudioSource == .coreAudioTap {
-                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Needs System Audio Recording permission — Parley asks for it when you save. Applies to the next recording.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -424,12 +425,15 @@ struct SettingsView: View {
                 pane: .microphone,
                 onGrant: { Task { await permissionManager.requestMicrophone() } }
             )
+            // The system-audio permission that matters depends on the capture method (#220).
+            let systemAudio: CapturePermission = permissionManager.systemAudioSource == .coreAudioTap
+                ? .systemAudioRecording : .screenRecording
             PermissionSettingsRow(
-                name: "Screen Recording",
-                detail: "Capture system audio from meeting apps",
-                status: permissionManager.screenRecording,
-                pane: .screenRecording,
-                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                name: systemAudio.displayName,
+                detail: systemAudio.detail,
+                status: permissionManager.status(of: systemAudio),
+                pane: systemAudio.pane,
+                onGrant: { Task { await grantPermission(systemAudio, using: permissionManager) } }
             )
         }
         Section("Optional") {
@@ -505,12 +509,15 @@ struct SettingsView: View {
     }
 
     private func save() {
+        // Decided once, up front, from the form state as it stands right now — NOT re-read inside
+        // commitSave(), which can run a moment later (after the async preflight resolves) by which
+        // point the user may have kept typing. Only `config.summary` (in-memory @State, not yet
+        // persisted anywhere) is computed here; the one actual persistent side effect below it
+        // (the Keychain write) is deferred to commitSave(), so a failed preflight leaves the
+        // Keychain — like config.json — untouched (review fix 1, item 2).
+        let apiKeyToPersist: String? = shouldSaveApiKey ? summaryApiKey : nil
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
-            // #48: the key never goes into `config`/config.json — Keychain only.
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
-            }
         } else if summaryEndpointMissing {
             // The user wants summaries but hasn't supplied an endpoint. Persist
             // their typed provider/model/key with enabled:false rather than
@@ -518,9 +525,6 @@ struct SettingsView: View {
             // non-empty endpoint (MeetingSummarizer), so it stays off, but the
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
-            }
         } else {
             // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
             // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
@@ -528,12 +532,50 @@ struct SettingsView: View {
             // the user actually cleared the field. Leaving a matching key in place means flipping
             // summaries back on later doesn't require re-typing it.
             config.summary = nil
-            if shouldSaveApiKey {
-                SummaryAPIKeyStore.save(summaryApiKey)
+        }
+        // §11.2: the chosen engine is preflighted (one synthetic second transcribed) before the
+        // config is committed, so a broken engine never gets saved silently — Save stays disabled
+        // (isPreflighting) until this resolves. A model that is not downloaded yet has nothing to
+        // preflight: the settings are committed, and commitSave() starts the download.
+        guard EnginePreflight.saveStep(for: config.engine, modelCached: FluidAudioEngine.isModelCached()) == .preflightThenCommit else {
+            commitSave(apiKeyToPersist: apiKeyToPersist)
+            return
+        }
+        isPreflighting = true
+        Task {
+            do {
+                let (engine, _) = try TranscriptionRunner().prepareEngine(config: config)
+                try await EnginePreflight.run(engine: engine)
+                await MainActor.run {
+                    isPreflighting = false
+                    commitSave(apiKeyToPersist: apiKeyToPersist)
+                }
+            } catch {
+                await MainActor.run {
+                    isPreflighting = false
+                    saveStatus = "Not saved — this engine cannot transcribe on this Mac: \(error)"
+                }
             }
         }
+    }
+
+    /// The remainder of Save once the chosen engine has been preflighted successfully: persists
+    /// the Keychain-only API key (review fix 1, item 2 — the last persistent side effect that used
+    /// to run before the preflight gate), commits `config` to disk, and everything that follows.
+    private func commitSave(apiKeyToPersist: String?) {
+        if let apiKeyToPersist {
+            // #48: the key never goes into `config`/config.json — Keychain only.
+            SummaryAPIKeyStore.save(apiKeyToPersist)
+        }
         config.lastMicrophoneDeviceId = settingsMicId
+        let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }
+        permissionManager.systemAudioSource = config.systemAudioSource
+        if sourceChanged {
+            // A new capture method can need a permission the old one didn't (the tap needs System
+            // Audio Recording). Ask now, not at the next meeting (#220).
+            Task { await PermissionRepairWindowController.shared.verify(trigger: .settingsChange) }
+        }
         // Don't claim "Saved" for a summary config that was just dropped on
         // the floor: the toggle would silently be off again on next open.
         saveStatus = summaryEndpointMissing
@@ -550,6 +592,9 @@ struct SettingsView: View {
             saveStatus = nil
         }
         triggerDownloadIfNeeded()
+        // The engine may be ready now (another one chosen, its model already there): recordings kept waiting for it are
+        // transcribed (L review 178).
+        Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
     }
 
     @ViewBuilder
@@ -622,6 +667,9 @@ struct SettingsView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
+                // Recordings kept waiting for the engine are transcribed now (L review 178) — in their own task (L review
+                // 233): the retry is never cancelled with this download task.
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

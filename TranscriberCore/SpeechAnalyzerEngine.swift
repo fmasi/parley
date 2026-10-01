@@ -10,20 +10,53 @@ import Speech
 
 /// Transcription engine backed by Apple's SpeechAnalyzer (macOS 26+).
 /// On-device, Apple-maintained, broad language support, possible code-switching awareness.
-/// No model download required — uses system framework.
+/// No Parley model download — but each language's speech model must be INSTALLED on this Mac, and installing one is a
+/// download: only `prepare()`, from an explicit user action, ever does it (L review 229).
 @available(macOS 26.0, *)
 public actor SpeechAnalyzerEngine: TranscriptionEngine {
     public nonisolated let name = "SpeechAnalyzer"
+    /// The language to transcribe when a caller passes none — SpeechAnalyzer cannot detect one. nil until #223 gives it a
+    /// setting.
+    private nonisolated let language: String?
+    private nonisolated let inventory: any SpeechAssetInventory
 
-    public init() {}
-
-    public nonisolated func isReady() -> Bool {
-        // System framework, always available on macOS 26+
-        true
+    public init(language: String? = nil, inventory: (any SpeechAssetInventory)? = nil) {
+        self.language = language
+        self.inventory = inventory ?? SystemSpeechAssetInventory()
     }
 
+    /// Ready only when its language's model is INSTALLED on this Mac (L review 229): a look at the installed locales, never
+    /// a download. Without a language it cannot transcribe, so it is never ready.
+    public nonisolated func isReady() async -> Bool {
+        SpeechAnalyzerLocale.isAmong(language, await inventory.installedLocales())
+    }
+
+    /// Why it is not ready, honestly (L review 270): a locale this Mac does not support at all is "not supported" — never
+    /// "not installed", which a download would fix.
+    public nonisolated func notReadyReason() async -> String {
+        guard let language else { return "Apple Speech needs a language, and has no language setting yet (#223)" }
+        let localeID = SpeechAnalyzerLocale.resolve(language)
+        guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
+            return "its \(localeID) speech model is not supported on this Mac"
+        }
+        return "its \(localeID) speech model is not installed on this Mac"
+    }
+
+    /// Installs the language's speech model — a NETWORK download: only from an explicit user action (Setup, Settings),
+    /// never from a recording or a salvage, which only look (L review 229).
     public func prepare() async throws {
-        // No preparation needed — SpeechAnalyzer is a system framework
+        guard let language else { throw SpeechAnalyzerError.languageRequired }
+        let localeID = SpeechAnalyzerLocale.resolve(language)
+        guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
+            throw SpeechAnalyzerError.localeNotSupported(localeID)
+        }
+        guard !SpeechAnalyzerLocale.isAmong(localeID, await inventory.installedLocales()) else { return }
+        Logger.transcription.info("SpeechAnalyzer: installing the \(localeID, privacy: .public) model, as the user asked")
+        do {
+            try await inventory.install(locale: localeID)
+        } catch {
+            throw SpeechAnalyzerError.assetInstallFailed(localeID, error.localizedDescription)
+        }
     }
 
     public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {
@@ -34,39 +67,26 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         // SpeechAnalyzer cannot auto-detect language — it transcribes in whatever locale it's
         // given. Refuse a missing language rather than defaulting to the system locale, which
         // silently transcribed non-English audio as English (e.g. Portuguese → gibberish).
-        guard let language, !language.trimmingCharacters(in: .whitespaces).isEmpty else {
+        guard let language = language ?? self.language, !language.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw SpeechAnalyzerError.languageRequired
         }
         let localeID = SpeechAnalyzerLocale.resolve(language)
         let locale = Locale(identifier: localeID)
 
-        let transcriber = SpeechTranscriber(
-            locale: locale,
-            preset: SpeechTranscriber.Preset(
-                transcriptionOptions: [],
-                reportingOptions: [.volatileResults],
-                attributeOptions: [.audioTimeRange]
-            )
-        )
-
-        // The locale must be supported AND its on-device model installed, or transcription returns
-        // empty/garbage. Check + install, surfacing failures (e.g. the ko-KR download SFSpeechError
-        // Code=11) instead of swallowing them.
-        func matches(_ a: Locale, _ b: Locale) -> Bool { a.identifier(.bcp47) == b.identifier(.bcp47) }
-        guard await SpeechTranscriber.supportedLocales.contains(where: { matches($0, locale) }) else {
-            throw SpeechAnalyzerError.localeNotSupported(locale.identifier(.bcp47))
-        }
-        if !(await SpeechTranscriber.installedLocales).contains(where: { matches($0, locale) }) {
-            Logger.transcription.info("SpeechAnalyzer: installing \(locale.identifier(.bcp47), privacy: .public) model...")
-            do {
-                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                    try await request.downloadAndInstall()
-                }
-            } catch {
-                throw SpeechAnalyzerError.assetInstallFailed(locale.identifier(.bcp47), error.localizedDescription)
+        // Its on-device model must be INSTALLED, or transcription returns empty/garbage — looked at FIRST (L review 254): an
+        // installed model is a supported one, and needs no other look. Only a model that is not installed looks at what this
+        // Mac supports, to say which it is (L review 270): "not supported on this Mac", or "not installed". It is NEVER
+        // downloaded here (L review 229): a transcription runs in a recording or a salvage, and installing is a network
+        // download only an explicit user action may start (`prepare`).
+        guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.installedLocales()) else {
+            guard SpeechAnalyzerLocale.isAmong(localeID, await inventory.supportedLocales()) else {
+                throw SpeechAnalyzerError.localeNotSupported(locale.identifier(.bcp47))
             }
+            Logger.transcription.error("SpeechAnalyzer: the \(locale.identifier(.bcp47), privacy: .public) model is not installed — not transcribed, never downloaded")
+            throw SpeechAnalyzerError.assetNotInstalled(locale.identifier(.bcp47))
         }
 
+        let transcriber = Self.transcriber(for: locale)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
 
         let audioFile = try AVAudioFile(forReading: audioPath)
@@ -138,7 +158,32 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
 
         Logger.transcription.info("SpeechAnalyzer complete: \(segments.count) segments in \(seconds)s")
 
-        return SpeakerAssignment.deduplicate(segments)
+        // Deduplication happens in the callers' transcribeStream, where the dropped count is recorded (P2).
+        return segments
+    }
+
+    static func transcriber(for locale: Locale) -> SpeechTranscriber {
+        SpeechTranscriber(
+            locale: locale,
+            preset: SpeechTranscriber.Preset(
+                transcriptionOptions: [],
+                reportingOptions: [.volatileResults],
+                attributeOptions: [.audioTimeRange]
+            )
+        )
+    }
+}
+
+/// The system's speech models (L review 229): the installed and supported locales are looks; `install` downloads.
+@available(macOS 26.0, *)
+struct SystemSpeechAssetInventory: SpeechAssetInventory {
+    func installedLocales() async -> [String] { await SpeechTranscriber.installedLocales.map { $0.identifier(.bcp47) } }
+    func supportedLocales() async -> [String] { await SpeechTranscriber.supportedLocales.map { $0.identifier(.bcp47) } }
+    func install(locale: String) async throws {
+        if let request = try await AssetInventory.assetInstallationRequest(
+            supporting: [SpeechAnalyzerEngine.transcriber(for: Locale(identifier: locale))]) {
+            try await request.downloadAndInstall()
+        }
     }
 }
 #endif // compiler(>=6.2)

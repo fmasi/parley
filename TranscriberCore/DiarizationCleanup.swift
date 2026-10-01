@@ -55,21 +55,31 @@ public enum DiarizationCleanup {
         _ result: DiarizationResult,
         minShare: Double? = defaultMinShare
     ) -> DiarizationResult {
-        guard let minShare, !result.segments.isEmpty else { return result }
+        absorbMinorityClustersCounting(result, minShare: minShare).0
+    }
+
+    /// `absorbMinorityClusters`, also returning how many clusters were absorbed — so the record can
+    /// say a quiet voice was merged into the main speaker (`clusters_absorbed`, P7) rather than the
+    /// merge being invisible.
+    public static func absorbMinorityClustersCounting(
+        _ result: DiarizationResult,
+        minShare: Double? = defaultMinShare
+    ) -> (DiarizationResult, absorbed: Int) {
+        guard let minShare, !result.segments.isEmpty else { return (result, 0) }
 
         var speech: [String: Double] = [:]
         for s in result.segments { speech[s.speaker, default: 0] += s.end - s.start }
-        guard speech.count > 1 else { return result }
+        guard speech.count > 1 else { return (result, 0) }
 
         let total = speech.values.reduce(0, +)
-        guard total > 0 else { return result }
+        guard total > 0 else { return (result, 0) }
 
         guard let dominant = speech.max(by: { $0.value < $1.value }),
               dominant.value / total >= dominanceShare
-        else { return result }
+        else { return (result, 0) }
 
         let absorbed = Set(speech.filter { $0.key != dominant.key && $0.value / total < minShare }.keys)
-        guard !absorbed.isEmpty else { return result }
+        guard !absorbed.isEmpty else { return (result, 0) }
 
         Logger.transcription.info(
             "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int(minShare * 100), privacy: .public)% of \(String(format: "%.1f", total), privacy: .public)s of speech)"
@@ -81,6 +91,6 @@ public enum DiarizationCleanup {
                 : seg
         }
         let database = result.speakerDatabase.filter { !absorbed.contains($0.key) }
-        return DiarizationResult(segments: segments, speakerDatabase: database)
+        return (DiarizationResult(segments: segments, speakerDatabase: database), absorbed.count)
     }
 }

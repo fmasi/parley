@@ -6,6 +6,9 @@ public struct EngineDescriptor: Sendable {
     public let requiresModelDownload: Bool
     public let approximateSizeMB: Int
     public let minimumMacOS: String
+    /// §11.2: whether this engine can be trusted end-to-end today. `false` is labelled in
+    /// `displayName`, never hidden from `availableEngines` — the picker still lists it.
+    public var isUsableEndToEnd: Bool = true
 
     public var isAvailableOnThisOS: Bool {
         let parts = minimumMacOS.split(separator: ".")
@@ -25,7 +28,8 @@ public enum EngineID: String, Codable, CaseIterable, Sendable, Identifiable {
 
     public var id: String { rawValue }
 
-    public static let `default`: EngineID = .speechAnalyzer
+    // §11.2 owner decision 2026-09-24; Apple Speech goes back to default when #223 lands
+    public static let `default`: EngineID = .fluidAudio
 
     /// The default engine, falling back if the preferred default is unavailable on this OS.
     public static var resolvedDefault: EngineID {
@@ -44,19 +48,21 @@ public enum EngineID: String, Codable, CaseIterable, Sendable, Identifiable {
         switch self {
         case .speechAnalyzer:
             EngineDescriptor(
-                displayName: "Apple Speech (recommended)",
-                description: "Apple's on-device model. No download. Best for multilingual (JA, KO). Requires macOS 26.",
+                displayName: "Apple Speech — not yet usable (#223)",
+                description: "Apple's on-device model. Produces blank transcripts on the live chunk path until it gets a language setting (#223). No download. Requires macOS 26.",
                 requiresModelDownload: false,
                 approximateSizeMB: 0,
-                minimumMacOS: "26.0"
+                minimumMacOS: "26.0",
+                isUsableEndToEnd: false
             )
         case .fluidAudio:
             EngineDescriptor(
-                displayName: "FluidAudio (dev)",
+                displayName: "FluidAudio (recommended)",
                 description: "Fastest engine, best accuracy for European languages. Downloads ~500MB on first use. macOS 15+.",
                 requiresModelDownload: true,
                 approximateSizeMB: 500,
-                minimumMacOS: "15.0"
+                minimumMacOS: "15.0",
+                isUsableEndToEnd: true
             )
         }
     }

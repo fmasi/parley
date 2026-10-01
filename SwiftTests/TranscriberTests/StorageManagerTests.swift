@@ -141,4 +141,20 @@ struct StorageManagerTests {
         let usage = StorageManager.currentUsageBytes(in: dir)
         #expect(usage == 3000)
     }
+
+    /// Round 8 item 2: protected files alone over the quota — nothing can be deleted, and the report
+    /// says by how much, instead of passing in silence.
+    @Test func aProtectedOverrunIsReported() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("storage-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let mine = dir.appendingPathComponent("m-0.m4a")
+        try Self.createFakeM4a(at: mine, sizeBytes: 4096)
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64, protectedFiles: [mine])
+        #expect(report.deleted.isEmpty && report.protectedOverrunBytes == 4096)
+        #expect(FileManager.default.fileExists(atPath: mine.path))
+        let under = try StorageManager.enforceQuotaReport(in: dir, limitHours: 1, bitrateKbps: 64, protectedFiles: [mine])
+        #expect(under.protectedOverrunBytes == 0)
+    }
 }
+

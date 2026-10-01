@@ -7,15 +7,43 @@ import UserNotifications
 import Sparkle
 import os
 
-/// Shared by both Quit paths (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift):
-/// `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no timeout, so a
-/// safety-net Task races the graceful uninstall-then-terminate path and terminates unconditionally
-/// after a bound generous past any real unload. Racing a second `terminate(nil)` in is safe here
-/// specifically because this app has no `applicationShouldTerminate(_:)` override — termination is
-/// always immediate once requested, never deferred via `.terminateLater` — so there's no
-/// in-progress graceful-shutdown answer for the safety net to cut short.
+/// The one Quit (this view's row, and `SetupRequiredPanel` in TranscriberApp.swift), routed through the
+/// coordinator whenever there is one (L10 review 58): the setup panel can be up during a Flow A re-attach or a
+/// resume. While recording — or while a start is in flight — it asks first; on "Stop and Quit" the recording
+/// is stopped (bounded, ≤ 30 s) BEFORE the LaunchAgent is uninstalled and the app terminates, so the 5 s
+/// safety-net terminate starts only then (§8.10).
 @MainActor
-func quitAfterUninstallingLaunchAgent() {
+func quitParley() {
+    Task {
+        guard await RecordingCoordinator.quitGate(TranscriberApp.busyCoordinator,
+                                                  confirm: { MenuView.confirmQuitWhileRecording() }) else { return }
+        terminateAfterUninstallingLaunchAgent()
+    }
+}
+
+/// The end of the one Quit: `launchctl unload`'s subprocess wait (`LaunchAgentManager.runLaunchctl`) has no
+/// timeout, so a safety-net Task races the graceful uninstall-then-terminate path and terminates
+/// unconditionally after a bound generous past any real unload. `applicationShouldTerminate`
+/// (`AppTerminationDelegate`, L10 review 53) answers this Quit at once — it is marked as the user's, whose
+/// recording `quitGate` already stopped — so a second `terminate(nil)` never lands on a pending
+/// `.terminateLater`, and racing it in is safe.
+@MainActor
+private func terminateAfterUninstallingLaunchAgent() {
+    AppTerminationDelegate.userQuitRequested = true
+    // L3 (C2 final): without the single-instance lock another live instance may be launchd's job —
+    // possibly recording — and `uninstall()`'s bootout would SIGTERM it. Just quit.
+    guard LaunchAgentHealth.shouldUninstallOnQuit(holdsInstanceLock: TranscriberApp.holdsInstanceLock) else {
+        Logger.state.info("Quit without the single-instance lock — leaving the LaunchAgent in place")
+        NSApplication.shared.terminate(nil)
+        return
+    }
+    // The Quit left a recording held — the capture helper would not stop it (L review 223): the LaunchAgent stays, so the
+    // next launch finishes it.
+    if TranscriberApp.busyCoordinator?.keepsLaunchAgentOnQuit == true {
+        Logger.state.info("Quit with a recording still being stopped — leaving the LaunchAgent in place")
+        NSApplication.shared.terminate(nil)
+        return
+    }
     // Async (#197): `launchctl unload` is a subprocess wait; off main so Quit never blocks on it.
     // (On a launchd-spawned instance, `unload` SIGTERMs this process before these lines finish —
     // expected, see LaunchAgentManager.)
@@ -30,67 +58,62 @@ func quitAfterUninstallingLaunchAgent() {
     }
 }
 
+extension Notification.Name {
+    /// Something a crash-protection hand-over (an exit) waits for has ended — post-recording work, a
+    /// panel still preparing — so the hand-over's idle watch looks again (L3 fix round 1, L round 5).
+    static let parleyActivityEnded = Notification.Name("eu.fmasi.parley.activityEnded")
+}
+
+/// Post-recording work a crash-protection hand-over (an exit) must not cut short — today, the
+/// auto-summary, which runs detached after the rename dialog (L3 fix round 1).
+@MainActor
+enum PostRecordingWork {
+    private(set) static var inFlight = 0
+
+    static func begin() { inFlight += 1 }
+
+    static func end() {
+        inFlight = max(0, inFlight - 1)
+        if inFlight == 0 { NotificationCenter.default.post(name: .parleyActivityEnded, object: nil) }
+    }
+}
+
 struct MenuView: View {
     @Bindable var appState: AppState
-    let captureClient: AudioCaptureClient
-    let transcriptionRunner: TranscriptionRunner
+    /// Owns the recording lifecycle + crash recovery (#139 PR-6). Built once by `TranscriberApp` (it
+    /// also runs launch recovery, before any menu exists) and injected here (§8.3).
+    let coordinator: RecordingCoordinator
     let configManager: ConfigManager
     let calendarService: CalendarService
     let updater: SPUUpdater
     /// Read for the ongoing notifications-off signal (#150); refreshed on panel open.
     let permissionManager: PermissionManager
     @State private var selectedMicId: String?
-    /// Owns the recording lifecycle + crash recovery (moved out of this view, #139 PR-6).
-    /// `@State`-held so it has exactly the lifetime the old `@State` counters had.
-    @State private var coordinator: RecordingCoordinator
     /// Closes the window-style MenuBarExtra panel (macOS 14+ honors dismiss here).
     @Environment(\.dismiss) private var dismissPanel
 
     init(
         appState: AppState,
-        captureClient: AudioCaptureClient,
-        transcriptionRunner: TranscriptionRunner,
+        coordinator: RecordingCoordinator,
         configManager: ConfigManager,
         calendarService: CalendarService,
         updater: SPUUpdater,
         permissionManager: PermissionManager
     ) {
         self.appState = appState
-        self.captureClient = captureClient
-        self.transcriptionRunner = transcriptionRunner
+        self.coordinator = coordinator
         self.configManager = configManager
         self.calendarService = calendarService
         self.updater = updater
         self.permissionManager = permissionManager
         self._selectedMicId = State(initialValue: configManager.config.lastMicrophoneDeviceId)
-        // The coordinator owns orchestration; the app-target UI side effects it needs
-        // (notifications, the critical panel, the rename dialog + auto-summary) are injected here.
-        self._coordinator = State(initialValue: RecordingCoordinator(
-            appState: appState,
-            captureClient: captureClient,
-            transcriptionRunner: transcriptionRunner,
-            configManager: configManager,
-            notify: { title, body in
-                MenuView.postNotification(title: title, body: body)
-            },
-            notifyCritical: { title, body in
-                MenuView.sendCriticalNotification(title: title, body: body)
-            },
-            presentTranscript: { jsonPath, config in
-                RenameWindowController.shared.show(jsonPath: jsonPath) {
-                    // Auto-summarize after rename completes (so summary has real speaker names)
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
-                }
-            }
-        ))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             statusHeader
 
-            if appState.criticalError != nil || appState.interruptionWarning != nil
-                || appState.truncatedErrorMessage != nil {
+            if appState.hasMenuAlerts {
                 alertBanners
             }
 
@@ -127,9 +150,9 @@ struct MenuView: View {
                     dismissPanel()
                     if let jsonPath = appState.lastJsonPath,
                        FileManager.default.fileExists(atPath: jsonPath) {
-                        RenameWindowController.shared.show(jsonPath: URL(fileURLWithPath: jsonPath))
+                        RenameWindowController.shared.enqueue(jsonPath: URL(fileURLWithPath: jsonPath))
                     } else if let picked = pickTranscript() {
-                        RenameWindowController.shared.show(jsonPath: picked)
+                        RenameWindowController.shared.enqueue(jsonPath: picked)
                     }
                 }
 
@@ -159,7 +182,7 @@ struct MenuView: View {
                 }
 
                 MenuActionRow(icon: "power", title: "Quit Parley") {
-                    quitAfterUninstallingLaunchAgent()
+                    quitParley()
                 }
                 .keyboardShortcut("q")
             }
@@ -221,6 +244,8 @@ struct MenuView: View {
         // after a crash the phase falls back to .idle, which would otherwise
         // pair a red dot with "Ready to record". The banner carries the detail.
         if appState.criticalError != nil { return "Error" }
+        // A long user Quit says so while it saves the recording (L10 review 60).
+        if coordinator.isQuitting { return "Quitting — saving the recording…" }
         switch appState.phase {
         case .idle: return "Ready to record"
         case .recording: return appState.interruptionWarning == nil ? "Recording" : "Recording — interrupted"
@@ -230,6 +255,26 @@ struct MenuView: View {
 
     @ViewBuilder
     private var alertBanners: some View {
+        // Sticky alarm rows (§6.3, #220): one per active alarm, never dismissible here — they clear only
+        // when the condition does (past events are acknowledged in the alarm window).
+        ForEach(appState.alarms.sorted, id: \.kind) { alarm in
+            MenuActionRow(icon: alarm.kind.symbolName, title: alarm.kind.headline, subtitle: alarm.message) {
+                dismissPanel()
+                if alarm.kind.track == .system {
+                    // Nothing missing app-side (#220's refusal although granted, "can't confirm"), or a
+                    // window that doesn't cover it: the alarm window explains instead (L round 6).
+                    Task {
+                        if await !PermissionRepairWindowController.shared.verify(trigger: .userRequest) {
+                            CaptureAlarmWindowController.shared.present(
+                                appState.alarms.sorted, newlyRaised: [], appState: appState, userRequest: true)
+                        }
+                    }
+                } else {
+                    CaptureAlarmWindowController.shared.present(
+                        appState.alarms.sorted, newlyRaised: [], appState: appState, userRequest: true)
+                }
+            }
+        }
         if let critical = appState.criticalError {
             AlertBanner(severity: .critical, message: critical) {
                 appState.criticalError = nil
@@ -310,7 +355,8 @@ struct MenuView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .tint(.red)
-        .disabled(appState.isTranscribing)
+        // A start in flight (the phase is still `.idle` while the helper starts) must not offer a second Start.
+        .disabled(appState.isTranscribing || coordinator.isStartInFlight)
     }
 
     private var recordButtonTitle: String {
@@ -365,6 +411,17 @@ struct MenuView: View {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    /// Quit while recording: stop it first, or stay.
+    static func confirmQuitWhileRecording() -> Bool {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = "Stop the recording and quit?"
+        alert.informativeText = "Parley stops the recording and keeps what was captured before it quits."
+        alert.addButton(withTitle: "Stop and Quit")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     private func toggleRecording() async {
         if appState.isRecording {
             await coordinator.stopRecording()
@@ -383,7 +440,15 @@ struct MenuView: View {
         ) { sessionName, micDeviceId in
             selectedMicId = micDeviceId
             let coordinator = coordinator
-            Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            // In flight from THIS turn, before the Task: a crash-protection hand-over must never see the
+            // gap between the dialog closing and the start (L round 7). `startRecording` takes it over.
+            coordinator.announceStart()
+            Task {
+                await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId)
+                // After the recording is up (never gating it): if a permission it needs is missing, the
+                // fix appears now, at the start of the meeting, not after it (#220).
+                await PermissionRepairWindowController.shared.verify(trigger: .recordStart)
+            }
         }
     }
 
@@ -421,11 +486,13 @@ struct MenuView: View {
     /// notification instead of failing silently (#134). Static + self-free so it is safe to
     /// fire from a rename-dialog completion without capturing the view.
     static func autoSummarize(jsonPath: URL, config: Config) {
+        PostRecordingWork.begin()
         Task.detached(priority: .utility) {
             if case .failed(let message) = await MeetingSummarizer.summarizeIfConfigured(
                 transcriptPath: jsonPath, config: config) {
                 postNotification(title: "Summary Failed", body: message)
             }
+            await MainActor.run { PostRecordingWork.end() }
         }
     }
 
@@ -433,11 +500,13 @@ struct MenuView: View {
     /// interruption level). `nonisolated` + self-free so it is safe to call from a detached
     /// (`@Sendable`) task off the main actor — e.g. reporting a failed background auto-summary
     /// (#134). `UNUserNotificationCenter` is thread-safe, so no main-actor hop is needed.
+    /// `identifier`: pass a stable one to REPLACE the previous notification of that kind rather than stack.
     nonisolated static func postNotification(
         title: String,
         body: String,
         sound: UNNotificationSound = .default,
-        interruptionLevel: UNNotificationInterruptionLevel = .timeSensitive
+        interruptionLevel: UNNotificationInterruptionLevel = .timeSensitive,
+        identifier: String? = nil
     ) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         Logger.state.debug("Sending notification: \(title, privacy: .public)")
@@ -447,11 +516,11 @@ struct MenuView: View {
         content.sound = sound
         content.interruptionLevel = interruptionLevel
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString, content: content, trigger: nil
+            identifier: identifier ?? UUID().uuidString, content: content, trigger: nil
         )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                Logger.state.error("Notification failed: \(error, privacy: .public)")
+                Logger.state.error("Notification failed: \(error, privacy: .private)")
             }
         }
     }

@@ -61,4 +61,19 @@ struct FilenameUtilsTests {
     @Test func multipleConsecutiveSlashes() {
         #expect(sanitizeFilename("///path///") == "path")
     }
+
+    // MARK: - Fitting a name into a byte budget (L review 262)
+
+    @Test func aNameThatFitsIsUnchanged() {
+        #expect(fittedFilename("Weekly Sync", maxBytes: 11) == "Weekly Sync")
+    }
+
+    @Test func aLongNameIsCutOnACharacterBoundaryAndHashed() {
+        let family = "👩‍👩‍👧", name = String(repeating: family, count: 20)   // 18-byte characters: never split
+        let fitted = fittedFilename(name, maxBytes: 100)
+        #expect(fitted.utf8.count <= 100)
+        #expect(name.hasPrefix(String(fitted.dropLast(9))) && fitted.dropLast(9).count == (100 - 9) / family.utf8.count, "\(fitted)")
+        #expect(fitted.hasSuffix(String(fittedFilename(name, maxBytes: 100).suffix(9))), "the same name fits the same way every time")
+        #expect(fittedFilename(name + "x", maxBytes: 100) != fitted, "another name, another fit")
+    }
 }

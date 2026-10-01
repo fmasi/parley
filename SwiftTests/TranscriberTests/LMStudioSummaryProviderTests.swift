@@ -272,4 +272,14 @@ struct LMStudioSummaryProviderTests {
         #expect(LMStudioSummaryProvider.parseContextError(body) == nil)
     }
 
+    /// R5: the provider's `truncated` flag comes from the token stats (both the first and the retry path).
+    @Test func detailedResponseCarriesTheTruncatedFlag() {
+        let full = LMStudioSummaryProvider.detailedResponse(
+            content: "cut", stats: .init(inputTokens: 9000, outputTokens: 1000), contextLength: 10000)
+        #expect(full == SummaryResponse(markdown: "cut", truncated: true))
+        let fine = LMStudioSummaryProvider.detailedResponse(
+            content: "ok", stats: .init(inputTokens: 1000, outputTokens: 500), contextLength: 10000)
+        #expect(!fine.truncated)
+        #expect(!LMStudioSummaryProvider.detailedResponse(content: "ok", stats: nil, contextLength: 10000).truncated)
+    }
 }

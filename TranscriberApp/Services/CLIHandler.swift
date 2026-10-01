@@ -80,7 +80,7 @@ enum CLIHandler {
             } catch {
                 // Leave logProcess nil so teardown never terminates an unlaunched Process.
                 fputs("Warning: --debug log stream unavailable: \(error.localizedDescription)\n", stderr)
-                Logger.transcription.warning("--debug: failed to launch /usr/bin/log: \(error.localizedDescription, privacy: .public)")
+                Logger.transcription.warning("--debug: failed to launch /usr/bin/log: \(error.localizedDescription, privacy: .private)")
             }
         }
         // Only terminate a process that actually launched and is still running (#62).

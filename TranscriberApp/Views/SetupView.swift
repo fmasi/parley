@@ -17,11 +17,16 @@ struct SetupView: View {
     @State private var downloadTask: Task<Void, Never>?
     @State private var folderCheckDenied = false
     @State private var checkingFolder = false
+    @State private var enginePreflightError: String?
 
     private var modelReady: Bool {
         !selectedEngine.descriptor.requiresModelDownload
             || (FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady())
             || downloadState == .done
+    }
+
+    private var systemAudioPermission: CapturePermission {
+        permissionManager.systemAudioSource == .coreAudioTap ? .systemAudioRecording : .screenRecording
     }
 
     private var canContinue: Bool {
@@ -69,13 +74,15 @@ struct SetupView: View {
                                 onGrant: { Task { await permissionManager.requestMicrophone() } }
                             )
                             Divider()
+                            // Follows the capture method: the tap needs System Audio Recording, not
+                            // Screen Recording (#220).
                             PermissionRow(
-                                tile: IconTile(systemImage: "rectangle.inset.filled.and.person.filled", color: .blue),
-                                name: "Screen Recording",
-                                detail: "Capture system audio from meeting apps",
-                                status: permissionManager.screenRecording,
-                                pane: .screenRecording,
-                                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                                tile: systemAudioPermission.tile,
+                                name: systemAudioPermission.displayName,
+                                detail: systemAudioPermission.detail,
+                                status: permissionManager.status(of: systemAudioPermission),
+                                pane: systemAudioPermission.pane,
+                                onGrant: { Task { await grantPermission(systemAudioPermission, using: permissionManager) } }
                             )
                         }
 
@@ -216,14 +223,32 @@ struct SetupView: View {
                 configManager.update { $0.recordingDirectory = recordingDirectory }
                 checkingFolder = true
                 folderCheckDenied = false
+                enginePreflightError = nil
                 Task {
                     let granted = await verifyFolderAccess(recordingDirectory)
-                    checkingFolder = false
-                    if granted {
-                        onReady()
-                    } else {
-                        folderCheckDenied = true
+                    if !granted {
+                        await MainActor.run {
+                            checkingFolder = false
+                            folderCheckDenied = true
+                        }
+                        return
                     }
+                    do {
+                        let (engine, _) = try TranscriptionRunner().prepareEngine(config: configManager.config)
+                        try await EnginePreflight.run(engine: engine)
+                    } catch {
+                        await MainActor.run {
+                            enginePreflightError = "This engine cannot transcribe on this Mac: \(error)"
+                            checkingFolder = false
+                        }
+                        return
+                    }
+                    await MainActor.run {
+                        checkingFolder = false
+                        onReady()
+                    }
+                    // Setup is complete: recordings kept waiting for the engine are transcribed now (L review 230).
+                    Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -253,6 +278,9 @@ struct SetupView: View {
                         downloadTask?.cancel()
                         downloadTask = nil
                         downloadState = .idle
+                        // Another engine, maybe one ready now: recordings kept waiting for the engine are retried (L review
+                        // 230) — a session kept for an engine this macOS cannot make is finished with the new one.
+                        Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
                         // Switching to an engine with an uncached model makes
                         // modelReady false, which the footer prioritizes over
                         // a stale folder denial — hiding it behind "Download
@@ -281,6 +309,12 @@ struct SetupView: View {
                         .frame(width: 30, alignment: .trailing)
                 }
                 .padding(.leading, 38)
+            }
+
+            if let enginePreflightError {
+                AlertBanner(severity: .critical, message: enginePreflightError) {
+                    self.enginePreflightError = nil
+                }
             }
         }
     }
@@ -369,6 +403,9 @@ struct SetupView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
+                // Recordings kept waiting for the engine are transcribed now (L review 178) — in their own task (L review
+                // 233): the retry is never cancelled with this download task (an engine change cancels it).
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
@@ -455,7 +492,7 @@ private struct FolderPickerRow: View {
     }
 }
 
-private struct PermissionRow: View {
+struct PermissionRow: View {
     let tile: IconTile
     let name: String
     let detail: String

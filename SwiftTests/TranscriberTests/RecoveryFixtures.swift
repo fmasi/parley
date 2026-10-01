@@ -14,8 +14,8 @@ enum RecoveryFixtures {
                                  chunkDurationMinutes: 1, chunks: chunks)
         try SessionState.write(state, directory: dir)
     }
-    static func writeFakeWav(at url: URL, seconds: Double) throws {
-        let sr = 48_000, ch = 1, bits = 16, frames = Int(seconds * 48_000), dataBytes = frames * ch * bits / 8
+    static func writeFakeWav(at url: URL, seconds: Double, sampleRate: Int = 48_000) throws {
+        let sr = sampleRate, ch = 1, bits = 16, frames = Int(seconds * Double(sampleRate)), dataBytes = frames * ch * bits / 8
         func le<T: FixedWidthInteger>(_ v: T) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
         var h = Data()
         h.append("RIFF".data(using: .ascii)!); h.append(le(UInt32(36 + dataBytes))); h.append("WAVE".data(using: .ascii)!)

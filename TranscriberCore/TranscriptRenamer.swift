@@ -112,6 +112,9 @@ public enum TranscriptRenamer {
         // Prefer durations already stamped in metadata (#204) over opening every chunk file.
         let cachedDurations = metadata?["chunk_durations"] as? [Double]
         let chunkDurations = SpeakerSampleLocator.durations(for: layout, cached: cachedDurations)
+        // Where finalize placed each chunk on the wall-clock timeline: across a capture gap the
+        // chunks are not end to end, and samples after the gap would otherwise play wrong audio.
+        let chunkOffsets = metadata?["chunk_offsets"] as? [Double]
 
         // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
         // clean speech from crosstalk.
@@ -119,7 +122,9 @@ public enum TranscriptRenamer {
         var segmentCounts: [String: Int] = [:]
         var orderedIds: [String] = []
 
-        for seg in segments {
+        // Flagged segments (VAD-filtered noise, mic-bleed echo) are never offered as a sample: an
+        // echo is the OTHER side's voice, and auditioning it would name the wrong person (P10/P11).
+        for seg in segments where !TranscriptAssembler.isFlagged(seg) {
             guard let speaker = seg["speaker"] as? String,
                   let text = seg["text"] as? String,
                   let start = seg["start"] as? Double,
@@ -151,7 +156,8 @@ public enum TranscriptRenamer {
                     start: candidate.start,
                     end: candidate.end,
                     layout: layout,
-                    chunkDurations: chunkDurations
+                    chunkDurations: chunkDurations,
+                    chunkOffsets: chunkOffsets
                 ) else { continue }
                 samples.append(SpeakerSample(
                     text: candidate.text,
@@ -200,7 +206,9 @@ public enum TranscriptRenamer {
             return false
         }
 
-        for i in segments.indices {
+        // Unflagged segments only: a flagged one (an echo, gate noise, a repeat) keeps the label it
+        // had when it was flagged, and after a re-detect that label can belong to someone else.
+        for i in segments.indices where !TranscriptAssembler.isFlagged(segments[i]) {
             if let speaker = segments[i]["speaker"] as? String,
                let newName = mapping[speaker] {
                 segments[i]["speaker"] = newName
@@ -222,10 +230,10 @@ public enum TranscriptRenamer {
             let updatedData = try JSONSerialization.data(
                 withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
             )
-            try updatedData.write(to: jsonPath, options: .atomic)
+            try DurableFile.replace(jsonPath, with: updatedData)   // round 4 item 6
             return true
         } catch {
-            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error.localizedDescription, privacy: .public)")
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
             return false
         }
     }

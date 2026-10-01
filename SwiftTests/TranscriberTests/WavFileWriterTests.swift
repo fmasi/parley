@@ -467,4 +467,89 @@ struct WavFileWriterTests {
         let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
         #expect(dataSize == UInt32(samples.count * 2))
     }
+
+    /// §6.2: a stale `diskWriteFailure` from a REPLACED helper is disproved by the NEW helper's first
+    /// successful write — so the writer reports its first write, once.
+    @Test func theFirstSuccessfulWriteIsReportedOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("first-write-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var successes = 0
+        writer.onWriteSucceeded = { successes += 1 }
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(successes == 1)
+    }
+
+    /// §6.1: diskWriteFailure clears on the next successful write on that writer — reported once.
+    @Test func aSuccessfulWriteAfterAFailureReportsRecoveryOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recover-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        writer.recoveryHold = .zero   // the re-arm logic, without the hold (see aSuccessRightAfterAFailureIsNotYetARecovery)
+        writer.noteWriteFailure(CocoaError(.fileWriteNoPermission), context: "test")   // internal seam (was private)
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(failures == 1 && successes == 1)
+    }
+
+    /// Every failure episode is reported, and every recovery from one: write, fail, write, fail. Pins
+    /// both re-arms — a failure re-arms the success report, a success re-arms the failure report.
+    @Test func eachFailureEpisodeAndEachRecoveryIsReported() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("episodes-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        writer.recoveryHold = .zero
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 2, "the first write, then the recovery")
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        #expect(failures == 2, "the recovery re-armed the failure report")
+        writer.finalize()
+    }
+
+    /// H2 council (B-M10): a volume where every sync fails but writes succeed flapped the disk alarm
+    /// twice a second — a snapshot push, two XPC sends, ring events and a banner per flap, evicting real
+    /// evidence. A failure now clears only after `recoveryHold` without another one.
+    @Test func aSuccessRightAfterAFailureIsNotYetARecovery() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hold-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        #expect(writer.recoveryHold == .seconds(5))
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 1, "a first write is evidence at once")
+        writer.noteWriteFailure(CocoaError(.fileWriteUnknown), context: "sync")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.noteWriteFailure(CocoaError(.fileWriteUnknown), context: "sync")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(failures == 1 && successes == 1, "no flap: one raise, no clear within the hold")
+        writer.recoveryHold = .zero   // the hold has passed
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 2, "then the recovery")
+        writer.finalize()
+    }
 }

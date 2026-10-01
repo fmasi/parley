@@ -81,6 +81,18 @@ public enum AudioArchiver {
             }
             return result
         }
+        // The mirror (P4): a mic that delivered zero frames for a whole chunk leaves a bare header at
+        // its nominal rate (16 kHz), which is the absence of a stream, not a stream at another rate.
+        // Letting it reach the rate guard refused the chunk, it fell back to its WAV, and the
+        // concatenator later re-encoded the mono system WAV into BOTH channels and deleted it.
+        if micFile.length == 0, sysFile.length > 0 {
+            Logger.files.info("AudioArchiver: mic track is empty — archiving '\(baseName, privacy: .sensitive)' as system-only")
+            let result = try await archiveSystemOnly(systemAudio: systemAudio, outputDirectory: outputDirectory,
+                                                     bitrateKbps: bitrateKbps, preserveSourceWAV: preserveSourceWAV)
+            // Same rule as the branch above: the empty header goes only after the archive succeeded.
+            if !preserveSourceWAV { try? FileManager.default.removeItem(at: micAudio) }
+            return result
+        }
         guard micFile.length > 0 || sysFile.length > 0 else {
             throw AudioArchiverError.cannotReadAudio("both tracks are empty")
         }
@@ -139,7 +151,7 @@ public enum AudioArchiver {
 
         // 5. Delete source WAVs (unless explicitly preserved for diagnostics).
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAVs (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAVs kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: systemAudio)
             try? FileManager.default.removeItem(at: micAudio)
@@ -205,7 +217,7 @@ public enum AudioArchiver {
         }
 
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAV kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: systemAudio)
         }
@@ -278,7 +290,7 @@ public enum AudioArchiver {
         }
 
         if preserveSourceWAV {
-            Logger.files.info("AudioArchiver: preserving source WAV (preserve_source_wav)")
+            Logger.files.info("AudioArchiver: source WAV kept (preserveSourceWAV — the caller decides)")
         } else {
             try? FileManager.default.removeItem(at: micAudio)
         }
@@ -347,7 +359,7 @@ public enum AudioArchiver {
                 }
                 results.append(archived.archivePath)
             } catch {
-                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .sensitive)' failed, keeping WAV: \(error.localizedDescription, privacy: .public)")
+                Logger.files.error("archiveAll: segment '\(pair.system.lastPathComponent, privacy: .sensitive)' failed, keeping WAV: \(error, privacy: .private)")
                 results.append(pair.system)
             }
         }
