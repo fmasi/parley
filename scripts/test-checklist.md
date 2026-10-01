@@ -261,6 +261,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: Settings → Engine → "Apple Speech — not yet usable (#223)" → Save.
   - PASS: "Not saved — this engine cannot transcribe on this Mac: …", and the engine stays FluidAudio after reopening Settings.
 
+- [ ] **D-24b Save downloads a model that is not there (pre-PR review).**
+  - Do: with Parley running and idle, move the speech model aside: `mv ~/Library/Application\ Support/FluidAudio/Models/parakeet-tdt-0.6b-v3 ~/Desktop/parakeet-aside`. Settings → Transcription: under the engine, "Model will download ~500 MB when you save". Save.
+  - PASS: "Saved", a progress bar runs under the engine, then "Model downloaded". Then delete `~/Desktop/parakeet-aside`.
+  - FAIL: "Not saved — this engine cannot transcribe on this Mac: …", and no download starts.
+
 - [ ] **D-25 The audio merge: passthrough without a gap, re-encode with one (R4).**
   - Do (a): a 2-chunk recording with no sleep. Do (b): D-33's recording (a 2-min sleep gap).
   - PASS (a): `merged_audio.gaps_inserted_seconds` is 0. `dur <id>.m4a` ≈ the sum of the chunk durations (±1 s). There is no audible gap at the chunk boundary. Write down whether the log said "AudioConcatenator: passthrough export succeeded" (`merged_audio.passthrough: true`) or fell back to the re-encode. Passthrough was never exercised in tests (it fails in the test runner), so this is its first real run.
