@@ -106,6 +106,9 @@ enum CLIHandler {
         } else {
             outputDir = inputURLs[0].deletingLastPathComponent()
         }
+        // #246: before any work, so a missing --output-dir is created (and an impossible one is
+        // refused by name) up front rather than after the whole transcription, at the write.
+        try OutputDirectory.ensureExists(outputDir)
 
         // Resolve stereo channel handling for single-file AAC input
         let systemAudio: URL
@@ -283,7 +286,7 @@ enum CLIHandler {
         Subcommands:
           transcribe  Transcribe audio files
             -i <file>        Input audio file (required, can specify twice for dual-stream)
-            --output-dir <dir>  Output directory (default: same as input file)
+            --output-dir <dir>  Output directory, created if missing (default: same as input file)
             -f <format>      Output format: json, srt, txt (default: json)
             --engine <id>    Engine: speech_analyzer, fluid_audio (default: from config)
             --no-diarize     Skip speaker diarization
