@@ -3739,10 +3739,11 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
-        let began = ContinuousClock.now
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "ended by its bound, never by the helper: its stop was still unanswered")
         let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(sentinel.quitDuringFinalize && sentinel.stopping, "salvage-only, worded as a quit (L review 109)")
         #expect(h.client.droppedConnections == 1, "the hung helper's connection is dropped: its invalidation handler stops it")
@@ -3755,16 +3756,18 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
-        await Harness.until { h.client.stopCalls == 1 }
-        let began = ContinuousClock.now
+        await Harness.until(within: 20) { helper.reached }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "ended by its bound, never by the helper: the Stop's ask was still unanswered")
         #expect(h.client.stopCalls == 1, "the Stop in flight asks the helper — never a second stop")
         #expect(h.client.droppedConnections == 1, "dropped at the bound, once")
         #expect(RecordingSentinel.read(directory: h.tmp).map { $0.stopping && $0.quitDuringFinalize } == true)
+        helper.release()
         await stopping.value
     }
 
@@ -3819,15 +3822,21 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         try stopReturnsTheFirstChunk(h)
-        h.runner.finalizeDelayForTesting = .milliseconds(600)
+        // The finalize hangs — in its first look at the folder — until released, and every bound that could end a wait for
+        // it is longer than the hang's own watchdog: a preparation that waited for the finalize returns only once it ended.
+        let finalize = HungStep()
+        defer { finalize.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-termination-\(UUID().uuidString)",
+                                                beforeEachRead: { if $0 == "transcript: chunk files" { finalize.hang() } })
+        h.coordinator.folderReadDeadline = .seconds(60)
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
-        await Harness.until { h.appState.isTranscribing }
-        #expect(h.coordinator.hasWorkInFlight, "a finalize is busy")
-        let began = ContinuousClock.now
-        await h.coordinator.prepareForTermination(bound: .seconds(5))
-        #expect(ContinuousClock.now - began < .milliseconds(500))
+        await Harness.until(within: 20) { finalize.reached }
+        #expect(h.appState.isTranscribing && h.coordinator.hasWorkInFlight, "a finalize is busy")
+        await h.coordinator.prepareForTermination(bound: .seconds(60))
+        #expect(finalize.isHanging, "at once: it returned with the transcript still being finished")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
+        finalize.release()
         await stopping.value   // awaited, never cancelled into the next test
     }
 
@@ -4005,10 +4014,11 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.quitStopBound = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
-        let began = ContinuousClock.now
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "quit at its bound, never held by the helper: its stop was still unanswered")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
     }
 
