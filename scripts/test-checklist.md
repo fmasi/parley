@@ -241,6 +241,10 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: a 2-chunk real call.
   - PASS: `meta` shows `capture.remote.status` `healthy`, `expected_seconds ≈ delivered_seconds` on both sides, `processing_issue_count` 0 (informational entries such as `echo_flagged` or `duplicates_flagged` in `processing_issues` are fine), and `dual_stream: true`. The completion notice is "Transcription Complete". There is no alarm at the chunk boundary.
 
+- [ ] **D-20b A listen-only call is not a diarization failure (pre-PR review).**
+  - Do: a 2-chunk recording with the other side talking (a call, or a video playing) while you say nothing at all.
+  - PASS: the completion notice is "Transcription Complete", never "N chunks had processing problems". `meta` shows `processing_issue_count` 0 and no `diarization_failed` in `processing_issues`. `grep '"diarization"' <id>.json` reads `true`. The remote speakers are labelled as usual.
+
 - [ ] **D-21 A mic-empty chunk (opportunistic).**
   - A chunk whose mic delivered nothing while the remote played. Unplugging a USB mic does NOT produce it: Parley follows the next mic (log "Mic input removed — … following to …"). Run this only if it happens naturally, or with a mic that stops delivering while staying selected.
   - PASS: that chunk archives system-only. The merged `.m4a` keeps the remote on the RIGHT, with the LEFT silent for that stretch. No WAV is left behind unless `preserve_source_wav` is on.
@@ -260,6 +264,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 - [ ] **D-24 The engine preflight.**
   - Do: Settings → Engine → "Apple Speech — not yet usable (#223)" → Save.
   - PASS: "Not saved — this engine cannot transcribe on this Mac: …", and the engine stays FluidAudio after reopening Settings.
+
+- [ ] **D-24b Save downloads a model that is not there (pre-PR review).**
+  - Do: with Parley running and idle, move the speech model aside: `mv ~/Library/Application\ Support/FluidAudio/Models/parakeet-tdt-0.6b-v3 ~/Desktop/parakeet-aside`. Settings → Transcription: under the engine, "Model will download ~500 MB when you save". Save.
+  - PASS: "Saved", a progress bar runs under the engine, then "Model downloaded". Then delete `~/Desktop/parakeet-aside`.
+  - FAIL: "Not saved — this engine cannot transcribe on this Mac: …", and no download starts.
 
 - [ ] **D-25 The audio merge: passthrough without a gap, re-encode with one (R4).**
   - Do (a): a 2-chunk recording with no sleep. Do (b): D-33's recording (a 2-min sleep gap).

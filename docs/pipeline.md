@@ -111,7 +111,7 @@ Notes:
 **Input:** Running capture. Output: `FinalizedChunk(index, systemPath, micPath, startTime)`.
 
 **Key code path:**
-- `TranscriberApp/Services/ChunkRotator.swift` — `rotate()` → `captureClient.rotateChunk()`
+- `TranscriberCore/ChunkRotator.swift` — `rotate()` → `captureClient.rotateChunk()`
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` — `rotateChunk()` → `handler.swapWriters()`
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` — `swapWriters()`
 
@@ -265,7 +265,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
 - `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
 - `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
-- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`.
+- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one.
 
 **Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`).
 

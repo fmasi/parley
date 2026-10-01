@@ -331,6 +331,26 @@ struct ChunkRotatorTests {
         #expect(!timer.isValid)
     }
 
+    /// Pre-PR review: a second `start()` with no `stop()` between — the real wake arriving after the watchdog's implicit one
+    /// (L review 104) — replaces the timer. The first used to stay on the run loop, so two timers rotated until Stop.
+    @Test func aSecondStartLeavesOneTimerRotating() async throws {
+        let fired = Box(0)
+        let rotator = makeRotator()
+        rotator.onRotated = { fired.value += 1 }
+        rotator.start()
+        let first = try #require(rotator.activeTimerForTesting)
+        rotator.start()
+        let second = try #require(rotator.activeTimerForTesting)
+        defer { rotator.stop(); first.invalidate() }
+        #expect(second !== first && second.isValid)
+        #expect(!first.isValid, "the timer it replaced no longer fires")
+        first.fire(); second.fire()                     // one chunk later: every timer still alive comes due
+        await until { fired.value >= 1 }
+        for _ in 0..<50 { await Task.yield() }
+        await rotator.awaitRotationInFlight()
+        #expect(fired.value == 1 && rotator.currentChunkInfo.index == 1, "one rotation per chunk, not two")
+    }
+
     /// Polls `condition` (up to about 2 s): the rotation looks at its folder off the main actor (L review 158), so a
     /// fixed number of yields is not enough.
     private func until(_ condition: () -> Bool) async {

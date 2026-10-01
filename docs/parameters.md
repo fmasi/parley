@@ -21,7 +21,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
-| Transcription engine | `engine` | `"fluid_audio"` | Which ASR engine to use. Values: `"fluid_audio"` (Parakeet, ~500 MB download, 25 EU languages; the default), `"speech_analyzer"` (Apple, macOS 26+, no download; labelled "not yet usable" because it produces blank transcripts on the live chunk path until #223). A config without the key, or with an unknown value, follows the current default (`.resolvedDefault`). The chosen engine must pass a one-second preflight at Setup Continue and Settings Save (`EnginePreflight`). |
+| Transcription engine | `engine` | `"fluid_audio"` | Which ASR engine to use. Values: `"fluid_audio"` (Parakeet, ~500 MB download, 25 EU languages; the default), `"speech_analyzer"` (Apple, macOS 26+, no download; labelled "not yet usable" because it produces blank transcripts on the live chunk path until #223). A config without the key, or with an unknown value, follows the current default (`.resolvedDefault`). The chosen engine must pass a one-second preflight at Setup Continue and Settings Save (`EnginePreflight`). One exception at Save: an engine whose model is not downloaded yet has nothing to preflight, so it is saved and the Save starts its download (`EnginePreflight.saveStep`). |
 | Output format | `output_format` | `"txt"` | Transcript file format. Values: `"txt"`, `"json"`, `"srt"`. |
 | VAD speech threshold | `vad_speech_threshold` | `0.5` | Minimum VAD probability (0–1) to classify a frame as speech. Higher values are stricter and discard more uncertain frames. Applies to `VadSpeechMap` quality filtering in speaker assignment. |
 
