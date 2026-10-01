@@ -354,6 +354,8 @@ public enum TranscriptRediarizer {
             //   flagged, the rest are not — nothing of it is given to the stated speaker;
             // - elsewhere, a flagged line (a match of 3+ words) is not relabelled: it keeps the label
             //   it had, as every flagged line does. A line that already carried the flag keeps it.
+            // The flag is one-way: a later re-detect whose clustering no longer judges that line
+            // echo does not clear it, so the line stays hidden. A re-detect cannot un-mark echo.
             var relabeled: [LabeledSegment] = []
             for (i, candidate) in pool.enumerated() {
                 finalLabels[echo.rawLabels[i]] = labeled[i].speaker
