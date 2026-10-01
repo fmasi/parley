@@ -10,6 +10,7 @@ import Testing
         #expect(o.tapAutoStart == true)
         #expect(o.remoteExactZeroSoftAlarmSeconds == nil)
         #expect(o.debugDropTapFrames == false)
+        #expect(o.debugSkipWavSync == false)
     }
     @Test func builtFromConfig() {
         var c = Config.default
@@ -19,6 +20,40 @@ import Testing
         let o = CaptureOptions(config: c)
         #expect(o == CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 300, debugDropTapFrames: true))
         #expect(CaptureOptions(config: Config.default) == CaptureOptions())
+    }
+    /// #247: `debug_skip_wav_sync` reaches the helper the way `debug_drop_tap_frames` does, and is
+    /// off unless the config says `true`.
+    @Test func skipWavSyncIsBuiltFromConfigAndOffByDefault() {
+        var c = Config.default
+        #expect(CaptureOptions(config: c).debugSkipWavSync == false, "absent from config.json")
+        c.debugSkipWavSync = false
+        #expect(CaptureOptions(config: c).debugSkipWavSync == false)
+        c.debugSkipWavSync = true
+        #expect(CaptureOptions(config: c).debugSkipWavSync == true)
+        #expect(CaptureOptions(config: c) == CaptureOptions(debugSkipWavSync: true), "and it changes nothing else")
+    }
+    @Test func skipWavSyncDecodesWhenPresent() throws {
+        let on = Data(#"{"tapAutoStart":true,"debugDropTapFrames":false,"debugSkipWavSync":true}"#.utf8)
+        #expect(try #require(CaptureOptions.decodeStrict(on)).debugSkipWavSync == true)
+        #expect(CaptureOptions.decode(on) == CaptureOptions(debugSkipWavSync: true))
+    }
+    @Test func skipWavSyncDecodesFalse() throws {
+        let off = Data(#"{"tapAutoStart":true,"debugDropTapFrames":false,"debugSkipWavSync":false}"#.utf8)
+        #expect(try #require(CaptureOptions.decodeStrict(off)).debugSkipWavSync == false)
+        #expect(CaptureOptions.decode(off) == CaptureOptions())
+    }
+    /// A payload without the key comes from a helper/app pair that does not match. As for every other
+    /// option it is "not understood" (the helper says so and keeps its defaults): the fsync is never
+    /// skipped by a payload that did not ask for it.
+    @Test func skipWavSyncAbsentIsNotUnderstoodAndNeverSkips() {
+        let absent = Data(#"{"tapAutoStart":true,"debugDropTapFrames":false}"#.utf8)
+        #expect(CaptureOptions.decodeStrict(absent) == nil)
+        #expect(CaptureOptions.decode(absent).debugSkipWavSync == false)
+        #expect(CaptureOptions.decode(nil).debugSkipWavSync == false)
+    }
+    @Test func skipWavSyncRoundTrips() {
+        let o = CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 120, debugDropTapFrames: false, debugSkipWavSync: true)
+        #expect(CaptureOptions.decodeStrict(o.encoded()) == o)
     }
     @Test func roundTripsAndFailsSoft() {
         let o = CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 120, debugDropTapFrames: false)

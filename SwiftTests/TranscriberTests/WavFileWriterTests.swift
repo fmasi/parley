@@ -552,4 +552,59 @@ struct WavFileWriterTests {
         #expect(successes == 2, "then the recovery")
         writer.finalize()
     }
+
+    // MARK: - Periodic sync: its timing, and the debug skip (#247)
+
+    /// The periodic `fsync` runs on the capture queue and is the suspected cause of the IO-callback
+    /// stalls (#247). The writer reports the time it spent there, so a callback can attribute it.
+    @Test func thePeriodicSyncIsTimed() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        #expect(writer.syncInterval == .milliseconds(500), "the shipped cadence")
+        #expect(writer.skipPeriodicSync == false, "the fsync is never skipped unless asked")
+        let samples = [Int16](repeating: 1234, count: 480)
+
+        writer.syncInterval = .seconds(3600)   // not due
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks == 0, "no sync, no time")
+
+        writer.syncInterval = .zero            // due on every append
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        let first = writer.syncTicks
+        #expect(first > 0)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks > first, "cumulative over the writer's life")
+        writer.finalize()
+    }
+
+    /// `debug_skip_wav_sync`: the `fsync` is left out, and nothing else. The header is still rewritten
+    /// on the same cadence, so the file stays readable if the helper dies before `finalize()`.
+    @Test func skippingThePeriodicSyncLeavesOutOnlyTheFsync() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        var failures = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.skipPeriodicSync = true
+        writer.syncInterval = .zero
+        let samples = [Int16](repeating: 1234, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks == 0, "no fsync ran")
+        #expect(failures == 0)
+
+        // No finalize: what a reader finds after a helper crash.
+        let data = readData(at: path)
+        #expect(data.count == 44 + 2 * samples.count * 2)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == UInt32(2 * samples.count * 2), "the header was still flushed")
+        let rate: UInt32 = data[24...27].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(rate == 48000)
+        writer.finalize()
+    }
 }

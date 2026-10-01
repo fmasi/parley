@@ -152,6 +152,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var remoteExactZeroSoftAlarmSeconds: Int?
     /// DIAGNOSTIC ONLY (device item D-04): the helper drops every tap buffer before the heartbeat.
     public var debugDropTapFrames: Bool?
+    /// DIAGNOSTIC ONLY (#247): the WAV writers skip their periodic `fsync`.
+    public var debugSkipWavSync: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
     public var echoEmbeddingThreshold: Double?
@@ -205,6 +207,7 @@ public struct Config: Codable, Equatable, Sendable {
         tapAutoStart: nil,
         remoteExactZeroSoftAlarmSeconds: nil,
         debugDropTapFrames: nil,
+        debugSkipWavSync: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -237,6 +240,7 @@ public struct Config: Codable, Equatable, Sendable {
         tapAutoStart: Bool? = nil,
         remoteExactZeroSoftAlarmSeconds: Int? = nil,
         debugDropTapFrames: Bool? = nil,
+        debugSkipWavSync: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -267,6 +271,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.tapAutoStart = tapAutoStart
         self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
         self.debugDropTapFrames = debugDropTapFrames
+        self.debugSkipWavSync = debugSkipWavSync
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -299,6 +304,7 @@ public struct Config: Codable, Equatable, Sendable {
         case tapAutoStart = "tap_auto_start"
         case remoteExactZeroSoftAlarmSeconds = "remote_exact_zero_soft_alarm_seconds"
         case debugDropTapFrames = "debug_drop_tap_frames"
+        case debugSkipWavSync = "debug_skip_wav_sync"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -335,6 +341,7 @@ public struct Config: Codable, Equatable, Sendable {
         tapAutoStart = try c.decodeIfPresent(Bool.self, forKey: .tapAutoStart)
         remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
         debugDropTapFrames = try c.decodeIfPresent(Bool.self, forKey: .debugDropTapFrames)
+        debugSkipWavSync = try c.decodeIfPresent(Bool.self, forKey: .debugSkipWavSync)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)

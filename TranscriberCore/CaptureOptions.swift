@@ -12,17 +12,23 @@ public struct CaptureOptions: Codable, Equatable, Sendable {
     /// DIAGNOSTIC ONLY (device item D-04): the helper drops every tap buffer BEFORE stamping the
     /// heartbeat, reproducing Incident B's "expected but never delivered" deterministically.
     public var debugDropTapFrames: Bool
+    /// DIAGNOSTIC ONLY (#247): the WAV writers skip their periodic `fsync` (the header is still
+    /// rewritten), for the A/B that tells whether that `fsync` is what stalls the IO callback.
+    public var debugSkipWavSync: Bool
 
-    public init(tapAutoStart: Bool = true, remoteExactZeroSoftAlarmSeconds: Int? = nil, debugDropTapFrames: Bool = false) {
+    public init(tapAutoStart: Bool = true, remoteExactZeroSoftAlarmSeconds: Int? = nil, debugDropTapFrames: Bool = false,
+                debugSkipWavSync: Bool = false) {
         self.tapAutoStart = tapAutoStart
         self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
         self.debugDropTapFrames = debugDropTapFrames
+        self.debugSkipWavSync = debugSkipWavSync
     }
 
     public init(config: Config) {
         self.init(tapAutoStart: config.tapAutoStart ?? true,
                   remoteExactZeroSoftAlarmSeconds: config.remoteExactZeroSoftAlarmSeconds,
-                  debugDropTapFrames: config.debugDropTapFrames ?? false)
+                  debugDropTapFrames: config.debugDropTapFrames ?? false,
+                  debugSkipWavSync: config.debugSkipWavSync ?? false)
     }
 
     public func encoded() -> Data { (try? JSONEncoder().encode(self)) ?? Data() }
