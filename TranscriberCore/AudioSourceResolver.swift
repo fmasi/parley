@@ -91,6 +91,9 @@ public enum AudioSourceResolver {
         wantLocal: Bool,
         wantRemote: Bool
     ) async throws -> (local: URL?, remote: URL?) {
+        // #246: the split WAVs are written into `outputDirectory`, so it has to exist first.
+        try OutputDirectory.ensureExists(outputDirectory)
+
         let baseName = stereoAac.deletingPathExtension().lastPathComponent
         let localPath = outputDirectory.appendingPathComponent("\(baseName)_split_mic.wav")
         let remotePath = outputDirectory.appendingPathComponent("\(baseName)_split_system.wav")

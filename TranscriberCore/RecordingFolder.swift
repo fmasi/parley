@@ -155,15 +155,23 @@ extension RecordingCoordinator {
         return (URL(fileURLWithPath: "/" + resolved.joined(separator: "/")).resolvingSymlinksInPath().standardizedFileURL, false)
     }
 
-    /// `dir`, or its nearest ancestor that exists (at worst `/`), every link substituted.
+    /// `dir`, or its nearest ancestor that exists, every link substituted. At worst `/`: the walk ends there even when the
+    /// probe says it is not there, and `/` is returned as any other ancestor — no case of its own for the callers.
     nonisolated static func nearestExistingDirectory(_ dir: URL, probe: FolderProbe = .live) -> URL {
         var candidate = resolvedFolder(dir, probe: probe)
         while !probe.exists(candidate) {
             let parent = candidate.deletingLastPathComponent()
-            guard parent.path != candidate.path else { break }
+            guard walkGoesUp(from: candidate, to: parent) else { break }
             candidate = parent
         }
         return candidate.resolvingSymlinksInPath().standardizedFileURL   // `/private` normalized, now that it exists
+    }
+
+    /// Whether `parent` is a step UP from `candidate`: only when its path is strictly SHORTER — so a walk up always ends,
+    /// whatever the OS's URL answers for the root's parent: `/` again, or `/..` and then `/../..` (the NSURL-backed URL,
+    /// with which "the parent is another path" never stopped).
+    nonisolated static func walkGoesUp(from candidate: URL, to parent: URL) -> Bool {
+        parent.path.utf8.count < candidate.path.utf8.count
     }
 
     /// What a resume needs from the session's folder, read off the main actor (L review 75).
