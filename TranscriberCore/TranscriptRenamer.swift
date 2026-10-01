@@ -191,11 +191,12 @@ public enum TranscriptRenamer {
     /// this point the source WAVs may be gone and this JSON is the only textual record of the
     /// meeting; a kill mid-write would truncate it.
     ///
-    /// Keying trap (latent, benign today): `speaker_names` is keyed by whatever label was
-    /// current at rename time (original → renamed), so re-renaming an already-renamed speaker
-    /// accumulates entries and can leave a stale original → intermediate key. Nothing in the
-    /// codebase reads `speaker_names` back — it is write-only — but if a reader is ever added,
-    /// resolve chains (or prune superseded keys) first.
+    /// Keying trap: `speaker_names` is keyed by whatever label was current at rename time
+    /// (original → renamed), so re-renaming an already-renamed speaker accumulates entries and can
+    /// leave a stale original → intermediate key. A reader has to resolve chains:
+    /// `EchoNotice.Findings` does, to find the row of a label `echo_clusters` still holds under its
+    /// original name (#244). The other reader, `TranscriptRediarizer.channelNames`, only asks
+    /// whether a channel has any name at all.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         guard let data = try? Data(contentsOf: jsonPath),
@@ -206,9 +207,9 @@ public enum TranscriptRenamer {
             return false
         }
 
-        // Unflagged segments only: a flagged one (an echo, gate noise, a repeat) keeps the label it
-        // had when it was flagged, and after a re-detect that label can belong to someone else.
-        for i in segments.indices where !TranscriptAssembler.isFlagged(segments[i]) {
+        var metadata = json["metadata"] as? [String: Any] ?? [:]
+        let rediarized = rediarizedChannels(in: metadata)
+        for i in segments.indices where !keepsItsLabel(segments[i], rediarized: rediarized) {
             if let speaker = segments[i]["speaker"] as? String,
                let newName = mapping[speaker] {
                 segments[i]["speaker"] = newName
@@ -216,7 +217,6 @@ public enum TranscriptRenamer {
         }
         json["segments"] = segments
 
-        var metadata = json["metadata"] as? [String: Any] ?? [:]
         var names = metadata["speaker_names"] as? [String: String] ?? [:]
         for (original, renamed) in mapping where original != renamed {
             names[original] = renamed
@@ -236,5 +236,32 @@ public enum TranscriptRenamer {
             Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
             return false
         }
+    }
+
+    /// The channels a re-detect has rewritten: `metadata.rediarized_channels`, plus any channel with
+    /// a `speaker_count_<channel>` — builds before that list existed stamped only the count. nil when
+    /// the list is there but is not a list of channels.
+    private static func rediarizedChannels(in metadata: [String: Any]) -> Set<String>? {
+        let counted = metadata.keys.filter { $0.hasPrefix("speaker_count_") }.map { String($0.dropFirst("speaker_count_".count)) }
+        guard let recorded = metadata[TranscriptRediarizer.rediarizedChannelsKey] else { return Set(counted) }
+        return (recorded as? [String]).map { Set($0).union(counted) }
+    }
+
+    /// Whether a rename leaves this segment's label alone (#245).
+    ///
+    /// A flagged segment (an echo, gate noise, a repeat, no usable time) is never relabelled by a
+    /// re-detect. On a channel one has rewritten it therefore keeps the label an EARLIER diarization
+    /// gave it, and that label can now belong to someone else: the rename must not reach it. On a
+    /// channel that was never re-detected the label is still the pipeline's, and it is renamed like
+    /// any other line — the JSON is the record, and it must not show two labels for one person.
+    ///
+    /// - Parameter rediarized: `rediarizedChannels(in:)`; nil = unreadable, and every flagged
+    ///   segment keeps its label.
+    private static func keepsItsLabel(_ segment: [String: Any], rediarized: Set<String>?) -> Bool {
+        guard TranscriptAssembler.isFlagged(segment) else { return false }
+        guard let rediarized else { return true }
+        // No `source`: it cannot be shown to be on a channel that was left alone.
+        guard let source = segment["source"] as? String else { return !rediarized.isEmpty }
+        return rediarized.contains(source)
     }
 }
