@@ -5903,18 +5903,45 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         let s = try fresh(h)
         // Another pending session, elsewhere: the alarm's read of the pending folders is then not the scan's folder
-        // alone — it answers, once the slow scan has let the queue go.
+        // alone — it answers, once the hung scan has let the queue go.
         let other = h.tmp.appendingPathComponent("elsewhere")
         try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
         try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "o", systemAudioPath: other.appendingPathComponent("o-0.wav").path,
                                                               micAudioPath: other.appendingPathComponent("o-0_mic.wav").path)], directory: h.tmp)
-        h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderReads = reads { label in if label == "resume: session folder" { Thread.sleep(forTimeInterval: 0.15) } }
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the other one stays pending: no salvage here
+        // Nothing here races a timer (the scan used to sleep 150 ms against a 100 ms bound: a bound that fired 50 ms late
+        // found the scan answered, and the session resumed). The scan HANGS until released, so its bound runs out however
+        // late it fires; only the scan's bound is short — set once the helper was asked, the step before the scan — and
+        // every read after it has all the time it needs: raised on the scan's own queue, the scan's bound already taken.
+        let coordinator = h.coordinator
+        /// The reads made, by label: written on the reads' queues.
+        final class Labels: @unchecked Sendable {
+            private let lock = NSLock()
+            private var labels: [String] = []
+            var all: [String] { lock.withLock { labels } }
+            func note(_ label: String) { lock.withLock { labels.append(label) } }
+        }
+        let scan = HungStep(), stop = HungStep(), reads = Labels()
+        defer { scan.release(); stop.release() }
+        h.client.onIsCapturing = { coordinator.folderReadDeadline = .milliseconds(100) }
+        h.coordinator.folderReads = self.reads { label in
+            reads.note(label)
+            guard label == "resume: session folder" else { return }
+            DispatchQueue.main.sync { MainActor.assumeIsolated { coordinator.folderReadDeadline = .seconds(60) } }
+            scan.hang()
+        }
+        h.client.onStop = { await stop.hangAwaited() }   // the other one stays pending: no salvage here
         h.coordinator.helperStopDeadline = .milliseconds(50)
-        await h.coordinator.recoverAtLaunch()
+        let recovering = Task { await coordinator.recoverAtLaunch() }
+        // The scan timed out — it is still hung — and the session was kept: only now does the folder answer again.
+        await Harness.until(within: 20) { pending(h).map(\.sessionKey).contains(s.sessionKey) }
+        #expect(scan.isHanging, "kept because the scan ran out its bound, never because it answered")
+        scan.release()
+        await recovering.value
         #expect(pending(h).map(\.sessionKey).contains(s.sessionKey))
-        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil, "said until the next event resolves it")
+        let alarm = try #require(h.appState.activeAlarms[.recordingFolderUnavailable]?.message, "said until the next event resolves it")
+        #expect(alarm.contains("isn’t answering"), "\(alarm)")
+        #expect(reads.all.filter { $0 == "pending folder" }.count >= 2 && h.client.stopCalls == 1,
+                "the folders were read again, and answered: the retry went on to the helper's stop (\(reads.all))")
     }
 
     /// L review 128: a hung relaunch read of a STOPPING session's folder waits for the folder — but first stops the
