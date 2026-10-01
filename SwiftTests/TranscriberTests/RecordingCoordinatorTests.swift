@@ -4479,6 +4479,46 @@ struct Harness {
             symlinkDestination: { $0.path == "/Users/x/Recordings" ? "/Volumes/Ext/Recordings" : nil })
         #expect(RecordingCoordinator.folderStatus(URL(fileURLWithPath: "/Users/x/Recordings/day"), probe: probe) == .reachable)
     }
+
+    /// Nothing exists, the root included (a fake's answer: a Mac always has `/`): the walk up to the nearest existing folder
+    /// still ends — at `/`, asked once and never walked past — and the folder reads as any other whose ancestor cannot be
+    /// written. The probe gives in after 200 asks, so a walk that does not end fails here instead of wedging the run.
+    @Test func aWalkUpWithNothingThereEndsAtTheRoot() {
+        /// What the probe was asked, in order: written and read on the test's own thread.
+        final class Asked: @unchecked Sendable { var paths: [String] = [] }
+        func nothingThere(_ asked: Asked) -> RecordingCoordinator.FolderProbe {
+            .init(exists: { asked.paths.append($0.path); return asked.paths.count > 200 }, isWritable: { _ in false }, isVolumeRoot: { _ in false })
+        }
+        let dir = URL(fileURLWithPath: "/Users/x/Recordings/day")
+        let asked = Asked()
+        #expect(RecordingCoordinator.nearestExistingDirectory(dir, probe: nothingThere(asked)).path == "/")
+        #expect(asked.paths == ["/Users/x/Recordings/day", "/Users/x/Recordings", "/Users/x", "/Users", "/"], "\(asked.paths)")
+        let forStatus = Asked()
+        #expect(RecordingCoordinator.folderStatus(dir, probe: nothingThere(forStatus)) == .notWritable)
+        #expect(forStatus.paths.count < 200 && !forStatus.paths.contains { $0.contains("..") }, "\(forStatus.paths.count) asks")
+    }
+
+    /// The walk goes on only to a strictly SHORTER path — so it ends whatever the OS's URL answers for the root's parent:
+    /// `/` again, or `/..` and then `/../..` (the NSURL-backed URL, with which the walk above never ended). Both answers
+    /// are built here, so this fails on any Mac if the stop ever depends on which one the OS gives.
+    @Test func theWalkUpStopsAtTheRootWhateverItsParentIs() {
+        let root = URL(fileURLWithPath: "/")
+        #expect(RecordingCoordinator.walkGoesUp(from: URL(fileURLWithPath: "/Users/x"), to: URL(fileURLWithPath: "/Users")))
+        #expect(RecordingCoordinator.walkGoesUp(from: URL(fileURLWithPath: "/Users"), to: root))
+        #expect(!RecordingCoordinator.walkGoesUp(from: root, to: root), "the root's parent is the root again")
+        #expect(!RecordingCoordinator.walkGoesUp(from: root, to: URL(fileURLWithPath: "/..")), "the root's parent is `/..`")
+        // A whole walk with the older answer and nothing existing: it ends at the root, after the folder's own four steps.
+        func olderParent(_ url: URL) -> URL {
+            guard url.path == "/" || url.lastPathComponent == ".." else { return url.deletingLastPathComponent() }
+            return URL(fileURLWithPath: url.path == "/" ? "/.." : url.path + "/..")
+        }
+        var candidate = URL(fileURLWithPath: "/Users/x/Recordings/day"), steps = 0
+        while steps < 100, RecordingCoordinator.walkGoesUp(from: candidate, to: olderParent(candidate)) {
+            candidate = olderParent(candidate)
+            steps += 1
+        }
+        #expect(candidate.path == "/" && steps == 4, "\(candidate.path) after \(steps) steps")
+    }
 }
 
 // MARK: - L follow-ups: teardown on every end path, quit is not a crash
