@@ -606,3 +606,44 @@ get** — run them all.
       Known gap: SWITCHING TO the not-responding mic itself can leave the dialog on "Switching…" for
       a long time (the app stays responsive) — the helper waits on the same stuck device and the
       call has no deadline yet (#194). Don't switch to a mic that says Not responding.
+
+## Echo cluster detection (#242) — added 2026-10-01
+
+The remote side's voice through the laptop speakers is judged per mic-side speaker, on time and
+words. The remote audio for these items is a public podcast or video with clear speech (`afplay`
+or a browser), never a real third party. Helper, next to `meta`:
+
+```zsh
+# the echo verdicts and counts of a transcript
+echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["metadata"];print(json.dumps({"echo_segments_flagged":m.get("echo_segments_flagged"),"echo_segments_removed":m.get("echo_segments_removed"),"echo_clusters":m.get("echo_clusters"),"echo_issues":[i for i in m.get("processing_issues",[]) if i["code"].startswith("echo_")],"segments":len(d["segments"]),"echo_segments":sum(1 for s in d["segments"] if s.get("echo"))},indent=1))' "$1"; }
+```
+
+- [ ] **E-01 Speaker mode: the bleed is flagged.**
+  - Do: output = the laptop speakers at a normal listening volume, mic = built-in (or a webcam mic).
+    Play 3 minutes of remote speech and stay silent. Stop.
+  - PASS: `echo_meta` shows one `echo_clusters` entry with `verdict` `"echo"`, `share` ≥ 0.5 and
+    `matched_remote` naming the remote speaker; `echo_segments_flagged` equals `matched_segments` of
+    that entry and equals `echo_segments` (the count of segments carrying `echo: true`);
+    `echo_issues` holds `echo_flagged` and `echo_cluster`. The TXT shows the remote lines once, not
+    twice. Write down `share` and `embedding_similarity`.
+- [ ] **E-02 Speaker mode with you talking.**
+  - Do: the same setup, 5 minutes. Talk for about half of it, in the pauses and over the remote
+    speech; say "yes" / "okay" a few times at the same moment the remote does.
+  - PASS: your own lines are in the TXT under your label and none of them is flagged (check the
+    segments with `echo: true` in the JSON: they are all remote words). If the mic side shows two
+    speakers, your cluster's entry reads `"kept"` with a `share` under 0.2 and the other reads
+    `"echo"`. Your short "yes" / "okay" are not flagged.
+- [ ] **E-03 Headphones: nothing is flagged.**
+  - Do: output = headphones or AirPods, 3 minutes of remote speech while you talk now and then.
+  - PASS: `echo_segments_flagged` is absent (null), every `echo_clusters` entry reads `"kept"` with a
+    `share` near 0, and there is no `echo_cluster` issue.
+- [ ] **E-04 The verdicts survive a crash.**
+  - Do: `cfg chunk_duration_minutes 10`, speaker mode as in E-01 for 12 minutes; after the first
+    chunk rotated, `kill -9` the app; let it relaunch and resume, then Stop.
+  - PASS: `echo_clusters` has an entry for the chunk processed before the kill (its `chunk` index)
+    and for the later ones, each with its `verdict`, and the labels match the speaker labels of the
+    flagged segments in the transcript.
+- [ ] **E-05 The log line.** In `stream.log`, each chunk has one `Echo cluster <private>: verdict …`
+  line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`).
+- [ ] **E-06 An old config still loads.** `cfg echo_embedding_threshold 0.99`, relaunch, repeat E-01
+  for 1 minute: the result is the same as E-01 (the key is ignored). `cfg echo_embedding_threshold null`.

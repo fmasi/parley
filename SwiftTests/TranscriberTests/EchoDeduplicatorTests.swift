@@ -136,7 +136,7 @@ struct EchoDeduplicatorTests {
 
     // MARK: - Deduplication
 
-    @Test func removesEchoWhenAllThreeSignalsMatch() {
+    @Test func flagsEchoWhenTimeAndTextMatch() {
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
             LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
@@ -153,16 +153,17 @@ struct EchoDeduplicatorTests {
         #expect(result.flaggedCount == 1)
     }
 
-    @Test func removesEchoWithAccumulatedEmbeddingsWhenDimThreaded() {
-        // Crash-recovery path: each speaker's embedding is accumulated across 2 segments,
-        // so DB entries are 2×dim (8 floats). Passing embeddingDim lets centroid() pool them
-        // back to dim regardless of segment counts (no inference). Echo should still be removed.
+    @Test func pooledEmbeddingEvidenceWithAccumulatedEmbeddingsWhenDimThreaded() {
+        // Crash-recovery path: each speaker's embedding is accumulated across 2 segments, so DB
+        // entries are 2×dim (8 floats) and the dim cannot be inferred from their lengths. Passing
+        // embeddingDim lets centroid() pool them back to dim, so the recorded similarity is the
+        // voices' (an [a,b] vs [c,d] cosine over 8 floats would be a different number).
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
             LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
         ]
-        let remoteDb: [String: [Float]] = ["Speaker 1": [1.0, 0.5, 0.3, 0.2, 1.0, 0.5, 0.3, 0.2]]
-        let localDb: [String: [Float]] = ["Speaker 1": [0.98, 0.52, 0.31, 0.19, 0.99, 0.50, 0.30, 0.20]]
+        let remoteDb: [String: [Float]] = ["Speaker 1": [1, 0, 0, 0, 0, 1, 0, 0]]
+        let localDb: [String: [Float]] = ["Speaker 1": [0, 1, 0, 0, 1, 0, 0, 0]]
 
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb,
@@ -171,6 +172,8 @@ struct EchoDeduplicatorTests {
         #expect(result.flaggedCount == 1)
         #expect(result.segments.count == 2, "flagged, not deleted")
         #expect(result.segments.filter { !$0.echo }.map(\.source) == ["remote"])
+        // Both centroids are [0.5, 0.5, 0, 0]: the same voice. Unpooled, the 8-float cosine is 0.
+        #expect(abs((result.clusters.first?.bestEmbeddingSimilarity ?? 0) - 1) < 0.001)
     }
 
     @Test func keepsLocalWhenTextDiffers() {
@@ -185,7 +188,7 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
         #expect(result.segments.count == 2)
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 0)
     }
 
     @Test func keepsLocalWhenTimestampsDontOverlap() {
@@ -200,9 +203,12 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
         #expect(result.segments.count == 2)
+        #expect(result.flaggedCount == 0)
     }
 
-    @Test func keepsLocalWhenEmbeddingsDiffer() {
+    /// #242 (was `keepsLocalWhenEmbeddingsDiffer`): a voice that does not resemble the remote
+    /// speaker no longer vetoes the echo. Same words at the same time, 3 words or more: flagged.
+    @Test func flagsEchoWhenEmbeddingsDiffer() {
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Same text here", source: "remote"),
             LabeledSegment(start: 10, end: 15, speaker: "Local Speaker 1", text: "Same text here", source: "local"),
@@ -214,6 +220,36 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
         #expect(result.segments.count == 2)
+        #expect(result.flaggedCount == 1)
+        #expect(result.segments.first { $0.source == "local" }?.echo == true)
+        #expect(result.clusters.first?.bestEmbeddingSimilarity == 0, "recorded as evidence, not used")
+    }
+
+    /// The guard for what the embedding veto used to protect: both sides saying the same one or two
+    /// words at once is not an echo — whatever the voices look like, here identical.
+    @Test func keepsOneAndTwoWordMatchesWhateverTheEmbedding() {
+        let segments = [
+            LabeledSegment(start: 10, end: 11, speaker: "Remote Speaker 1", text: "Yeah.", source: "remote"),
+            LabeledSegment(start: 10, end: 11, speaker: "Local Speaker 1", text: "Yeah.", source: "local"),
+            LabeledSegment(start: 20, end: 21, speaker: "Remote Speaker 1", text: "It's okay.", source: "remote"),
+            LabeledSegment(start: 20, end: 21, speaker: "Local Speaker 1", text: "It's okay.", source: "local"),
+        ]
+        let db: [String: [Float]] = ["Speaker 1": [1, 0, 0, 0]]
+
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: db, remoteSpeakerDatabase: db
+        )
+        #expect(result.flaggedCount == 0)
+        #expect(result.segments.allSatisfy { !$0.echo })
+        #expect(result.clusters.first?.matchedSegments == 2, "they match; they are too short to be flagged on their own")
+    }
+
+    @Test func wordCountIsWhitespaceWordsWithALetterOrDigit() {
+        #expect(EchoDeduplicator.wordCount("Yeah.") == 1)
+        #expect(EchoDeduplicator.wordCount("It's okay.") == 2)
+        #expect(EchoDeduplicator.wordCount("  one  two\tthree\n") == 3)
+        #expect(EchoDeduplicator.wordCount("— ... ?") == 0)
+        #expect(EchoDeduplicator.wordCount("") == 0)
     }
 
     @Test func handlesEmptySegments() {
@@ -221,7 +257,7 @@ struct EchoDeduplicatorTests {
             segments: [], localSpeakerDatabase: [:], remoteSpeakerDatabase: [:]
         )
         #expect(result.segments.isEmpty)
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 0)
     }
 
     @Test func handlesSingleSourceOnly() {
@@ -233,7 +269,7 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:]
         )
         #expect(result.segments.count == 2)
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 0)
     }
 
     @Test func handlesMultipleEchoesInSequence() {
@@ -294,7 +330,7 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
         // Individual comparison should catch this since local is subset — Jaccard should be high
-        #expect(result.removedCount == 1)
+        #expect(result.flaggedCount == 1)
     }
 
     @Test func removesEchoWhenLocalIsShortExcerptOfLongRemote() {
@@ -338,7 +374,7 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 0)
         #expect(result.segments.count == 2)
     }
 
@@ -355,26 +391,31 @@ struct EchoDeduplicatorTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 0)
         #expect(result.segments.count == 3)
     }
 
-    @Test func worksWithoutEmbeddings() {
+    /// #242 (was `worksWithoutEmbeddings`, which asserted only that nothing was deleted): with no
+    /// embeddings at all the echo is still judged on time and text, and no similarity is recorded.
+    @Test func flagsEchoWithoutEmbeddings() {
         let segments = [
-            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Same text", source: "remote"),
-            LabeledSegment(start: 10, end: 15, speaker: "Local Speaker 1", text: "Same text", source: "local"),
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Same text here", source: "remote"),
+            LabeledSegment(start: 10, end: 15, speaker: "Local Speaker 1", text: "Same text here", source: "local"),
+            LabeledSegment(start: 20, end: 22, speaker: "Remote Speaker 1", text: "Same text", source: "remote"),
+            LabeledSegment(start: 20, end: 22, speaker: "Local Speaker 1", text: "Same text", source: "local"),
         ]
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:]
         )
-        #expect(result.segments.count == 2)
+        #expect(result.segments.count == 4)
+        #expect(result.segments.filter(\.echo).map(\.text) == ["Same text here"], "two words alone are not flagged")
+        #expect(result.clusters.count == 1 && result.clusters.first?.bestEmbeddingSimilarity == nil)
     }
 
-    /// The local voice matches Remote Speaker 1 by embedding. A different remote
-    /// speaker (Speaker 2) happens to be saying the same text in the same window
-    /// — that overlap must NOT cause the local segment to be dropped, because
-    /// the local voice does not resemble Speaker 2.
-    @Test func keepsLocalWhenOverlappingTextIsFromDifferentRemoteSpeaker() {
+    /// #242 (was `keepsLocalWhenOverlappingTextIsFromDifferentRemoteSpeaker`): the local voice
+    /// resembles Remote Speaker 1, and the words are Remote Speaker 2's. The match is made against
+    /// every remote speaker, so this is an echo of Speaker 2 and the verdict says so.
+    @Test func flagsEchoOfARemoteSpeakerTheLocalVoiceDoesNotResemble() {
         let segments = [
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Totally different content", source: "remote"),
             LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 2", text: "The quick brown fox", source: "remote"),
@@ -391,6 +432,81 @@ struct EchoDeduplicatorTests {
             segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
         )
         #expect(result.segments.count == 3)
-        #expect(result.removedCount == 0)
+        #expect(result.flaggedCount == 1)
+        #expect(result.clusters.first?.matchedRemote.keys.sorted() == ["Remote Speaker 2"])
+    }
+
+    /// The guard for the cross-talk case that test used to protect: a one- or two-word reply that a
+    /// different remote speaker happens to say at the same moment is kept.
+    @Test func keepsShortLocalReplyThatADifferentRemoteSpeakerAlsoSays() {
+        let segments = [
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "Totally different content", source: "remote"),
+            LabeledSegment(start: 12, end: 13, speaker: "Remote Speaker 2", text: "Quick fox", source: "remote"),
+            LabeledSegment(start: 12.1, end: 13.1, speaker: "Local Speaker 1", text: "Quick fox", source: "local"),
+        ]
+        let remoteDb: [String: [Float]] = [
+            "Speaker 1": [1.0, 0.5, 0.3, 0.2],
+            "Speaker 2": [0.1, 0.2, 0.9, 0.4],
+        ]
+        let localDb: [String: [Float]] = ["Speaker 1": [0.98, 0.52, 0.31, 0.19]]
+
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb
+        )
+        #expect(result.segments.count == 3)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// The deprecated `echo_embedding_threshold` is accepted and changes nothing.
+    @Test func theEmbeddingThresholdIsIgnored() {
+        let segments = [
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
+            LabeledSegment(start: 10.1, end: 15.2, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+        ]
+        let remoteDb: [String: [Float]] = ["Speaker 1": [1, 0, 0, 0]]
+        let localDb: [String: [Float]] = ["Speaker 1": [0, 1, 0, 0]]
+        for threshold in [0.0, 0.8, 1.0] {
+            let result = EchoDeduplicator.deduplicate(
+                segments: segments, localSpeakerDatabase: localDb, remoteSpeakerDatabase: remoteDb,
+                embeddingThreshold: threshold
+            )
+            #expect(result.flaggedCount == 1)
+        }
+    }
+
+    // MARK: - Invalid input
+
+    /// A segment whose times are not finite or run backwards is never a candidate nor evidence, and
+    /// it adds no time to its cluster.
+    @Test func segmentsWithUnusableTimesAreNeverMatched() {
+        let segments = [
+            LabeledSegment(start: 10, end: 15, speaker: "Remote Speaker 1", text: "The quick brown fox", source: "remote"),
+            LabeledSegment(start: .nan, end: 15, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+            LabeledSegment(start: 15, end: 10, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+            LabeledSegment(start: 12, end: 12, speaker: "Local Speaker 1", text: "The quick brown fox", source: "local"),
+            LabeledSegment(start: .infinity, end: .infinity, speaker: "Remote Speaker 1", text: "Jumps over the dog", source: "remote"),
+            LabeledSegment(start: 30, end: 35, speaker: "Local Speaker 1", text: "Jumps over the dog", source: "local"),
+        ]
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:]
+        )
+        #expect(result.flaggedCount == 0)
+        let cluster = result.clusters.first
+        #expect(cluster?.segments == 4 && cluster?.seconds == 5 && cluster?.matchedSeconds == 0 && cluster?.share == 0)
+    }
+
+    /// A dual-stream recording where the remote side said nothing: every local cluster is reported
+    /// as kept with nothing matched.
+    @Test func noRemoteSpeechKeepsEveryClusterAndStillReportsIt() {
+        let segments = [
+            LabeledSegment(start: 0, end: 40, speaker: "Local Speaker 1", text: "My own unique thought", source: "local"),
+        ]
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: ["Speaker 1": [1, 0, 0, 0]], remoteSpeakerDatabase: [:]
+        )
+        #expect(result.flaggedCount == 0)
+        #expect(result.clusters == [EchoDeduplicator.ClusterVerdict(
+            label: "Local Speaker 1", segments: 1, matchedSegments: 0, seconds: 40, matchedSeconds: 0,
+            words: 4, matchedWords: 0, share: 0, verdict: .kept)])
     }
 }

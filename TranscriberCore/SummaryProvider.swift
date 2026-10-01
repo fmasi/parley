@@ -60,7 +60,8 @@ public struct SummaryMetadata: Sendable {
     public let durationSeconds: Double
     public let speakers: [String]
     public let dualStream: Bool
-    public let echoSegmentsRemoved: Int
+    /// How many local segments the transcript flags as echo (`metadata.echo_segments_flagged`).
+    public let echoSegmentsFlagged: Int
     /// Capture coverage per side; nil when the transcript carries none (older, or not recorded).
     public let remoteCapture: CaptureSideNote?
     public let localCapture: CaptureSideNote?
@@ -78,7 +79,7 @@ public struct SummaryMetadata: Sendable {
     public let captureReconstructed: Bool
 
     public init(sessionName: String, date: Date, durationSeconds: Double, speakers: [String],
-                dualStream: Bool = false, echoSegmentsRemoved: Int = 0,
+                dualStream: Bool = false, echoSegmentsFlagged: Int = 0,
                 remoteCapture: CaptureSideNote? = nil, localCapture: CaptureSideNote? = nil,
                 coverageNotRecorded: Bool = false, gapCount: Int = 0, gapSeconds: Double = 0, untimedSegmentCount: Int = 0,
                 captureReconstructed: Bool = false) {
@@ -87,7 +88,7 @@ public struct SummaryMetadata: Sendable {
         self.durationSeconds = durationSeconds
         self.speakers = speakers
         self.dualStream = dualStream
-        self.echoSegmentsRemoved = echoSegmentsRemoved
+        self.echoSegmentsFlagged = echoSegmentsFlagged
         self.remoteCapture = remoteCapture
         self.localCapture = localCapture
         self.coverageNotRecorded = coverageNotRecorded

@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2367%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2396%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -113,11 +113,11 @@ faithful and private.
   land in the transcript too. The tap is the default for new installs; ScreenCaptureKit stays
   selectable in Settings as the legacy option until #221.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
-  phantom local speaker. A triple-confirmed gate flags it: >50% temporal overlap **and** >70% word
-  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays unflagged. A flagged line is
-  kept in the JSON record and hidden from the TXT/SRT transcript and the summary. Across 7 real
-  recordings that gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129
-  segments), with zero false positives.
+  phantom local speaker. Each mic-side line is matched against the far end on time (>50% overlap)
+  **and** words (>70% overlap); a mic-side speaker whose speech is at least half matched is judged to
+  be echo and every matched line of it is flagged, and elsewhere only matches of three words or more
+  are. A flagged line is kept in the JSON record and hidden from the TXT/SRT transcript and the
+  summary, and the transcript records the numbers behind each verdict (`metadata.echo_clusters`).
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
@@ -202,7 +202,7 @@ TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC clien
 TranscriberCore/       engines, diarization, echo-dedup, speaker reconciliation, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2367 tests across 264 suites
+SwiftTests/            2396 tests across 265 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```

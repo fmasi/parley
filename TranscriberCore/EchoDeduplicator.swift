@@ -7,7 +7,6 @@ public enum EchoDeduplicator {
 
     public static let defaultTemporalThreshold: Double = 0.5
     public static let defaultTextThreshold: Double = 0.7
-    public static let defaultEmbeddingThreshold: Float = 0.8
 
     // MARK: - Helper functions
 
@@ -92,19 +91,160 @@ public enum EchoDeduplicator {
         return x
     }
 
+    // MARK: - Cluster rule (constants, not config keys)
+
+    /// A local cluster is echo when at least this share of its duration matches concurrent remote
+    /// speech. Measured on a real speaker-mode call: 0.91 for the bleed cluster, never above 0.05
+    /// for the user's own (#242).
+    public static let clusterShareThreshold: Double = 0.5
+    /// A cluster with less speech than this is not judged as a cluster (three one-word replies are
+    /// no evidence of anything).
+    public static let clusterMinimumSeconds: Double = 30
+    /// Outside an echo cluster a matched segment is flagged only from this many words: "Yes." said
+    /// on both sides at once matches on time and text and is not an echo.
+    public static let minimumWordsOutsideEchoCluster = 3
+
+    /// Whitespace-separated words that hold at least one letter or digit ("It's okay." is 2).
+    public static func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: \.isWhitespace).filter { $0.contains { $0.isLetter || $0.isNumber } }.count
+    }
+
     // MARK: - Result
+
+    /// What the dedup found for one local cluster (one diarized speaker label on the mic side):
+    /// numbers and labels only, never text. Persisted on `ProcessedChunk.echoClusters` and written to
+    /// the transcript's `metadata.echo_clusters`, so the decision can be audited without a re-run.
+    ///
+    /// Only UNFLAGGED local segments are counted: one already `filtered` or `duplicate` is neither a
+    /// candidate nor part of these totals. "Matched" means the segment overlaps a remote segment in
+    /// time and repeats its words; it is flagged `echo` when the cluster's verdict is `.echo`, or
+    /// when it has `minimumWordsOutsideEchoCluster` words or more.
+    public struct ClusterVerdict: Codable, Equatable, Sendable {
+        public enum Verdict: String, Codable, Sendable {
+            /// The cluster is the other side's voice through the speakers: every matched segment is flagged.
+            case echo
+            /// The cluster is somebody on this side: only its matches of 3 words or more are flagged.
+            case kept
+        }
+
+        /// The cluster's speaker label as its segments carry it ("Local Speaker 2").
+        public var label: String
+        public var segments: Int
+        public var matchedSegments: Int
+        public var seconds: Double
+        public var matchedSeconds: Double
+        public var words: Int
+        public var matchedWords: Int
+        /// `matchedSeconds / seconds` (0 when the cluster holds no time).
+        public var share: Double
+        public var verdict: Verdict
+        /// The highest cosine similarity between this cluster's voice and any remote speaker's.
+        /// EVIDENCE ONLY — it plays no part in the verdict. nil when either side has no embedding.
+        public var bestEmbeddingSimilarity: Double?
+        /// Per remote speaker label, the seconds of this cluster's matched segments that overlap the
+        /// remote speech they repeat.
+        public var matchedRemote: [String: Double]
+
+        public var isEcho: Bool { verdict == .echo }
+
+        public init(label: String, segments: Int, matchedSegments: Int, seconds: Double, matchedSeconds: Double,
+                    words: Int, matchedWords: Int, share: Double, verdict: Verdict,
+                    bestEmbeddingSimilarity: Double? = nil, matchedRemote: [String: Double] = [:]) {
+            self.label = label
+            self.segments = segments
+            self.matchedSegments = matchedSegments
+            self.seconds = seconds
+            self.matchedSeconds = matchedSeconds
+            self.words = words
+            self.matchedWords = matchedWords
+            self.share = share
+            self.verdict = verdict
+            self.bestEmbeddingSimilarity = bestEmbeddingSimilarity
+            self.matchedRemote = matchedRemote
+        }
+
+        /// The same names as `metadata.echo_clusters`, so session.json and the transcript read alike.
+        private enum CodingKeys: String, CodingKey {
+            case label, segments, seconds, words, share, verdict
+            case matchedSegments = "matched_segments"
+            case matchedSeconds = "matched_seconds"
+            case matchedWords = "matched_words"
+            case bestEmbeddingSimilarity = "embedding_similarity"
+            case matchedRemote = "matched_remote"
+        }
+
+        /// One `metadata.echo_clusters` entry. `chunk` is left out when the dedup ran over a whole
+        /// file rather than one chunk (the single-file path). `relabel` maps a chunk-local speaker
+        /// label to the transcript's global one; remote labels that land on the same global label
+        /// are summed.
+        public func metadataDictionary(track: String = "local", chunk: Int?, relabel: (String) -> String = { $0 }) -> [String: Any] {
+            func rounded(_ value: Double, _ places: Double) -> Double { (value * places).rounded() / places }
+            var remote: [String: Double] = [:]
+            for (label, seconds) in matchedRemote { remote[relabel(label), default: 0] += seconds }
+            var d: [String: Any] = [
+                "track": track,
+                "label": relabel(label),
+                "segments": segments,
+                "matched_segments": matchedSegments,
+                "seconds": rounded(seconds, 1000),
+                "matched_seconds": rounded(matchedSeconds, 1000),
+                "words": words,
+                "matched_words": matchedWords,
+                "share": rounded(share, 10_000),
+                "verdict": verdict.rawValue,
+                "matched_remote": remote.mapValues { rounded($0, 1000) },
+            ]
+            if let chunk { d["chunk"] = chunk }
+            if let bestEmbeddingSimilarity {
+                d["embedding_similarity"] = rounded(bestEmbeddingSimilarity, 10_000)
+            }
+            return d
+        }
+    }
 
     public struct DeduplicationResult {
         /// Every input segment; echoes carry `echo = true` (P11 — flagged, never deleted).
         public let segments: [LabeledSegment]
         /// How many local segments were flagged as echo.
         public let flaggedCount: Int
-        /// Alias of `flaggedCount`, kept for one release while callers move over.
-        public var removedCount: Int { flaggedCount }
+        /// One verdict per local cluster that holds an unflagged segment, sorted by label.
+        public let clusters: [ClusterVerdict]
+
+        public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = []) {
+            self.segments = segments
+            self.flaggedCount = flaggedCount
+            self.clusters = clusters
+        }
+
+        /// The chunk's processing issues for this result, both informational: `echo_flagged` (how
+        /// many segments) and `echo_cluster` (how many local clusters were judged to be echo).
+        public var issues: [ChunkIssue] {
+            let echoClusters = clusters.filter(\.isEcho).count
+            return (flaggedCount > 0 ? [ChunkIssue(code: .echoFlagged, track: "local", count: flaggedCount)] : [])
+                + (echoClusters > 0 ? [ChunkIssue(code: .echoCluster, track: "local", count: echoClusters)] : [])
+        }
     }
 
     // MARK: - Main deduplication
 
+    /// Flags local segments that are mic bleed of the remote side (#242).
+    ///
+    /// 1. Per segment, speaker-independent: an unflagged local segment MATCHES when an unflagged
+    ///    remote segment of ANY remote speaker overlaps it in time (> `temporalThreshold` of the
+    ///    shorter one) and repeats its words (Jaccard or containment > `textThreshold`, or the
+    ///    Jaccard against all the overlapping remote segments joined).
+    /// 2. Per local cluster (speaker label): `share = matched seconds / total seconds`. The cluster
+    ///    is echo when `share >= clusterShareThreshold` and it holds `clusterMinimumSeconds`.
+    /// 3. In an echo cluster every matched segment is flagged, whatever its length; its unmatched
+    ///    segments stay unflagged under the cluster's label. Elsewhere a matched segment is flagged
+    ///    only from `minimumWordsOutsideEchoCluster` words.
+    ///
+    /// The voice similarity is recorded as evidence and decides nothing: speaker playback into a
+    /// far-field mic changes a voice enough to fail any fixed threshold (0.68 on the call behind
+    /// #242), and bleed absorbed into the user's own cluster carries the user's embedding.
+    ///
+    /// - Parameter embeddingThreshold: DEPRECATED and ignored (`echo_embedding_threshold`). Kept for
+    ///   one release so existing callers and config files keep working.
     public static func deduplicate(
         segments: [LabeledSegment],
         localSpeakerDatabase: [String: [Float]],
@@ -116,12 +256,112 @@ public enum EchoDeduplicator {
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
-        let eThresh = Float(embeddingThreshold ?? Double(defaultEmbeddingThreshold))
 
-        Logger.transcription.debug(
-            "Echo dedup: \(segments.count, privacy: .public) segments, localDb keys: \(Array(localSpeakerDatabase.keys), privacy: .private), remoteDb keys: \(Array(remoteSpeakerDatabase.keys), privacy: .private), thresholds: temporal=\(tThresh, privacy: .public) text=\(xThresh, privacy: .public) embedding=\(eThresh, privacy: .public)"
-        )
+        // An already-flagged segment (gate-filtered noise, an abutting repeat) is neither an echo
+        // candidate nor evidence for one.
+        let remoteSegments = segments.filter { $0.source == "remote" && !$0.isFlagged }
 
+        // 1. Per-segment match.
+        var matches: [Int: [String: Double]] = [:]   // segment index → remote label → overlap seconds
+        var clusterIndices: [String: [Int]] = [:]
+        for i in segments.indices where segments[i].source == "local" && !segments[i].isFlagged {
+            clusterIndices[segments[i].speaker, default: []].append(i)
+            if let remote = matchedRemote(local: segments[i], remoteSegments: remoteSegments,
+                                          temporalThreshold: tThresh, textThreshold: xThresh) {
+                matches[i] = remote
+            }
+        }
+
+        // 2. Cluster verdicts, 3. flags.
+        let similarities = bestEmbeddingSimilarities(
+            local: localSpeakerDatabase, remote: remoteSpeakerDatabase, embeddingDim: embeddingDim)
+        var result = segments
+        var flaggedCount = 0
+        var clusters: [ClusterVerdict] = []
+        for (label, indices) in clusterIndices.sorted(by: { $0.key < $1.key }) {
+            let matched = indices.filter { matches[$0] != nil }
+            let seconds = indices.reduce(0) { $0 + duration(of: segments[$1]) }
+            let matchedSeconds = matched.reduce(0) { $0 + duration(of: segments[$1]) }
+            let words = indices.reduce(0) { $0 + wordCount(segments[$1].text) }
+            let matchedWords = matched.reduce(0) { $0 + wordCount(segments[$1].text) }
+            var remote: [String: Double] = [:]
+            for i in matched {
+                for (remoteLabel, overlap) in matches[i] ?? [:] { remote[remoteLabel, default: 0] += overlap }
+            }
+            let share = seconds > 0 ? matchedSeconds / seconds : 0
+            let isEcho = share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
+            var flagged = 0
+            for i in matched where isEcho || wordCount(segments[i].text) >= minimumWordsOutsideEchoCluster {
+                result[i].echo = true
+                flagged += 1
+            }
+            flaggedCount += flagged
+            let dbKey = label.hasPrefix("Local ") ? String(label.dropFirst("Local ".count)) : label
+            let verdict = ClusterVerdict(
+                label: label, segments: indices.count, matchedSegments: matched.count,
+                seconds: seconds, matchedSeconds: matchedSeconds, words: words, matchedWords: matchedWords,
+                share: share, verdict: isEcho ? .echo : .kept,
+                bestEmbeddingSimilarity: similarities[dbKey], matchedRemote: remote)
+            clusters.append(verdict)
+            // Numbers only are public; a label becomes a name once the user renames a speaker.
+            Logger.transcription.info(
+                "Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
+            )
+        }
+
+        return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters)
+    }
+
+    /// A segment's length; 0 when its times are not finite or run backwards.
+    private static func duration(of segment: LabeledSegment) -> Double {
+        let d = segment.end - segment.start
+        return d.isFinite && d > 0 ? d : 0
+    }
+
+    /// Whether `local` repeats concurrent remote speech, from whichever remote speaker: nil when it
+    /// does not, else the seconds it overlaps the remote segment(s) it repeats, per remote label.
+    private static func matchedRemote(
+        local: LabeledSegment,
+        remoteSegments: [LabeledSegment],
+        temporalThreshold: Double,
+        textThreshold: Double
+    ) -> [String: Double]? {
+        guard duration(of: local) > 0 else { return nil }
+        func overlapSeconds(_ remote: LabeledSegment) -> Double {
+            max(min(local.end, remote.end) - max(local.start, remote.start), 0)
+        }
+
+        // Every remote segment that overlaps this one in time. Compared one by one, then joined, to
+        // handle misaligned boundaries — one long local segment over what the remote side split
+        // into several shorter ones.
+        let overlapping = remoteSegments.filter { remote in
+            duration(of: remote) > 0 && temporalOverlap(
+                aStart: local.start, aEnd: local.end, bStart: remote.start, bEnd: remote.end
+            ) > temporalThreshold
+        }
+        guard !overlapping.isEmpty else { return nil }
+
+        // Jaccard, or containment when the local segment is a short excerpt of a longer remote one
+        // (Jaccard then fails on the size of the union). The best-scoring remote segment wins.
+        var best: (remote: LabeledSegment, score: Double)?
+        for remote in overlapping {
+            let score = max(textSimilarity(local.text, remote.text), textContainment(local.text, remote.text))
+            if score > textThreshold, score > (best?.score ?? 0) { best = (remote, score) }
+        }
+        if let best { return [best.remote.speaker: overlapSeconds(best.remote)] }
+
+        guard overlapping.count > 1 else { return nil }
+        let window = overlapping.sorted { $0.start < $1.start }
+        guard textSimilarity(local.text, window.map(\.text).joined(separator: " ")) > textThreshold else { return nil }
+        var result: [String: Double] = [:]
+        for remote in window { result[remote.speaker, default: 0] += overlapSeconds(remote) }
+        return result
+    }
+
+    /// Per local speaker key, the highest cosine similarity to any remote speaker. Evidence only.
+    private static func bestEmbeddingSimilarities(
+        local: [String: [Float]], remote: [String: [Float]], embeddingDim: Int?
+    ) -> [String: Double] {
         // Base embedding dimension, used to pool accumulated multi-segment embeddings into a
         // centroid. The robust source is `embeddingDim` passed by the caller, captured from a
         // known single-segment embedding before any accumulation (TranscriptionRunner does
@@ -134,159 +374,19 @@ public enum EchoDeduplicator {
         if let embeddingDim, embeddingDim > 0 {
             baseDim = embeddingDim
         } else {
-            var allLengths: [Int] = []
-            for v in localSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
-            for v in remoteSpeakerDatabase.values where !v.isEmpty { allLengths.append(v.count) }
-            baseDim = allLengths.reduce(0) { gcd($0, $1) }
+            baseDim = (Array(local.values) + Array(remote.values)).filter { !$0.isEmpty }.map(\.count).reduce(0) { gcd($0, $1) }
         }
-
-        // Pool each speaker's accumulated embedding vectors into a single centroid so that
-        // cosineSimilarity always receives equal-length vectors regardless of per-speaker
-        // segment counts. For single-segment databases (the common case) this is a no-op.
-        let localCentroidDb  = localSpeakerDatabase.mapValues  { centroid(from: $0, dim: baseDim) }
-        let remoteCentroidDb = remoteSpeakerDatabase.mapValues { centroid(from: $0, dim: baseDim) }
-
-        // An already-flagged segment (gate-filtered noise, an abutting repeat) is neither an echo
-        // candidate nor evidence for one: it used to be gone by now.
-        let remoteSegments = segments.filter { $0.source == "remote" && !$0.isFlagged }
-        guard !remoteSegments.isEmpty else {
-            return DeduplicationResult(segments: segments, flaggedCount: 0)
+        // Pool each speaker's accumulated vectors into one centroid so `cosineSimilarity` always
+        // receives equal-length vectors. For single-segment databases (the common case) a no-op.
+        let remoteCentroids = remote.values.filter { !$0.isEmpty }.map { centroid(from: $0, dim: baseDim) }
+        var result: [String: Double] = [:]
+        for (key, embedding) in local where !embedding.isEmpty {
+            let mine = centroid(from: embedding, dim: baseDim)
+            // Vectors of different lengths are not comparable (cosineSimilarity would say 0).
+            // Finite only: the verdict is persisted, and a NaN cannot be encoded as JSON.
+            let similarities = remoteCentroids.filter { $0.count == mine.count }.map { cosineSimilarity(mine, $0) }.filter(\.isFinite)
+            if let best = similarities.max() { result[key] = Double(best) }
         }
-
-        var result = segments
-        var flaggedCount = 0
-
-        for i in result.indices where result[i].source == "local" && !result[i].isFlagged {
-            if isEcho(local: result[i], remoteSegments: remoteSegments,
-                      localDb: localCentroidDb, remoteDb: remoteCentroidDb,
-                      temporalThreshold: tThresh, textThreshold: xThresh, embeddingThreshold: eThresh) {
-                result[i].echo = true
-                flaggedCount += 1
-            }
-        }
-
-        if flaggedCount > 0 {
-            Logger.transcription.debug("Echo dedup: flagged \(flaggedCount, privacy: .public) local segments as echo (mic bleed of remote speaker)")
-        }
-
-        return DeduplicationResult(segments: result, flaggedCount: flaggedCount)
-    }
-
-    private static func isEcho(
-        local: LabeledSegment,
-        remoteSegments: [LabeledSegment],
-        localDb: [String: [Float]],
-        remoteDb: [String: [Float]],
-        temporalThreshold: Double,
-        textThreshold: Double,
-        embeddingThreshold: Float
-    ) -> Bool {
-        // Speaker embedding gate runs first (cheap), then temporal+text per overlap.
-        // Recover the DB key for this local speaker (segments are prefixed by
-        // tagWithSourcePrefix as "Local Speaker N"; DB keys are "Speaker N").
-        let localSpeakerName = local.speaker.hasPrefix("Local ")
-            ? String(local.speaker.dropFirst("Local ".count))
-            : local.speaker
-        guard let localEmbedding = localDb[localSpeakerName],
-              !localEmbedding.isEmpty else {
-            Logger.transcription.debug(
-                "Echo dedup: no embedding for '\(localSpeakerName, privacy: .private)' (localDb keys: \(Array(localDb.keys), privacy: .private))"
-            )
-            return false
-        }
-
-        var bestSimilarity: Float = 0
-        var bestRemoteKey = ""
-        for (remoteKey, remoteEmbedding) in remoteDb {
-            let sim = cosineSimilarity(localEmbedding, remoteEmbedding)
-            if sim > bestSimilarity {
-                bestSimilarity = sim
-                bestRemoteKey = remoteKey
-            }
-        }
-
-        guard bestSimilarity > embeddingThreshold else {
-            Logger.transcription.debug(
-                "Echo dedup: embedding gate FAILED for '\(localSpeakerName, privacy: .private)' — best match '\(bestRemoteKey, privacy: .private)' at \(String(format: "%.3f", bestSimilarity), privacy: .public) (threshold \(embeddingThreshold, privacy: .public))"
-            )
-            return false
-        }
-        Logger.transcription.debug(
-            "Echo dedup: embedding gate PASSED for '\(localSpeakerName, privacy: .private)' — matches '\(bestRemoteKey, privacy: .private)' at \(String(format: "%.3f", bestSimilarity), privacy: .public)"
-        )
-
-        // The local voice resembles `bestRemoteKey`. Only that remote speaker's
-        // segments can be the source of the echo, so filter before the temporal
-        // + text loop (otherwise cross-talk from a different remote speaker can
-        // produce a false positive).
-        let bestRemoteSpeaker = "Remote \(bestRemoteKey)"
-        let candidateRemotes = remoteSegments.filter { $0.speaker == bestRemoteSpeaker }
-
-        // Temporal + text gates (windowed). Collect all candidate remote segments
-        // that temporally overlap with this local segment, then compare local text
-        // against each one (and concatenated, if multiple) to handle misaligned
-        // boundaries — one long local segment covering content that the remote
-        // side split into multiple shorter ones.
-        var overlappingRemotes: [(segment: LabeledSegment, overlap: Double)] = []
-        for remote in candidateRemotes {
-            let overlap = temporalOverlap(
-                aStart: local.start, aEnd: local.end,
-                bStart: remote.start, bEnd: remote.end
-            )
-            if overlap > temporalThreshold {
-                overlappingRemotes.append((remote, overlap))
-            }
-        }
-
-        guard !overlappingRemotes.isEmpty else { return false }
-
-        // Try individual comparisons first (handles aligned segments efficiently)
-        for (remote, overlap) in overlappingRemotes {
-            let textSim = textSimilarity(local.text, remote.text)
-            Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .private)' vs '\(remote.speaker, privacy: .private)' — temporal=\(String(format: "%.3f", overlap), privacy: .public) text=\(String(format: "%.3f", textSim), privacy: .public) (thresholds: \(String(format: "%.2f", temporalThreshold), privacy: .public)/\(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" remote=\"\(remote.text.prefix(60), privacy: .private)\""
-            )
-            if textSim > textThreshold {
-                Logger.transcription.debug(
-                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of '\(remote.speaker, privacy: .private)'"
-                )
-                return true
-            }
-
-            // Containment fallback: when local is a short excerpt of a longer remote,
-            // Jaccard fails because the union is huge. Check if most local words appear
-            // in the remote text (local ⊂ remote).
-            if textSim <= textThreshold {
-                let containment = textContainment(local.text, remote.text)
-                if containment > textThreshold {
-                    Logger.transcription.debug(
-                        "Echo dedup: '\(localSpeakerName, privacy: .private)' vs '\(remote.speaker, privacy: .private)' — containment=\(String(format: "%.3f", containment), privacy: .public) (Jaccard was \(String(format: "%.3f", textSim), privacy: .public))"
-                    )
-                    Logger.transcription.debug(
-                        "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — contained in '\(remote.speaker, privacy: .private)'"
-                    )
-                    return true
-                }
-            }
-        }
-
-        // If no individual match, try concatenated window (handles misaligned boundaries)
-        if overlappingRemotes.count > 1 {
-            let sorted = overlappingRemotes.sorted { $0.0.start < $1.0.start }
-            let windowText = sorted.map(\.0.text).joined(separator: " ")
-            let windowSim = textSimilarity(local.text, windowText)
-            let speakers = Array(Set(sorted.map(\.0.speaker))).joined(separator: "+")
-            Logger.transcription.debug(
-                "Echo dedup: '\(localSpeakerName, privacy: .private)' vs WINDOW(\(sorted.count, privacy: .public) segs) — text=\(String(format: "%.3f", windowSim), privacy: .public) (threshold: \(String(format: "%.2f", textThreshold), privacy: .public)) local=\"\(local.text.prefix(60), privacy: .private)\" window=\"\(windowText.prefix(80), privacy: .private)\""
-            )
-            if windowSim > textThreshold {
-                Logger.transcription.debug(
-                    "Echo dedup: REMOVING '\(localSpeakerName, privacy: .private)' segment [\(String(format: "%.1f", local.start), privacy: .public)-\(String(format: "%.1f", local.end), privacy: .public)s] — echo of window [\(speakers, privacy: .private)]"
-                )
-                return true
-            }
-        }
-
-        return false
+        return result
     }
 }

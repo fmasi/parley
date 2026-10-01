@@ -35,7 +35,11 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         public static let zeroLengthDropped = Code(rawValue: "zero_length_dropped")
         public static let segmentsFiltered = Code(rawValue: "segments_filtered")
         public static let clustersAbsorbed = Code(rawValue: "clusters_absorbed")
+        /// Local segments flagged `echo` (mic bleed of the remote side): kept, hidden when read.
         public static let echoFlagged = Code(rawValue: "echo_flagged")
+        /// Local clusters judged to be the remote side's voice through the speakers; `count` is how
+        /// many. Informational: their matched segments are flagged, nothing is missing (#242).
+        public static let echoCluster = Code(rawValue: "echo_cluster")
         /// A chunk arrived under an index already held by a different recording file; it was
         /// processed under a fresh index. `count` carries the index it collided with.
         public static let chunkIndexCollision = Code(rawValue: "chunk_index_collision")
@@ -211,7 +215,12 @@ public struct ProcessedChunk: Codable {
     public let speakerDatabase: [String: [Float]]
     /// Speaker embeddings from the local/mic audio stream (keyed by friendly name). (#64)
     public let localSpeakerDatabase: [String: [Float]]
-    public let echoSegmentsRemoved: Int
+    /// How many local segments echo dedup flagged in this chunk (they are kept, never removed).
+    public let echoSegmentsFlagged: Int
+    /// The echo verdict of each local cluster of this chunk, with the chunk's own speaker labels
+    /// (#242). Persisted so a crash-recovered finalize still writes `metadata.echo_clusters`. Absent
+    /// in a session.json written before it → `[]`.
+    public let echoClusters: [EchoDeduplicator.ClusterVerdict]
     /// Whether a MIC STREAM WAS CAPTURED for this chunk — a property of the recording, not of
     /// whether the user happened to say anything.
     ///
@@ -234,7 +243,8 @@ public struct ProcessedChunk: Codable {
         segments: [Segment],
         speakerDatabase: [String: [Float]],
         localSpeakerDatabase: [String: [Float]] = [:],
-        echoSegmentsRemoved: Int = 0,
+        echoSegmentsFlagged: Int = 0,
+        echoClusters: [EchoDeduplicator.ClusterVerdict] = [],
         isDualStream: Bool = false,
         issues: [ChunkIssue] = []
     ) {
@@ -244,7 +254,8 @@ public struct ProcessedChunk: Codable {
         self.segments = segments
         self.speakerDatabase = speakerDatabase
         self.localSpeakerDatabase = localSpeakerDatabase
-        self.echoSegmentsRemoved = echoSegmentsRemoved
+        self.echoSegmentsFlagged = echoSegmentsFlagged
+        self.echoClusters = echoClusters
         self.isDualStream = isDualStream
         self.issues = issues
     }
@@ -258,9 +269,16 @@ public struct ProcessedChunk: Codable {
         case segments
         case speakerDatabase
         case localSpeakerDatabase
-        case echoSegmentsRemoved = "echo_segments_removed"
+        case echoSegmentsFlagged = "echo_segments_flagged"
+        case echoClusters = "echo_clusters"
         case isDualStream = "is_dual_stream"
         case issues
+    }
+
+    /// The count's key before #231 ("removed" — nothing is). Read only, so a session.json written
+    /// by an earlier build keeps its count across an update.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case echoSegmentsRemoved = "echo_segments_removed"
     }
 
     public init(from decoder: Decoder) throws {
@@ -271,7 +289,11 @@ public struct ProcessedChunk: Codable {
         segments = try c.decode([Segment].self, forKey: .segments)
         speakerDatabase = try c.decode([String: [Float]].self, forKey: .speakerDatabase)
         localSpeakerDatabase = try c.decodeIfPresent([String: [Float]].self, forKey: .localSpeakerDatabase) ?? [:]
-        echoSegmentsRemoved = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
+        echoSegmentsFlagged = try c.decodeIfPresent(Int.self, forKey: .echoSegmentsFlagged)
+            ?? decoder.container(keyedBy: LegacyCodingKeys.self).decodeIfPresent(Int.self, forKey: .echoSegmentsRemoved) ?? 0
+        // Evidence, never worth a chunk: verdicts this build cannot read (a newer build's) are
+        // dropped rather than failing the whole session.json and the recording with it.
+        echoClusters = (try? c.decodeIfPresent([EchoDeduplicator.ClusterVerdict].self, forKey: .echoClusters)) ?? []
         // Legacy session.json predates the flag: fall back to the old inference so an in-flight
         // recording recovered by a newer build still reconciles the way it was written.
         if let flag = try c.decodeIfPresent(Bool.self, forKey: .isDualStream) {

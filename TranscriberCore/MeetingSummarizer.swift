@@ -220,7 +220,8 @@ public enum MeetingSummarizer {
 
         let metadata_raw = json["metadata"] as? [String: Any]
         let dualStream = metadata_raw?["dual_stream"] as? Bool ?? false
-        let echoRemoved = metadata_raw?["echo_segments_removed"] as? Int ?? 0
+        // `echo_segments_removed` is the same count under its name before #231 (older transcripts).
+        let echoFlagged = metadata_raw?["echo_segments_flagged"] as? Int ?? metadata_raw?["echo_segments_removed"] as? Int ?? 0
         let capture = metadata_raw?["capture"] as? [String: Any]
         let provenance = metadata_raw?["capture_provenance"] as? [String: Any]
         let gaps = capture?["gaps"] as? [[String: Any]] ?? []
@@ -258,7 +259,7 @@ public enum MeetingSummarizer {
             durationSeconds: duration,
             speakers: speakers,
             dualStream: dualStream,
-            echoSegmentsRemoved: echoRemoved,
+            echoSegmentsFlagged: echoFlagged,
             remoteCapture: captureSideNote(capture?["remote"], provenance: provenance, isRemote: true),
             localCapture: captureSideNote(capture?["local"], provenance: provenance, isRemote: false),
             // Written by a build that tracks issues, yet no coverage for either side: say so rather

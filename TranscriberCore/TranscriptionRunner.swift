@@ -286,8 +286,10 @@ public final class TranscriptionRunner {
         allSegments.sort { $0.start < $1.start }
         Logger.transcription.info("Total segments after merge: \(allSegments.count, privacy: .public)")
 
-        // Echo dedup (remove mic bleed of remote speaker)
-        var echoRemoved = 0
+        // Echo dedup (flag mic bleed of the remote side), once over the whole file: its cluster
+        // verdicts carry no chunk.
+        var echoFlagged = 0
+        var echoClusters: [[String: Any]]?
         if isDualStream {
             let dedupResult = EchoDeduplicator.deduplicate(
                 segments: allSegments,
@@ -295,11 +297,11 @@ public final class TranscriptionRunner {
                 remoteSpeakerDatabase: remoteSpeakerDb,
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold,
                 embeddingDim: embeddingDim > 0 ? embeddingDim : nil
             )
             allSegments = dedupResult.segments
-            echoRemoved = dedupResult.flaggedCount
+            echoFlagged = dedupResult.flaggedCount
+            echoClusters = dedupResult.clusters.map { $0.metadataDictionary(chunk: nil) }
         }
 
         let uniqueLanguages = Set(detectedLanguages)
@@ -318,7 +320,8 @@ public final class TranscriptionRunner {
             numSpeakers: nil,
             diarization: diarizer != nil,
             dualStream: isDualStream,
-            echoSegmentsRemoved: echoRemoved,
+            echoSegmentsFlagged: echoFlagged,
+            echoClusters: echoClusters,
             provenance: provenance,
             // No in-memory session start here (CLI / crash-recovery / single-file path), so
             // use the source audio's creation time as the recording-start stamp (#49).
@@ -628,7 +631,7 @@ public final class TranscriptionRunner {
         }
 
         // 7. Assemble JSON
-        let totalEchoRemoved = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsRemoved }
+        let totalEchoFlagged = sessionState.chunks.reduce(0) { $0 + $1.echoSegmentsFlagged }
         let processingIssues = Self.processingIssueDictionaries(chunks: sortedChunks, sessionIssues: sessionState.issues + finalizeIssues)
         let json = TranscriptAssembler.assemble(
             segments: allSegments,
@@ -639,7 +642,10 @@ public final class TranscriptionRunner {
             // Diarization happened only if a diarizer ran AND no chunk's diarization failed (§7.2).
             diarization: diarizer != nil && !processingIssues.contains { $0["code"] as? String == ChunkIssue.Code.diarizationFailed.rawValue },
             dualStream: isDualStream,
-            echoSegmentsRemoved: totalEchoRemoved,
+            echoSegmentsFlagged: totalEchoFlagged,
+            // Each chunk's own verdicts (no second dedup pass here), in the transcript's speaker
+            // namespace: the same per-chunk mapping the merger applied to the segments.
+            echoClusters: isDualStream ? Self.echoClusterDictionaries(chunks: sortedChunks, speakerMapping: speakerMapping) : nil,
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
@@ -803,6 +809,17 @@ public final class TranscriptionRunner {
         }
         return chunks.flatMap { c in c.issues.map { dictionary(chunk: c.index, issue: $0) } }
             + sessionIssues.map { dictionary(chunk: $0.chunk, issue: $0.issue) }
+    }
+
+    /// `metadata.echo_clusters` for a chunked session: one entry per (chunk, local cluster), the
+    /// labels remapped from the chunk's own speaker numbering to the transcript's global one with
+    /// `speakerMapping` — what `TranscriptMerger.merge` applies to the segments. A label the mapping
+    /// does not hold is kept as it is, as the merger does.
+    static func echoClusterDictionaries(chunks: [ProcessedChunk], speakerMapping: [Int: [String: String]]) -> [[String: Any]] {
+        chunks.flatMap { chunk in
+            let labelMap = speakerMapping[chunk.index] ?? [:]
+            return chunk.echoClusters.map { $0.metadataDictionary(chunk: chunk.index) { labelMap[$0] ?? $0 } }
+        }
     }
 
     // MARK: - Chunked Pipeline
