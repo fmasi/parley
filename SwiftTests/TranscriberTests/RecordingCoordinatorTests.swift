@@ -415,6 +415,61 @@ struct Harness {
     }
 }
 
+/// A step hung until the test releases it: a blocking one (`hang()` — a folder read, a probe, on its queue) or an awaited
+/// one (`hangAwaited()` — a fake helper call). The test then asserts by ORDER — what it expects happened while the step
+/// `isHanging` — never by a stopwatch, which a loaded machine stretches.
+///
+/// The watchdog is reached only by a test that is already failing: whatever waits for the step without a bound never
+/// lets the test release it. So a regression fails, never wedges the run. It is longer than any bound a test sets short,
+/// and shorter than the production defaults of the helper-call deadlines (20–30 s): a path that ignored the test's bound
+/// for its default is let go before that default, and fails too. Once released, or let go, it never hangs again.
+final class HungStep: @unchecked Sendable {
+    static let watchdog: TimeInterval = 15
+    private let condition = NSCondition()
+    private var began = false, over = false, onMain = false
+
+    var reached: Bool { condition.withLock { began } }
+    /// Hung now: begun, and neither released nor let go by the watchdog.
+    var isHanging: Bool { condition.withLock { began && !over } }
+    /// A blocking hang was asked for on the main thread: the main actor made the step itself.
+    var ranOnMainThread: Bool { condition.withLock { onMain } }
+
+    /// Blocks its thread until released. Never the main thread: there it returns at once, never hung (`isHanging` stays
+    /// false and `ranOnMainThread` says why) — the test fails at once, not after the watchdog.
+    func hang() {
+        let main = Thread.isMainThread
+        condition.withLock {
+            guard !over else { return }
+            began = true
+            if main { onMain = true; over = true; return }
+            let giveUp = Date().addingTimeInterval(Self.watchdog)
+            while !over { if !condition.wait(until: giveUp) { over = true } }
+            condition.broadcast()
+        }
+    }
+
+    /// Suspends its task until released (or cancelled).
+    func hangAwaited() async {
+        guard condition.withLock({ () -> Bool in
+            guard !over else { return false }
+            began = true
+            return true
+        }) else { return }
+        let giveUp = ContinuousClock.now + .seconds(Self.watchdog)
+        while !condition.withLock({ over }), ContinuousClock.now < giveUp, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        release()
+    }
+
+    func release() {
+        condition.withLock {
+            over = true
+            condition.broadcast()
+        }
+    }
+}
+
 // MARK: - Pure decision helpers
 
 @Suite struct RecordingCoordinatorNamingTests {
