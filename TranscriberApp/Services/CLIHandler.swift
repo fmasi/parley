@@ -283,7 +283,7 @@ enum CLIHandler {
         Subcommands:
           transcribe  Transcribe audio files
             -i <file>        Input audio file (required, can specify twice for dual-stream)
-            --output-dir <dir>  Output directory (default: same as input file)
+            --output-dir <dir>  Output directory, created if missing (default: same as input file)
             -f <format>      Output format: json, srt, txt (default: json)
             --engine <id>    Engine: speech_analyzer, fluid_audio (default: from config)
             --no-diarize     Skip speaker diarization

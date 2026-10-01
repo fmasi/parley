@@ -55,6 +55,9 @@ public final class TranscriptionRunner {
         provenance: CaptureProvenance? = nil
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
+        // #246: before any work. The transcript is written into `outputDirectory` at the very end,
+        // so a missing directory used to cost the whole transcription before it failed.
+        try OutputDirectory.ensureExists(outputDirectory)
         detectedLanguages = []
         applyDiarizerConfig(config)
 
