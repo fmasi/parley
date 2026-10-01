@@ -163,22 +163,23 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// A copy of both tracks' callback timing. MUST be read on the audio queue.
     func ioCycleStats() -> (mic: IOCycleStats, system: IOCycleStats) { (micIOStats, systemIOStats) }
 
-    /// Close one callback's timing: convert the ticks, add the cycle to the track's histogram and, when
-    /// it is an overrun the rate limit allows (one per 10 s per track), record the `ioOverrun` event.
-    /// On the audio queue. The common path is one clock read, seven multiply-divides and the histogram
+    /// Close one callback's timing: read the clock, convert the ticks, add the cycle to the track's
+    /// histogram and, when it is an overrun the rate limit allows (one per 10 s per track), record the
+    /// `ioOverrun` event. MUST be the callback's last act: the reading taken here ends the cycle's total
+    /// and its "check" stage (everything since `writeEndTicks`), so work done after this call is work the
+    /// HAL waits for and nobody measured.
+    /// On the audio queue. The common path is one clock read, eight multiply-divides and the histogram
     /// increments. The event path (rare) builds a small dictionary and takes the ring's lock, as every
     /// other anomaly recorded from this queue does; it runs after the cycle's end was read, so it is
     /// not in the number it reports.
     private func noteIOCycle(
         track: CaptureTrack, startTicks: UInt64, queueWaitTicks: UInt64, convertTicks: UInt64,
-        stages: (pad: UInt64, write: UInt64, sync: UInt64)
+        stages: (pad: UInt64, write: UInt64, sync: UInt64), writeEndTicks: UInt64
     ) {
         let endTicks = mach_absolute_time()
-        let cycle = IOCycleStats.Cycle(
-            queueWaitNanos: timebase.nanos(queueWaitTicks), convertNanos: timebase.nanos(convertTicks),
-            padNanos: timebase.nanos(stages.pad), writeNanos: timebase.nanos(stages.write),
-            syncNanos: timebase.nanos(stages.sync),
-            totalNanos: timebase.nanos(IOCycleStats.elapsed(from: startTicks, to: endTicks)))
+        let cycle = timebase.cycle(
+            startTicks: startTicks, queueWaitTicks: queueWaitTicks, convertTicks: convertTicks,
+            stages: stages, writeEndTicks: writeEndTicks, endTicks: endTicks)
         let now = timebase.nanos(endTicks)
         let report = track == .mic ? micIOStats.record(cycle, nowNanos: now) : systemIOStats.record(cycle, nowNanos: now)
         guard report else { return }
@@ -465,15 +466,17 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the writer is pinned once. Stamps the #86 liveness arrival and timeline-pads exactly like the SCK
     /// path, so the shared mic/system anchor, chunk rotation, and stereo-AAC archive behave identically.
     /// MUST be called on the capture service's audio queue (the tap's IOProc is dispatched there).
-    /// `lead` is what the tap callback measured before this call (#247); the cycle is closed here, after
-    /// the write, so the service's tap-guard pass over the samples that follows is not in its total.
-    func appendSystemSamples(_ samples: [Int16], pts: CMTime, lead: TapCycleLead) {
-        guard accepting else { return }
+    /// `lead` is what the tap callback measured before this call (#247). The cycle is NOT closed here:
+    /// the service still runs its tap-guard pass over the samples before the IOProc block returns, and
+    /// the HAL waits for that too. The caller hands the returned cycle to `endSystemCycle` as its last
+    /// act. nil = nothing was written (sealed, or no samples): no cycle to close.
+    func appendSystemSamples(_ samples: [Int16], pts: CMTime, lead: TapCycleLead) -> OpenTapCycle? {
+        guard accepting else { return nil }
         // Liveness stamp (#86): a real system buffer arrived, independent of energy. Harmless for the
         // tap (it has no in-place-restart probe), but keeps the field honest for any shared reader.
         systemBufferArrival.withLock { $0 = DispatchTime.now().uptimeNanoseconds }
         noteRealAudio(samples, track: .system)
-        guard !samples.isEmpty else { return }
+        guard !samples.isEmpty else { return nil }
 
         // Pin the writer to the canonical tap format exactly once. swapWriters re-applies systemFormatInfo
         // to each rotated writer, so chunk rotation keeps the format without re-detecting. The
@@ -511,12 +514,21 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
         notePadding(
             systemPadMonitor.record(padFrames: pad, dataFrames: Int64(samples.count), rate: rate),
             track: "system")
-        noteIOCycle(
-            track: .system, startTicks: lead.startTicks, queueWaitTicks: lead.queueWaitTicks,
-            convertTicks: lead.convertTicks,
+        return OpenTapCycle(
+            lead: lead,
             stages: IOCycleStats.writeStages(
                 padded: pad > 0, padStart: padStartTicks, padEnd: padEndTicks, writeEnd: writeEndTicks,
-                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite))
+                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite),
+            writeEndTicks: writeEndTicks)
+    }
+
+    /// Close the tap cycle `appendSystemSamples` left open (#247). The tap's sample closure calls this
+    /// as its LAST statement, after its guard pass, so the system track's total runs to the point where
+    /// the IOProc block returns to the HAL, as the mic's runs to the end of its callback. On the audio queue.
+    func endSystemCycle(_ open: OpenTapCycle) {
+        noteIOCycle(
+            track: .system, startTicks: open.lead.startTicks, queueWaitTicks: open.lead.queueWaitTicks,
+            convertTicks: open.lead.convertTicks, stages: open.stages, writeEndTicks: open.writeEndTicks)
     }
 
     // MARK: - Mic audio (normalized via AudioConverter)
@@ -717,7 +729,8 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             convertTicks: IOCycleStats.elapsed(from: micCycleStartTicks, to: convertEndTicks),
             stages: IOCycleStats.writeStages(
                 padded: pad > 0, padStart: padStartTicks, padEnd: padEndTicks, writeEnd: writeEndTicks,
-                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite))
+                syncBefore: syncBefore, syncAfterPad: syncAfterPad, syncAfterWrite: syncAfterWrite),
+            writeEndTicks: writeEndTicks)
     }
 
     /// Surface a sustained run of exact-zero mic samples (#193) — a mic that is delivering but
@@ -949,4 +962,13 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private func isFloatFormat(from buf: CMSampleBuffer) -> Bool {
         return formatInfo(from: buf)?.isFloat ?? true
     }
+}
+
+/// A tap cycle whose samples are written but which is not over (#247): what `appendSystemSamples`
+/// measured, kept until the tap's sample closure has finished its guard pass. Seven integers, by value.
+struct OpenTapCycle {
+    let lead: TapCycleLead
+    let stages: (pad: UInt64, write: UInt64, sync: UInt64)
+    /// Host-clock ticks at the end of the samples' write: where the "check" stage starts.
+    let writeEndTicks: UInt64
 }

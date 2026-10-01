@@ -76,11 +76,13 @@ import Testing
         for i in 0..<50 {
             stats.record(IOCycleStats.Cycle(
                 convertNanos: 200 * Self.us, writeNanos: 100 * Self.us,
-                syncNanos: i == 0 ? 4 * Self.ms : 0, totalNanos: 400 * Self.us), nowNanos: 0)
+                syncNanos: i == 0 ? 4 * Self.ms : 0, checkNanos: 12 * Self.us, totalNanos: 400 * Self.us), nowNanos: 0)
         }
         #expect(stats.count(.total) == 50)
         #expect(stats.count(.convert) == 50)
         #expect(stats.count(.write) == 50)
+        #expect(stats.count(.check) == 50)
+        #expect(stats.max(.check) == 12 * Self.us)
         #expect(stats.count(.sync) == 1)
         #expect(stats.max(.sync) == 4 * Self.ms)
         #expect(stats.percentile(50, .sync) == 4 * Self.ms)
@@ -106,6 +108,7 @@ import Testing
                     case .pad: c.padNanos = value
                     case .write: c.writeNanos = value
                     case .sync: c.syncNanos = value
+                    case .check: c.checkNanos = value
                     case .total: c.totalNanos = value
                     }
                     stats.record(c, nowNanos: 0)
@@ -221,7 +224,8 @@ import Testing
     @Test func resetForgetsEverythingIncludingTheRateLimit() {
         var stats = IOCycleStats()
         let busy = IOCycleStats.Cycle(queueWaitNanos: 12 * Self.ms, convertNanos: Self.ms, padNanos: Self.ms,
-                                      writeNanos: Self.ms, syncNanos: 5 * Self.ms, totalNanos: 20 * Self.ms)
+                                      writeNanos: Self.ms, syncNanos: 5 * Self.ms, checkNanos: Self.ms,
+                                      totalNanos: 21 * Self.ms)
         #expect(stats.record(busy, nowNanos: Self.second) == true)
         #expect(stats.record(busy, nowNanos: 2 * Self.second) == false)
         stats.reset()
@@ -262,6 +266,45 @@ import Testing
         #expect(IOCycleStats.elapsed(from: 10, to: 10) == 0)
         #expect(IOCycleStats.elapsed(from: 10, to: 4) == 0)
         #expect(IOCycleStats.elapsed(from: UInt64.max, to: 0) == 0)
+    }
+
+    /// The cycle is closed by ONE clock reading, taken as the callback's last act. The total runs from
+    /// the cycle's start to that reading, and "check" is what lies between the end of the samples'
+    /// write and it: the per-buffer monitors and exact-zero scans (for the tap, `TapPermissionGuard`'s
+    /// pass, which runs in the service after the handler has written). Review of #259: the tap's cycle
+    /// was closed before that pass, so its total stopped short of what the HAL waits for.
+    @Test func theCycleRunsToItsLastClockReadingAndCheckIsWhatFollowsTheWrite() {
+        let timebase = IOCycleStats.Timebase(numer: 125, denom: 3)   // 24 ticks = 1 µs
+        let cycle = timebase.cycle(
+            startTicks: 2_400, queueWaitTicks: 240, convertTicks: 480,
+            stages: (pad: 0, write: 240, sync: 720), writeEndTicks: 4_800, endTicks: 7_200)
+        #expect(cycle == IOCycleStats.Cycle(
+            queueWaitNanos: 10 * Self.us, convertNanos: 20 * Self.us, padNanos: 0, writeNanos: 10 * Self.us,
+            syncNanos: 30 * Self.us, checkNanos: 100 * Self.us, totalNanos: 200 * Self.us))
+        // Readings that go backwards never trap, and never invent time.
+        let hostile = timebase.cycle(startTicks: 9_000, queueWaitTicks: 0, convertTicks: 0,
+                                     stages: (pad: 0, write: 0, sync: 0), writeEndTicks: 8_000, endTicks: 7_000)
+        #expect(hostile.checkNanos == 0 && hostile.totalNanos == 0)
+    }
+
+    /// The false reading the device test must not produce: every stage up to the write is fast, the
+    /// pass after it is slow. The cycle is an overrun, and the slow part has a name.
+    @Test func aSlowPassAfterTheWriteIsAnOverrunAndIsNamed() {
+        let timebase = IOCycleStats.Timebase(numer: 1, denom: 1)
+        var stats = IOCycleStats()
+        // 0.4 ms up to the end of the write, then 9 ms before the callback returns.
+        let cycle = timebase.cycle(
+            startTicks: 1_000_000, queueWaitTicks: 20_000, convertTicks: 200_000,
+            stages: (pad: 0, write: 100_000, sync: 0), writeEndTicks: 1_400_000, endTicks: 10_400_000)
+        #expect(cycle.totalNanos == 9_400 * Self.us)
+        #expect(cycle.checkNanos == 9 * Self.ms)
+        #expect(stats.record(cycle, nowNanos: 0) == true, "over 8 ms: an overrun, reported")
+        #expect(stats.overrunCount == 1)
+        #expect(stats.max(.check) == 9 * Self.ms)
+        let detail = cycle.overrunEvent(track: .system, overruns: 1, at: Date()).detail
+        #expect(detail["check_ms"] == "9.000")
+        #expect(detail["total_ms"] == "9.400")
+        #expect(stats.summary().asDetail(prefix: "remote_io")["remote_io_check_max_ms"] == "9.000")
     }
 
     /// The writer counts the ticks it spends in `fsync`; the callback reads that counter around the
@@ -314,11 +357,10 @@ import Testing
                 let stages = IOCycleStats.writeStages(
                     padded: i % 97 == 0, padStart: 1_000, padEnd: 1_000 &+ ticks / 5, writeEnd: 1_000 &+ ticks / 3,
                     syncBefore: 0, syncAfterPad: 0, syncAfterWrite: i % 50 == 0 ? ticks / 9 : 0)
-                let cycle = IOCycleStats.Cycle(
-                    queueWaitNanos: timebase.nanos(ticks), convertNanos: timebase.nanos(ticks / 3),
-                    padNanos: timebase.nanos(stages.pad), writeNanos: timebase.nanos(stages.write),
-                    syncNanos: timebase.nanos(stages.sync),
-                    totalNanos: timebase.nanos(IOCycleStats.elapsed(from: 1_000, to: 1_000 &+ ticks &+ ticks / 2)))
+                // The call that closes a cycle in the helper (`AudioOutputHandler.noteIOCycle`).
+                let cycle = timebase.cycle(
+                    startTicks: 1_000, queueWaitTicks: ticks, convertTicks: ticks / 3, stages: stages,
+                    writeEndTicks: 1_000 &+ ticks, endTicks: 1_000 &+ ticks &+ ticks / 2)
                 let now = UInt64(i) &* 10_000_000
                 let report = i % 2 == 0 ? holder.system.record(cycle, nowNanos: now) : holder.mic.record(cycle, nowNanos: now)
                 if report { reports += 1 }
@@ -335,6 +377,7 @@ import Testing
         #expect(seen == 0, "\(seen) malloc-family calls while recording 400000 cycles")
         #expect(holder.system.cycleCount + holder.mic.cycleCount > 150_000, "the loop really recorded")
         #expect(local.overrunCount > 0 && reports > 0, "and it took the overrun path")
+        #expect(local.count(.check) > 150_000, "with the check stage in it")
         _ = sink
 
         // The counter is not blind: one array is seen.
@@ -356,7 +399,7 @@ import Testing
 
     @Test func theOverrunEventCarriesTheStageBreakdown() {
         let waited = IOCycleStats.Cycle(queueWaitNanos: 55_870_000, convertNanos: 210_000, writeNanos: 130_000,
-                                        totalNanos: 56_512_000)
+                                        checkNanos: 41_000, totalNanos: 56_512_000)
         let at = Date(timeIntervalSince1970: 1_800_000_000)
         let event = waited.overrunEvent(track: .system, overruns: 13, at: at)
         #expect(event.kind == .ioOverrun)
@@ -364,7 +407,7 @@ import Testing
         #expect(event.timestamp == at)
         #expect(event.detail == [
             "track": "system", "total_ms": "56.512", "queue_wait_ms": "55.870", "convert_ms": "0.210",
-            "write_ms": "0.130", "threshold_ms": "8.000", "overruns": "13",
+            "write_ms": "0.130", "check_ms": "0.041", "threshold_ms": "8.000", "overruns": "13",
         ])
     }
 
@@ -401,7 +444,7 @@ import Testing
         for i in 1...100 {
             stats.record(IOCycleStats.Cycle(
                 queueWaitNanos: 20 * Self.us, convertNanos: 200 * Self.us, writeNanos: 100 * Self.us,
-                syncNanos: i % 50 == 0 ? 12 * Self.ms : 0,
+                syncNanos: i % 50 == 0 ? 12 * Self.ms : 0, checkNanos: 30 * Self.us,
                 totalNanos: i % 50 == 0 ? 12 * Self.ms + 400 * Self.us : 400 * Self.us), nowNanos: 0)
         }
         let summary = stats.summary()
@@ -419,6 +462,8 @@ import Testing
         #expect(detail["remote_io_sync_max_ms"] == "12.000")
         #expect(detail["remote_io_queue_wait_n"] == "100")
         #expect(detail["remote_io_queue_wait_max_ms"] == "0.020")
+        #expect(detail["remote_io_check_n"] == "100")
+        #expect(detail["remote_io_check_max_ms"] == "0.030")
         #expect(detail["remote_io_total_n"] == "100")
         #expect(detail["remote_io_total_max_ms"] == "12.400")
         // 400 µs is in [393.216, 458.752) µs.
@@ -426,8 +471,8 @@ import Testing
         #expect(detail["remote_io_total_p99_ms"] == "12.400")
         // The pad never ran: left out, never a claimed 0.
         #expect(detail.keys.contains { $0.hasPrefix("remote_io_pad") } == false)
-        // cycles + overruns + 4 keys for each of the 5 stages that ran.
-        #expect(detail.count == 2 + 4 * 5)
+        // cycles + overruns + 4 keys for each of the 6 stages that ran.
+        #expect(detail.count == 2 + 4 * 6)
     }
 
     @Test func aTrackWithNoCyclesAddsNothingToTheStopSummary() {
@@ -438,9 +483,10 @@ import Testing
     @Test func theLogLineNamesEveryMeasuredStageInMilliseconds() throws {
         var stats = IOCycleStats()
         stats.record(IOCycleStats.Cycle(convertNanos: 300 * Self.us, writeNanos: 90 * Self.us,
-                                        syncNanos: 31_400 * Self.us, totalNanos: 31_900 * Self.us), nowNanos: 0)
+                                        syncNanos: 31_400 * Self.us, checkNanos: 25 * Self.us,
+                                        totalNanos: 31_900 * Self.us), nowNanos: 0)
         let line = try #require(stats.summary().logLine)
-        #expect(line == "cycles=1 overruns=1 (over 8.000 ms) | convert n=1 p50=0.300 p99=0.300 max=0.300 | write n=1 p50=0.090 p99=0.090 max=0.090 | sync n=1 p50=31.400 p99=31.400 max=31.400 | total n=1 p50=31.900 p99=31.900 max=31.900 (ms)")
+        #expect(line == "cycles=1 overruns=1 (over 8.000 ms) | convert n=1 p50=0.300 p99=0.300 max=0.300 | write n=1 p50=0.090 p99=0.090 max=0.090 | sync n=1 p50=31.400 p99=31.400 max=31.400 | check n=1 p50=0.025 p99=0.025 max=0.025 | total n=1 p50=31.900 p99=31.900 max=31.900 (ms)")
     }
 
     /// The summary rides in `captureStop` next to the coverage keys, which the app parses by prefix:

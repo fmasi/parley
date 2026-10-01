@@ -1505,10 +1505,16 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             deliveryQueue: audioQueue, tapAutoStart: options.tapAutoStart,
             dropFramesForDiagnostics: options.debugDropTapFrames
         ) { [weak self, weak handler] samples, pts, lead in
-            handler?.appendSystemSamples(samples, pts: pts, lead: lead)
+            let handler = handler   // one strong reference for the whole callback
+            let openCycle = handler?.appendSystemSamples(samples, pts: pts, lead: lead)
             // Already on audioQueue.
-            guard let self else { return }
-            self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
+            if let self {
+                self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
+            }
+            // #247: LAST statement. The HAL waits for this block, guard pass included, so the cycle's
+            // total and its "check" stage end here and not when the handler had written. Anything added
+            // to this closure goes above this line.
+            if let openCycle { handler?.endSystemCycle(openCycle) }
         }
         tap.onBuilt = { [weak self] in self?.tapDidBuild(epoch: epoch) }
         tap.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }

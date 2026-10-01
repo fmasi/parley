@@ -122,7 +122,7 @@ The capture-reliability constants below are hardcoded (in `TranscriberCore` unle
 
 ### Callback timing (#247)
 
-A measurement, not a detector: it changes nothing about the recording. Each tap and mic callback is timed per stage (`IOCycleStats`: queue wait, convert, pad, write, sync, total).
+A measurement, not a detector: it changes nothing about the recording. Each tap and mic callback is timed per stage (`IOCycleStats`: queue wait, convert, pad, write, sync, check, total), from its start to the last clock reading before it returns.
 
 | Parameter | Location | Value | Description |
 |-----------|----------|-------|-------------|

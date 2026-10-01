@@ -9,7 +9,7 @@ import Foundation
 /// writes and a periodic `fsync`. This type makes that measurable. It changes nothing.
 ///
 /// It is fed from the audio queue, once per callback, so it is built for that path:
-/// - a value type whose storage is inline and fixed-size (2120 bytes). `record` allocates nothing,
+/// - a value type whose storage is inline and fixed-size (2128 bytes). `record` allocates nothing,
 ///   and a copy is a `memcpy`: there is no reference to share, so no copy-on-write on the next
 ///   `record` (`IOCycleStatsTests.recordingACycleAllocatesNothing` holds it to that);
 /// - no lock, no log, no clock. Durations come in as plain integers (nanoseconds); the caller reads
@@ -41,8 +41,14 @@ public struct IOCycleStats: Sendable {
         case write
         /// The periodic `fsync`, wherever in the cycle it ran.
         case sync
-        /// The whole cycle. For the tap it starts at the HAL's cycle start, so it includes the
-        /// queue wait; for the mic it starts at the callback's first line.
+        /// From the end of the samples' write to the callback's last clock reading: the frame
+        /// counters, the pad-ratio monitor and the exact-zero scan over the buffer (mic:
+        /// `ExactZeroRunMonitor`; tap: `TapPermissionGuard`'s pass and whatever its verdict starts).
+        /// The same span on both tracks.
+        case check
+        /// The whole cycle, to the callback's last clock reading. For the tap it starts at the
+        /// HAL's cycle start, so it includes the queue wait; for the mic it starts at the
+        /// callback's first line.
         case total
 
         /// The stage's name in diagnostic keys.
@@ -53,6 +59,7 @@ public struct IOCycleStats: Sendable {
             case .pad: return "pad"
             case .write: return "write"
             case .sync: return "sync"
+            case .check: return "check"
             case .total: return "total"
             }
         }
@@ -65,15 +72,17 @@ public struct IOCycleStats: Sendable {
         public var padNanos: UInt64
         public var writeNanos: UInt64
         public var syncNanos: UInt64
+        public var checkNanos: UInt64
         public var totalNanos: UInt64
 
         public init(queueWaitNanos: UInt64 = 0, convertNanos: UInt64 = 0, padNanos: UInt64 = 0,
-                    writeNanos: UInt64 = 0, syncNanos: UInt64 = 0, totalNanos: UInt64) {
+                    writeNanos: UInt64 = 0, syncNanos: UInt64 = 0, checkNanos: UInt64 = 0, totalNanos: UInt64) {
             self.queueWaitNanos = queueWaitNanos
             self.convertNanos = convertNanos
             self.padNanos = padNanos
             self.writeNanos = writeNanos
             self.syncNanos = syncNanos
+            self.checkNanos = checkNanos
             self.totalNanos = totalNanos
         }
 
@@ -84,6 +93,7 @@ public struct IOCycleStats: Sendable {
             case .pad: return padNanos
             case .write: return writeNanos
             case .sync: return syncNanos
+            case .check: return checkNanos
             case .total: return totalNanos
             }
         }
@@ -133,7 +143,8 @@ public struct IOCycleStats: Sendable {
     // MARK: - Storage (inline, fixed-size)
 
     // A homogeneous tuple is laid out as a contiguous C array, so 512 `UInt32` are one 2048-byte
-    // block inside the struct. `Stage.allCases.count * bucketCount` (420) slots are used.
+    // block inside the struct. `Stage.allCases.count * bucketCount` (7 x 70 = 490) slots are used:
+    // an eighth stage would not fit, and `slot` then refuses it rather than write past the block.
     private typealias Slots8 = (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32)
     private typealias Slots64 = (Slots8, Slots8, Slots8, Slots8, Slots8, Slots8, Slots8, Slots8)
     private typealias Slots512 = (Slots64, Slots64, Slots64, Slots64, Slots64, Slots64, Slots64, Slots64)
@@ -147,7 +158,7 @@ public struct IOCycleStats: Sendable {
 
     private var slots: Slots512 = IOCycleStats.zeroSlots()
     /// The exact maximum of each stage, by `Stage.rawValue`.
-    private var maxima: (UInt64, UInt64, UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0, 0, 0)
+    private var maxima: (UInt64, UInt64, UInt64, UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0, 0, 0, 0)
     /// Cycles whose total was over the threshold. Exact.
     public private(set) var overrunCount: UInt64 = 0
     private var hasReported = false
@@ -180,6 +191,7 @@ public struct IOCycleStats: Sendable {
         note(.pad, cycle.padNanos)
         note(.write, cycle.writeNanos)
         note(.sync, cycle.syncNanos)
+        note(.check, cycle.checkNanos)
         note(.total, cycle.totalNanos)
 
         guard cycle.totalNanos > Self.overrunThresholdNanos else { return false }
@@ -393,6 +405,21 @@ public struct IOCycleStats: Sendable {
             if numer == denom { return ticks }
             let (product, overflow) = ticks.multipliedReportingOverflow(by: numer)
             return overflow ? .max : product / denom
+        }
+
+        /// One callback's clock readings (host ticks) as a `Cycle` (nanoseconds). `endTicks` is the
+        /// reading that closes the cycle: the caller takes it as its LAST act before the callback
+        /// returns, so the total (from `startTicks`) covers everything the callback did, and
+        /// "check" (from `writeEndTicks`, the end of the samples' write) covers everything after
+        /// the write. A cycle closed any earlier under-reports the time the HAL waited (#259 review).
+        public func cycle(
+            startTicks: UInt64, queueWaitTicks: UInt64, convertTicks: UInt64,
+            stages: (pad: UInt64, write: UInt64, sync: UInt64), writeEndTicks: UInt64, endTicks: UInt64
+        ) -> Cycle {
+            Cycle(queueWaitNanos: nanos(queueWaitTicks), convertNanos: nanos(convertTicks),
+                  padNanos: nanos(stages.pad), writeNanos: nanos(stages.write), syncNanos: nanos(stages.sync),
+                  checkNanos: nanos(IOCycleStats.elapsed(from: writeEndTicks, to: endTicks)),
+                  totalNanos: nanos(IOCycleStats.elapsed(from: startTicks, to: endTicks)))
         }
     }
 }
