@@ -527,18 +527,26 @@ import Testing
             p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
         }
         LiveDiagnosticsLog.flushAll()
-        let known = HungRead("evidence: known helpers"), build = Harness.Box(false)
+        let known = HungRead("evidence: known helpers")
         defer { known.release() }
-        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-hung-\(UUID().uuidString)", beforeEachRead: { name in
-            if name == "evidence: build" { build.value = true }
-            known.hangIfNamed(name)
-        }))
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-hung-\(UUID().uuidString)",
+                                                                beforeEachRead: { known.hangIfNamed($0) }))
         var helperRing = CaptureDiagnostics()
         helperRing.record(captureStop(remote: 30, local: 30, helper: "1000-0", at: 50))
         let attributing = Task { await evidence.attributeHelperDrain(helperRing.snapshotData(), toOneOf: [("p", d)]) }
         await Harness.until { known.reached }   // L review 205: awaited, never a fixed sleep
-        let building = Task { await evidence.finalize(sessionId: "p", directory: d) }   // the owner's salvage went ahead
-        await Harness.until { build.value }
+        // The owner's salvage went ahead: its build BEGINS while the attribution's read is still out. Waited for by what
+        // the build does first — `began` is set and `finalize` entered in one main-actor turn, and `finalize` marks the
+        // record as being made before its first await: once this test sees `began`, the mark is made. The build's own read
+        // cannot be waited for here: it is queued behind the hung one, on the folder's queue, and runs once that is let go —
+        // waiting for it only ran the wait out, past the build's bound on a slow machine.
+        let began = Harness.Box(false)
+        let building = Task {
+            began.value = true
+            return await evidence.finalize(sessionId: "p", directory: d)
+        }
+        await Harness.until { began.value }
+        try #require(began.value, "the owner's build began before the attribution's read answered")
         known.release()
         await attributing.value
         let record = await building.value

@@ -527,7 +527,7 @@ Parley transcribe -i <path> [-i <path>...] [options]
 
 Options:
   -i, --input <path>        Input audio file (repeat for multiple files)
-  --output-dir <path>       Output directory (default: same as input)
+  --output-dir <path>       Output directory, created if missing (default: same as input)
   -f, --format <fmt>        Output format: json (default), txt, srt
   --no-diarize              Skip speaker diarization
   --engine <id>             Engine override: fluidAudio, speechAnalyzer

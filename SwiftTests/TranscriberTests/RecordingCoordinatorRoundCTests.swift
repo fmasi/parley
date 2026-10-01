@@ -505,7 +505,10 @@ final class HungRead: @unchecked Sendable {
         s.lastAliveAt = Date().addingTimeInterval(-3600); s.bootSessionUUID = BootSession.currentUUID()
         try RecordingSentinel.write(s, directory: h.tmp)
         try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
-        h.coordinator.folderProbe = .init(exists: { _ in false }, isWritable: { _ in false }, isVolumeRoot: { _ in false })   // the drive is away
+        // The drive is away: nothing of the folder is there — but `/` is, as on every Mac. With NOTHING there, the walk up to
+        // the nearest existing folder ends only where the root's parent is the root again; a Foundation that answers `/..`
+        // for it (the NSURL-backed URL) walks on for ever, and this test's folder reads then never answer (CI, macOS 15).
+        h.coordinator.folderProbe = .init(exists: { $0.path == "/" }, isWritable: { _ in false }, isVolumeRoot: { _ in false })
         await h.coordinator.recoverAtLaunch()
         var kept = try #require(pending(h).first)
         #expect(kept.stopCause == .appCrash, "stamped with what this launch saw")
