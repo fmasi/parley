@@ -165,6 +165,7 @@ public final class ChunkRotator {
     /// rotates the live chunk when IT is due, at once when that has passed (L review 77).
     public func start(firstRotationAt: Date? = nil) {
         stopped = false
+        timer?.invalidate()   // a second start with no stop between replaces the timer, never adds one beside it
         Logger.audio.info("ChunkRotator started — interval: \(self.chunkDuration, privacy: .public)s, base: \(self.sessionBaseName, privacy: .sensitive)")
         let firstFire = firstRotationAt ?? Date().addingTimeInterval(chunkDuration)
         let newTimer = Timer(fire: firstFire, interval: chunkDuration, repeats: true) { [weak self] timer in
