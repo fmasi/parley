@@ -55,3 +55,71 @@ import Testing
         #expect(Set(mapping.values).count == 1)
     }
 }
+
+/// #246: the non-split CLI path (`Parley transcribe -i a.wav --output-dir ./out`) had the same gap
+/// as the split path — nothing created `./out` — but found out only AFTER the whole transcription
+/// had run, when the transcript write failed. `run()` now ensures its output directory up front.
+///
+/// The input is a header-only WAV (a recording with no audio), which `run()` skips without ever
+/// calling the engine — so these tests need no model and no media daemon.
+@Suite struct TranscriptionRunnerOutputDirectoryTests {
+
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runner-outdir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func makeHeaderOnlyWav(in dir: URL) throws -> URL {
+        let wav = dir.appendingPathComponent("empty.wav")
+        try WavFileWriter(path: wav.path).finalize()
+        return wav
+    }
+
+    /// FluidAudio is pinned so the test does not depend on which engine this macOS defaults to.
+    private var config: Config {
+        var config = Config.default
+        config.engine = .fluidAudio
+        return config
+    }
+
+    @MainActor
+    @Test func runCreatesAMissingOutputDirectory() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let wav = try makeHeaderOnlyWav(in: dir)
+
+        let outputDir = dir.appendingPathComponent("out/nested", isDirectory: true)
+        #expect(!FileManager.default.fileExists(atPath: outputDir.path))
+
+        let result = try await TranscriptionRunner().run(
+            systemAudio: wav, micAudio: nil, outputDirectory: outputDir, config: config)
+
+        #expect(result.jsonPath.deletingLastPathComponent().path == outputDir.path)
+        let data = try Data(contentsOf: result.jsonPath)
+        #expect(try JSONSerialization.jsonObject(with: data) is [String: Any])
+    }
+
+    /// Fails before any transcription work, naming the directory rather than the transcript file.
+    @MainActor
+    @Test func runFailsNamingAnUncreatableOutputDirectory() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let wav = try makeHeaderOnlyWav(in: dir)
+
+        let blocker = dir.appendingPathComponent("not-a-directory")
+        try Data("occupied".utf8).write(to: blocker)
+
+        do {
+            _ = try await TranscriptionRunner().run(
+                systemAudio: wav, micAudio: nil, outputDirectory: blocker, config: config)
+            Issue.record("writing a transcript into a path occupied by a regular file must throw")
+        } catch {
+            let message = error.localizedDescription
+            #expect(message.contains(blocker.path), "error must name the output directory: \(message)")
+            #expect(!message.contains("empty.json"), "error must not name a downstream file: \(message)")
+        }
+        #expect(try Data(contentsOf: blocker) == Data("occupied".utf8))
+    }
+}
