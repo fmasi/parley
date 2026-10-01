@@ -3141,11 +3141,14 @@ final class HungStep: @unchecked Sendable {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderProbe = .init(exists: { _ in Thread.sleep(forTimeInterval: 1); return true },
+        // The share HANGS until released: the read's own bound alone can end the wait — and did, if the start is refused
+        // with the read still hung (by order, never a stopwatch: the 100 ms may fire as late as a loaded machine makes it).
+        let share = HungStep()
+        defer { share.release() }
+        h.coordinator.folderProbe = .init(exists: { _ in share.hang(); return true },
                                           isWritable: { _ in true }, isVolumeRoot: { _ in false })
-        let began = ContinuousClock.now
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(share.isHanging, "refused at the read's own bound: the folder had still not answered")
         #expect(h.client.startCalls.isEmpty && !h.coordinator.isStartInFlight)
         let body = try #require(h.notified.value.last?.body)
         #expect(h.notified.value.last?.title == "Recording not started")
@@ -3262,12 +3265,13 @@ final class HungStep: @unchecked Sendable {
         #expect(onMain.value == false)
 
         h.coordinator.rotationDiskReadDeadline = .milliseconds(100)
-        h.diskReadHook.value = { Thread.sleep(forTimeInterval: 1) }
+        let volume = HungStep()   // the read hangs until released: only its bound ends the check
+        defer { volume.release() }
+        h.diskReadHook.value = { volume.hang() }
         h.freeBytes.value = 1_000   // it WOULD be low — but the read does not answer in time
-        let began = ContinuousClock.now
         await h.runner.chunkRotator?.rotateForTesting()
         await h.coordinator.awaitRotationDiskCheckForTesting()
-        #expect(ContinuousClock.now - began < .milliseconds(600), "bounded at 100 ms, never the 1 s read")
+        #expect(volume.isHanging, "the check ended at its bound: the read had still not answered")
         #expect(h.appState.activeAlarms[.diskLow] == nil, "skipped for this rotation")
         #expect(h.appState.isRecording)
     }
@@ -3448,11 +3452,11 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(200)
         h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
-        let stalled = Harness.Box(true)
-        h.client.onStartAsync = { if stalled.value { try? await Task.sleep(for: .seconds(2)) } }
-        let began = ContinuousClock.now
+        let stalled = Harness.Box(true), helper = HungStep()   // the helper's start hangs until released
+        defer { helper.release() }
+        h.client.onStartAsync = { if stalled.value { await helper.hangAwaited() } }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
-        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s (L9 review 50)")
+        #expect(helper.isHanging, "ended by the deadline, never by the helper: its start was still unanswered (L9 review 50)")
         #expect(!h.coordinator.isStartInFlight, "cleared on the timeout path")
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.last?.title == "Recording Failed")
@@ -3471,10 +3475,11 @@ final class HungStep: @unchecked Sendable {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.coordinator.startDeadline = .milliseconds(150)
-        h.coordinator.preflight = { _ in Thread.sleep(forTimeInterval: 0.6); return (false, false) }
-        let began = ContinuousClock.now
+        let lookup = HungStep()   // the lookup hangs until released
+        defer { lookup.release() }
+        h.coordinator.preflight = { _ in lookup.hang(); return (false, false) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(ContinuousClock.now - began < .milliseconds(450), "bounded by the 150 ms deadline, never the 600 ms lookup")
+        #expect(lookup.isHanging, "ended by the deadline, never by the lookup: it had still not answered")
         #expect(!h.coordinator.isStartInFlight && h.appState.isIdle)
         #expect(h.client.startCalls.isEmpty && h.client.stopCalls == 0, "the helper was never involved")
         #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
@@ -3488,15 +3493,17 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.stopDeadline = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         h.client.stopResult = AudioPaths(systemAudio: URL(fileURLWithPath: "/nonexistent/a.wav"), micAudio: URL(fileURLWithPath: "/nonexistent/a_mic.wav"))
-        let began = ContinuousClock.now
         await h.coordinator.stopRecording()
-        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s")
+        #expect(helper.isHanging, "ended by the deadline, never by the helper: its stop was still unanswered")
         #expect(h.appState.isIdle, "never left on Finishing…")
         let critical = try #require(h.criticals.value.first)
-        // The title follows what the salvage wrote (L6); the body says why the stop failed.
-        #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
+        // The title follows what the salvage wrote (L6); the body says why the stop failed — and which bound ran out: the
+        // 200 ms one (said as 1 s, the least it says), never the default 25 s.
+        #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within 1 s)"), "\(critical.body)")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.everyRecordedEvent.contains { $0.kind == .xpcTimeout })
     }
 
