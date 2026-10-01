@@ -1,0 +1,21 @@
+name: Claude review
+# The ONE Claude review per PR, plus the merge gate (CHEATSHEET R1). Identical in every repo.
+# - `review / claude-review` runs when the PR is marked ready, or when the `ready-for-review` label is
+#   added. Re-review: remove and re-add that label. NOT a required check.
+# - `review / review-gate` runs on every non-draft PR event and passes only while the PR has
+#   `claude-reviewed` and not `claude-blocked`. REQUIRED by the repo's ruleset (R12, protect.sh).
+# No paths / paths-ignore here, ever: the gate is required, and a filtered-out PR would never get it.
+# Permissions EXACTLY as below. `actions: write` is required: the gate re-runs stale review-gate jobs on the
+# PR's current head (the Claude job narrows it to read). With `actions: read` the called workflow fails at startup.
+# Paths the review should ignore go in .github/claude-review-prompt.md instead.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+jobs:
+  review:
+    uses: fmasi/.github/.github/workflows/claude-review.yml@main
+    permissions: { contents: read, pull-requests: write, issues: write, id-token: write, actions: write }
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    # optional inputs:
+    # with: { prompt-file: .github/claude-review-prompt.md, timeout-minutes: 20, claude-args: "" }

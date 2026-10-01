@@ -1,0 +1,17 @@
+# Git hooks for the local-first CI flow. Activate once per clone: `lefthook install`.
+# Block style only: `{staged_files}` inside a `{ ... }` flow mapping is invalid YAML.
+pre-commit:
+  parallel: true
+  commands:
+    secrets:
+      run: gitleaks git --staged --redact --no-banner
+    shell:
+      glob: "*.sh"
+      run: shellcheck {staged_files}
+    workflows:
+      glob: ".github/workflows/*.yml"
+      run: actionlint {staged_files}
+pre-push:
+  commands:
+    ci:
+      run: just ci   # the full serial suite (~10 min); never skipped with --no-verify (AGENTS.md)
