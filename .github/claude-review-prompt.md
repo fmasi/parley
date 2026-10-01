@@ -21,7 +21,7 @@ Report only material problems: no praise, no summary of what the code does, no s
 
 1. **The capture path and silent audio loss.** `SystemTapSession`, `MicCaptureSession`,
    `AudioOutputHandler`, `AudioCaptureService`, `WavFileWriter`, `AudioConverter`, `ChunkRotator`,
-   and the detectors (`LivenessGapDetector`, `ExactZeroRunMonitor`, `FrameCountPlausibility`,
+   and the detectors (`TrackLivenessMonitor`, `ExactZeroRunMonitor`, `FrameCountPlausibility`,
    rate drift, padding caps). Ask of every change: can audio now stop, turn to zeros, be padded
    over, be dropped or shift in time *without* an anomaly the user sees? Flag a detector that can
    fire once and go quiet, a restart or rebuild that reports success while nothing flows, a
@@ -59,7 +59,7 @@ Report only material problems: no praise, no summary of what the code does, no s
    it (the `red-first` check enforces this). The test target links only `TranscriberCore` and
    `VerifyEdSignatureCore`, so decision logic added to `AudioCaptureHelper/` or `TranscriberApp/`
    is untested by construction: ask for it in Core behind a seam (as `RecordingCoordinator` and
-   `LivenessGapDetector` were). Flag a `RED-FIRST-EXEMPT:` marker whose reason isn't a
+   `TrackLivenessMonitor` were). Flag a `RED-FIRST-EXEMPT:` marker whose reason isn't a
    characterization test or the documented diarization-fixture gap, a test that can skip silently,
    and assertions that cannot fail. A change to capture or audio needs a device measurement in the
    PR description (docs/development-process.md §4); say so when it is missing.

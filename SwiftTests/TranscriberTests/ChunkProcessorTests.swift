@@ -11,6 +11,21 @@ struct ThrowingEngine: TranscriptionEngine {
     func prepare() async throws {}
 }
 
+/// An engine that hears no words: a track with audio and no speech (a muted mic, a listen-only call).
+struct NoWordsEngine: TranscriptionEngine {
+    let name = "NoWords"
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] { [] }
+    func isReady() -> Bool { true }
+    func prepare() async throws {}
+}
+
+/// A diarizer that throws — as FluidAudio's offline diarizer does on audio it finds no speech in (`noSpeechDetected`).
+struct ThrowingDiarizer: DiarizationProvider {
+    struct NoSpeech: Error {}
+    func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { throw NoSpeech() }
+    func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { throw NoSpeech() }
+}
+
 /// Drives the real (now-Core) `ChunkProcessor` with the shared `FakeEngine`/`FakeDiarizer` from
 /// `ChunkedSessionRecoveryTests`, replacing the old hand-copied characterization suite that never
 /// touched the actual class.
@@ -86,10 +101,10 @@ struct ChunkProcessorTests {
         #expect(state.chunks.map(\.index) == [0, 1])
     }
 
-    private func makeProcessor(dir: URL, engine: any TranscriptionEngine) -> ChunkProcessor {
+    private func makeProcessor(dir: URL, engine: any TranscriptionEngine, diarizer: any DiarizationProvider = FakeDiarizer()) -> ChunkProcessor {
         ChunkProcessor(config: .default, outputDirectory: dir,
             sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluidAudio", chunkDurationMinutes: 10, chunks: []),
-            transcriber: engine, diarizer: FakeDiarizer())
+            transcriber: engine, diarizer: diarizer)
     }
     private func chunk0(in dir: URL) -> ChunkRotator.FinalizedChunk {
         ChunkRotator.FinalizedChunk(index: 0, systemPath: dir.appendingPathComponent("meeting-0.wav").path,
@@ -120,6 +135,35 @@ struct ChunkProcessorTests {
         let chunk = try #require(await processor.getSessionState().chunks.first)
         let issue = try #require(chunk.issues.first { $0.code == .streamEmpty })
         #expect(issue.track == "remote" && issue.affectsContent == false)
+    }
+
+    /// Pre-PR review: a track with audio and no words has nothing to label, so it is not diarized. Diarizing it threw (no
+    /// speech), and that was filed as a diarization failure — every listen-only call said its chunks had processing
+    /// problems, and its transcript was stamped `diarization: false`.
+    @Test func aStreamWithNoWordsIsNotADiarizationFailure() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = makeProcessor(dir: dir, engine: NoWordsEngine(), diarizer: ThrowingDiarizer())
+        await processor.processLastChunk(chunk0(in: dir))
+        let state = await processor.getSessionState()
+        let chunk = try #require(state.chunks.first)
+        #expect(!chunk.issues.contains { $0.code == .diarizationFailed })
+        #expect(!chunk.issues.contains { $0.affectsContent }, "nothing for the completion notice to call a problem")
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
+        let metadata = try #require(json?["metadata"] as? [String: Any])
+        #expect(metadata["diarization"] as? Bool == true)
+    }
+
+    /// ...while a diarizer that throws on a stream that DOES have words is still a failure, and still recorded.
+    @Test func aDiarizerThrowOnAStreamWithWordsIsStillRecorded() async throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0.wav"), seconds: 1)
+        let processor = makeProcessor(dir: dir, engine: FakeEngine(), diarizer: ThrowingDiarizer())
+        await processor.processLastChunk(chunk0(in: dir))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        #expect(chunk.issues.contains(ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)))
+        #expect(chunk.segments.map(\.speaker) == [SpeakerAssignment.unknownSpeaker], "never a made-up Speaker 1")
     }
 
     /// L6/L7 (scan B P3.2): the orphan re-ingested by the crash path and the same index arriving again

@@ -535,7 +535,12 @@ struct SettingsView: View {
         }
         // §11.2: the chosen engine is preflighted (one synthetic second transcribed) before the
         // config is committed, so a broken engine never gets saved silently — Save stays disabled
-        // (isPreflighting) until this resolves.
+        // (isPreflighting) until this resolves. A model that is not downloaded yet has nothing to
+        // preflight: the settings are committed, and commitSave() starts the download.
+        guard EnginePreflight.saveStep(for: config.engine, modelCached: FluidAudioEngine.isModelCached()) == .preflightThenCommit else {
+            commitSave(apiKeyToPersist: apiKeyToPersist)
+            return
+        }
         isPreflighting = true
         Task {
             do {

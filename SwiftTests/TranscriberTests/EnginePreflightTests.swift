@@ -33,4 +33,23 @@ private struct PreflightThrowingEngine: TranscriptionEngine {
         #expect(file.processingFormat.sampleRate == 16_000 && file.processingFormat.channelCount == 1)
         #expect(file.length == 16_000)
     }
+
+    // MARK: - What a Settings Save does about the engine (pre-PR review)
+
+    /// A model that is not downloaded is not a broken engine. The preflight could only throw `modelNotDownloaded`, and Save
+    /// answered "Not saved" — so the download Save is there to start never started, and FluidAudio could not be chosen.
+    @Test func aSaveWithItsModelNotDownloadedCommitsSoTheDownloadStarts() {
+        #expect(EnginePreflight.saveStep(for: .fluidAudio, modelCached: false) == .commitThenDownload)
+    }
+
+    @Test func aSaveWithItsModelDownloadedIsPreflighted() {
+        #expect(EnginePreflight.saveStep(for: .fluidAudio, modelCached: true) == .preflightThenCommit)
+    }
+
+    /// Apple Speech has no model of Parley's to wait for: it is preflighted whatever the cache says, and refused while it
+    /// cannot transcribe (#223).
+    @Test func anEngineWithNoDownloadIsAlwaysPreflighted() {
+        #expect(EnginePreflight.saveStep(for: .speechAnalyzer, modelCached: false) == .preflightThenCommit)
+        #expect(EnginePreflight.saveStep(for: .speechAnalyzer, modelCached: true) == .preflightThenCommit)
+    }
 }
