@@ -279,18 +279,15 @@ public enum EchoDeduplicator {
         var flaggedCount = 0
         var clusters: [ClusterVerdict] = []
         for (label, indices) in clusterIndices.sorted(by: { $0.key < $1.key }) {
-            var seconds = 0.0, matchedSeconds = 0.0, words = 0, matchedWords = 0
-            var remote: [String: Double] = [:]
-            for i in indices {
-                let duration = Self.duration(of: segments[i]), count = wordCount(segments[i].text)
-                seconds += duration
-                words += count
-                guard let overlaps = matches[i] else { continue }
-                matchedSeconds += duration
-                matchedWords += count
-                for (remoteLabel, overlap) in overlaps { remote[remoteLabel, default: 0] += overlap }
-            }
             let matched = indices.filter { matches[$0] != nil }
+            let seconds = indices.reduce(0) { $0 + duration(of: segments[$1]) }
+            let matchedSeconds = matched.reduce(0) { $0 + duration(of: segments[$1]) }
+            let words = indices.reduce(0) { $0 + wordCount(segments[$1].text) }
+            let matchedWords = matched.reduce(0) { $0 + wordCount(segments[$1].text) }
+            var remote: [String: Double] = [:]
+            for i in matched {
+                for (remoteLabel, overlap) in matches[i] ?? [:] { remote[remoteLabel, default: 0] += overlap }
+            }
             let share = seconds > 0 ? matchedSeconds / seconds : 0
             let isEcho = share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
             var flagged = 0
