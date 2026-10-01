@@ -677,7 +677,9 @@ public final class ChunkProcessor {
         }
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
-        if let diarizer {
+        // No words, nothing to label: the stream is not diarized. FluidAudio throws `noSpeechDetected` on audio it finds
+        // no speech in, and a listen-only call must not be filed as a diarization failure.
+        if let diarizer, !segments.isEmpty {
             do {
                 // Run diarization + VAD concurrently
                 async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
