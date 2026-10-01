@@ -174,4 +174,61 @@ struct AudioSourceResolverSplitTests {
         }
         #expect(maxDiff < 0.0001)
     }
+
+    /// #246: `Parley transcribe -i recording.m4a --split --output-dir ./out` failed with
+    /// "The file “recording_split_mic.wav” doesn’t exist." when `./out` did not exist — nothing on
+    /// the split path created the directory it was asked to write into. Nested on purpose: the
+    /// directory is created with its intermediates.
+    @Test func splitChannelsCreatesAMissingOutputDirectory() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("split-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let aacPath = dir.appendingPathComponent("test.m4a")
+        try await Self.createTestStereoAac(at: aacPath)
+
+        let outputDir = dir.appendingPathComponent("out/nested", isDirectory: true)
+        #expect(!FileManager.default.fileExists(atPath: outputDir.path))
+
+        let (localPath, remotePath) = try await AudioSourceResolver.splitChannels(
+            stereoAac: aacPath, outputDirectory: outputDir)
+
+        #expect(localPath.deletingLastPathComponent().path == outputDir.path)
+        #expect(remotePath.deletingLastPathComponent().path == outputDir.path)
+        // Both sides are real mono audio, not empty stubs left behind by a half-failed write.
+        let localFile = try AVAudioFile(forReading: localPath)
+        let remoteFile = try AVAudioFile(forReading: remotePath)
+        #expect(localFile.processingFormat.channelCount == 1)
+        #expect(remoteFile.processingFormat.channelCount == 1)
+        #expect(localFile.length > 0)
+        #expect(remoteFile.length > 0)
+    }
+
+    /// #246: an output path that cannot become a directory (here: it is an existing regular file)
+    /// must fail with an error that names THAT path — not a downstream `_split_mic.wav` the user
+    /// never asked for, which is what sent them looking in the wrong place.
+    @Test func splitIntoAnUncreatableOutputDirectoryNamesTheDirectory() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("split-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let aacPath = dir.appendingPathComponent("test.m4a")
+        try await Self.createTestStereoAac(at: aacPath)
+
+        let blocker = dir.appendingPathComponent("not-a-directory")
+        try Data("occupied".utf8).write(to: blocker)
+
+        do {
+            _ = try await AudioSourceResolver.splitChannels(stereoAac: aacPath, outputDirectory: blocker)
+            Issue.record("splitting into a path occupied by a regular file must throw")
+        } catch {
+            let message = error.localizedDescription
+            #expect(message.contains(blocker.path), "error must name the output directory: \(message)")
+            #expect(!message.contains("_split_"), "error must not name a downstream file: \(message)")
+        }
+        // The file standing in the way is left exactly as it was.
+        #expect(try Data(contentsOf: blocker) == Data("occupied".utf8))
+    }
 }
