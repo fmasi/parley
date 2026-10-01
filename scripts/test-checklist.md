@@ -471,7 +471,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
     3. B and C: `diag <id>.diag.jsonl | grep ioOverrun`, when the file exists (it does once a callback went over 8 ms): each line is one callback, with `track`, `total_ms` and its stages.
     4. By ear: every dropout of the call in the headset, with the menu timer's time.
   - Sanity (the instrument, on the first B run, before trusting anything):
-    - system `queue_wait` p50 is well under 1 ms. If it reads about one buffer (≈ 10 ms) on every cycle, or `queue_wait` is absent from the system line, the cycle-start timestamp is not what the code assumes: stop and report it, the totals mean nothing.
+    - system `queue_wait` p50 is well under 1 ms and its `n` ≈ `cycles`. If it reads about one buffer (≈ 10 ms) on every cycle, or `queue_wait` is absent from the system line or its `n` is far below `cycles`, the cycle-start timestamp (`inNow`) is not what the code assumes: stop and report it, the totals mean nothing.
     - `sync n` on each track ≈ 2 × the recording's seconds (one `fsync` per 0.5 s); in C there is no `sync` at all on either line.
     - system `cycles` ≈ `remote_coverage.heartbeat_callbacks` from `meta`.
     - `quality_anomaly_count` in `meta` stays 0 on an otherwise clean call even when `diag` lists `ioOverrun` events (they count in `anomaly_count` only), and the completion notice stays "Transcription Complete".
