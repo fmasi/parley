@@ -239,7 +239,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 
 - [ ] **D-20 Coverage on a real call.**
   - Do: a 2-chunk real call.
-  - PASS: `meta` shows `capture.remote.status` `healthy`, `expected_seconds ≈ delivered_seconds` on both sides, `processing_issue_count` 0 (informational entries such as `echo_flagged` or `duplicates_flagged` in `processing_issues` are fine), and `dual_stream: true`. The completion notice is "Transcription Complete". There is no alarm at the chunk boundary.
+  - PASS: `meta` shows `capture.remote.status` `healthy`, `expected_seconds ≈ delivered_seconds` on both sides, `processing_issue_count` 0 (informational entries such as `echo_flagged` or `duplicates_flagged` in `processing_issues` are fine), and `dual_stream: true`. The completion notice is "Transcription Complete" (on headphones; with the call on the loudspeakers it can read "Transcription Complete — echo marked", see N-01 under "Echo notice"). There is no alarm at the chunk boundary.
 
 - [ ] **D-21 A mic-empty chunk (opportunistic).**
   - A chunk whose mic delivered nothing while the remote played. Unplugging a USB mic does NOT produce it: Parley follows the next mic (log "Mic input removed — … following to …"). Run this only if it happens naturally, or with a mic that stops delivering while staying selected.
@@ -588,6 +588,67 @@ detection".
 - [ ] **R-06 The other side is unaffected.** Re-detect "Other side" on the R-01 transcript: the
       `local` entries of `echo_clusters` and the `echo: true` segments are as they were;
       `rediarized_channels` is `["local", "remote"]`.
+
+## Echo notice: the dialog and the completion notice (#244) — added 2026-10-01
+
+Nothing here can be checked without a screen: the copy is unit-tested, where it appears is not.
+Same setup as E-02 / R-01: output = the laptop speakers, mic = built-in (or a webcam mic), the
+remote audio a public podcast or video, never a real third party. Play 5 minutes and talk for
+about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detection".
+
+- [ ] **N-01 The completion notice says so.**
+  - PASS: the notification's title is "Transcription Complete — echo marked" and its body reads
+    `<file>.json — it looks like part of the other side's voice came through your microphone, and
+    N lines are marked as echo (headphones avoid this)`. N equals `echo_segments_flagged` in
+    `echo_meta`. If the recording also has a problem (capture anomalies, a side not captured,
+    processing problems), the title names the problem instead and the body carries both.
+- [ ] **N-02 The echo voice's card explains itself.**
+  - Do: the rename dialog opens after Stop. Find the mic-side row that is not you (usually
+    "Local Speaker 2"; its sample is the remote voice).
+  - PASS: between the row's label and its Name field there is a grey caption: "Looks like the
+    other side's voice through your loudspeakers: N of M lines (P% of its speaking time) match
+    Remote Speaker 1 at the same time and are marked as echo. The other K lines stay under this
+    label." It wraps over several lines and is not cut off. In `echo_meta`, the `"echo"` entries of
+    that label sum to M (`segments`) and N (`matched_segments`), K = M − N, and P is
+    `matched_seconds / seconds` in percent. Your own card and the remote cards have no caption.
+  - If the echo voice has fewer than 5 unmarked lines it has no row at all; N-03 still applies.
+- [ ] **N-03 The count is people.**
+  - PASS: under "Wrong number of speakers?", the "This side" stepper reads **1 speaker** although
+    two mic-side rows are listed, and under that row a grey caption reads "The count is people
+    only, not the echo voice. Re-detect checks for echo again and keeps an echo voice separate;
+    its matched lines stay marked as echo." "Other side" has no such caption and shows its own
+    row count.
+- [ ] **N-04 After Re-detect.**
+  - Do: leave "This side" at 1 and press Re-detect.
+  - PASS: the caption under the row is replaced by the outcome, on one or two lines:
+    "1 speaker found · 1 echo voice kept separate · N lines marked as echo · R lines relabeled".
+    The echo voice's card is still there with its caption (the numbers can differ from N-02: the
+    re-detect judged the whole channel at once), and the stepper still reads 1.
+- [ ] **N-05 Reopen.** Save without naming the echo voice, reopen the dialog from the menu
+      ("Rename Speakers…"): the card caption, the stepper at 1 and the caption under "This side"
+      are as in N-02 / N-03 (the outcome line is gone — it describes a run, not the transcript).
+- [ ] **N-06 A named echo voice is still recognised.** Type a name on the echo voice's card, Save,
+      reopen: its card (now under that name) still has the caption and the stepper still reads 1.
+      The caption still says "Remote Speaker 1" even if you named that speaker too: it names the
+      labels the check compared.
+- [ ] **N-07 Headphones: nothing.** Record 3 minutes on headphones. The completion notice is plain
+      "Transcription Complete", no card has a caption, the stepper shows the row count, and there
+      is no caption under "This side".
+
+## Rename reaches flagged lines (#245) — added 2026-10-01
+
+- [ ] **F-01 Never re-detected: one label per person in the JSON.**
+  - Do: on a fresh transcript that has flagged lines (N-01's has `echo: true` ones), name the
+    speakers and Save. Do NOT press Re-detect first.
+  - PASS: `python3 -c 'import json,sys,collections;d=json.load(open(sys.argv[1]));print(collections.Counter((s["speaker"],bool(s.get("echo") or s.get("filtered") or s.get("duplicate"))) for s in d["segments"]))' <transcript.json>`
+    shows no `Local Speaker N` / `Remote Speaker N` label that you named — flagged lines carry the
+    name too.
+- [ ] **F-02 Re-detected: the flagged lines of that channel keep their label.**
+  - Do: on another such transcript press Re-detect on "This side" first, then name the speakers
+    and Save.
+  - PASS: the same command shows every flagged line (`True`) of the mic side still under a
+    `Local Speaker N` label, its unflagged lines under your name, and every line of the other
+    side — flagged or not — under the name you gave it.
 
 ## Mic-only recordings (#183) — added 2026-09-03
 
