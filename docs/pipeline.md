@@ -111,7 +111,7 @@ Notes:
 **Input:** Running capture. Output: `FinalizedChunk(index, systemPath, micPath, startTime)`.
 
 **Key code path:**
-- `TranscriberApp/Services/ChunkRotator.swift` — `rotate()` → `captureClient.rotateChunk()`
+- `TranscriberCore/ChunkRotator.swift` — `rotate()` → `captureClient.rotateChunk()`
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` — `rotateChunk()` → `handler.swapWriters()`
 - `AudioCaptureHelper/XPC/AudioOutputHandler.swift` — `swapWriters()`
 
