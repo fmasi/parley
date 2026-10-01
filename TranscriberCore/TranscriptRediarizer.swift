@@ -316,9 +316,9 @@ public enum TranscriptRediarizer {
         }
         var (pool, labeled) = relabel()
         if echo != nil, labeled.count != pool.count {
-            // The check's flags are carried over by position. Unreachable while its own labelling
-            // was one-to-one (the same function over the same segments); if it ever is not, the
-            // flags must not land on the wrong lines.
+            // The check's verdicts are put on the lines by position. Not reachable while its own
+            // labelling was one-to-one (this is the same function over the same segments); if it
+            // ever is, the flags must not land on the wrong lines.
             Logger.transcription.error(
                 "Re-diarize: \(labeled.count, privacy: .public) labels for \(pool.count, privacy: .public) segments — relabelling without the echo check")
             echo = nil
@@ -386,9 +386,9 @@ public enum TranscriptRediarizer {
         // is a runtime string comparison, NOT a compile-time guarantee: if `tagWithSourcePrefix`
         // ever stops using "<Prefix><Unknown>", this silently over-counts again, so the two must
         // change together.
-        let relabeledCount = labeled.filter { !$0.isFlagged }.count
-        let echoLabels = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
-        let found = Set(labeled.filter { !$0.isFlagged }.map(\.speaker)).subtracting([unattributed]).subtracting(echoLabels).count
+        let visible = labeled.filter { !$0.isFlagged }
+        let echoClusters = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
+        let found = Set(visible.map(\.speaker)).subtracting([unattributed]).subtracting(echoClusters).count
         metadata["speaker_count_\(source)"] = found
         // Which channels a re-detect has rewritten: their labels are no longer the pipeline's.
         var rediarized = metadata[rediarizedChannelsKey] as? [String] ?? []
@@ -428,10 +428,11 @@ public enum TranscriptRediarizer {
             try DurableFile.replace(backup, with: data)   // round 4 item 6
         }
         try DurableFile.replace(url, with: out)
-        let echoClusters = echo?.echoLabels.count ?? 0, echoFlagged = echo?.result.flaggedCount ?? 0
+        let outcome = Outcome(speakerCount: found, segmentsRelabeled: visible.count,
+                              echoClusters: echo?.echoLabels.count ?? 0, echoFlagged: echo?.result.flaggedCount ?? 0)
         Logger.transcription.info(
-            "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(relabeledCount, privacy: .public) segments, \(echoClusters, privacy: .public) echo cluster(s), \(echoFlagged, privacy: .public) segment(s) flagged as echo")
-        return Outcome(speakerCount: found, segmentsRelabeled: relabeledCount, echoClusters: echoClusters, echoFlagged: echoFlagged)
+            "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(outcome.segmentsRelabeled, privacy: .public) segments, \(outcome.echoClusters, privacy: .public) echo cluster(s), \(outcome.echoFlagged, privacy: .public) segment(s) flagged as echo")
+        return outcome
     }
 
     // MARK: - Labelling and the echo check (#243)
