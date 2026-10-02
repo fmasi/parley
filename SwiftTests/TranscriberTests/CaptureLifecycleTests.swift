@@ -1,4 +1,3 @@
-// RED-FIRST-EXEMPT: characterization of AbandonableStep.overran (final review H3 #5)
 import Dispatch
 import Foundation
 import os
