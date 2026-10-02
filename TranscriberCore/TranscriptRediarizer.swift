@@ -353,21 +353,25 @@ public enum TranscriptRediarizer {
             // What the check found, line by line (#243):
             // - a line of an echo cluster carries that cluster's own label; its matched lines are
             //   flagged, the rest are not — nothing of it is given to the stated speaker;
-            // - elsewhere, a flagged line (a match of 3+ words) is not relabelled: it keeps the label
-            //   it had, as every flagged line does. A line that already carried the flag keeps it.
+            // - elsewhere, a flagged line (a match of 3+ words) is not given to the stated speaker,
+            //   and does not keep the label it had either (#277): it is the other side's words, and
+            //   after a repair the old label is the user's. It takes the channel's unattributed
+            //   label, which nothing counts as a person or a voice. A line that already carried the
+            //   flag keeps it, and is labelled the same way: its old label comes from an earlier
+            //   clustering (and perhaps a rename), and may now be a person's.
             // The flag is one-way: a later re-detect whose clustering no longer judges that line
             // echo does not clear it, so the line stays hidden. A re-detect cannot un-mark echo.
             var relabeled: [LabeledSegment] = []
             for (i, candidate) in pool.enumerated() {
                 finalLabels[echo.rawLabels[i]] = labeled[i].speaker
                 if candidate.wasEcho {
-                    if echo.isInEchoCluster(i) { segments[candidate.index]["speaker"] = labeled[i].speaker }
+                    segments[candidate.index]["speaker"] = echo.isInEchoCluster(i) ? labeled[i].speaker : unattributed
                     continue
                 }
                 var line = labeled[i]
                 if echo.result.segments[i].echo {
                     line.echo = true
-                    if !echo.isInEchoCluster(i) { line.speaker = candidate.speaker ?? unattributed }
+                    if !echo.isInEchoCluster(i) { line.speaker = unattributed }
                 }
                 relabeled.append(line)
             }
@@ -449,8 +453,6 @@ public enum TranscriptRediarizer {
         /// Its position in the transcript's `segments`.
         let index: Int
         let segment: TranscriptSegment
-        /// The label it carries before the re-detect.
-        let speaker: String?
         /// Already flagged `echo`, and nothing else. Such a line is not relabelled as a line — it
         /// stays flagged — but it is evidence for the echo check: the pipeline flags an echo
         /// cluster's matched lines, and judged on the unmatched residue alone that cluster would
@@ -476,7 +478,7 @@ public enum TranscriptRediarizer {
                     start: start, end: end, text: text,
                     language: dict["language"] as? String,
                     confidence: (dict["confidence"] as? Double).map(Float.init)),
-                speaker: dict["speaker"] as? String, wasEcho: flagged)
+                wasEcho: flagged)
         }
     }
 

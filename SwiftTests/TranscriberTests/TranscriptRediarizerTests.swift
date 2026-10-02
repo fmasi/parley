@@ -1148,7 +1148,7 @@ struct TranscriptRediarizerEchoGuardTests {
 
     /// One blended cluster: the diarizer honoured the count, so there is no echo cluster to keep out.
     /// The per-segment rule still applies.
-    @Test("one blended cluster: matches of 3+ words are flagged and keep their label; 1–2-word matches are untouched")
+    @Test("one blended cluster: matches of 3+ words are flagged and unattributed; 1–2-word matches are untouched")
     func aBlendedClusterFlagsOnlyLongMatches() async throws {
         let own = Self.lines("own", count: 10, offset: 0, length: 8)
         let copies = Self.lines("far", count: 3, offset: 10, length: 5)
@@ -1168,9 +1168,10 @@ struct TranscriptRediarizerEchoGuardTests {
 
         let (segments, metadata) = try read(t)
         #expect(speakers(found(own, in: segments)) == ["Local Speaker 1"])
-        // Flagged, and NOT relabelled to the stated speaker: they keep the label they had.
+        // Flagged, and NOT relabelled to the stated speaker. Nor do they keep the label they had
+        // (#277): they are the other side's words, so they belong to nobody on this side.
         #expect(echoCount(found(copies + stray, in: segments)) == 4)
-        #expect(speakers(found(copies + stray, in: segments)) == ["Local Speaker 2"])
+        #expect(speakers(found(copies + stray, in: segments)) == ["Local Unknown"])
         // "Yes." on both sides at once is not an echo: relabelled like any other line.
         #expect(echoCount(found(backchannels, in: segments)) == 0)
         #expect(speakers(found(backchannels, in: segments)) == ["Local Speaker 1"])
@@ -1181,6 +1182,161 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(outcome.echoFlagged == 4)
         #expect(outcome.segmentsRelabeled == own.count + backchannels.count)
         #expect(clusters(metadata, track: "local").allSatisfy { $0["verdict"] as? String == "kept" })
+    }
+
+    // MARK: A line flagged outside an echo cluster belongs to nobody on this side (#277)
+
+    /// The user's voice and three copies of the other side in ONE cluster: the diarizer blended them,
+    /// so there is no echo cluster and only the per-line rule can flag the copies. Every local line
+    /// starts under `label` — what a transcript looks like after a re-detect merged the bleed into
+    /// the user.
+    struct BlendedVoice {
+        let own = lines("own", count: 10, offset: 0, length: 8)
+        let copies = lines("far", count: 3, offset: 10, length: 5)
+
+        var diarization: DiarizationResult {
+            DiarizationResult(segments: turns(own + copies, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+        }
+
+        func segments(label: String, copiesFlagged: Bool = false) -> [[String: Any]] {
+            own.map { segment($0, label, "local") }
+                + copies.map { segment($0, "Remote Speaker 1", "remote") }
+                + copies.map { segment($0, label, "local", echo: copiesFlagged) }
+        }
+    }
+
+    /// The defect: the line was flagged and hidden, but kept the label it had before the re-detect.
+    /// After a repair that label is the user's, so the JSON paired the other side's words with the
+    /// user's label. "Robin" is the same case after the user named the merged speaker.
+    @Test("a line the per-line rule flags takes the channel's unattributed label, never a person's",
+          arguments: ["Local Speaker 1", "Robin"])
+    func aLineFlaggedOutsideAnEchoClusterIsUnattributed(label: String) async throws {
+        let voice = BlendedVoice()
+        let before = voice.segments(label: label)
+        var metadata: [String: Any] = ["speaker_count_local": 1, "rediarized_channels": ["local"]]
+        if label != "Local Speaker 1" { metadata["speaker_names"] = ["Local Speaker 1": label] }
+        let (t, cleanup) = try makeRecording(segments: before, metadata: metadata); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voice.diarization))
+
+        let (segments, after) = try read(t)
+        // Echo, and nobody's on this side.
+        #expect(echoCount(found(voice.copies, in: segments)) == voice.copies.count)
+        #expect(speakers(found(voice.copies, in: segments)) == ["Local Unknown"])
+        // The user's own lines are the stated speaker, unflagged; the other channel is as it was.
+        #expect(speakers(found(voice.own, in: segments)) == ["Local Speaker 1"])
+        #expect(echoCount(found(voice.own, in: segments)) == 0)
+        #expect(speakers(found(voice.copies, in: segments, source: "remote")) == ["Remote Speaker 1"])
+        #expect(record(segments) == record(before))
+
+        // The unattributed label is not a person and not a voice: nothing counts it.
+        #expect(after["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.echoFlagged == voice.copies.count)
+        #expect(outcome.segmentsRelabeled == voice.own.count)
+        #expect(after["echo_segments_flagged"] as? Int == voice.copies.count)
+        let local = clusters(after, track: "local")
+        #expect(local.compactMap { $0["label"] as? String } == ["Local Speaker 1"])
+        #expect(local.allSatisfy { $0["verdict"] as? String == "kept" })
+        #expect(EchoNotice.Findings(metadata: after).voices.isEmpty)
+    }
+
+    /// What reads the result: the rename dialog's rows, a rename, and the summary.
+    @Test("an unattributed echo line is no row to rename, is not reached by a rename, and is no participant")
+    func anUnattributedEchoLineIsNobodyDownstream() async throws {
+        let voice = BlendedVoice()
+        let (t, cleanup) = try makeRecording(segments: voice.segments(label: "Local Speaker 1")); defer { cleanup() }
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voice.diarization))
+
+        // The dialog offers the people, and the stepper counts one on this side.
+        let rows = try TranscriptRenamer.collectSpeakerSamples(from: t, maxSamplesPerSpeaker: 1).map(\.id)
+        #expect(Set(rows) == ["Local Speaker 1", "Remote Speaker 1"])
+        #expect(EchoNotice.Findings.read(transcriptAt: t).people(on: "local", rows: rows.filter { $0.hasPrefix("Local ") }) == 1)
+
+        // Naming the user does not put the name on the other side's words.
+        #expect(TranscriptRenamer.applyRenames(["Local Speaker 1": "Robin"], jsonPath: t))
+        let segments = try read(t).segments
+        #expect(speakers(found(voice.own, in: segments)) == ["Robin"])
+        #expect(speakers(found(voice.copies, in: segments)) == ["Local Unknown"])
+        #expect(echoCount(found(voice.copies, in: segments)) == voice.copies.count)
+
+        // The summary sees neither the lines nor a participant for them.
+        let (prompt, summary) = try MeetingSummarizer.parseTranscriptForTesting(at: t)
+        #expect(summary.speakers == ["Robin", "Remote Speaker 1"])
+        #expect(Set(prompt.map(\.speaker)) == ["Robin", "Remote Speaker 1"])
+        #expect(prompt.count == voice.own.count + voice.copies.count)
+    }
+
+    /// The line was flagged by an EARLIER pass (the pipeline's own per-line rule), and the user then
+    /// named the speaker: on a channel that was never re-detected a rename reaches flagged lines too,
+    /// so the other side's words sit under the name. This re-detect puts them in no echo cluster.
+    /// `orphan` is such a line whose match the check can no longer see (nothing on the other channel).
+    @Test("a line already flagged as echo, outside an echo cluster, becomes unattributed and stays flagged")
+    func anAlreadyFlaggedLineOutsideAnEchoClusterIsUnattributed() async throws {
+        let voice = BlendedVoice()
+        let orphan = [Line(start: 215, end: 220, text: Self.words("orphan", 6))]
+        let before = voice.segments(label: "Robin", copiesFlagged: true)
+            + orphan.map { Self.segment($0, "Robin", "local", echo: true) }
+        let (t, cleanup) = try makeRecording(segments: before, metadata: ["speaker_names": ["Local Speaker 1": "Robin"]]); defer { cleanup() }
+        let diarization = DiarizationResult(segments: Self.turns(voice.own + voice.copies + orphan, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: diarization))
+
+        let (segments, metadata) = try read(t)
+        // The flag is one-way; the label an earlier diarization (and a rename) left is not kept.
+        #expect(echoCount(found(voice.copies + orphan, in: segments)) == voice.copies.count + 1)
+        #expect(speakers(found(voice.copies + orphan, in: segments)) == ["Local Unknown"])
+        #expect(speakers(found(voice.own, in: segments)) == ["Local Speaker 1"])
+        #expect(echoCount(found(voice.own, in: segments)) == 0)
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.segmentsRelabeled == voice.own.count)
+        #expect(metadata["echo_segments_flagged"] as? Int == voice.copies.count + 1)
+        #expect(clusters(metadata, track: "local").compactMap { $0["label"] as? String } == ["Local Speaker 1"])
+    }
+
+    /// Both rules in one re-detect: an echo cluster, and one more copy of the other side inside the
+    /// user's own cluster. The cluster's lines are untouched by #277; only the stray copy changes.
+    @Test("an echo cluster's lines carry the cluster's label; a flagged line outside it is unattributed")
+    func echoClusterLinesKeepTheClustersLabel() async throws {
+        let voices = TwoVoices()
+        let blended = [Line(start: 215, end: 220, text: Self.words("blended", 6))]
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+            + blended.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + blended.map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarization = DiarizationResult(
+            segments: Self.turns(voices.own + blended, "S1") + Self.turns(voices.far + voices.residue, "S2"),
+            speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: diarization))
+
+        let (segments, metadata) = try read(t)
+        // The echo cluster: its own label on every line, matched lines flagged, the residue not.
+        #expect(speakers(found(voices.far + voices.residue, in: segments)) == ["Local Speaker 2"])
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(echoCount(found(voices.residue, in: segments)) == 0)
+        // The copy inside the user's cluster: flagged, and nobody's.
+        #expect(echoCount(found(blended, in: segments)) == 1)
+        #expect(speakers(found(blended, in: segments)) == ["Local Unknown"])
+        #expect(speakers(found(voices.own, in: segments)) == ["Local Speaker 1"])
+        #expect(record(segments) == record(before))
+
+        // One person, one echo voice; the unattributed label is neither.
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 1)
+        #expect(outcome.echoFlagged == voices.far.count + 1)
+        #expect(metadata["echo_segments_flagged"] as? Int == voices.far.count + 1)
+        #expect(clusters(metadata, track: "local").compactMap { $0["label"] as? String }.sorted() == ["Local Speaker 1", "Local Speaker 2"])
+        #expect(EchoNotice.Findings(metadata: metadata).voices.map(\.label) == ["Local Speaker 2"])
     }
 
     /// Speech the diarizer gave no turn to is grouped as "Unknown". When that group is mostly echo it
