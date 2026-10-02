@@ -76,6 +76,13 @@
 
 set -euo pipefail
 
+# Run from a git hook, this script inherits GIT_DIR and its siblings. SwiftPM checks dependencies out
+# with git, and with that environment a tree with no build directory yet — the throwaway parent
+# worktree below is always one — fails to resolve its packages, which used to read as RED (#260).
+# Git finds the repository from the working directory without them.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 BASE_SHA=$(git rev-parse "${1:-HEAD~1}")
 HEAD_SHA=$(git rev-parse HEAD)
 REPO_ROOT=$(git rev-parse --show-toplevel)

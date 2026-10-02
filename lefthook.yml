@@ -14,4 +14,8 @@ pre-commit:
 pre-push:
   commands:
     ci:
-      run: just ci   # the full serial suite (~10 min); never skipped with --no-verify (AGENTS.md)
+      # git exports GIT_DIR and its siblings to a hook. SwiftPM checks its dependencies out with git,
+      # so in a tree that has never been built that environment makes the checkout act on THIS
+      # repository and fail ("unable to read tree"); the red-first gate's throwaway parent worktree is
+      # always such a tree. Drop git's local environment before anything builds (#260).
+      run: unset $(git rev-parse --local-env-vars); just ci   # the full serial suite; never skipped with --no-verify (AGENTS.md)
