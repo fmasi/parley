@@ -487,12 +487,23 @@ public struct CaptureDiagnostics: Sendable {
     /// `resetSession()`, the new-session reset, zeroes them.
     public private(set) var retryCount = 0
     public private(set) var launchRecoveries = 0
-    /// Per-side content-anomaly tallies and per-prefix coverage sums (§7.1, fix round 1) — fed by
+    /// Per-side content-anomaly tallies and per-helper coverage (§7.1, fix round 1) — fed by
     /// `count()`, same out-of-ring lifetime as the counters above. Without this, a track's
     /// `compromised`/`neverDelivered` verdict would flip back to `healthy` the moment its own
     /// evidence (the `rateDrift`, the `captureStop`) aged out of the bounded ring.
     private var contentAnomalyTallies: [String: Int] = [:]
-    private var coverageTallies: [String: TrackAccounting] = [:]
+    /// Coverage per HELPER SESSION, then per prefix (#229), summed at `makeProvenance`. A helper's stand-in (its last
+    /// status pull, for a helper that wrote no `captureStop`) is REPLACED by that helper's real stop whenever it arrives
+    /// — a later finalize included — never added to it. `""` holds the stops that name no helper session.
+    private var coverageTallies: [String: HelperCoverage] = [:]
+    /// The helper sessions in the order first seen: the sum is made in that order, as it always was.
+    private var coverageOrder: [String] = []
+
+    private struct HelperCoverage: Sendable {
+        var tracks: [String: TrackAccounting]
+        /// When the status pull it was made from was taken; nil = the helper's own `captureStop`.
+        var standInAt: Date?
+    }
     /// The latest CONFIRMED permission denial and the latest restore (out-of-ring, same lifetime as
     /// the tallies). Timestamps rather than a flag, so the answer does not depend on the order in
     /// which merges first present the events.
@@ -557,15 +568,36 @@ public struct CaptureDiagnostics: Sendable {
         }
         if e.kind == .captureStop {
             if let helper = e.detail["helper_session"] { stoppedHelperSessions.insert(helper) }
-            for prefix in ["local", "remote"] {
-                if let parsed = TrackAccounting(detail: e.detail, prefix: prefix) {
-                    // The first session is the tally itself: summed onto an empty counter it would
-                    // read as "measured + unmeasured" and be marked a lower bound.
-                    if var tally = coverageTallies[prefix] { tally += parsed; coverageTallies[prefix] = tally }
-                    else { coverageTallies[prefix] = parsed }
-                }
-            }
+            var tracks: [String: TrackAccounting] = [:]
+            for prefix in ["local", "remote"] { tracks[prefix] = TrackAccounting(detail: e.detail, prefix: prefix) }
+            tally(HelperCoverage(tracks: tracks, standInAt: e.detail["from"] == Self.standInSource ? e.timestamp : nil),
+                  helper: e.detail["helper_session"] ?? "")
         }
+    }
+
+    /// What marks a `captureStop` as a stand-in (`detail["from"]`): made from a helper session's last status pull.
+    public static let standInSource = "status pull"
+
+    /// One `captureStop`'s coverage into its helper session's tally (#229).
+    private mutating func tally(_ new: HelperCoverage, helper: String) {
+        guard var held = coverageTallies[helper] else {
+            coverageTallies[helper] = new
+            coverageOrder.append(helper)
+            return
+        }
+        switch (held.standInAt, new.standInAt) {
+        case (nil, .some):
+            return   // the helper stopped: its stand-in never counts
+        case (.some, nil):
+            held = new   // the real stop replaces the stand-in
+        case let (old?, latest?):
+            if latest >= old { held = new }   // the same counters, further on: the latest pull stands in
+        case (nil, nil):
+            // Stops that name no helper session (or two of one): summed, as before. The first is the tally itself:
+            // summed onto an empty counter it would read as "measured + unmeasured" and be marked a lower bound.
+            held.tracks.merge(new.tracks) { sum, parsed in var sum = sum; sum += parsed; return sum }
+        }
+        coverageTallies[helper] = held
     }
 
     private mutating func evict() {
@@ -598,6 +630,7 @@ public struct CaptureDiagnostics: Sendable {
         launchRecoveries = 0
         contentAnomalyTallies.removeAll()
         coverageTallies.removeAll()
+        coverageOrder.removeAll()
         stoppedHelperSessions.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
@@ -721,10 +754,16 @@ public struct CaptureDiagnostics: Sendable {
         contentAnomalyTallies[track] ?? 0
     }
 
-    /// Reads the out-of-ring tally (fix round 1) — correct even after the contributing `captureStop`
-    /// events themselves have been evicted from `events`.
+    /// Sums the out-of-ring tallies of every helper session (fix round 1, #229) — correct even after the
+    /// contributing `captureStop` events themselves have been evicted from `events`.
     private func coverage(prefix: String) -> TrackAccounting? {
-        coverageTallies[prefix]
+        var sum: TrackAccounting?
+        for helper in coverageOrder {
+            guard let part = coverageTallies[helper]?.tracks[prefix] else { continue }
+            // The first session is the sum itself (see `tally`).
+            if var running = sum { running += part; sum = running } else { sum = part }
+        }
+        return sum
     }
 
     public func makeProvenance(

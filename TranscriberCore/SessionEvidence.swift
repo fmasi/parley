@@ -17,7 +17,8 @@ import os
 ///   97): a crash while the transcript is written is salvaged with all of it.
 /// - Every status pull's coverage is kept per helper session (council A-I4 / C-I1). At finalize a helper
 ///   session's latest snapshot stands in for the `captureStop` a crashed helper never wrote; a
-///   `captureStop` of that helper session, when there is one, supersedes it (never counted twice).
+///   `captureStop` of that helper session, when there is one, supersedes it (never counted twice) — also when it
+///   arrives after a finalize that already counted the stand-in: it replaces it at the next one (#229).
 /// - Nothing here waits on a recording folder on the main actor (L review 158): the record's build — its reads of the
 ///   live log and its write of `.diag.jsonl` — runs through `FolderReads`, bounded; appends, coverage writes and the
 ///   commit's delete are queued on the folder's own queue.
@@ -323,7 +324,7 @@ public final class SessionEvidence {
             .filter { !stopped.contains($0.key) }
             .map { helper, snapshot in
                 CaptureEvent(timestamp: snapshot.at, origin: .helper, kind: .captureStop, severity: .info,
-                             detail: snapshot.facts.merging(["helper_session": helper, "from": "status pull"]) { _, new in new })
+                             detail: snapshot.facts.merging(["helper_session": helper, "from": CaptureDiagnostics.standInSource]) { _, new in new })
             }
         if !standIns.isEmpty { merged.merge(standIns) }
         guard merged.isAnomalous else { return Built(record: merged) }

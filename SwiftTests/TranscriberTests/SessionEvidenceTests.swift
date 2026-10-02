@@ -442,6 +442,46 @@ import Testing
         #expect(provenance(await evidence.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 30)
     }
 
+    // MARK: - Coverage honesty (#229)
+
+    /// #229: a helper dies, and its last status pull stands in for it at the first finalize. Its real `captureStop`,
+    /// drained afterwards, reaches a SECOND finalize of the same session (the transcript failed; the salvage builds
+    /// again): it REPLACES that helper's stand-in. The record never says stand-in + stop.
+    @Test func aRealStopAtASecondFinalizeReplacesItsHelpersStandIn() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.mergeHelperDrain(wire([captureStop(remote: 40, local: 40, helper: "1000-0", at: 40)]))   // a helper that stopped
+        evidence.noteCoverage(statusPull(remote: 60, local: 60, helper: "2000-0"))                        // one that died: its last pull
+        let first = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(first.remoteCoverage?.deliveredSeconds == 100, "40 s stopped + the 60 s stand-in")
+        // The dead helper's own stop turns up after all, with nothing bound: into the ring.
+        evidence.mergeHelperDrain(wire([captureStop(remote: 65, local: 65, helper: "2000-0", at: 70)]))
+        let second = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(second.remoteCoverage?.deliveredSeconds == 105, "40 s + the real stop's 65 s — never 40 + 60 + 65")
+        #expect(second.remoteCoverage?.expectedSeconds == 105)
+        #expect(second.localCoverage?.deliveredSeconds == 105 && second.localCoverage?.expectedSeconds == 105)
+        #expect(second.remoteCoverage?.coverageIncomplete == false, "a whole record: no lower-bound mark")
+        // A third build changes nothing: neither the stand-in nor the stop is counted again.
+        let third = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(third.remoteCoverage?.deliveredSeconds == 105 && third.localCoverage?.deliveredSeconds == 105)
+    }
+
+    /// … and the same when the late stop comes through a pending retry's attribution: appended to the session's
+    /// live log, which the second build merges.
+    @Test func aRealStopAttributedAfterTheFirstFinalizeReplacesItsHelpersStandIn() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.noteCoverage(statusPull(remote: 60, local: 60, helper: "2000-0"))
+        let first = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(first.remoteCoverage?.deliveredSeconds == 60, "the stand-in")
+        await evidence.attributeHelperDrain(wire([captureStop(remote: 65, local: 65, helper: "2000-0", at: 70)]), toOneOf: [("s", d)])
+        let second = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(second.remoteCoverage?.deliveredSeconds == 65, "the real stop's — never 60 + 65")
+        #expect(second.localCoverage?.deliveredSeconds == 65)
+    }
+
     /// L11 review 68: a start that never became a recording leaves no orphan `.diag.live.jsonl` behind.
     @Test func aDiscardedSessionLeavesNoLiveLog() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
