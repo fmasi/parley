@@ -120,6 +120,20 @@ jobs:
           actionlint
           zizmor --min-severity high .github/workflows
 
+      # "Green" must not silently mean "not run" (#272). A test inside `#if compiler(>=X)` is not
+      # even built by an older Swift, and one that opens with `guard #available(macOS N, *) else
+      # { return }` passes on an older macOS without asserting anything. For months that hid ten
+      # tests here, one of them the "a transcription never downloads a missing model" airgap test.
+      # This step writes the toolchain in use and "N tests not run on this toolchain" to the job
+      # summary, and raises a warning annotation when N is not 0. The counter is tested first
+      # (a few seconds, a temp fixture): a counter that wrongly says 0 would be worse than none.
+      # `just toolchain` runs the same two scripts.
+      - name: Report the toolchain and the tests it cannot run
+        run: |
+          set -euo pipefail
+          bash scripts/test-toolchain-report.sh
+          bash scripts/toolchain-report.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
       # SyntheticDiarizationTests (and the metamorphic suite) need the diarization models
       # (~23 MB). The fixture itself is synthesized at test time with `say`, so the models are
       # the ONLY external dependency — cached, they cost nothing; cold, ~6s.
@@ -169,7 +183,7 @@ jobs:
           restore-keys: spm-${{ runner.os }}-
 
       # Blast radius, stated deliberately: this fetch now gates the whole `test` job, so an
-      # unreachable fixture server fails all 934 unit tests rather than just an isolated guard job.
+      # unreachable fixture server fails the entire suite rather than just an isolated guard job.
       # Accepted, because `PARLEY_REQUIRE_AMI_FIXTURE=1` means a missing fixture MUST fail loudly —
       # the entire reason that env var exists is that these tests once skipped silently in CI for
       # months while the suite reported green. A fetch failure that merely disabled the guard would
@@ -238,6 +252,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # the gate diffs against, and checks out, the merge base
+
+      # The same report as in `test` (see the comment there): this job builds and runs tests with
+      # the same toolchain, so its summary says which one, and what that toolchain cannot run.
+      - name: Report the toolchain and the tests it cannot run
+        run: |
+          set -euo pipefail
+          bash scripts/toolchain-report.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Cache diarization models
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

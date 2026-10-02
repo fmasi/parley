@@ -42,9 +42,11 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 
 `just --list` shows every recipe. The ones that matter:
 
-- `just ci`: exactly what CI runs (workflow lint, the serial Swift suite, the release-tooling tests,
-  the red-first gate), then the app-bundle build, which CI doesn't do.
+- `just ci`: exactly what CI runs (workflow lint, the toolchain report, the serial Swift suite, the
+  release-tooling tests, the red-first gate), then the app-bundle build, which CI doesn't do.
 - `just workflows`: actionlint + zizmor on `.github/workflows`, as the `test` job runs them.
+- `just toolchain`: this Mac's Swift and macOS, and "N tests not run on this toolchain" (the tests
+  an older Swift doesn't compile or an older macOS skips). CI prints the same in each job summary.
 - `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
 - `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier).
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
