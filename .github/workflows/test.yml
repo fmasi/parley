@@ -31,7 +31,23 @@ jobs:
     # Skip drafts, never push/dispatch. `test` is the ruleset's required check, and a job skipped by
     # its `if` reports success, so a draft never blocks on it; `ready_for_review` then runs it for real.
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: macos-15
+    # The image decides the toolchain (#272). `macos-26` (arm64, GA) runs macOS 26 with Xcode 26.6
+    # as its default, i.e. Swift 6.3 (actions/runner-images README and macos-26-arm64-Readme.md,
+    # read 2026-10-02). That is new enough for everything this repo gates: the code behind
+    # `#if compiler(>=6.2)` (the SpeechAnalyzer engine and its tests) is built, and the tests
+    # behind `#available(macOS 26.0, *)` assert instead of returning early. On `macos-15`
+    # (Xcode 16.4, Swift 6.1, macOS 15) ten tests never ran, one of them an airgap test.
+    #
+    # Named, not `macos-latest`: that label moves to the next macOS on GitHub's schedule, and the
+    # toolchain under a required check must change in a reviewed commit. Development is on Xcode 27
+    # (Swift 6.4), which GitHub offers only as the PREVIEW image `xcode-27` (no SLA, "queueing
+    # issues" per its announcement, runner-images#14404), so it is not used for a required check;
+    # move there when it is GA. Until then CI's Swift is one minor behind development's, and the
+    # report step below says what, if anything, that leaves unrun.
+    #
+    # To go back: set `runs-on: macos-15` on both jobs. Nothing else here depends on the image
+    # (the SwiftPM cache key follows the Swift version by itself).
+    runs-on: macos-26
     # Bound it, as `red-first` already is. Twice on 2026-09-03/04 this job sat 80+ minutes inside
     # its test step while the other jobs — running the same swift test binary against the same
     # models cache — passed. Without a timeout it runs to GitHub's 6-hour default, so the branch is
@@ -42,6 +58,10 @@ jobs:
     # on a healthy run, and a timed-out job leaves a log naming the tests that were executing —
     # which is exactly how the hang in this PR was diagnosed after four cancellations produced
     # nothing.
+    #
+    # Those figures are from macos-15. The last runs there took ~12 minutes (166s build, 425s
+    # tests on 2026-10-02), still well inside the bound; it is left as it was for macos-26 and
+    # should be re-measured there, not shortened on a guess.
     timeout-minutes: 30
 
     steps:
@@ -55,7 +75,7 @@ jobs:
       # a leaked token or a bad workflow fails in seconds, before the ~8-minute build and suite.
       # Pinned release binaries, sha256-verified (the same versions as fmasi/.github just-ci.yml;
       # gitleaks and actionlint from each release's checksums.txt, zizmor from the release API's
-      # asset digest; all verified by download on 2026-09-28). macos-15 runners are arm64.
+      # asset digest; all verified by download on 2026-09-28). macos-26 runners are arm64.
       - name: Install gitleaks, actionlint and zizmor (pinned, checksum-verified)
         env:
           GITLEAKS_VERSION: 8.30.1
@@ -120,6 +140,23 @@ jobs:
           actionlint
           zizmor --min-severity high .github/workflows
 
+      # "Green" must not silently mean "not run" (#272). A test inside `#if compiler(>=X)` is not
+      # even built by an older Swift, and one that opens with `guard #available(macOS N, *) else
+      # { return }` passes on an older macOS without asserting anything. For months that hid ten
+      # tests here, one of them the "a transcription never downloads a missing model" airgap test.
+      # This step writes the toolchain in use and "N tests not run on this toolchain" to the job
+      # summary, and raises a warning annotation when N is not 0. The counter is tested first
+      # (a few seconds, a temp fixture): a counter that wrongly says 0 would be worse than none.
+      # `just toolchain` runs the same two scripts. The Swift version also goes into the SwiftPM
+      # cache key below.
+      - name: Report the toolchain and the tests it cannot run
+        id: toolchain
+        run: |
+          set -euo pipefail
+          bash scripts/test-toolchain-report.sh
+          bash scripts/toolchain-report.sh | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "swift=$(bash scripts/toolchain-report.sh --swift-version)" >> "$GITHUB_OUTPUT"
+
       # SyntheticDiarizationTests (and the metamorphic suite) need the diarization models
       # (~23 MB). The fixture itself is synthesized at test time with `say`, so the models are
       # the ONLY external dependency — cached, they cost nothing; cold, ~6s.
@@ -161,15 +198,20 @@ jobs:
           # (Sparkle ships an XCFramework). They are all content addressed by `Package.resolved`,
           # so a stale entry cannot silently stand in for a rebuild of the code under test — the
           # cache key changes the moment a dependency version does.
+          #
+          # The key also carries the Swift version (from the report step). `runner.os` is "macOS"
+          # on every image, so without it a run on one image restores what another image's SwiftPM
+          # wrote; while branches cut before and after the move to macos-26 are both open, the two
+          # images run side by side. A new Swift costs one cold resolution (~26s), nothing more.
           path: |
             .build/repositories
             .build/checkouts
             .build/artifacts
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-${{ runner.os }}-swift${{ steps.toolchain.outputs.swift }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-swift${{ steps.toolchain.outputs.swift }}-
 
       # Blast radius, stated deliberately: this fetch now gates the whole `test` job, so an
-      # unreachable fixture server fails all 934 unit tests rather than just an isolated guard job.
+      # unreachable fixture server fails the entire suite rather than just an isolated guard job.
       # Accepted, because `PARLEY_REQUIRE_AMI_FIXTURE=1` means a missing fixture MUST fail loudly —
       # the entire reason that env var exists is that these tests once skipped silently in CI for
       # months while the suite reported green. A fetch failure that merely disabled the guard would
@@ -231,13 +273,22 @@ jobs:
   # comment block in scripts/verify-regression-tests.sh for the full semantics.
   red-first:
     if: github.event_name == 'pull_request' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    runs-on: macos-15
+    runs-on: macos-26  # the same image as `test`, for the same reason (see there)
     timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # the gate diffs against, and checks out, the merge base
+
+      # The same report as in `test` (see the comment there): this job builds and runs tests with
+      # the same toolchain, so its summary says which one, and what that toolchain cannot run.
+      - name: Report the toolchain and the tests it cannot run
+        id: toolchain
+        run: |
+          set -euo pipefail
+          bash scripts/toolchain-report.sh | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "swift=$(bash scripts/toolchain-report.sh --swift-version)" >> "$GITHUB_OUTPUT"
 
       - name: Cache diarization models
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -263,12 +314,17 @@ jobs:
           # (Sparkle ships an XCFramework). They are all content addressed by `Package.resolved`,
           # so a stale entry cannot silently stand in for a rebuild of the code under test — the
           # cache key changes the moment a dependency version does.
+          #
+          # The key also carries the Swift version (from the report step). `runner.os` is "macOS"
+          # on every image, so without it a run on one image restores what another image's SwiftPM
+          # wrote; while branches cut before and after the move to macos-26 are both open, the two
+          # images run side by side. A new Swift costs one cold resolution (~26s), nothing more.
           path: |
             .build/repositories
             .build/checkouts
             .build/artifacts
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-${{ runner.os }}-swift${{ steps.toolchain.outputs.swift }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-swift${{ steps.toolchain.outputs.swift }}-
 
       # KNOWN GAP: this job does not fetch the AMI fixture or set PARLEY_REQUIRE_AMI_FIXTURE, so
       # DiarizationRegressionTests SKIP here. The gate counts a skip as PASSED
