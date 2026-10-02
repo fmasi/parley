@@ -213,13 +213,19 @@ jobs:
       # The release tooling (appcast, release notes, publish.sh, the Sparkle feed verifier). A break
       # here ships a broken auto-update feed, which every installed client fails silently. Stdlib
       # Python + bash only, a few seconds; it runs after the suite so verify-ed-signature reuses the
-      # debug build. `just release-tools` runs the same three commands.
+      # debug build. `just release-tools` runs the same four commands.
+      #
+      # The fourth tests the red-first gate itself (scripts/verify-regression-tests.sh) against a
+      # fake `swift`: a parent that cannot be resolved, built, linked or run must fail the gate as
+      # "could not build the parent", never pass it as RED (#260). It is a step here, not in the
+      # `red-first` job, so it also runs on pushes to main and costs no second macOS job.
       - name: Test the release tooling
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py'
           bash scripts/test-publish.sh
           bash scripts/test-verify-release-feed.sh
+          bash scripts/test-verify-regression-tests.sh
 
   # Red-first gate: the PR's changed tests must FAIL at the merge base and PASS at HEAD.
   #
@@ -228,7 +234,10 @@ jobs:
   # or silently skips (the AMI diarization guard in CI). This job checks out the merge base,
   # overlays only the PR's changed test files, and requires them to be RED there and GREEN at
   # HEAD. Tests-only PRs and files marked 'RED-FIRST-EXEMPT: <reason>' pass trivially — see the
-  # comment block in scripts/verify-regression-tests.sh for the full semantics.
+  # comment block in scripts/verify-regression-tests.sh for the full semantics. A non-zero exit
+  # at the merge base is RED only when the tests ran and failed, or a changed test file did not
+  # compile; a merge base that cannot be resolved, built, linked or run FAILS this job as "could
+  # not build the parent" (#260).
   red-first:
     if: github.event_name == 'pull_request' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: macos-15

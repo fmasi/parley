@@ -27,11 +27,13 @@ test:
       -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 
 # Stdlib only (system python3 + bash 3.2); the feed test builds verify-ed-signature itself.
+# The last line tests the red-first gate's own classifier against a fake `swift` (a few seconds).
 # test.yml `test`, last step: the release-tooling tests that guard the Sparkle feed and appcast
 release-tools:
     python3 -m unittest discover -s scripts -p 'test_*.py'
     bash scripts/test-publish.sh
     bash scripts/test-verify-release-feed.sh
+    bash scripts/test-verify-regression-tests.sh
 
 # CI passes the merge base with the PR's base branch, so this does too (not the raw base ref).
 # test.yml `red-first`: changed tests must be RED at the merge base, GREEN at HEAD
