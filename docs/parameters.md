@@ -54,7 +54,7 @@ The cluster rule has three constants. They are **not** config keys (`EchoDedupli
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
 | Archive bitrate | `archive_bitrate_kbps` | `64` | AAC encoding bitrate in kbps for the stereo archive file (L=mic, R=system). Lower values save space at some quality cost. |
-| Archive storage limit | `audio_archive_limit_hours` | `15` | Maximum total hours of `.m4a` archive files to keep in the recording directory. When exceeded, `StorageManager` deletes the oldest files first. Transcripts are never deleted. |
+| Archive storage limit | `audio_archive_limit_hours` | `15` | Maximum total hours of `.m4a` archive files to keep in the recording directory. When exceeded, `StorageManager` deletes the oldest files first. Transcripts are never deleted, and neither is the audio of a session that is still being recorded, processed or awaiting recovery (#230): usage can stay over the limit until it finishes. |
 | Merge chunked audio | `merge_chunked_audio` | `true` | When true, concatenates per-chunk `.m4a` files into a single archive at the end of a chunked session. Uses AVFoundation passthrough (lossless) where possible, falls back to AAC re-encode. Set to `false` to keep individual chunk files. |
 
 ---
