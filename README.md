@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2480%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2530%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -96,7 +96,7 @@ open /Applications/Parley.app
 On first launch, macOS asks for **Screen & System Audio Recording** permission. The default engine
 downloads its model (~500 MB) on first use and caches it after that.
 
-**Requirements:** macOS 15+ (Sequoia), Apple Silicon (M1–M5), Xcode Command Line Tools. *(The Apple
+**Requirements:** macOS 15+ (Sequoia), Apple Silicon (M1–M5); Xcode to build from source. *(The Apple
 SpeechAnalyzer engine additionally requires macOS 26+.)*
 
 ## How it works — the hard parts
@@ -131,7 +131,8 @@ faithful and private.
   Engine (`.cpuAndNeuralEngine`); pyannote/WeSpeaker/VBx diarization runs through CoreML's `.all`,
   spread across the Neural Engine and GPU.
 
-For the full design — XPC architecture, ScreenCaptureKit constraints, the pipeline — see
+For the full design — the Core Audio tap, capture reliability and healing, the recording
+lifecycle, the pipeline — see
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Transcription engines
@@ -185,13 +186,13 @@ record trustworthy.
 
 ```bash
 # Transcribe audio files (system + optional mic stream)
-.build/debug/Parley transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
+"$(swift build --show-bin-path)/Parley" transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
 
 # Rename detected speakers interactively
-.build/debug/Parley rename -i transcript.json
+"$(swift build --show-bin-path)/Parley" rename -i transcript.json
 
 # Summarize a transcript with a local/remote LLM
-.build/debug/Parley summarize -i transcript.json
+"$(swift build --show-bin-path)/Parley" summarize -i transcript.json
 
 # Benchmark engines (speed + WER) across languages
 swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,speech
@@ -200,18 +201,18 @@ swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engi
 ## Project layout
 
 ```
-TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC client, chunk processing
-TranscriberCore/       engines, diarization, echo-dedup, speaker reconciliation, summaries, transcript I/O
+TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC client, windows and dialogs
+TranscriberCore/       recording lifecycle, chunk processing, engines, diarization, echo detection, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2480 tests across 272 suites
+SwiftTests/            2530 tests across 278 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — XPC design, ScreenCaptureKit constraints, the dual-stream model
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the four targets, the Core Audio tap, capture reliability and healing, the recording lifecycle, the record
 - [docs/pipeline.md](docs/pipeline.md) — end-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) — every tunable parameter, with config keys and defaults
 - [docs/gotchas.md](docs/gotchas.md) — hard-won platform gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats)

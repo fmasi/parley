@@ -63,12 +63,12 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 ### Shared Logic (TranscriberCore target)
 - `TranscriberCore/AppState.swift` -- Observable state machine: idle -> recording -> transcribing -> idle, `interruptionWarning` for benign notices, sticky `alarms` (`CaptureAlarmRegistry`: helper snapshots applied, app alarms raised/acknowledged)
 - `TranscriberCore/AudioConverter.swift` -- converts arbitrary PCM audio buffers to fixed 48kHz mono Int16 via AVAudioConverter, auto-detects source format changes (e.g. mic switch)
-- `TranscriberCore/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
+- `TranscriberCore/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session; counts its unfinished chunks so a Stop can bound its wait on them (#226)
 - `TranscriberCore/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
 - `TranscriberCore/ChunkRotationClient.swift` -- protocol seam: the one capability ChunkRotator needs from the XPC audio client
 - `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, processing issues, echo cluster verdicts, and atomic JSON persistence
 - `TranscriberCore/RecordingCaptureClient.swift` -- protocol seam (refines ChunkRotationClient) for everything RecordingCoordinator needs from the XPC capture client, plus the AudioPaths stop-result type; lets orchestration be tested with a fake
-- `TranscriberCore/RecordingCoordinator.swift` -- recording lifecycle + crash-recovery orchestration (start/stop, XPC-crash retry/restart, abandoned-session salvage), moved out of MenuView (#139 PR-6) so it is unit-testable; app-side UI effects (notifications, rename dialog) are injected closures
+- `TranscriberCore/RecordingCoordinator.swift` -- recording lifecycle + crash-recovery orchestration (start/stop, XPC-crash retry/restart, abandoned-session salvage), moved out of MenuView (#139 PR-6) so it is unit-testable; app-side UI effects (notifications, rename dialog) are injected closures; the wait on chunk processing is bounded by the length of the audio still being processed (never under 5 min), a session left behind is finished once, never twice (`chunksStillProcessing`), and the last chunk is re-read only once its files stop growing (#226, #232)
 - `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization; owns the chunked pipeline (setup/teardown, finalize)
 - `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, summarize, downloadModels) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `summary: SummaryConfig`
@@ -213,7 +213,7 @@ swift build
 # The whole suite, as `just test` and CI run it. --no-parallel is load-bearing (AGENTS.md): run in
 # parallel the suite wedges.
 swift test --no-parallel --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 2480 tests across 272 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2530 tests across 278 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
 # Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
@@ -254,13 +254,13 @@ record of its build, and the live log does not carry it either.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 87 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 87 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.
