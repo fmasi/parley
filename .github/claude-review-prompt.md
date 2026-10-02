@@ -48,7 +48,11 @@ Report only material problems: no praise, no summary of what the code does, no s
    (`RecordingSentinel`, segment discovery and stitching) must not drop a segment. Log privacy
    (docs/pipeline.md "Log privacy conventions"): speaker names and transcript text `.private`,
    paths and filenames `.sensitive`, only counts and status `.public`. The summary API key lives
-   in the Keychain only (`KeychainStore`), never in config.json, logs or tests.
+   in the Keychain only (`KeychainStore`), never in config.json, logs or tests. Flag the name of a
+   real recording (six digits, a dash and a capitalised title, such as `HHMMSS-Title`), a real
+   path under a home directory, a person's name or words quoted from a real transcript or summary
+   in code, comments, tests, docs or scripts: describe the recording or use a synthetic lowercase
+   name (`110851-standup`). The `recording-names` pre-commit hook catches only the name pattern.
 6. **The updater and dependencies.** Sparkle: the feed URL, `SUPublicEDKey`, EdDSA verification
    (`VerifyEdSignatureCore`), `scripts/release.sh` / `publish.sh` and the appcast tooling. Any
    weakening is Critical. `Package.swift` / `Package.resolved` changes: say what moved (FluidAudio

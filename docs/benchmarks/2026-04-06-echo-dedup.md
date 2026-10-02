@@ -17,25 +17,25 @@ CLI re-processing of AAC archives via `Parley transcribe -i file.m4a`. Stereo AA
 
 | Recording | Date | Description |
 |-----------|------|-------------|
-| 191712-Youtube test | Apr 5 | YouTube cycling video, Frederick speaks at end |
-| 205302-Only Youtube | Apr 5 | YouTube only, Frederick speaks briefly between segments |
-| 210139-Youtube test 2 | Apr 5 | YouTube space video, Frederick narrates over |
-| 211328-youtube at 2113 | Apr 5 | YouTube space video, short |
-| 182322-Only Youtube | Apr 6 | YouTube female vocal, Frederick silent |
-| 182600-Youtube + Me | Apr 6 | YouTube female vocal + Frederick talking |
-| 183048-Multiple speakers + me | Apr 6 | 3-speaker male podcast + Frederick |
+| R1 | Apr 5 | YouTube cycling video, Frederick speaks at end |
+| R2 | Apr 5 | YouTube only, Frederick speaks briefly between segments |
+| R3 | Apr 5 | YouTube space video, Frederick narrates over |
+| R4 | Apr 5 | YouTube space video, short |
+| R5 | Apr 6 | YouTube female vocal, Frederick silent |
+| R6 | Apr 6 | YouTube female vocal + Frederick talking |
+| R7 | Apr 6 | 3-speaker male podcast + Frederick |
 
 ## Results
 
 | Recording | Legacy Removed | Enhanced Removed | Delta | Surviving Local |
 |-----------|---------------|-----------------|-------|----------------|
-| 191712-Youtube test | 32 | 38 | +6 | 1 |
-| 205302-Only Youtube | 15 | 18 | +3 | 5 |
-| 210139-Youtube test 2 | 6 | 7 | +1 | 7 |
-| 211328-youtube at 2113 | 9 | 10 | +1 | 0 |
-| 182322-Only Youtube (female) | 16 | 21 | +5 | 0 |
-| 182600-Youtube + Me | 20 | 25 | +5 | 10 |
-| 183048-Multiple speakers + me | 31 | 39 | +8 | 13 |
+| R1 | 32 | 38 | +6 | 1 |
+| R2 | 15 | 18 | +3 | 5 |
+| R3 | 6 | 7 | +1 | 7 |
+| R4 | 9 | 10 | +1 | 0 |
+| R5 | 16 | 21 | +5 | 0 |
+| R6 | 20 | 25 | +5 | 10 |
+| R7 | 31 | 39 | +8 | 13 |
 | **Total** | **129** | **158** | **+29 (22%)** | |
 
 ## False Positive Analysis
@@ -76,13 +76,13 @@ Summaries generated via Gemma 4 E4B Instruct (unsloth/gemma-4-e4b-it, Q6_K_XL) w
 
 | Recording | Verdict | Notes |
 |-----------|---------|-------|
-| 182322-Only Youtube | PASS | Remote-only, clean attribution |
-| 182600-Youtube + Me | PASS | Frederick's test narration correctly treated as non-meeting content |
-| 183048-Multiple speakers + me | PARTIAL | 3 known bleed segments correctly excluded; minor bleed attribution at ~124-128s |
-| 191712-Youtube test | PASS | Clean attribution |
-| 205302-Only Youtube | PASS | Local speech correctly included |
-| 210139-Youtube test 2 | MINOR | Bleed phrase "out of the atmosphere" leaked via a mixed ASR segment |
-| 211328-youtube at 2113 | PASS | Remote-only, clean |
+| R5 | PASS | Remote-only, clean attribution |
+| R6 | PASS | Frederick's test narration correctly treated as non-meeting content |
+| R7 | PARTIAL | 3 known bleed segments correctly excluded; minor bleed attribution at ~124-128s |
+| R1 | PASS | Clean attribution |
+| R2 | PASS | Local speech correctly included |
+| R3 | MINOR | Bleed phrase "out of the atmosphere" leaked via a mixed ASR segment |
+| R4 | PASS | Remote-only, clean |
 
 ## WAV vs AAC Comparison
 

@@ -4,7 +4,9 @@
 # Usage:
 #   bash package_app.sh [--release] [--install]
 #
-#   --release        Build in release mode (default: debug)
+#   --release        Build in release mode (default: debug). A debug build is unoptimised
+#                    (-Onone): for development only. scripts/dev.py passes --release unless it
+#                    is given --debug-build, and scripts/release.sh always does (#271).
 #   --install        Copy finished .app to /Applications
 #
 # Output: dist/Parley.app
@@ -68,6 +70,12 @@ fi
 BUILD_NUMBER="$(git show -s --format=%ct HEAD)"
 
 echo "   Version: $VERSION (build: $BUILD_NUMBER, git: $GIT_DESCRIPTION)"
+# The app and the capture helper are compiled in this one configuration; the helper writes it into
+# each recording's captureStart diagnostic event as "build" (#271).
+echo "   Configuration: $CONFIG"
+if [[ "$CONFIG" == "debug" ]]; then
+    echo "   note: a debug build is unoptimised (-Onone) -- not for recording real meetings or for timings. Pass --release for those."
+fi
 
 # Dev-build note: a build from a commit that isn't exactly a release tag gets a build number higher
 # than the last release's, so Sparkle on THIS machine won't offer the real release as an update
@@ -170,12 +178,12 @@ codesign --force --sign "$SIGN_ID" "$APP"
 # a subtle signing error is caught here, not at launch as a cryptic "damaged or incomplete" alert.
 codesign --verify --deep --strict "$APP"
 
-echo "==> Done: $APP"
+echo "==> Done: $APP ($CONFIG build)"
 
 # ── Install ───────────────────────────────────────────────────────────────────
 if [[ "$INSTALL" == "1" ]]; then
     echo "==> Installing to /Applications ..."
     rm -rf "/Applications/Parley.app"
     cp -R "$APP" /Applications/
-    echo "==> Installed: /Applications/Parley.app"
+    echo "==> Installed: /Applications/Parley.app ($CONFIG build)"
 fi

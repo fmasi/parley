@@ -2,7 +2,10 @@
 """
 Benchmark script: WhisperKit vs Python transcription pipeline.
 
-Run with: python scripts/benchmark.py
+Run with: python scripts/benchmark.py <system.wav> [<system.wav> ...]
+   or:    PARLEY_BENCHMARK_INPUTS="<system.wav>:<system.wav>" python scripts/benchmark.py
+Each argument is a recording's system-audio WAV; its microphone WAV is expected next to it as
+<name>_mic.wav (the app's naming). The inputs are your own local recordings: no path is kept here.
 Will prompt for sudo password (needed for powermetrics only).
 
 Outputs to ~/Library/Application Support/Parley/benchmark/:
@@ -13,6 +16,7 @@ Outputs to ~/Library/Application Support/Parley/benchmark/:
     <label>-iostat.csv           — kb_per_transfer, transfers_per_sec, mb_per_sec
 """
 
+import argparse
 import csv
 import json
 import os
@@ -37,18 +41,41 @@ TELEMETRY_DIR = REPORT_DIR / f"telemetry-{TIMESTAMP}"
 WHISPERKIT_BIN = Path(".build/debug/Parley")
 PYTHON_BIN = sys.executable
 
-BENCHMARKS = [
-    {
-        "name": "Jon Interview (38min)",
-        "system": HOME / "Documents/Recordings/2026-04-01/152936-Jon Interview.wav",
-        "mic": HOME / "Documents/Recordings/2026-04-01/152936-Jon Interview_mic.wav",
-    },
-    {
-        "name": "Gustavo Part 2 (17min)",
-        "system": HOME / "Documents/Recordings/2026-04-01/130007-gustavo part 2.wav",
-        "mic": HOME / "Documents/Recordings/2026-04-01/130007-gustavo part 2_mic.wav",
-    },
-]
+INPUTS_ENV = "PARLEY_BENCHMARK_INPUTS"
+
+
+def resolve_benchmarks(argv: list[str]) -> list[dict]:
+    """The recordings to benchmark, from the arguments or else from PARLEY_BENCHMARK_INPUTS.
+
+    Each input is a system-audio WAV; the mic WAV is `<name>_mic.wav` beside it. Recordings are
+    labelled by position ("Recording 1"), so no file name reaches the report's headings.
+    Exits with a message when no input is given or a file is missing.
+    """
+    parser = argparse.ArgumentParser(
+        description="Benchmark the transcription pipelines on your own recordings.",
+        epilog=f"With no arguments, the inputs are read from {INPUTS_ENV} "
+               f"(paths separated by '{os.pathsep}').",
+    )
+    parser.add_argument(
+        "system_wav", nargs="*", type=Path,
+        help="a recording's system-audio WAV (its mic WAV is <name>_mic.wav beside it)",
+    )
+    systems = parser.parse_args(argv).system_wav
+    if not systems:
+        systems = [Path(p) for p in os.environ.get(INPUTS_ENV, "").split(os.pathsep) if p]
+    if not systems:
+        parser.error(f"no recordings given: pass system WAV paths or set {INPUTS_ENV}")
+
+    benchmarks = []
+    for i, system in enumerate(systems, start=1):
+        system = system.expanduser()
+        mic = system.with_name(f"{system.stem}_mic{system.suffix}")
+        for path in (system, mic):
+            if not path.exists():
+                print(f"ERROR: Audio file not found: {path}")
+                sys.exit(1)
+        benchmarks.append({"name": f"Recording {i}", "system": system, "mic": mic})
+    return benchmarks
 
 
 # ── Telemetry collectors ──
@@ -331,6 +358,9 @@ def run_benchmark(
 # ── Main ──
 
 def main():
+    # Before the sudo prompt, so --help and a wrong path need no password.
+    benchmarks = resolve_benchmarks(sys.argv[1:])
+
     print("╔═══════════════════════════════════════════╗")
     print("║  Transcription Pipeline Benchmark         ║")
     print("╚═══════════════════════════════════════════╝")
@@ -354,13 +384,6 @@ def main():
     # Setup dirs
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Validate audio files
-    for b in BENCHMARKS:
-        for key in ("system", "mic"):
-            if not b[key].exists():
-                print(f"ERROR: Audio file not found: {b[key]}")
-                sys.exit(1)
 
     # Build if needed
     if not WHISPERKIT_BIN.exists():
@@ -405,7 +428,7 @@ def main():
         f"macOS: {macos_ver}",
         "",
     ]
-    for b in BENCHMARKS:
+    for b in benchmarks:
         sz_sys = b["system"].stat().st_size / (1024 * 1024)
         sz_mic = b["mic"].stat().st_size / (1024 * 1024)
         report.append(f"  {b['name']}: system={sz_sys:.0f}MB, mic={sz_mic:.0f}MB")
@@ -422,7 +445,7 @@ def main():
     report.append("WhisperKit (large-v3-turbo, CoreML)")
     report.append("═══════════════════════════════════════════")
 
-    for i, b in enumerate(BENCHMARKS):
+    for i, b in enumerate(benchmarks):
         out = Path(f"/tmp/bench-wk-{i}.json")
         run_benchmark(
             name=f"{b['name']} — WhisperKit",
@@ -451,7 +474,7 @@ def main():
     if not conda:
         print("WARNING: No conda env active. Python benchmarks may fail.")
 
-    for i, b in enumerate(BENCHMARKS):
+    for i, b in enumerate(benchmarks):
         out = Path(f"/tmp/bench-py-{i}.json")
         run_benchmark(
             name=f"{b['name']} — Python",

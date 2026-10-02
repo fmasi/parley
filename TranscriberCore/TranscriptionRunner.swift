@@ -46,6 +46,8 @@ public final class TranscriptionRunner {
     var failSetupForTesting = false
     /// Test seam: `finalize` sleeps this long before doing anything.
     var finalizeDelayForTesting: Duration?
+    /// Test seam: `run` takes its engine and diarizer from here rather than `prepareEngine`. Never set in production.
+    var engineFactoryForTesting: ((Config) throws -> (any TranscriptionEngine, (any DiarizationProvider)?))?
     /// Where the transcript's looks at its folder run — which chunk files are there, the leftover WAVs, the mic file —
     /// off the main actor, bounded (L review 158). The coordinator hands over its own; tests inject one that hangs.
     public var folderReads: FolderReads = .shared
@@ -74,18 +76,7 @@ public final class TranscriptionRunner {
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
-        applyDiarizerConfig(config)
-
-        let engineID = config.engine
-        if transcriber == nil || lastEngineID != engineID {
-            Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")
-            transcriber = try createEngine(for: engineID, config: config)
-            lastEngineID = engineID
-        }
-
-        guard let transcriber = transcriber else {
-            throw RunnerError.failed("Failed to initialize transcription engine")
-        }
+        let (transcriber, diarizer) = try engineFactoryForTesting?(config) ?? prepareEngine(config: config)
 
         let isDualStream = micAudio != nil
         // No mic — tuples with system-only URLs (the mic is skipped below).
@@ -135,6 +126,7 @@ public final class TranscriptionRunner {
                 fileSize: found.sizes[segmentPair.system.path] ?? 0,
                 source: "remote",
                 transcriber: transcriber,
+                diarizer: diarizer,
                 label: "system\(index > 0 ? "-\(index + 1)" : "")",
                 audioSource: .system,
                 config: config
@@ -161,6 +153,7 @@ public final class TranscriptionRunner {
                         fileSize: found.sizes[micPath.path] ?? 0,
                         source: "local",
                         transcriber: transcriber,
+                        diarizer: diarizer,
                         label: "mic\(index > 0 ? "-\(index + 1)" : "")",
                         audioSource: .microphone,
                         config: config
@@ -818,7 +811,7 @@ public final class TranscriptionRunner {
 
     /// Ensures the cached transcription engine + diarizer for `config` are ready — creating or
     /// rebuilding them as needed. This is the single source of truth for how the chunked pipeline
-    /// picks its engine/diarizer from `config` (mirrors what `setupChunkedPipeline` used to do
+    /// and `run` pick their engine/diarizer from `config` (mirrors what `setupChunkedPipeline` used to do
     /// inline); crash recovery (`ChunkedSessionRecovery`) calls this too, so a recovered session is
     /// transcribed with the exact same engine construction as a live recording — never a second,
     /// diverging init path (#135).
@@ -1094,6 +1087,7 @@ public final class TranscriptionRunner {
         fileSize: Int,
         source: String,
         transcriber: any TranscriptionEngine,
+        diarizer: (any DiarizationProvider)?,
         label: String,
         audioSource: AudioSourceType,
         config: Config
@@ -1120,7 +1114,9 @@ public final class TranscriptionRunner {
 
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
-        if let diarizer = diarizer {
+        // No words, nothing to label: the stream is not diarized (as in `ChunkProcessor`). FluidAudio throws
+        // `noSpeechDetected` on audio it finds no speech in, and here that throw fails the whole run (#264).
+        if let diarizer, !segments.isEmpty {
             // Run VAD concurrently with diarization (both read the same audio file)
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)

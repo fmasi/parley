@@ -80,7 +80,7 @@ Afterwards the saved record states truthfully how much of each side was captured
    the concatenator re-encode, and the only lossless copy get deleted with the remote voice
    duplicated into the local channel. Repeated short answers ("Yes." … "Yes.", minutes apart) were
    deleted as duplicates. `dual_stream: true` on 33 of 125 transcripts that have no remote audio.
-   The summary of the 09-24 call reads "Frederic met to prepare…".
+   The summary of the 09-24 call reads as if both sides had been there.
 
 **What changes.**
 

@@ -60,8 +60,9 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     private var healedAt: Double?
     private var onReopen: Reopen = .fresh
     /// A grant that arrived while a rung was in flight: it runs when that rung's result lands (final review
-    /// H-I3). A gate close keeps it (the rung is forgotten, not the grant); `forgetEverything` does not.
-    private var grantPending = false
+    /// H-I3). A gate close keeps it (the rung is forgotten, not the grant); `forgetEverything` does not,
+    /// so `TapHealer` reads it before the reset at sleep and runs the grant at the wake (#235).
+    public private(set) var grantPending = false
     /// The rung whose heartbeat the ladder is waiting for; `nil` = none.
     public private(set) var awaitedToken: Int?
     private var nextToken = 1
@@ -248,8 +249,9 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         exhausted = false
     }
 
-    /// Wake, `srst`, a new session: the next tap is built with the permission as it is now, so a pending
-    /// grant goes too.
+    /// Wake, `srst`, a new session: a pending grant goes too. After `srst` or in a new session the next
+    /// tap is built with the permission as it is now; a wake builds nothing, so `TapHealer` carries the
+    /// grant across the sleep itself (#235).
     private mutating func forgetEverything() {
         endEpisode()
         onReopen = .fresh

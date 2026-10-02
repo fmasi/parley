@@ -147,6 +147,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SystemAudioRecordingPermission.swift` -- private TCC SPI wrapper (`dlsym`) for `kTCCServiceAudioCapture`; preflight is cached per process, so live checks go through the helper (gotcha #70, docs/app-store-blockers.md)
 - `TranscriberCore/PathDisplay.swift` -- prefix-anchored `~` abbreviation of filesystem paths for display (shared by Setup + Settings)
 - `TranscriberCore/RecordingTimer.swift` -- pure elapsed-time formatting (mm:ss / h:mm:ss) for the menu bar live timer
+- `TranscriberCore/BuildConfiguration.swift` -- whether this binary is a debug or a release build (`#if DEBUG`), with the stable names `"debug"` / `"release"`; the capture helper stamps it into `captureStart` as `build` (#271)
 - `TranscriberCore/Log.swift` -- os.Logger extension with 6 category loggers (audio, transcription, state, config, permissions, files)
 - `TranscriberCore/AudioSourceResolver.swift` -- detects input format (dual WAV or stereo AAC), splits stereo AAC channels (L=local mic, R=remote system) for pipeline re-ingestion
 - `TranscriberCore/OutputDirectory.swift` -- `ensureExists`: creates a caller-supplied output directory (with intermediates) before Core writes into it, or throws `OutputDirectoryError` naming it (#246); called by `AudioSourceResolver`'s split and by the CLI for `--output-dir`, deliberately not by `TranscriptionRunner.run()` (the app's stop/recovery path must fail visibly if its folder vanished)
@@ -205,7 +206,8 @@ is installed matches what you just built, so the next recording exercises the ne
 
 Each recording also writes a `.diag.jsonl` beside its audio — a per-session event log (format
 detection, device changes, restarts, anomalies). Read it before theorising; it frequently names the
-fault outright.
+fault outright. Its `captureStart` event says which kind of build recorded it: `"build": "release"` or
+`"debug"` (#271). A timing or an allocation count from a debug build is not the shipped app's.
 
 ## Documentation
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
@@ -226,8 +228,10 @@ See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging refe
 # All logs (debug + info + error)
 /usr/bin/log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug
 
-# Via dev.py (launches app + tails log)
+# Via dev.py (builds a RELEASE build, installs, launches + tails log; `--debug` is about the log, not the build)
 python3 scripts/dev.py --debug
+# The fast inner loop: an unoptimised debug build. Not for real meetings or for timings (gotcha 84)
+python3 scripts/dev.py --debug-build
 ```
 
 ## Packaging

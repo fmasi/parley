@@ -442,6 +442,82 @@ import Testing
         #expect(provenance(await evidence.finalize(sessionId: "s", directory: d)).remoteCoverage?.deliveredSeconds == 30)
     }
 
+    // MARK: - Coverage honesty (#229)
+
+    /// #229: a helper dies, and its last status pull stands in for it at the first finalize. Its real `captureStop`,
+    /// drained afterwards, reaches a SECOND finalize of the same session (the transcript failed; the salvage builds
+    /// again): it REPLACES that helper's stand-in. The record never says stand-in + stop.
+    @Test func aRealStopAtASecondFinalizeReplacesItsHelpersStandIn() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.mergeHelperDrain(wire([captureStop(remote: 40, local: 40, helper: "1000-0", at: 40)]))   // a helper that stopped
+        evidence.noteCoverage(statusPull(remote: 60, local: 60, helper: "2000-0"))                        // one that died: its last pull
+        let first = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(first.remoteCoverage?.deliveredSeconds == 100, "40 s stopped + the 60 s stand-in")
+        // The dead helper's own stop turns up after all, with nothing bound: into the ring.
+        evidence.mergeHelperDrain(wire([captureStop(remote: 65, local: 65, helper: "2000-0", at: 70)]))
+        let second = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(second.remoteCoverage?.deliveredSeconds == 105, "40 s + the real stop's 65 s — never 40 + 60 + 65")
+        #expect(second.remoteCoverage?.expectedSeconds == 105)
+        #expect(second.localCoverage?.deliveredSeconds == 105 && second.localCoverage?.expectedSeconds == 105)
+        #expect(second.remoteCoverage?.coverageIncomplete == false, "a whole record: no lower-bound mark")
+        // A third build changes nothing: neither the stand-in nor the stop is counted again.
+        let third = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(third.remoteCoverage?.deliveredSeconds == 105 && third.localCoverage?.deliveredSeconds == 105)
+    }
+
+    /// … and the same when the late stop comes through a pending retry's attribution: appended to the session's
+    /// live log, which the second build merges.
+    @Test func aRealStopAttributedAfterTheFirstFinalizeReplacesItsHelpersStandIn() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let evidence = SessionEvidence()
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.noteCoverage(statusPull(remote: 60, local: 60, helper: "2000-0"))
+        let first = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(first.remoteCoverage?.deliveredSeconds == 60, "the stand-in")
+        await evidence.attributeHelperDrain(wire([captureStop(remote: 65, local: 65, helper: "2000-0", at: 70)]), toOneOf: [("s", d)])
+        let second = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(second.remoteCoverage?.deliveredSeconds == 65, "the real stop's — never 60 + 65")
+        #expect(second.localCoverage?.deliveredSeconds == 65)
+    }
+
+    /// #229: a build whose folder does not answer is made from this process's events alone — the coverage a crashed
+    /// helper left on disk is not in it. Both sides' seconds are then lower bounds, and marked so (`coverage_incomplete`:
+    /// the summary says "at least"). A later build the folder answers is whole again, and unmarked.
+    @Test func aBuildWhoseFolderDoesNotAnswerMarksBothCoveragesAsLowerBounds() async throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let hung = HungStep()
+        defer { hung.release() }
+        let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", beforeEachRead: { name in
+            if name == "evidence: build" { hung.hang() }
+        }))
+        evidence.folderDeadline = 0.2
+        evidence.beginCapture(sessionId: "s", directory: d)
+        evidence.noteCoverage(statusPull(remote: 60, local: 60, helper: "1000-0"))   // a helper that crashed: on disk only
+        evidence.beginCapture(sessionId: "s", directory: d)                             // the crash restart
+        evidence.mergeHelperDrain(wire([captureStop(remote: 30, local: 30, helper: "2000-0", at: 100)]))
+        let record = await evidence.finalize(sessionId: "s", directory: d)
+        #expect(hung.isHanging, "built while the folder was still not answering")
+        #expect(record.events.contains { $0.kind == .folderNotAnswering }, "said")
+        let partial = provenance(record)
+        #expect(partial.remoteCoverage?.deliveredSeconds == 30 && partial.localCoverage?.deliveredSeconds == 30, "the ring alone")
+        #expect(partial.remoteCoverage?.coverageIncomplete == true, "the remote side's seconds are a lower bound")
+        #expect(partial.localCoverage?.coverageIncomplete == true, "and the local side's")
+        let meta = partial.asMetadataDictionary()
+        #expect((meta["remote_coverage"] as? [String: Any])?["coverage_incomplete"] as? Bool == true)
+        #expect((meta["local_coverage"] as? [String: Any])?["coverage_incomplete"] as? Bool == true)
+
+        // The folder answers again; the salvage builds the record a second time, from everything.
+        hung.release()
+        _ = await evidence.folderReads.read("settle", folder: d.path, seconds: 5) { 0 }   // the late build has left its queue
+        evidence.folderDeadline = 5
+        let whole = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        #expect(whole.remoteCoverage?.deliveredSeconds == 90, "60 s from the crashed helper's last pull + 30 s from the stop")
+        #expect(whole.remoteCoverage?.coverageIncomplete == false && whole.localCoverage?.coverageIncomplete == false,
+                "a record built from everything states its seconds exactly")
+    }
+
     /// L11 review 68: a start that never became a recording leaves no orphan `.diag.live.jsonl` behind.
     @Test func aDiscardedSessionLeavesNoLiveLog() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }

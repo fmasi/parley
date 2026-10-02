@@ -739,3 +739,135 @@ struct MeetingSummarizerReconstructedTests {
     }
 }
 
+
+/// #269: the summary's participant list is people only. A real summary opened with "Participants:
+/// A, B, Local Unknown, and Local Speaker 2" — the last two being lines nobody could be tied to and
+/// the other side's voice through the loudspeakers. Synthetic labels and text only.
+struct MeetingSummarizerParticipantsTests {
+
+    private let you = "Local Speaker 1", echo = "Local Speaker 2", them = "Remote Speaker 1"
+
+    /// A speaker-mode call: the user, the other side, and the other side's voice found as a second
+    /// speaker on the microphone — one of its lines matched and flagged, one left visible.
+    private func call(echoSpeaker: String = "Local Speaker 2") -> [[String: Any]] {
+        [
+            ["start": 0.0, "end": 4.0, "speaker": them, "source": "remote", "text": "the budget is approved"],
+            ["start": 0.5, "end": 4.5, "speaker": echoSpeaker, "source": "local", "text": "the budget is approved", "echo": true],
+            ["start": 5.0, "end": 8.0, "speaker": you, "source": "local", "text": "good news"],
+            ["start": 9.0, "end": 12.0, "speaker": echoSpeaker, "source": "local", "text": "half of both voices"],
+        ]
+    }
+
+    private func line(_ speaker: String, _ source: String, _ text: String, at start: Double = 20) -> [String: Any] {
+        ["start": start, "end": start + 2, "speaker": speaker, "source": source, "text": text]
+    }
+
+    /// One `metadata.echo_clusters` entry, as `EchoDeduplicator.ClusterVerdict.metadataDictionary` writes it.
+    private func cluster(_ label: String, _ verdict: String = "echo") -> [String: Any] {
+        ["label": label, "verdict": verdict, "track": "local", "chunk": 0, "segments": 2, "matched_segments": 1,
+         "seconds": 7.0, "matched_seconds": 4.0, "matched_remote": [them: 4.0]]
+    }
+
+    private func parse(_ segments: [[String: Any]], _ extra: [String: Any]) throws -> ([SummarySegment], SummaryMetadata) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("participants-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let metadata = extra.merging(["dual_stream": true, "recorded_at": "2026-01-05T10:00:00Z"]) { mine, _ in mine }
+        try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": segments]).write(to: url)
+        return try MeetingSummarizer.parseTranscriptForTesting(at: url)
+    }
+
+    private func participantsLine(_ segments: [SummarySegment], _ metadata: SummaryMetadata) throws -> String {
+        let message = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
+        return String(try #require(message.split(separator: "\n").first { $0.hasPrefix("Participants:") }))
+    }
+
+    @Test func anEchoVoiceAndUnattributedLinesAreNotParticipants() throws {
+        let (segments, metadata) = try parse(call() + [line("Local Unknown", "local", "mm-hm")], ["echo_clusters": [cluster(echo)]])
+        #expect(metadata.speakers == [them, you])
+        #expect(try participantsLine(segments, metadata) == "Participants: Remote Speaker 1, Local Speaker 1")
+        // Its visible line is kept — it mixes both people's words — under the channel's unattributed label.
+        #expect(segments.map(\.speaker) == [them, you, "Local Unknown", "Local Unknown"])
+        #expect(segments.map(\.text) == ["the budget is approved", "good news", "half of both voices", "mm-hm"])
+        let message = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
+        #expect(!message.contains(echo), "nothing in the prompt the model can make a participant of")
+        #expect(message.contains("[00:00:09] Local Unknown (local): half of both voices"))
+    }
+
+    /// `echo_clusters` keeps the label the check compared; the lines carry the name the user gave it.
+    @Test func anEchoVoiceTheUserRenamedIsNotAParticipant() throws {
+        let (segments, metadata) = try parse(call(echoSpeaker: "Dana"), [
+            "echo_clusters": [cluster(echo)], "speaker_names": [echo: "Dana"]])
+        #expect(metadata.speakers == [them, you])
+        #expect(segments.map(\.speaker) == [them, you, "Local Unknown"])
+    }
+
+    @Test func aRemoteUnattributedLineIsNotAParticipantAndKeepsItsLabel() throws {
+        let (segments, metadata) = try parse(call() + [line("Remote Unknown", "remote", "sorry, go on")], ["echo_clusters": [cluster(echo)]])
+        #expect(metadata.speakers == [them, you])
+        #expect(segments.last?.speaker == "Remote Unknown")
+        #expect(segments.last?.text == "sorry, go on")
+    }
+
+    /// The user never spoke: everything on the microphone is the other side's voice.
+    @Test func whenEveryLocalLineIsTheEchoVoiceOnlyTheOtherSideAttended() throws {
+        let onlyEcho = call().filter { $0["speaker"] as? String != you }
+        let (segments, metadata) = try parse(onlyEcho, ["echo_clusters": [cluster(echo)]])
+        #expect(metadata.speakers == [them])
+        #expect(try participantsLine(segments, metadata) == "Participants: Remote Speaker 1")
+        #expect(segments.map(\.speaker) == [them, "Local Unknown"])
+    }
+
+    /// The other half of the rule: with nothing judged echo the same call reaches the model exactly
+    /// as it always has — a second voice on this side is a person until the record says otherwise.
+    @Test func withoutAnEchoVoiceTheParticipantsAndThePromptAreUnchanged() throws {
+        for metadata in [[:], ["echo_clusters": [] as [Any]], ["echo_clusters": [cluster(echo, "kept")]]] as [[String: Any]] {
+            let (segments, parsed) = try parse(call(), metadata)
+            #expect(parsed.speakers == [them, you, echo])
+            #expect(segments.map(\.speaker) == [them, you, echo])
+            let asBefore = SummaryPromptBuilder.userMessage(
+                metadata: SummaryMetadata(sessionName: parsed.sessionName, date: parsed.date, durationSeconds: 12,
+                                          speakers: [them, you, echo], dualStream: true),
+                segments: [
+                    SummarySegment(start: 0, end: 4, speaker: them, text: "the budget is approved", source: "remote"),
+                    SummarySegment(start: 5, end: 8, speaker: you, text: "good news", source: "local"),
+                    SummarySegment(start: 9, end: 12, speaker: echo, text: "half of both voices", source: "local"),
+                ])
+            #expect(SummaryPromptBuilder.userMessage(metadata: parsed, segments: segments) == asBefore)
+        }
+    }
+
+    /// "Unknown" is an absence of attribution on any transcript, echo or not: its lines stay, and
+    /// it is not somebody who attended.
+    @Test func unattributedLinesAreNeverParticipants() throws {
+        let lines = [line("Alice", "", "ship it", at: 0), line("Unknown", "", "mm-hm", at: 3), line("Local Unknown", "local", "right", at: 6)]
+        let (segments, metadata) = try parse(lines, [:])
+        #expect(metadata.speakers == ["Alice"])
+        #expect(segments.map(\.speaker) == ["Alice", "Unknown", "Local Unknown"])
+    }
+
+    /// A name says who somebody is. When the user gave the echo voice the name of someone else in
+    /// the transcript, the lines under that name cannot be told apart: all of them stay that person's.
+    @Test func aNameTheEchoVoiceSharesWithAPersonStaysAParticipant() throws {
+        let renamed = call(echoSpeaker: "Robin").map { $0.merging(["speaker": $0["speaker"] as? String == you ? "Robin" : $0["speaker"]!]) { $1 } }
+        let (segments, metadata) = try parse(renamed, [
+            "echo_clusters": [cluster(echo)], "speaker_names": [echo: "Robin", you: "Robin"]])
+        #expect(metadata.speakers == [them, "Robin"])
+        #expect(segments.map(\.speaker) == [them, "Robin", "Robin"])
+    }
+
+    /// The likely rename: the user recognises the echo voice and gives it the other person's name.
+    @Test func anEchoVoiceNamedAfterTheOtherSideLeavesThatPersonAParticipant() throws {
+        let renamed = call(echoSpeaker: "Robin").map { $0.merging(["speaker": $0["speaker"] as? String == them ? "Robin" : $0["speaker"]!]) { $1 } }
+        let (segments, metadata) = try parse(renamed, [
+            "echo_clusters": [cluster(echo)], "speaker_names": [echo: "Robin", them: "Robin"]])
+        #expect(metadata.speakers == ["Robin", you])
+        #expect(segments.map(\.speaker) == ["Robin", you, "Robin"])
+    }
+
+    /// An echo voice is a voice on the microphone: a line on the other channel is never its line.
+    @Test func onlyLinesOnTheEchoVoicesOwnChannelLoseTheirLabel() throws {
+        let (segments, metadata) = try parse(call() + [line(echo, "remote", "the other channel")], ["echo_clusters": [cluster(echo)]])
+        #expect(segments.map(\.speaker) == [them, you, "Local Unknown", echo])
+        #expect(metadata.speakers == [them, you, echo])
+    }
+}
