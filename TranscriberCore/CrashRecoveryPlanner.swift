@@ -28,13 +28,17 @@ public enum CrashRecoveryPlanner {
     /// delete while the session is being processed (round 8 item 1).
     public static func sessionArchives(outputDirectory: URL, sessionId: String) -> [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        return names.filter { isArchive($0, of: sessionId) }.map { outputDirectory.appendingPathComponent($0) }
+    }
+
+    /// The name rule of `sessionArchives`: `<id>.m4a` or `<id>-<n>.m4a`. An id can start another (`a`, `a-2`): `a-2.m4a` is
+    /// then `a`'s chunk 2 or `a-2`'s merge, and counts as both (#230) — a name is only ever kept by this, never deleted.
+    static func isArchive(_ name: String, of sessionId: String) -> Bool {
+        guard name.hasSuffix(".m4a") else { return false }
+        if name == "\(sessionId).m4a" { return true }
         let prefix = "\(sessionId)-"
-        return names.filter { name in
-            guard name.hasSuffix(".m4a") else { return false }
-            if name == "\(sessionId).m4a" { return true }
-            guard name.hasPrefix(prefix) else { return false }
-            return Int(name.dropFirst(prefix.count).dropLast(".m4a".count)) != nil
-        }.map { outputDirectory.appendingPathComponent($0) }
+        guard name.hasPrefix(prefix) else { return false }
+        return Int(name.dropFirst(prefix.count).dropLast(".m4a".count)) != nil
     }
 
     /// Chunks on disk that `session.json` does not hold. An archive with no WAV counts (C-I4: a crash

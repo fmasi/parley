@@ -57,7 +57,8 @@ public enum StorageManager {
     }
 
     /// Enforce storage quota by deleting oldest .m4a files (recursive scan), never one of
-    /// `protectedFiles` — every file backing the record being written (round 7 item 1).
+    /// `protectedFiles` — every file backing the record being written (round 7 item 1) — nor an
+    /// archive of any session that still has state in its folder (#230).
     @discardableResult
     public static func enforceQuota(
         in directory: URL,
@@ -71,12 +72,14 @@ public enum StorageManager {
     /// `enforceQuota`, reporting what the protected files alone leave over the quota. `deadline` (L review 251): the pass
     /// stops walking there — a walk cut short deletes nothing (it has not weighed every archive, so it cannot know the
     /// oldest), and one stopped among its deletes keeps what is left. Either way the report says it did not finish.
+    /// `sessionsWithState`: a folder's in-flight sessions (#230); a parameter so a test can see when it is asked.
     public static func enforceQuotaReport(
         in directory: URL,
         limitHours: Int,
         bitrateKbps: Int,
         protectedFiles: [URL],
-        deadline: SuspendingClock.Instant? = nil
+        deadline: SuspendingClock.Instant? = nil,
+        sessionsWithState: (URL) -> Set<String>? = SessionState.sessionIdsWithState(in:)
     ) throws -> QuotaReport {
         let quota = quotaBytes(hours: limitHours, bitrateKbps: bitrateKbps)
         let pastDeadline = { deadline.map { SuspendingClock.now >= $0 } ?? false }
@@ -103,6 +106,8 @@ public enum StorageManager {
 
         var deleted: [URL] = []
         var finished = true
+        /// Per folder, the sessions with state there; nil when that could not be told — nothing there is deleted then.
+        var inFlightByFolder: [String: Set<String>?] = [:]
         for file in m4aFiles {
             guard totalSize > quota else { break }
             guard !pastDeadline() else {
@@ -111,6 +116,13 @@ public enum StorageManager {
                 break
             }
             if resolvedProtected.contains(file.resolvingSymlinksInPath().path) { continue }
+            // Nor another session's audio while that session still has state in the file's folder (#230): for its
+            // chunks, the only copy. The folder is read here, once, and only now that a delete is about to happen.
+            let folder = file.deletingLastPathComponent()
+            let inFlight = inFlightByFolder[folder.path] ?? sessionsWithState(folder)
+            inFlightByFolder.updateValue(inFlight, forKey: folder.path)
+            guard let inFlight, !inFlight.contains(where: { CrashRecoveryPlanner.isArchive(file.lastPathComponent, of: $0) })
+            else { continue }
 
             let fileSize = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             try FileManager.default.removeItem(at: file)
