@@ -850,10 +850,11 @@ public final class RecordingCoordinator {
                 // from its own files (L9 review 46). The last chunk is the one the stop's reply NAMES, labelled
                 // by its own index — never another chunk's (L review 113).
                 let lastChunk = await rotator.lastChunkAtStop(systemPath: paths.systemAudio.path, micPath: paths.micAudio.path)
-                await processor.processLastChunk(lastChunk)
-
-                // Wait for any background chunks still processing
-                await processor.awaitAllProcessed()
+                // The last chunk, then any background chunks still processing — bounded (#226): chunks that do not finish
+                // (a recording folder that stopped answering under them) keep the session for later, never the Stop waiting.
+                guard await chunksProcessed(by: processor, session: attemptKey, during: "stop", lastChunk: lastChunk) else {
+                    throw FolderNotAnswering()
+                }
 
                 // Final merge. The record is written off the main actor, bounded (L review 185): the menu says "Finishing…"
                 // meanwhile, and stays responsive.
@@ -2497,8 +2498,9 @@ public final class RecordingCoordinator {
         // any of theirs — an older held session's chunk still being written. They wait for the helper's stop; a session
         // never held (its folder was away, say) is not the helper's, and is finished now.
         let helperHoldsOn = heldKey != nil
+        // Nor one whose chunks are still being processed in this process (#226): it is retried once they end.
         let ready = pending.filter {
-            $0.sessionKey != heldKey && !(helperHoldsOn && $0.heldReason != nil)
+            $0.sessionKey != heldKey && !(helperHoldsOn && $0.heldReason != nil) && !chunksStillProcessing.contains($0.sessionKey)
                 && folders.statuses[URL(fileURLWithPath: $0.systemAudioPath).deletingLastPathComponent().path] == .reachable
         }
         if helperHoldsOn, pending.contains(where: { $0.sessionKey != heldKey && $0.heldReason != nil }) {
@@ -3350,10 +3352,71 @@ public final class RecordingCoordinator {
     /// The live pipeline of a session that is NOT finalized now (L review 137): the chunks already queued are
     /// processed — each persisted to session.json — then the rotation stops and the pipeline goes. A later salvage
     /// finishes the session from there.
+    /// Waited for within a bound (#226): chunks that do not finish go on behind the session — still persisted when they
+    /// do — and it is not salvaged until then (`chunksStillProcessing`).
     private func settleAbandonedPipeline() async {
         transcriptionRunner.stopChunkRotation()
-        if let processor = transcriptionRunner.chunkProcessor { await processor.awaitAllProcessed() }
+        if let processor = transcriptionRunner.chunkProcessor {
+            let session = transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) }
+            _ = await chunksProcessed(by: processor, session: session, during: "settling an abandoned pipeline")
+        }
         transcriptionRunner.teardownChunkedPipeline()
+    }
+
+    /// The least a Stop or a salvage waits for the chunks still being processed (#226): a cold engine's model load is in
+    /// it, whatever the audio's length.
+    nonisolated static let chunkProcessingFloor: Duration = .seconds(300)
+
+    /// How long the chunks still being processed are waited for (#226): as long as the audio they hold — from when the
+    /// oldest of them began recording until now — and never under the floor. A pipeline slower than real time could not
+    /// keep up with a meeting at all, so a healthy one, however slow the Mac, ends well inside it (measured: about 60× real
+    /// time per stream on an M5 Pro); only chunks that will not finish reach it. A wall-clock span, never a file's size:
+    /// the folder may be what does not answer.
+    nonisolated static func chunkProcessingBound(oldestUnfinishedStart: Date?, now: Date = Date()) -> Duration {
+        let audio = oldestUnfinishedStart.map { now.timeIntervalSince($0) } ?? 0
+        return max(chunkProcessingFloor, .milliseconds(Int64(max(0, audio) * 1000)))
+    }
+
+    /// Tests: the bound itself, in place of `chunkProcessingBound`.
+    var chunkProcessingDeadline: Duration?
+
+    /// Sessions whose chunks a Stop or a salvage stopped waiting for (#226), by session key: their tasks still run —
+    /// hung on a folder that does not answer, or only slow — and still persist each chunk when they end. Until then the
+    /// session is never salvaged in this process: a second pipeline over the same files would transcribe the chunk twice
+    /// and write its archive under the first. A relaunch has no such tasks, and salvages it as it stands.
+    private(set) var chunksStillProcessing: Set<String> = []
+
+    /// Every chunk `processor` holds, processed — `lastChunk` (the Stop's) first — within the bound (#226). False when it
+    /// ran out: recorded, and the session marked as still processing; its tasks go on, and a pending retry runs once they
+    /// end. The processor's write outcomes are no longer this coordinator's: the next recording's alarm is its own.
+    private func chunksProcessed(by processor: ChunkProcessor, session: String?, during step: String,
+                                 lastChunk: ChunkRotator.FinalizedChunk? = nil) async -> Bool {
+        let oldest = [processor.oldestUnfinishedStart, lastChunk?.startTime].compactMap { $0 }.min()
+        let bound = chunkProcessingDeadline ?? Self.chunkProcessingBound(oldestUnfinishedStart: oldest)
+        do {
+            try await withDeadline(seconds: Self.seconds(bound), label: "chunk processing (\(step))") {
+                if let lastChunk { await processor.processLastChunk(lastChunk) }
+                await processor.awaitAllProcessed()
+            }
+            return true
+        } catch {
+            let unfinished = processor.unfinishedCount
+            Logger.state.error("\(unfinished, privacy: .public) chunk(s) were still being processed after \(Self.seconds(bound), privacy: .public) s (\(step, privacy: .public)) — no longer waited for; the session is kept")
+            captureClient.record(.folderNotAnswering, .anomaly, ["during": "chunk processing", "step": step, "unfinished_chunks": "\(unfinished)"])
+            processor.onSessionWriteFailure = nil
+            processor.onSessionWriteSucceeded = nil
+            if let session {
+                chunksStillProcessing.insert(session)
+                Task {
+                    await processor.awaitAllProcessed()
+                    self.chunksStillProcessing.remove(session)
+                    Logger.state.info("The chunks a bounded wait left behind are processed — retrying the pending sessions")
+                    // Once idle: the Stop that left them may not have kept its session pending yet.
+                    if self.appState.isIdle { await self.retryPendingSessions() } else { self.retryPendingWhenIdle = true }
+                }
+            }
+            return false
+        }
     }
 
     /// A recording ended on a failure path: its recovery file goes — unless its folder did not answer, when nothing
@@ -3581,7 +3644,11 @@ public final class RecordingCoordinator {
             orphan = await reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
         }
 
-        await processor.awaitAllProcessed()
+        // Bounded (#226): chunks that do not finish keep the session for when they do — never a salvage that waits.
+        guard await chunksProcessed(by: processor, session: Self.sessionKey(of: location), during: "salvage") else {
+            transcriptionRunner.teardownChunkedPipeline()
+            return SalvageOutcome(kind: .folderNotAnswering, chunkCount: 0)
+        }
         let sessionState = await processor.getSessionState()
         let outcome = await salvageAbandonedSession(sessionState: sessionState, outputDir: outputDir)
         switch outcome.kind {
