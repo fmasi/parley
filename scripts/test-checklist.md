@@ -258,12 +258,13 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - PASS: the speaker turns land at the same timestamps as before (±0.5 s), and `<id>.json.bak` exists next to the transcript.
 
 - [ ] **D-23 The summary is honest.**
-  - Do: make a stamped COPY of the 09-24 incident transcript, never the original:
+  - Do: make a stamped COPY of a transcript whose remote side was never captured (the 09-24 incident's), never the original. Set `SRC` to that transcript's `.json`:
     ```zsh
-    mkdir -p ~/Desktop/parley-x1/D-23 && python3 -c 'import json,sys;j=json.load(open(sys.argv[1]));j["metadata"].setdefault("capture",{})["remote"]={"status":"neverDelivered","expected_seconds":2736.0,"delivered_seconds":0.0};json.dump(j,open(sys.argv[2],"w"),ensure_ascii=False,indent=1)' ~/Documents/Recordings/2026-09-24/160032-*.json ~/Desktop/parley-x1/D-23/stamped.json
+    SRC=<recordings>/<date>/<id>.json
+    mkdir -p ~/Desktop/parley-x1/D-23 && python3 -c 'import json,sys;j=json.load(open(sys.argv[1]));j["metadata"].setdefault("capture",{})["remote"]={"status":"neverDelivered","expected_seconds":2736.0,"delivered_seconds":0.0};json.dump(j,open(sys.argv[2],"w"),ensure_ascii=False,indent=1)' "$SRC" ~/Desktop/parley-x1/D-23/stamped.json
     /Applications/Parley.app/Contents/MacOS/Parley summarize -i ~/Desktop/parley-x1/D-23/stamped.json
     ```
-  - PASS: `stamped-summary.md` opens with a banner containing "Remote audio: not captured (0 s delivered of 2736 s expected)", and its Summary section says the other side was not captured. It does not read "Frederic met to prepare…" as if both sides were there.
+  - PASS: `stamped-summary.md` opens with a banner containing "Remote audio: not captured (0 s delivered of 2736 s expected)", and its Summary section says the other side was not captured. It does not describe the call as a meeting between two parties ("A and B met to discuss…") as if both sides were there.
 
 - [ ] **D-24 The engine preflight.**
   - Do: Settings → Engine → "Apple Speech — not yet usable (#223)" → Save.
@@ -560,7 +561,7 @@ lands. Verify the error message is the readable one.
 ## Re-detect: binding count + name safety (#201 / #202) — added 2026-09-15
 
 - [ ] **Re-detect is reachable on an ALREADY-NAMED transcript.** Open the rename dialog on a
-      recording whose speakers you have already named (the rows read "Jacques", not "Remote
+      recording whose speakers you have already named (the rows read a name, not "Remote
       Speaker 1"). The "Wrong number of speakers?" section must still be there. It used to vanish
       outright, because the channel list was derived from the label prefix — so re-detect was
       unreachable on exactly the transcripts someone had already invested naming effort in.
