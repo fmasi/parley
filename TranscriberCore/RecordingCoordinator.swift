@@ -1002,8 +1002,8 @@ public final class RecordingCoordinator {
             // A stop that TIMED OUT may have left the helper capturing: drop the connection BEFORE the salvage
             // — the helper's invalidation handler stops and finalizes its capture — and only then release the
             // mic (L9 review 45). The sentinel stays marked `stopping` until the salvage below has run, so a
-            // crash meanwhile is salvaged at relaunch. Any other stop failure (an XPC crash, a fatal failure)
-            // means the helper has already gone.
+            // crash meanwhile is salvaged at relaunch. Any other stop failure (an XPC crash) means the helper
+            // has already gone.
             if !stopSucceeded, error is CaptureCallTimeout {
                 Logger.state.error("The capture helper did not answer the stop — dropping the connection so it stops")
                 captureClient.dropConnection()
@@ -1068,7 +1068,7 @@ public final class RecordingCoordinator {
         }
         // #86: a benign route change no longer reads as a crash. The helper restarts the stream in
         // place (onRestartInPlace) or the connection blips without a crash report (onBriefInterruption)
-        // — both keep recording silently. Only a fatal give-up escalates.
+        // — both keep recording silently. A give-up on the remote stream is an alarm, not a crash.
         // Routine mic switches are handled by onMicDeviceChanged (label refresh only, no banner) —
         // for recordings this coordinator started and the ones it re-attached at launch alike.
         captureClient.onMicDeviceChanged = { [weak self] deviceId in
@@ -1076,9 +1076,6 @@ public final class RecordingCoordinator {
                 guard let self, self.appState.isRecording else { return }
                 self.setHelperMic(deviceId)
             }
-        }
-        captureClient.onFatalFailure = { [weak self] _ in
-            Task { @MainActor in await self?.crashReported() }
         }
         // A transient notice only: the sticky state is the helper's `remoteRecoveryFailed` alarm.
         captureClient.onSystemAudioUnrecoverable = { [weak self] _ in
@@ -1121,7 +1118,7 @@ public final class RecordingCoordinator {
         }
     }
 
-    /// A crash or fatal failure from the helper. While a start awaits it the phase is still `.idle`: the
+    /// A crash of the helper. While a start awaits it the phase is still `.idle`: the
     /// crash counts for that recording and is handled once it is up. Outside a recording: nothing.
     private func crashReported() async {
         guard appState.isRecording else {

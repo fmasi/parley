@@ -46,8 +46,6 @@ public protocol RecordingCaptureClient: ChunkRotationClient {
     var onServiceCrash: (@Sendable () -> Void)? { get set }
     /// Fired when the helper auto-switched the mic device (label refresh only, no banner).
     var onMicDeviceChanged: (@Sendable (String?) -> Void)? { get set }
-    /// Fired when the helper gave up on an in-place restart — escalates like a crash.
-    var onFatalFailure: (@Sendable (String) -> Void)? { get set }
     /// Fired for a live, user-facing capture-quality anomaly (exact-zero mic, a liveness gap, a
     /// disk-full write failure) — surfaced WHILE the recording is still running (#193/#196).
     /// `kind` is the `CaptureEventKind` raw value; `message` is human-readable.

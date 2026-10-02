@@ -79,14 +79,14 @@ import Foundation
 }
 
 /// Reverse XPC channel: the helper calls back into the app to report that it self-healed a benign
-/// stream stop in place, or that capture has terminally failed (#86). The app sets an exported
+/// stream stop in place, or that it gave up on the remote stream (#86). The app sets an exported
 /// object conforming to this so a route-change restart surfaces as a transient "Recording Resumed"
-/// notice instead of a crash, and a fatal stop stops the session cleanly.
+/// notice instead of a crash. There is no "capture failed, stop the session" call (#233): the helper
+/// never ends a recording because a source failed. A failure reaches the app as an alarm
+/// (`captureAlarmsChanged`, and the `captureStatus` pull), and a helper that died as an XPC interruption.
 @objc public protocol AudioCaptureClientProtocol {
     /// The SCStream stopped (benign route change) and was restarted in place — no audio lost.
     func captureDidRestartInPlace()
-    /// Capture failed and could not be restarted within budget; the session must stop.
-    func captureDidFailFatally(reason: String)
     /// The MID-RECORDING system (remote) stream could not be restarted within budget (#86). The mic
     /// keeps recording on its own AVCaptureSession — the recording is NOT stopped, only a "mic only"
     /// warning is surfaced.
