@@ -196,17 +196,18 @@ final class StuckSentinelQueue: @unchecked Sendable {
     /// L review 237: a resolution that hangs (a dying local disk under a link) never makes another folder's read wait: the
     /// resolutions run on a queue of their own, never the one a read with no volume yet falls back to.
     @Test func aHungResolutionNeverDelaysAnotherFoldersRead() async throws {
-        let gate = Gate()
-        defer { gate.release() }
+        let dying = HungStep()   // the resolution hangs until released
+        defer { dying.release() }
         let reads = FolderReads(label: "folder-reads-g-\(UUID().uuidString)", volumeOf: { folder in
-            if folder.hasPrefix("/Volumes/Dying") { gate.hang() }
+            if folder.hasPrefix("/Volumes/Dying") { dying.hang() }
             return folder.hasPrefix("/Volumes/Dying") ? "/Volumes/Dying" : "/"
         })
         _ = await reads.read("dying", folder: "/Volumes/Dying/rec", seconds: 0.3) { 1 }
-        let began = ContinuousClock.now
-        let healthy = await reads.read("healthy", folder: "/Users/me/Recordings/2026-09-25", seconds: 0.5) { 2 }
+        // By order, never a stopwatch: its bound is longer than the hung resolution can last, so a read held behind that
+        // resolution answers only once it let go. It answers with the resolution STILL hung.
+        let healthy = await reads.read("healthy", folder: "/Users/me/Recordings/2026-09-25", seconds: 30) { 2 }
         #expect(healthy == 2, "answered")
-        #expect(ContinuousClock.now - began < .seconds(1), "within its bound")
+        #expect(dying.isHanging, "while the other folder's resolution was still hung")
     }
 
     /// L review 237: only the recording root is resolved — once — and every folder under it is derived from it lexically.

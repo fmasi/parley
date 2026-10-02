@@ -3019,12 +3019,12 @@ final class HungStep: @unchecked Sendable {
         let h = try Harness()
         let s = try writeSentinel(h, alive: 600)
         h.coordinator.folderReadDeadline = .milliseconds(100)
-        let onMain = Harness.Box<Bool?>(nil)
-        h.coordinator.folderProbe = .init(exists: { _ in onMain.value = Thread.isMainThread; Thread.sleep(forTimeInterval: 1); return true },
+        let onMain = Harness.Box<Bool?>(nil), share = HungStep()   // the folder hangs until released
+        defer { share.release() }
+        h.coordinator.folderProbe = .init(exists: { _ in onMain.value = Thread.isMainThread; share.hang(); return true },
                                           isWritable: { _ in true }, isVolumeRoot: { _ in false })
-        let began = ContinuousClock.now
         await h.coordinator.recoverAtLaunch()
-        #expect(ContinuousClock.now - began < .seconds(1))
+        #expect(share.isHanging, "bounded: the relaunch ended with the folder still not answering")
         #expect(onMain.value == false)
         #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [s.sessionKey])
         #expect(h.presented.value.isEmpty && h.appState.activeAlarms[.recordingStopped] == nil)
@@ -3039,11 +3039,12 @@ final class HungStep: @unchecked Sendable {
         await h.coordinator.recoverAtLaunch()
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
         h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderProbe = .init(exists: { _ in Thread.sleep(forTimeInterval: 1); return true },
+        let share = HungStep()   // the folder hangs until released
+        defer { share.release() }
+        h.coordinator.folderProbe = .init(exists: { _ in share.hang(); return true },
                                           isWritable: { _ in true }, isVolumeRoot: { _ in false })
-        let began = ContinuousClock.now
         await h.coordinator.retryPendingSessions()
-        #expect(ContinuousClock.now - began < .seconds(1))
+        #expect(share.isHanging, "bounded: the retry ended with the folder still not answering")
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1 && h.presented.value.isEmpty)
         #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil)
     }
@@ -5562,14 +5563,18 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         h.coordinator.quitStopBound = .milliseconds(300)
-        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }   // the audio system hangs
+        let audio = HungStep()   // the audio system hangs until released
+        defer { audio.release() }
+        h.client.onStartAsync = { await audio.hangAwaited() }
         let coordinator = h.coordinator
         let starting = Task { await coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil) }
-        await Harness.until { !h.client.startCalls.isEmpty }
-        let began = ContinuousClock.now
+        await Harness.until(within: 20) { audio.reached }
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
-        #expect(ContinuousClock.now - began < .milliseconds(1500), "one bound for the start and the stop")
+        // By order: the Quit returned with the start STILL hung. Waiting out the start's own deadline (30 s) before the
+        // stop's would have held it until the hang was let go.
+        #expect(audio.isHanging, "one bound for the start and the stop")
         #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true, "salvage-only at the next launch")
+        audio.release()
         await starting.value
     }
 }
