@@ -453,8 +453,6 @@ public enum TranscriptRediarizer {
         /// Its position in the transcript's `segments`.
         let index: Int
         let segment: TranscriptSegment
-        /// The label it carries before the re-detect.
-        let speaker: String?
         /// Already flagged `echo`, and nothing else. Such a line is not relabelled as a line — it
         /// stays flagged — but it is evidence for the echo check: the pipeline flags an echo
         /// cluster's matched lines, and judged on the unmatched residue alone that cluster would
@@ -480,7 +478,7 @@ public enum TranscriptRediarizer {
                     start: start, end: end, text: text,
                     language: dict["language"] as? String,
                     confidence: (dict["confidence"] as? Double).map(Float.init)),
-                speaker: dict["speaker"] as? String, wasEcho: flagged)
+                wasEcho: flagged)
         }
     }
 
