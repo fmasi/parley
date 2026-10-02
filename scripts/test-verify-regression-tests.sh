@@ -13,6 +13,12 @@
 # Compatible with the stock macOS bash 3.2.
 set -euo pipefail
 
+# A git hook exports GIT_DIR and its siblings, and the pre-push hook is where `just ci` runs this. With
+# them set, every `git` call below — the `init`, the commits, the branches of the throwaway repo —
+# would act on the REAL repository instead. Drop them before anything touches git.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 GATE="$(cd "$(dirname "$0")" && pwd)/verify-regression-tests.sh"
 
 tmp=$(mktemp -d)
