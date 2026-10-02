@@ -179,6 +179,31 @@ public enum LaunchAgentHealth {
         }
     }
 
+    // MARK: - The row (#236, #237)
+
+    /// What a verdict does to the `crashProtectionOff` row.
+    public enum RowChange: Equatable, Sendable {
+        /// The verdict says nothing about the row, or the row already says it.
+        case keep
+        case clear
+        case raise(String)
+        /// The row is up with another reason: re-worded in place. A plain raise would keep the first wording.
+        case revise(old: String, new: String)
+    }
+
+    /// `currentMessage`: what the row says now, nil when it is not up.
+    public static func rowChange(for action: CrashProtectionAction, currentMessage: String?) -> RowChange {
+        let message: String
+        switch action {
+        case .healthy, .deferUntilIdle(message: nil, recheckAfter: _): return .clear
+        case .handOver, .retryAfter(seconds: _, message: nil): return .keep
+        case .deferUntilIdle(message: let said?, recheckAfter: _), .retryAfter(seconds: _, message: let said?), .alarm(let said):
+            message = said
+        }
+        guard let currentMessage else { return .raise(message) }
+        return currentMessage == message ? .keep : .revise(old: currentMessage, new: message)
+    }
+
     /// Whether Quit may remove the LaunchAgent (`LaunchAgentManager.uninstall`, whose `bootout`
     /// SIGTERMs whichever process launchd runs as the job). Only with the single-instance lock: without
     /// it another live instance may be that job, and may be recording (L3, C2 final wiring 4).
@@ -231,4 +256,16 @@ public enum LaunchAgentHealth {
     /// hand-over guard (never while busy or recording, never by the launchd job itself, never without
     /// the single-instance lock) is decided by `crashProtectionAction`.
     public static let handOverCooldown: TimeInterval = 30
+}
+
+extension AppState {
+    /// Applies a crash-protection verdict to the `crashProtectionOff` row (`LaunchAgentHealth.rowChange`).
+    public func showCrashProtection(_ action: LaunchAgentHealth.CrashProtectionAction, now: Date = Date()) {
+        switch LaunchAgentHealth.rowChange(for: action, currentMessage: activeAlarms[.crashProtectionOff]?.message) {
+        case .keep: break
+        case .clear: clearAppAlarm(.crashProtectionOff)
+        case .raise(let message): raiseAppAlarm(.crashProtectionOff, message: message, now: now)
+        case .revise(let old, let new): reviseAppAlarm(.crashProtectionOff, replacing: old, with: new, now: now)
+        }
+    }
 }

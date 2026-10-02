@@ -90,11 +90,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: menu → Quit, `chmod 500 ~/Library/LaunchAgents`, and open Parley. Then `chmod 700 ~/Library/LaunchAgents`, menu → Quit, and open Parley again.
   - PASS: with 500, the row "Crash protection is off" and ONE notification appear at once, not after 2 min. With 700, one blink and no row.
   - Capture: shot of the row.
-  - Optional (15 min): on a non-job instance (the D-02e trick), leave Settings open 15 min. PASS: the row reads "Crash protection is waiting for you to close Parley’s windows…".
+  - Optional (15 min): on a non-job instance (the D-02e trick), leave Settings open 15 min. PASS: the row reads "Crash protection is waiting for you to close Parley’s windows…". Then press Record with that row still up. PASS: the row re-words to "Crash protection is off for this recording…" (#237), with no second notification.
 
 - [ ] **D-02h Crash protection during a recording (final review A-I2).**
   - Do: make Parley a non-job instance whose hand-over is deferred: launch it from Finder with the Setup/repair window open (or the D-02e cooldown trick), or click Record within a second of launch. Record 5 min with audio, then Stop and let the transcript finish.
-  - PASS: when the recording starts, the row "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it…" appears with ONE notification, and no further notification for the rest of the call (not every 2 min). After Stop, once Parley is idle (no panel open): the hand-over runs (one icon blink) and the row clears.
+  - PASS: when the recording starts, the row "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it…" appears with ONE notification, and no further notification for the rest of the call (not every 2 min). After Stop the row clears as transcription begins, not when the transcript is done (#236); once Parley is idle (no panel open) the hand-over runs (one icon blink).
   - Capture: shot of the row, the log line "Crash-protection hand-over deferred…" if any.
 
 - [ ] **D-03 A crash relaunches and resumes within 5 s.**

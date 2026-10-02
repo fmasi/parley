@@ -291,6 +291,8 @@ struct TranscriberApp: App {
     private static let crashProtectionChecks = LaunchAgentHealth.SerialCheck()
     /// Waits for the transition to idle before re-checking (never a blind timer).
     private static var idleWatch: IdleWatch?
+    /// Waits for the recording to end before re-checking (#236).
+    private static var recordingEndWatch: IdleWatch?
     /// Since when open windows alone have deferred the hand-over (bounded: `windowDeferralLimit`).
     private static var windowDeferralSince: Date?
     /// The one pending bounded re-check of a window deferral.
@@ -357,15 +359,18 @@ struct TranscriberApp: App {
             isRecording: appState.isRecording, anyWindowVisible: windowsOpen, windowDeferredFor: windowDeferralSince.map { now.timeIntervalSince($0) } ?? 0,
             lastHandOverAt: defaults.object(forKey: lastHandOverKey) as? Date, now: now, failedHandOvers: failedHandOvers
         )
+        // The row: cleared, raised, or re-worded when it is up with another reason (#237). Raising is enough: the
+        // coordinator presents a newly raised alarm at once (window + ONE notification), then backs off (L round 3).
+        appState.showCrashProtection(action, now: now)
         switch action {
         case .healthy:
-            appState.clearAppAlarm(.crashProtectionOff)
-        case .deferUntilIdle(let message, let recheckAfter):
+            break
+        case .deferUntilIdle(_, let recheckAfter):
             // Normal after a Finder/Sparkle launch while something is in flight: no row (C2 ruling) —
             // unless windows have held it for `windowDeferralLimit`, or a recording runs unprotected (final
             // review A-I2): then the row says why (never silent).
-            if let message { raiseCrashProtectionOff(appState, message) } else { appState.clearAppAlarm(.crashProtectionOff) }
             recheckCrashProtectionWhenIdle(appState: appState)
+            if appState.isRecording { recheckCrashProtectionWhenRecordingEnds(appState: appState) }
             if let recheckAfter {
                 windowDeferralRecheck?.cancel()
                 windowDeferralRecheck = Task(priority: .utility) { @MainActor in
@@ -374,16 +379,14 @@ struct TranscriberApp: App {
                     await verifyCrashProtection(appState: appState)
                 }
             }
-        case .retryAfter(let seconds, let message):
-            if let message { raiseCrashProtectionOff(appState, message) }
+        case .retryAfter(let seconds, _):
             Logger.state.info("LaunchAgent hand-over cooldown — one re-check in \(Int(seconds.rounded(.up)), privacy: .public) s")
             Task(priority: .utility) { @MainActor in
                 try? await Task.sleep(for: .seconds(seconds))
                 await verifyCrashProtection(appState: appState)
             }
-        case .alarm(let message):
+        case .alarm:
             Logger.state.error("Crash protection is off (\(LaunchAgentHealth.logName(for: health), privacy: .public)) — no automatic retry")
-            raiseCrashProtectionOff(appState, message)
         case .handOver:
             defaults.set(Date(), forKey: lastHandOverKey)   // BEFORE the kickstart: the cooldown must outlive this process
             guard await LaunchAgentManager.handOverToJob() else {
@@ -414,13 +417,6 @@ struct TranscriberApp: App {
         }
     }
 
-    /// Raising is enough: the coordinator presents a newly raised alarm at once (window + ONE
-    /// notification), then backs off (L round 3). No second notification from here.
-    @MainActor
-    private static func raiseCrashProtectionOff(_ appState: AppState, _ message: String) {
-        appState.raiseAppAlarm(.crashProtectionOff, message: message)
-    }
-
     /// Re-check on the TRANSITION to idle: a Parley window closing (or the menu-bar panel, which hides
     /// rather than closes, resigning key), post-recording work finishing, or the phase changing — not a
     /// timer. One watch at a time.
@@ -436,6 +432,19 @@ struct TranscriberApp: App {
             _ = appState.phase
             _ = busyCoordinator?.isStartInFlight
         }
+    }
+
+    /// Re-check on the transition OUT of the recording (#236): transcription is then in flight, so the check clears the
+    /// "off for this recording" row instead of leaving it up until Parley is idle. One watch at a time.
+    @MainActor
+    private static func recheckCrashProtectionWhenRecordingEnds(appState: AppState) {
+        guard recordingEndWatch == nil else { return }
+        let watch = IdleWatch(isBusy: { appState.isRecording }) {
+            recordingEndWatch = nil
+            Task { @MainActor in await verifyCrashProtection(appState: appState) }
+        }
+        recordingEndWatch = watch
+        watch.start { _ = appState.phase }
     }
 
     /// Holds the single-instance lock fd for the whole process lifetime. It must stay open (closing
