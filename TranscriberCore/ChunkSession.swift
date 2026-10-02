@@ -574,6 +574,22 @@ public struct SessionState: Codable {
         return .some(stored.sessionId)
     }
 
+    /// The ids of the sessions that still have state in `directory` — being recorded, processed, or awaiting salvage:
+    /// `session.json` and every moved-aside `session-*.json`, by the id each stores (a finalize deletes its session's).
+    /// nil when it cannot tell: the folder did not list, or one of those files' id cannot be read. Under the lock — a write
+    /// moving `session.json` aside mid-scan would hide its session. What a quota pass must not delete from (#230).
+    public static func sessionIdsWithState(in directory: URL) -> Set<String>? {
+        ioLock.lock(); defer { ioLock.unlock() }
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return nil }
+        var ids: Set<String> = []
+        for name in names where name == fileName || (name.hasPrefix("session-") && name.hasSuffix(".json")) {
+            guard let stored = storedSessionId(at: directory.appendingPathComponent(name)) else { continue }
+            guard let id = stored else { return nil }
+            ids.insert(id)
+        }
+        return ids
+    }
+
     // MARK: - Static I/O
 
     /// Atomically and durably write session state: a uniquely named temp file in the same folder,
