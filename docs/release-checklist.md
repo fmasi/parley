@@ -8,7 +8,7 @@ in the maintainer's login Keychain); everything else is guarded by scripts and C
 - **`main` = the live 0.9.x development / Sparkle line.** Releases cut from here are published on the
   **current** line and take GitHub's "latest" — that's what `SUFeedURL`
   (`releases/latest/download/appcast.xml`) resolves to.
-- **`release/0.8.x` = the frozen stable line.** Critical backports only; big refactors never land
+- **`release/v0.8.x` = the frozen stable line.** Critical backports only; big refactors never land
   here. A 0.8.x maintenance release is published on the **stable** line (`--line stable` →
   `--latest=false`) so it cannot hijack "latest" from the 0.9.x feed and silently 404 it for every
   installed client (#110).
@@ -22,8 +22,8 @@ in the maintainer's login Keychain); everything else is guarded by scripts and C
 
 ## Per-release steps
 
-1. **Merge everything for this release to `main`** and confirm it's green (test + CodeQL + resolved
-   review threads).
+1. **Merge everything for this release to `main`** and confirm it's green: the required checks
+   (`test`, `red-first`, `review / review-gate`) and code scanning (AGENTS.md, "How work lands here").
 
 2. **Write the release notes — one file, the single source of truth:**
    ```bash
@@ -32,11 +32,18 @@ in the maintainer's login Keychain); everything else is guarded by scripts and C
    This becomes both the GitHub release body **and** (rendered to HTML by `release.sh`) the Sparkle
    in-app notes pane — they can no longer drift or ship blank.
 
-3. **Tag from `main`:**
+3. **Tag on `main`, after the squash merge:**
    ```bash
    git checkout main && git pull
    git tag v<version> && git push origin v<version>
    ```
+   Never tag a branch that will be squash-merged, a pre-release tag (`-beta.N`) included. The repo
+   squash-merges, so the branch's commits never become ancestors of `main`: the tag stays on the
+   branch, and every build from `main` goes on reporting the previous version, because
+   `package_app.sh` takes the version from `git describe --tags`. This happened with
+   `v0.9.0-beta.2`: it was put on the capture-reliability branch before the merge, and `main`
+   described itself as `v0.9.0-beta.1-<n>-g<sha>` afterwards. Check with
+   `git describe --tags` on `main` before building: it must print the tag you just made.
 
 4. **Build, sign, generate the appcast:**
    ```bash

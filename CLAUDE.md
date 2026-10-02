@@ -22,7 +22,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/TranscriberApp.swift` -- `@main` entry point, MenuBarExtra + Settings scenes
 - `TranscriberApp/Services/AudioCaptureClient.swift` -- XPC connection to audio capture service, crash detection via `onServiceCrash` callback armed per capture generation (`XPCInterruptionPolicy`), `isCapturing()` ping for recovery, a deadline on every helper call (`Deadline.swift`), the helper's alarm snapshots and evidence (first frames, real audio, write succeeded) forwarded to the coordinator; conforms to Core's `RecordingCaptureClient` seam
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
-- `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, benchmark) to their handlers
+- `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, rename-gui, summarize, download-models) to their handlers
 - `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: prompts per speaker and plays samples; collection + rename application live in TranscriptRenamer (TranscriberCore)
 - `TranscriberApp/Services/MicSwitchWindowController.swift` -- opens mic switch dialog as floating NSPanel during recording
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel; one off-main parse of the transcript gives the dialog its speaker rows, the saved channel names (#207) and the echo findings (`EchoNotice.Findings`, #244)
@@ -35,6 +35,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/CaptureAlarmWindowController.swift` -- presents capture alarms (§6.3): floating non-activating panel listing every active alarm + one time-sensitive notification per kind (stable identifier); the coordinator decides when (per-kind notify floor), `AlarmRealarmPolicy.presentation` decides what; permission alarms are left to the repair window while it covers them
 - `TranscriberApp/Services/SystemEventObserver.swift` -- forwards `NSWorkspace` sleep/wake to the coordinator and notes `willPowerOff` for the termination delegate (fast user switching deliberately ignored); a volume mount or wake retries the sessions a relaunch could not finish
 - `TranscriberApp/Views/CaptureAlarmView.swift` -- the alarm window's content: every active alarm with its one action; only past (acknowledgeable) events can be dismissed, "Later" just snoozes the window
+- `TranscriberApp/Services/CriticalAlertController.swift` -- presents the critical alert as a floating, non-activating panel (`CriticalAlertDialog`); called from `MenuView.sendCriticalNotification`
+- `TranscriberApp/Views/CriticalAlertDialog.swift` -- the critical alert's content: title, message, Dismiss
 - `TranscriberApp/Services/UpdaterController.swift` -- hosts `CheckForUpdatesViewModel` + `CheckForUpdatesView`, driving the "Check for Updates..." menu item via `SPUUpdater.canCheckForUpdates` KVO
 - `TranscriberApp/Views/MenuView.swift` -- window-style menu bar panel (status header, live timer, record button, action rows); presentation only — recording lifecycle + crash recovery delegate to Core's `RecordingCoordinator`
 - `TranscriberApp/Views/DesignSystem.swift` -- shared "Quiet Confidence" components (MenuActionRow, IconTile, StatusDot, AlertBanner, folder-picker helpers); see docs/design/design-system-0.8.x.md
@@ -68,7 +70,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/RecordingCaptureClient.swift` -- protocol seam (refines ChunkRotationClient) for everything RecordingCoordinator needs from the XPC capture client, plus the AudioPaths stop-result type; lets orchestration be tested with a fake
 - `TranscriberCore/RecordingCoordinator.swift` -- recording lifecycle + crash-recovery orchestration (start/stop, XPC-crash retry/restart, abandoned-session salvage), moved out of MenuView (#139 PR-6) so it is unit-testable; app-side UI effects (notifications, rename dialog) are injected closures
 - `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization; owns the chunked pipeline (setup/teardown, finalize)
-- `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, benchmark, summarize) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
+- `TranscriberCore/CLIParser.swift` -- parses CLI arguments into CLICommand enum (transcribe, rename, renameGUI, summarize, downloadModels) with typed option structs; SplitMode enum for stereo channel handling (split/noSplit/ask)
 - `TranscriberCore/Config.swift` -- Codable config struct (snake_case JSON keys), includes `engine: EngineID` and optional `summary: SummaryConfig`
 - `TranscriberCore/ConfigManager.swift` -- reads/writes `~/Library/Application Support/Parley/config.json`; migrates a legacy plaintext `summary.api_key` into the Keychain on every load (#48), idempotent, never clears the JSON field until the Keychain write succeeds
 - `TranscriberCore/KeychainStore.swift` -- `KeychainStoring` protocol + `KeychainStore` (SecItem-backed) for string secrets, keyed by (service, account); `SummaryAPIKeyStore` facade holds the one secret this app stores (`Config.summary` has at most one active provider at a time, so a single fixed account is enough) — the summary API key never round-trips through config.json (#48)
@@ -100,7 +102,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TranscriptMerger.swift` -- merges processed chunks into a single time-sorted transcript with absolute timestamps and cross-chunk speaker remapping
 - `TranscriberCore/TranscriptRenamer.swift` -- shared speaker-rename logic (SpeakerSample struct, per-speaker sample collection, rename application that merges into metadata.speaker_names — #162; flagged segments are renamed too, except on a channel listed in `metadata.rediarized_channels`, where an echo line of the mic channel carries its echo cluster's label or the unattributed one (#277) and any other flagged segment's label is an earlier diarization's — #245) used by both CLIRename and the GUI rename dialog
 - `TranscriberCore/TranscriptWriter.swift` -- formats and writes transcripts in multiple formats (JSON, TXT, SRT) with timestamp formatting
-- `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberCore/VadSpeechMap.swift` -- wraps FluidAudio VadManager to produce SpeechRegion map with probabilities for quality filtering
 - `TranscriberCore/AudioDeviceEnumerator.swift` -- lists audio input devices via AVCaptureDevice.DiscoverySession, resolves last-used device
 - `TranscriberCore/InputLevelMonitor.swift` -- @Observable real-time audio level (0-1) via AVCaptureSession, works with all device types including USB webcams; every device call runs on a per-session queue, never the caller's (#192). Also holds two process-wide types: `RecordingMicrophone` (the mic the recording is capturing — kept by RecordingCoordinator and the relaunch re-attach paths; no level meter ever opens it, and the coordinator mirrors it for the menu's mic label) and `PendingStartRegistry` (physical devices with a meter start still in flight — a second start on one waits instead of parking another thread in the same HAL wait). Budget: each picker showing a stuck mic holds one sleeping thread while it waits, so keep at most two pickers open at once (Settings plus one dialog) — a feature that adds a third must revisit this
@@ -162,6 +163,33 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/Library/Application Support/Parley/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
 - `TranscriberCore/EchoDeduplicator.swift` -- echo dedup by cluster verdict (#242): matches each local segment against every remote speaker on time (>50% overlap) and text (>70% word overlap), judges each local cluster (echo at >=50% of its duration matched over >=30 s), and FLAGS as `echo: true` every matched segment of an echo cluster and, elsewhere, matches of 3+ words; kept in the JSON and hidden from TXT/SRT/summary, never deleted. The speaker-embedding cosine is recorded as evidence only. `ClusterVerdict` (per local cluster: counts, share, verdict, matched remote labels) feeds `ProcessedChunk.echoClusters` and `metadata.echo_clusters`
 - `TranscriberCore/EchoNotice.swift` -- what the UI says about echo (#244), from the transcript's metadata only: `Findings` sums `echo_clusters` by label (a label with an `"echo"` verdict is an echo voice), finds its speaker row through `speaker_names`, and counts the PEOPLE on a channel (rows that are not an echo voice, never below `speaker_count_<track>`); pure copy builders for the speaker card, the re-detect row (hint + outcome) and the completion notice (`CaptureQualityNotice` takes `echoLines`). Labels, never names; "looks like", never "is"
+- `TranscriberCore/AppPaths.swift` -- Parley's on-disk locations: `~/Library/Application Support/Parley`, with a one-time migration from the legacy `~/.audio-transcribe`
+- `TranscriberCore/AppVersion.swift` -- version strings read from the bundle (`CFBundleShortVersionString`, `ATGitDescription`), commit-hash parsing, the About panel's display string
+- `TranscriberCore/CaptureDiagnostics.swift` -- the capture event model (`CaptureEventKind`, `CaptureEvent` with severity info/warning/anomaly), `CaptureProvenance` (the transcript's capture stamp), the bounded diagnostic ring `CaptureDiagnostics` (`isAnomalous` gates `<session>.diag.jsonl`) and its locked wrapper `LockedDiagnostics`
+- `TranscriberCore/CaptureQualityNotice.swift` -- the completion notification's title and body, read from the transcript's own record: a side not or partly captured, capture anomalies, processing problems, echo marked (§7.3)
+- `TranscriberCore/AudioStreamFormat.swift` -- PCM format snapshot plus `SystemFormatTracker`, which reports a mid-stream system-audio format change so the WAV writer is rotated instead of appended to (#94)
+- `TranscriberCore/AudioConcatenator.swift` -- stitches a session's chunk `.m4a` archives into one (passthrough first, AAC re-encode as fallback), inserting silence for the gaps between chunks so the merged file keeps the transcript's timeline
+- `TranscriberCore/ChunkLocator.swift` -- maps an absolute transcript time onto (chunk file, offset within it) (#132)
+- `TranscriberCore/ChunkedSessionRecovery.swift` -- rehydrates a chunked session after a crash: reads `session.json` (or its moved-aside copy), re-ingests chunks on disk that it does not hold, then finalizes
+- `TranscriberCore/CrashRecoveryPlanner.swift` -- scans a session's chunk files: orphan chunks, the session's archives, whether it is finalized or recoverable, the next free chunk index and the restart's naming (`planRestart`)
+- `TranscriberCore/CrashReportScanner.swift` -- classifies an XPC interruption as a crash or a harmless blip by looking for a fresh crash report (`.ips`) naming the capture helper (#86)
+- `TranscriberCore/XPCRetryPolicy.swift` -- crash-restart budget as a consecutive-failure streak: 2 retries, a crash more than 10 minutes after the last starts a new streak (#61)
+- `TranscriberCore/RestartDecision.swift` -- how the helper reacts to an SCStream stop: ignore, restart in place, or fail once the restart budget is spent (#86)
+- `TranscriberCore/SystemStreamLiveness.swift` -- pure check that a rebuilt SCStream delivered a buffer after an in-place restart (#86)
+- `TranscriberCore/SingleInstanceGuard.swift` -- `flock`-based single-instance lock: a duplicate launched by the LaunchAgent sees it held and exits 0 (#109)
+- `TranscriberCore/ClockAnchorPolicy.swift` -- which device may clock the tap's aggregate device: never a Bluetooth one, whose rate can drop to hands-free with no notification; bounds rate-drift remediation
+- `TranscriberCore/RateDriftMonitor.swift` -- pure detector: a device delivering fewer frames than its declared rate over a window, reported once; reset on every tap rebuild
+- `TranscriberCore/PadRatioMonitor.swift` -- pure detector: how much of a written track is timeline padding rather than captured audio, per chunk
+- `TranscriberCore/MicTargeting.swift` -- pure mic targeting rule used by `MicCaptureSession`: the pinned device if available, otherwise the system default (auto-follow, fallback, re-pin)
+- `TranscriberCore/MultichannelDownmix.swift` -- equal-weight average of interleaved multichannel float audio into mono (a mic with more than two channels)
+- `TranscriberCore/PCMCopyPlan.swift` -- how many whole frames the PCM bytes that actually arrived represent, for `AudioOutputHandler`'s copy into an `AVAudioPCMBuffer`
+- `TranscriberCore/SpeakerSampleSelector.swift` -- chooses which of a speaker's segments to offer as voice samples in the rename dialog: isolation over length
+- `TranscriberCore/SpeakerSampleLocator.swift` -- resolves a transcript segment (absolute time + source) to a file, an offset and a channel, for chunked and single-file layouts (#132)
+- `TranscriberCore/SpeakerSamplePreview.swift` -- renders one speaker sample (one channel, the right offset) to a temporary mono WAV for playback; shared by the GUI and CLI rename
+- `TranscriberCore/SpeechAnalyzerLocale.swift` -- locale resolution and the errors of the SpeechAnalyzer engine, kept outside the `#if compiler(>=6.2)` guard so it is testable everywhere
+- `TranscriberCore/ModelManifest.swift` -- snapshot of a downloaded model: Hugging Face commit, download time, SHA-256 per file; stored under `model-manifests/` in the data directory
+- `TranscriberCore/ModelManifestService.swift` -- records and verifies a model's manifest (local only); `checkForUpdate` is the one network call and is opt-in (`model_update_check_enabled`)
+- `TranscriberCore/MeetingSenseDecider.swift` -- pure decision for meeting sensing (prompt only, never auto-record); tested, not referenced by the app or the helper yet
 
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)
@@ -172,19 +200,22 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - Handler must be stored to prevent deallocation
 - Must use async/await API, not completion-handler callbacks (callbacks don't deliver frames reliably)
 - XPC service requires embedding in .app bundle -- bare binary can't reach the service
-- Exit code 2 = permission denied
 
 ## Build & Test
 
 ### Swift (SwiftUI app + XPC service)
 ```bash
 swift build
-# Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
+# Produces the executables Parley and audio-capture-helper-xpc. `swift build --show-bin-path` prints
+# where: .build/out/Products/Debug/ with Xcode 27's SwiftPM, .build/debug/ with older toolchains
+# (package_app.sh asks the same way instead of hardcoding it).
 
-swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+# The whole suite, as `just test` and CI run it. --no-parallel is load-bearing (AGENTS.md): run in
+# parallel the suite wedges.
+swift test --no-parallel --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
 # 2480 tests across 272 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
-# Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
-# Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
+# Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
+# Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
 
 ## Always identify the RUNNING build before diagnosing a recording
@@ -204,12 +235,22 @@ squash-merged PRs mean a fix commit from a feature branch is *not* an ancestor o
 content shipped — check the squash commit, not the original SHA. And when you finish work, verify what
 is installed matches what you just built, so the next recording exercises the new code.
 
-Each recording also writes a `.diag.jsonl` beside its audio — a per-session event log (format
-detection, device changes, restarts, anomalies). Read it before theorising; it frequently names the
-fault outright. Its `captureStart` event says which kind of build recorded it: `"build": "release"` or
-`"debug"` (#271). A timing or an allocation count from a debug build is not the shipped app's.
+A recording that had an anomaly also keeps a `<session>.diag.jsonl` beside its audio — the session's
+capture events (format detection, device changes, restarts, alarms, anomalies). Read it before
+theorising; it frequently names the fault outright. A clean recording keeps none: the file is written
+only when the session recorded at least one event of severity `anomaly`, and what a clean recording
+keeps is `metadata.capture_provenance` in its transcript. While a recording is unfinished (running,
+or crashed before its transcript was written) its non-routine events and its coverage are in
+`<session>.diag.live.jsonl` and `<session>.diag.coverage.json` (docs/pipeline.md, "Files beside the
+recording"); both are deleted once the transcript exists, unless the `.diag.jsonl` could not be written.
+
+The `captureStart` event in a `.diag.jsonl` says which kind of build recorded it: `"build": "release"`
+or `"debug"` (#271). A timing or an allocation count from a debug build is not the shipped app's.
+`captureStart` is a routine event, so it reaches disk only in that file: a clean recording has no
+record of its build, and the live log does not carry it either.
 
 ## Documentation
+- [ARCHITECTURE.md](ARCHITECTURE.md) -- Overview: the four targets, capture, capture reliability, alarms, crash recovery, the pipeline, the record
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
@@ -238,6 +279,5 @@ python3 scripts/dev.py --debug-build
 See [docs/pipeline.md](docs/pipeline.md#packaging) for bundle structure, Info.plist, and dev.py details.
 
 ## Branches
-- `main` -- stable (Python rumps UI)
-- `feature/swiftui-native-ui` -- SwiftUI native UI rewrite
-- `feature/whisperkit-migration` -- engine abstraction: swappable engines replacing hardcoded WhisperKit (this branch)
+- `main` -- the Swift app: the live development line, and the line releases are cut from (0.9.x). Protected: every change lands through a PR, squash-merged (AGENTS.md)
+- `release/v0.8.x` -- the frozen stable line, critical backports only; one such branch per released minor line (`release/v0.6.x`, `release/v0.7.x`). See docs/release-checklist.md and docs/development-process.md §6
