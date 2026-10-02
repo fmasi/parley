@@ -62,8 +62,8 @@ public enum AudioArchiver {
         // of a stream (#183). Phone call on speakerphone: everything arrives through the mic and
         // the tap writes a bare header. That header declares a nominal rate (16 kHz) which has
         // nothing to do with any audio, so letting it reach the rate guard below refuses a
-        // perfectly archivable recording and leaves it as raw WAV forever. Device-observed twice:
-        // 2026-07-16 Leaseholder and 2026-09-02 Paul feedback.
+        // perfectly archivable recording and leaves it as raw WAV forever. Device-observed twice,
+        // on 2026-07-16 and 2026-09-02: both a phone call answered and put on speaker.
         if sysFile.length == 0, micFile.length > 0 {
             Logger.files.info(
                 "AudioArchiver: system track is empty — archiving '\(baseName, privacy: .sensitive)' as mic-only")
