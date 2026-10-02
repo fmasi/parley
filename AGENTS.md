@@ -72,6 +72,14 @@ a release (see `docs/release-checklist.md`).
 - **The test suite runs serially.** `--no-parallel`, the timeouts, the caches, the conditional
   cancel and the `red-first` job in `test.yml` are load-bearing (their comments say why). Don't
   loosen them. `PARLEY_REQUIRE_AMI_FIXTURE=1` makes a missing fixture a failure, never a skip.
+- **CI toolchain.** `test` and `red-first` run on GitHub's `macos-26` image (arm64) with its
+  default Xcode: Xcode 26.6, Swift 6.3 and macOS 26 when this was written. `runs-on` in `test.yml`
+  is the source of truth, and each job's summary prints the exact versions. Development uses
+  Xcode 27 (Swift 6.4), which GitHub offers only as a preview image, so CI's Swift is one minor
+  version behind: a Swift 6.4-only language feature or an unguarded macOS 27 API fails the CI
+  build. The same summary prints "N tests not run on this toolchain" (`just toolchain` locally).
+  N is 0 today and must stay 0: don't put a test behind `#if compiler(...)`, and say so in the PR
+  if a change makes N anything else.
 - **No silent audio loss.** Every way capture can stop, turn to zeros or be padded over must
   surface as an anomaly the user sees, for as long as it lasts. A denied or revoked permission
   never produces a normal-looking recording.

@@ -57,7 +57,7 @@ secrets:
 lint:
     shellcheck scripts/*.sh package_app.sh
 
-# act has no macOS backend, so test.yml (macos-15) can't run under it.
+# act has no macOS backend, so test.yml (macos-26) can't run under it.
 # Workflow parity: only proves every workflow parses
 act:
     act -l
