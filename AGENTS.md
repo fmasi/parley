@@ -84,7 +84,8 @@ a release (see `docs/release-checklist.md`).
   only. Tests and fixtures use synthetic audio (`say`) or the public AMI corpus, never a real
   recording.
 - **Data.** Transcripts are never deleted. `StorageManager` deletes only the oldest `.m4a`
-  archives, within the configured quota.
+  archives, within the configured quota, and never an archive of a session that still has a
+  session file in its folder (`session.json`, `session-*.json`): for its chunks that is the only copy.
 - **Updater.** Never weaken Sparkle's EdDSA verification, `SUPublicEDKey` or the feed URL.
 - **Docs move with the code.** Update `CLAUDE.md`'s file map, `docs/parameters.md` (config keys,
   defaults), `docs/gotchas.md` (append new items), `scripts/test-checklist.md` and the README test

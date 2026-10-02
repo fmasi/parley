@@ -151,7 +151,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/AudioSourceResolver.swift` -- detects input format (dual WAV or stereo AAC), splits stereo AAC channels (L=local mic, R=remote system) for pipeline re-ingestion
 - `TranscriberCore/OutputDirectory.swift` -- `ensureExists`: creates a caller-supplied output directory (with intermediates) before Core writes into it, or throws `OutputDirectoryError` naming it (#246); called by `AudioSourceResolver`'s split and by the CLI for `--output-dir`, deliberately not by `TranscriptionRunner.run()` (the app's stop/recovery path must fail visibly if its folder vanished)
 - `TranscriberCore/AudioArchiver.swift` -- converts dual WAV (system+mic) to stereo AAC archive (L=mic, R=system) via AVAssetWriter, deletes source WAVs on success
-- `TranscriberCore/StorageManager.swift` -- enforces audio archive storage quota in hours, deletes oldest .m4a files first, never deletes transcripts
+- `TranscriberCore/StorageManager.swift` -- enforces audio archive storage quota in hours, deletes oldest .m4a files first, never deletes transcripts nor the archives of a session that still has a session file in its folder (#230)
 - `TranscriberCore/SummaryProvider.swift` -- protocol for LLM summary providers + SummarySegment/SummaryMetadata types
 - `TranscriberCore/SummaryDisclosure.swift` -- #138 disclosure stamp: whether a transcript's contents were transmitted off-machine (summary endpoint host only, on-device vs remote); airgapped by default, updated when a summary runs
 - `TranscriberCore/SummaryPromptBuilder.swift` -- shared prompt + transcript/date/duration formatting (systemMessage + userMessage) used by both summary providers, so the prompt lives once

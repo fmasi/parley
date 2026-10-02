@@ -43,8 +43,8 @@ Report only material problems: no praise, no summary of what the code does, no s
    network call, SDK or dependency that phones home (telemetry, crash reporting, analytics), a
    model download at recording or transcription time (models download only in Setup or on Settings
    Save: gotcha 22), and a summary path that skips the disclosure stamp.
-5. **Data safety and privacy.** `StorageManager` deletes only the oldest `.m4a` archives and never
-   transcripts; source WAVs are deleted only after the AAC archive succeeded; crash recovery
+5. **Data safety and privacy.** `StorageManager` deletes only the oldest `.m4a` archives, never
+   transcripts, and never an archive of a session that still has a session file in its folder (#230); source WAVs are deleted only after the AAC archive succeeded; crash recovery
    (`RecordingSentinel`, segment discovery and stitching) must not drop a segment. Log privacy
    (docs/pipeline.md "Log privacy conventions"): speaker names and transcript text `.private`,
    paths and filenames `.sensitive`, only counts and status `.public`. The summary API key lives
