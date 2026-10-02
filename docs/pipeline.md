@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — in an XPC service. System audio comes from a Core Audio output process tap by default (`system_audio_source: core_audio_tap`, which also captures Continuity/VoIP calls ScreenCaptureKit misses), or from ScreenCaptureKit (`sck`, legacy until #221). During recording, audio is written in time-bounded chunks (default: configurable minutes) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
+Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meetings by capturing two separate audio streams — microphone and system audio (Zoom, Teams, Meet) — in an XPC service. System audio comes from a Core Audio output process tap by default (`system_audio_source: core_audio_tap`, which also captures Continuity/VoIP calls ScreenCaptureKit misses), or from ScreenCaptureKit (`sck`, legacy until #221). During recording, audio is written in time-bounded chunks (`chunk_duration_minutes`, default 30) that are processed in parallel: ASR transcription, speaker diarization, VAD quality filtering, and echo deduplication. At the end of recording each chunk's results are merged into a single time-sorted transcript with globally consistent speaker identities, an AAC stereo archive is written (L=mic, R=system), and an optional LLM summary is fired in the background. The raw audio archive is the canonical evidence store — it is never modified after writing.
 
 ---
 
@@ -15,9 +15,9 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 │  Capture (XPC) — two independent sources:                       │
 │    system audio: Core Audio tap (default) or ScreenCaptureKit   │
 │                  (system_audio_source=sck, legacy)              │
-│      → WavFileWriter → chunk-N.wav                              │
+│      → WavFileWriter → <session>-N.wav                          │
 │    mic: MicCaptureSession (AVCaptureSession, #96)               │
-│      → AudioConverter → WavFileWriter → chunk-N_mic.wav         │
+│      → AudioConverter → WavFileWriter → <session>-N_mic.wav     │
 │                         │                                       │
 │            ChunkRotator (timer-based)                           │
 │            ├─ calls rotateChunk() on XPC → swaps writers        │
@@ -79,8 +79,10 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
            │  awaitAllProcessed()        │
            │  SpeakerReconciler.reconcile()  (cross-chunk embedding matching)
            │  TranscriptMerger.merge()   (absolute timestamps, global speakers)
+           │  AudioConcatenator.concatenate()  (one .m4a, when merge_chunked_audio)
            │  TranscriptAssembler.assemble() + write JSON
-           │  MeetingSummarizer.summarizeIfConfigured()  (fire-and-forget)
+           │  then, after the rename dialog:
+           │  MeetingSummarizer.summarizeIfConfigured()  (in the background)
            └─────────────────────────────┘
 ```
 
@@ -90,24 +92,23 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
 
 ### Stage 1 — Audio Capture
 
-**What it does:** the XPC service captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. System audio is captured by a Core Audio output process tap (`system_audio_source: core_audio_tap`, the default, `SystemTapSession.swift`), which captures Continuity/VoIP call audio ScreenCaptureKit misses, or by ScreenCaptureKit (`sck`, legacy); the mic is captured independently (`MicCaptureSession.swift`). The XPC service (`AudioCaptureHelperXPC` target) runs in-process within the app bundle and is the only process that holds Screen Recording permission.
+**What it does:** the XPC service captures two separate PCM streams — system audio (all app audio, 48 kHz) and microphone — and writes each to a WAV file. There is no Apple API for a pre-mixed stream. System audio is captured by a Core Audio output process tap (`system_audio_source: core_audio_tap`, the default, `SystemTapSession.swift`), which captures Continuity/VoIP call audio ScreenCaptureKit misses, or by ScreenCaptureKit (`sck`, legacy); the mic is captured independently (`MicCaptureSession.swift`). The XPC service (`AudioCaptureHelperXPC` target) is a separate process embedded in the app bundle; all capture happens there.
 
-**Input:** None (live capture). Output: `<baseName>.wav` (system, 48 kHz, auto-detected Float32 or Int16) and `<baseName>_mic.wav` (mic, normalized to 48 kHz mono Int16 via `AudioConverter`).
+**Input:** None (live capture). Output: `<baseName>.wav` (system) and `<baseName>_mic.wav` (mic), both written as Int16 WAV. The tap and the mic are each normalized to 48 kHz mono Int16 via `AudioConverter`; the legacy ScreenCaptureKit stream is pinned to 48 kHz mono by its configuration, and its sample format is detected from the first buffer (Float32 input is converted to Int16 by `WavFileWriter`).
 
 **Key code path:**
-- `AudioCaptureHelper/XPC/AudioCaptureService.swift` — `startCapture()`, `rotateChunk()`, `configureAndStart()`
-- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` — `stream(_:didOutputSampleBuffer:of:)`, `handleSystemAudio()`, `handleMicAudio()`
+- `AudioCaptureHelper/XPC/AudioCaptureService.swift` — `startCapture()`, `rotateChunk()`, `startMicSession()`, `startSystemTap()` (tap) / `buildAndStartStream()` (ScreenCaptureKit)
+- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` — `appendSystemSamples()` (tap), `appendMicSampleBuffer()` (mic), `stream(_:didOutputSampleBuffer:of:)` → `handleSystemAudio()` (ScreenCaptureKit)
 
 Notes:
-- System audio: format detected from `CMSampleBuffer` on first frame; `Float32` and `Int16` both handled.
-- Mic audio: any native device rate/channel/format → `AudioConverter` normalizes to 48 kHz mono Int16.
-- `.screen` output type must be registered even for audio-only capture (ScreenCaptureKit requirement).
-- `SCStreamConfiguration.microphoneCaptureDeviceID` (macOS 15+) allows per-device mic selection.
+- System audio, tap: each buffer (float32 at the output device's rate) → `AudioConverter` normalizes to 48 kHz mono Int16.
+- System audio, ScreenCaptureKit: format detected from `CMSampleBuffer` on first frame; `Float32` and `Int16` both handled. The stream registers `.audio` and `.screen` (`.screen` must be registered even for audio-only capture), never `.microphone`.
+- Mic audio: any native device rate/channel/format → `AudioConverter` normalizes to 48 kHz mono Int16. The device is chosen by its `AVCaptureDevice.uniqueID` (`startCapture(microphoneDeviceId:)`; nil follows the system default input).
 - Callback timing (#247): every tap and mic callback is timed per stage by `IOCycleStats` (queue wait, convert, pad, write, sync, check, total), with clock reads and integer arithmetic only. "check" is everything after the samples' write: the frame counters, the pad-ratio monitor and the exact-zero scan over the buffer (mic: `ExactZeroRunMonitor`; tap: `TapPermissionGuard`'s pass in the service). Each cycle is closed by one clock reading taken as the callback's last act, on both tracks, so the total covers all the callback did: the tap's is closed in the service's sample closure, after the guard pass, not when the handler has written. The tap's IOProc is a block on the helper's shared serial audio queue and the HAL waits for it, so the tap's queue wait (the callback's first line minus the HAL's cycle start, `inNow`) counts against the device's IO budget; the mic has no such timestamp and no queue-wait stage. A callback over 8 ms records an `ioOverrun` event with the stage breakdown in ms (at most one per track per 10 s). The ScreenCaptureKit system path is not timed. The numbers are in `captureStop` and in the log (see "Files beside the recording" and Debugging).
 
 ### Stage 2 — Chunk Rotation
 
-**What it does:** A `Timer` fires on a configurable interval (default: set in config). On each tick, the XPC service atomically swaps the active `WavFileWriter` pair on the audio callback queue (zero-gap guarantee), finalizes the old writers, and returns the old file paths. The caller receives a `FinalizedChunk` value and dispatches background processing.
+**What it does:** A `Timer` fires on a configurable interval (`chunk_duration_minutes`, default 30, minimum 10). On each tick, the XPC service atomically swaps the active `WavFileWriter` pair on the audio callback queue (zero-gap guarantee), finalizes the old writers, and returns the old file paths. The caller receives a `FinalizedChunk` value and dispatches background processing.
 
 **Input:** Running capture. Output: `FinalizedChunk(index, systemPath, micPath, startTime)`.
 
@@ -216,16 +217,16 @@ Notes:
 
 **What it does:** At end of recording, all processed chunks are reconciled cross-chunk (speaker identity), merged into absolute wall-clock timestamps, assembled into a JSON dictionary, and written to disk.
 
-**Input:** `[ProcessedChunk]` (from `session.json`). Output: `<sessionName>-transcript.json` with `metadata` and `segments` keys.
+**Input:** `[ProcessedChunk]` (from `session.json`). Output: `<sessionId>.json` with `metadata` and `segments` keys (and, unless `output_format` is `json`, the `.txt` or `.srt` made from it).
 
 **Key code path:**
-- `TranscriberCore/SpeakerReconciler.swift` — `reconcile(chunks:threshold:)`: greedy cosine-similarity matching, EMA embedding update (alpha=0.9), new global IDs as `spk_N`
+- `TranscriberCore/SpeakerReconciler.swift` — `reconcile(chunks:isDualStream:threshold:)`: greedy cosine-similarity matching, EMA embedding update (alpha=0.9); each channel is reconciled in its own `Local` / `Remote` namespace
 - `TranscriberCore/TranscriptMerger.swift` — `merge(chunks:speakerMapping:meetingStart:)`: converts chunk-relative offsets to elapsed seconds + absolute `Date`
 - `TranscriberCore/TranscriptAssembler.swift` — `assemble(segments:audioPaths:...)` → `write(_:to:)`
 
 Notes:
 - Reconciler threshold default: 0.65 cosine similarity.
-- Unmatched local speakers in a chunk get new global IDs (`spk_0`, `spk_1`, ...).
+- A chunk speaker that matches no earlier one gets a new global label that continues the numbering (`Speaker N`), never a raw internal id (#113).
 - Merger output is `MergeResult(segments: [MergedSegment], meetingStart, chunkCount)`.
 
 #### Capture provenance and metadata
@@ -278,7 +279,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 ### Stage 10 — Summary Generation
 
-**What it does:** Reads the transcript JSON, builds a prompt with speaker-labeled lines (and source labels in dual-stream mode), calls the configured LLM provider, and writes `<sessionName>-summary.md` alongside the transcript. Called via `summarizeIfConfigured()` — logs errors, never throws, fire-and-forget.
+**What it does:** Reads the transcript JSON, builds a prompt with speaker-labeled lines (and source labels in dual-stream mode), calls the configured LLM provider, and writes `<sessionName>-summary.md` alongside the transcript. Called via `summarizeIfConfigured()`, in a background task after the rename dialog closes (so the summary has the real speaker names). It never throws: it returns a `SummaryOutcome`, and a failure is posted as a "Summary Failed" notification (#134).
 
 **Participants are people only (#269).** The prompt's `Participants:` line lists the speakers of the visible lines, minus two kinds of label that are not somebody who attended: the unattributed ones (`Unknown`, `Local Unknown`, `Remote Unknown`), whose lines stay in the prompt as they are, and an echo voice (a label `metadata.echo_clusters` records with verdict `echo`, found through `EchoNotice.Findings` so a renamed one is still recognised). An echo voice's flagged lines are already hidden; its visible lines mix both people's words, so they stay in the prompt with the speaker shown as the channel's unattributed label (`Local Unknown`). The transcript file is not changed. A name the user gave to both the echo voice and another speaker stays a participant, lines and all: those lines cannot be told apart. With no echo voice and no unattributed line the prompt is what it was before.
 
@@ -386,11 +387,11 @@ When `dualStream = true`, the summary prompt receives source labels ("Local" / "
 - Echo is flagged, never removed: the segments are kept, flagged `echo: true`, and their text and number never change. `metadata.echo_segments_flagged` counts them (`metadata.echo_segments_removed` is the same count under the old name, for one release), and `metadata.echo_clusters` records the numbers behind each cluster's verdict.
 - `metadata.dual_stream` is the capture-time flag (a mic stream was captured next to the remote one). It does not say the remote side delivered audio: `metadata.capture.remote.status` is the authority for that.
 - The transcript JSON is the processed record; the `.m4a` is the raw evidence. The two are independent.
-- `AudioArchiverError.verificationFailed` is thrown (and WAVs are preserved) if the output archive is empty or has no audio tracks.
+- `AudioArchiverError.verificationFailed` is thrown (and WAVs are preserved) if the output archive is empty, has no audio tracks, or its duration does not match the source's.
 
 ### Validation
 
-0 false positives across 7 recordings. Benchmark reports are in `docs/benchmarks/`.
+The echo benchmark in `docs/benchmarks/` (2026-04-06) measured the earlier algorithm, before the cluster verdict (#242). It has not been re-run on the rule described here, so its numbers do not describe the current behaviour.
 
 ---
 
@@ -424,9 +425,9 @@ When `metadata.dualStream == true`, each transcript line is prefixed with its so
 
 The ratio is used by `LMStudioSummaryProvider` to estimate token count and select an appropriate `context_length` for the request, with a self-correcting retry if the context overflows.
 
-### Fire-and-Forget Design
+### Background, never blocking the transcript
 
-`MeetingSummarizer.summarizeIfConfigured()` is `async` and logs errors via `Logger.transcription.error(...)` — it never throws. It is called from the post-recording flow without `try` and without blocking the transcript write.
+`MeetingSummarizer.summarizeIfConfigured()` is `async` and never throws: it returns a `SummaryOutcome` (`skipped`, `succeeded`, `failed(reason)`, `cancelled`). The app runs it in a detached task once the rename dialog closes (`MenuView.autoSummarize`), after the transcript is on disk, and posts a "Summary Failed" notification on `failed` (#134).
 
 ---
 
@@ -474,7 +475,7 @@ python3 scripts/dev.py --debug
 
 ### Package.swift — SPM Workspace
 
-4 library/executable targets + 1 test target:
+The app's 4 library/executable targets + 1 test target:
 
 | Target | Type | Description |
 |---|---|---|
@@ -482,14 +483,16 @@ python3 scripts/dev.py --debug
 | `TranscriberCore` | Library | All business logic (engines, pipeline, CLI) |
 | `AudioCaptureHelperXPC` | Executable | XPC service for audio capture |
 | `AudioCaptureProtocol` | Library | `@objc` XPC protocol + service name constant |
-| `TranscriberTests` | Test | 2354 tests across 263 suites (Swift Testing, not XCTest) |
+| `TranscriberTests` | Test | Swift Testing, not XCTest. Links `TranscriberCore` and `VerifyEdSignatureCore` only. The current test count is in the [README](../README.md) |
 
-Test path: `SwiftTests/TranscriberTests/` (not `Tests/` — APFS case-collision workaround).
+`Package.swift` also defines `VerifyEdSignatureCore` and `VerifyEdSignature`, a release tool that checks the update feed's signature.
+
+Test path: `SwiftTests/TranscriberTests/`.
 
 ### Plists
 
-- `packaging/Info.plist` — app bundle metadata: `CFBundleIdentifier: eu.fmasi.parley`, `LSUIElement: true` (menu bar only), TCC usage descriptions (microphone, screen recording, calendar, notifications)
-- `packaging/AudioCaptureHelper-Info.plist` — XPC service plist: `ServiceType: Application`
+- `packaging/Info.plist` — app bundle metadata: `CFBundleIdentifier: eu.fmasi.parley`, `LSUIElement: true` (menu bar only), TCC usage descriptions (microphone, screen recording, system audio recording, calendar)
+- `packaging/AudioCaptureHelper-Info.plist` — XPC service plist: `CFBundleIdentifier: eu.fmasi.parley.capture-helper`, `ServiceType: Application`, and the microphone, screen recording and system audio recording usage descriptions
 
 ### Build & Run
 
@@ -497,8 +500,8 @@ Test path: `SwiftTests/TranscriberTests/` (not `Tests/` — APFS case-collision 
 # Build everything
 swift build
 
-# Run tests
-swift test --filter TranscriberTests \
+# Run tests (serially: --no-parallel is load-bearing, see AGENTS.md; `just test` runs this with the fixture guard)
+swift test --no-parallel --filter TranscriberTests \
   -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
@@ -513,7 +516,7 @@ Developer iteration CLI. Key flags:
 | (default) | Kill app, build a **release** build, install bundle, launch |
 | `--debug-build` | Build the unoptimised debug configuration instead (faster to compile). For the inner loop only: not for real meetings or for timings (gotcha 84) |
 | `--debug` | Launch app + tail unified log (subsystem filter). Nothing to do with the build configuration |
-| `--reset-tcc` | Reset TCC permissions (microphone + screen recording) |
+| `--reset-tcc` | Reset the app's TCC grants for Microphone, Screen Recording, Calendar and the Documents folder (`tccutil`). System Audio Recording is not in the list |
 | `--build` | Build only, into `dist/`: nothing is killed, installed or launched. `just build` runs `--build --debug-build` |
 | `--kill --launch` | Relaunch the installed app without building |
 
@@ -544,11 +547,10 @@ Options:
   --output-dir <path>       Output directory, created if missing (default: same as input)
   -f, --format <fmt>        Output format: json (default), txt, srt
   --no-diarize              Skip speaker diarization
-  --engine <id>             Engine override: fluidAudio, speechAnalyzer
+  --engine <id>             Engine override: fluid_audio, speech_analyzer
   --split                   Force L/R channel split for stereo AAC (L=mic, R=system)
   --no-split                Force single-stream processing (external recordings)
-  --debug                   Enable verbose debug logging
-  --legacy-dedup            Use legacy (non-windowed) echo dedup mode
+  --debug                   Stream the unified log to stderr while it runs
 ```
 
 **Stereo channel handling:** When a single `.m4a` file is given without `--split` or `--no-split`, the CLI prompts interactively:
@@ -578,12 +580,12 @@ Opens the speaker rename dialog as a floating NSPanel (same input as `rename` bu
 Parley rename-gui -i <transcript.json>
 ```
 
-### `benchmark`
+### `download-models`
 
-Run engine benchmark suite against test audio files.
+Download the diarization and VAD models without a UI (CI uses it, so the ground-truth diarization tests do not skip).
 
 ```
-Parley benchmark [--transcription-only | --diarization-only]
+Parley download-models
 ```
 
 ### `summarize`
