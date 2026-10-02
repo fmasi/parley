@@ -109,6 +109,47 @@ at the merge base also lands here (no summary is printed): make it fail with an 
 behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,
 and the measurements belong in the commit message.
 
+### Merge blockers that are not test failures
+
+Each of these held up a merge while every test was green. All four were met while landing a stack
+of PRs (#266) and its follow-ups.
+
+**A retargeted PR has no code-scanning result.** Code scanning here is GitHub's default CodeQL
+setup (a repository setting; there is no workflow file for it). A PR opened against a branch other
+than `main` and later retargeted to `main` has no code-scanning run for its head commit, and the
+merge stays blocked until one exists. A push to the PR triggers the run. Closing and reopening the
+PR does not.
+
+**A cancelled required check blocks the merge even when its twin passed.** Pushing to a PR and
+changing its base at the same moment starts two `Tests` runs. They share a concurrency group
+(`test.yml`: the workflow plus the ref, with `cancel-in-progress` for PR events), so one of them is
+cancelled. The cancelled run's `test` counts as a required check that did not pass, although the
+other run went green. Re-running the cancelled run clears it.
+
+**A stacked branch cannot merge its parent's squash commit.** The repo squash-merges, so once the
+parent PR is merged, `main` holds one new commit whose content the stacked branch already has as
+many commits. Merging `main` into the stacked branch then conflicts everywhere. Instead, merge the
+parent branch's real history into the stacked branch (`git merge <parent-branch>`); when the
+stacked branch's tree matches what `main` plus its own work should be, record `main` as merged
+without taking anything from it: `git merge -s ours origin/main`. Check the trees first
+(`git diff <parent-branch> origin/main` must print nothing), because `-s ours` discards whatever
+`main` has that the branch does not. Simpler still is not to stack: branch from `main`, one PR per
+piece of work.
+
+**A build started from a git hook fails to resolve its packages unless git's environment is
+dropped.** Git exports `GIT_DIR` and its sibling variables to every hook. SwiftPM checks its
+dependencies out with `git`, and with those variables set its `git` acts on this repository
+instead of the dependency's checkout. In a tree that already has a build directory nothing is
+checked out, so nothing shows. In a tree that has never been built the checkout fails ("unable to
+read tree", "Couldn't check out revision"), and the red-first gate always builds such a tree: the
+throwaway worktree of the merge base. Three places drop the variables, each with
+`unset $(git rev-parse --local-env-vars)`: the `pre-push` hook in `lefthook.yml`, before it runs
+`just ci`; `scripts/verify-regression-tests.sh`, at its top, so the gate is safe whoever calls it;
+and `scripts/test-verify-regression-tests.sh`, whose throwaway repository's `git init` and commits
+would otherwise act on the real repository. Git then finds the repository from the working
+directory. A new script that runs `swift` or `git` and can be reached from a hook needs the same
+line (#260).
+
 ## 3a. Then a simplification pass — the only step that removes
 
 Nothing above removes code. The council adds findings, the bot adds guards, the author adds
