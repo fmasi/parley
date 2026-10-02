@@ -82,7 +82,7 @@ struct RenameDialog: View {
     private var channels: [String] {
         var seen: [String] = []
         // Via `channel(of:)`, not the label prefix: once a speaker has been renamed its label is
-        // "Jacques", not "Remote Speaker 1", so a prefix test finds no channels at all and the
+        // the name the user typed, not "Remote Speaker 1", so a prefix test finds no channels and the
         // Re-detect controls disappear entirely — on precisely the transcripts someone has already
         // invested naming effort in, which are the ones most worth re-detecting.
         for speaker in speakers {

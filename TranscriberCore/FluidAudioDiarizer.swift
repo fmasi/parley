@@ -47,9 +47,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     ///   "0 speakers" is not an answer, and pinning clustering to it would be worse than the
     ///   default. `nil` means "no answer given"; the configured/default behaviour applies.
     ///
-    ///   `maxSpeakers` is a target rather than a ceiling in practice: on `150633-Paul feedback`
-    ///   the unbounded default produced ONE speaker while `maxSpeakers` of 2/3/4 produced exactly
-    ///   2/3/4. That is why a user's answer is routed here and not to a `numSpeakers` hint.
+    ///   `maxSpeakers` is a target rather than a ceiling in practice: on a speakerphone call with
+    ///   two people on one mic (2026-09-02) the unbounded default produced ONE speaker while
+    ///   `maxSpeakers` of 2/3/4 produced exactly 2/3/4. That is why a user's answer is routed here
+    ///   and not to a `numSpeakers` hint.
     public nonisolated func makeOfflineConfig(forcedSpeakerCount: Int? = nil) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
         if let clusteringThreshold {

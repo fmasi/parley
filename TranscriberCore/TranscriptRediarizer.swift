@@ -16,8 +16,9 @@ public enum TranscriptRediarizer {
     /// Replace one source's segments with a freshly labeled set, keeping the other source as-is.
     ///
     /// Not a 1:1 relabel: word-level boundary splitting (#120) can turn one ASR segment into two
-    /// when a speaker change lands mid-segment — measured 73 → 84 segments on `150633-Paul
-    /// feedback` — so the target source is replaced wholesale rather than patched in place.
+    /// when a speaker change lands mid-segment — measured 73 → 84 segments on a speakerphone call
+    /// with two people on one mic — so the target source is replaced wholesale rather than patched
+    /// in place.
     public static func mergeRelabeled(
         into segments: [[String: Any]],
         source: String,
