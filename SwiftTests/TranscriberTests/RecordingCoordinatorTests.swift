@@ -415,6 +415,61 @@ struct Harness {
     }
 }
 
+/// A step hung until the test releases it: a blocking one (`hang()` — a folder read, a probe, on its queue) or an awaited
+/// one (`hangAwaited()` — a fake helper call). The test then asserts by ORDER — what it expects happened while the step
+/// `isHanging` — never by a stopwatch, which a loaded machine stretches.
+///
+/// The watchdog is reached only by a test that is already failing: whatever waits for the step without a bound never
+/// lets the test release it. So a regression fails, never wedges the run. It is longer than any bound a test sets short,
+/// and shorter than the production defaults of the helper-call deadlines (20–30 s): a path that ignored the test's bound
+/// for its default is let go before that default, and fails too. Once released, or let go, it never hangs again.
+final class HungStep: @unchecked Sendable {
+    static let watchdog: TimeInterval = 15
+    private let condition = NSCondition()
+    private var began = false, over = false, onMain = false
+
+    var reached: Bool { condition.withLock { began } }
+    /// Hung now: begun, and neither released nor let go by the watchdog.
+    var isHanging: Bool { condition.withLock { began && !over } }
+    /// A blocking hang was asked for on the main thread: the main actor made the step itself.
+    var ranOnMainThread: Bool { condition.withLock { onMain } }
+
+    /// Blocks its thread until released. Never the main thread: there it returns at once, never hung (`isHanging` stays
+    /// false and `ranOnMainThread` says why) — the test fails at once, not after the watchdog.
+    func hang() {
+        let main = Thread.isMainThread
+        condition.withLock {
+            guard !over else { return }
+            began = true
+            if main { onMain = true; over = true; return }
+            let giveUp = Date().addingTimeInterval(Self.watchdog)
+            while !over { if !condition.wait(until: giveUp) { over = true } }
+            condition.broadcast()
+        }
+    }
+
+    /// Suspends its task until released (or cancelled).
+    func hangAwaited() async {
+        guard condition.withLock({ () -> Bool in
+            guard !over else { return false }
+            began = true
+            return true
+        }) else { return }
+        let giveUp = ContinuousClock.now + .seconds(Self.watchdog)
+        while !condition.withLock({ over }), ContinuousClock.now < giveUp, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        release()
+    }
+
+    func release() {
+        condition.withLock {
+            over = true
+            condition.broadcast()
+        }
+    }
+}
+
 // MARK: - Pure decision helpers
 
 @Suite struct RecordingCoordinatorNamingTests {
@@ -3086,11 +3141,14 @@ struct Harness {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderProbe = .init(exists: { _ in Thread.sleep(forTimeInterval: 1); return true },
+        // The share HANGS until released: the read's own bound alone can end the wait — and did, if the start is refused
+        // with the read still hung (by order, never a stopwatch: the 100 ms may fire as late as a loaded machine makes it).
+        let share = HungStep()
+        defer { share.release() }
+        h.coordinator.folderProbe = .init(exists: { _ in share.hang(); return true },
                                           isWritable: { _ in true }, isVolumeRoot: { _ in false })
-        let began = ContinuousClock.now
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(share.isHanging, "refused at the read's own bound: the folder had still not answered")
         #expect(h.client.startCalls.isEmpty && !h.coordinator.isStartInFlight)
         let body = try #require(h.notified.value.last?.body)
         #expect(h.notified.value.last?.title == "Recording not started")
@@ -3207,12 +3265,13 @@ struct Harness {
         #expect(onMain.value == false)
 
         h.coordinator.rotationDiskReadDeadline = .milliseconds(100)
-        h.diskReadHook.value = { Thread.sleep(forTimeInterval: 1) }
+        let volume = HungStep()   // the read hangs until released: only its bound ends the check
+        defer { volume.release() }
+        h.diskReadHook.value = { volume.hang() }
         h.freeBytes.value = 1_000   // it WOULD be low — but the read does not answer in time
-        let began = ContinuousClock.now
         await h.runner.chunkRotator?.rotateForTesting()
         await h.coordinator.awaitRotationDiskCheckForTesting()
-        #expect(ContinuousClock.now - began < .milliseconds(600), "bounded at 100 ms, never the 1 s read")
+        #expect(volume.isHanging, "the check ended at its bound: the read had still not answered")
         #expect(h.appState.activeAlarms[.diskLow] == nil, "skipped for this rotation")
         #expect(h.appState.isRecording)
     }
@@ -3393,11 +3452,11 @@ struct Harness {
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(200)
         h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
-        let stalled = Harness.Box(true)
-        h.client.onStartAsync = { if stalled.value { try? await Task.sleep(for: .seconds(2)) } }
-        let began = ContinuousClock.now
+        let stalled = Harness.Box(true), helper = HungStep()   // the helper's start hangs until released
+        defer { helper.release() }
+        h.client.onStartAsync = { if stalled.value { await helper.hangAwaited() } }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
-        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s (L9 review 50)")
+        #expect(helper.isHanging, "ended by the deadline, never by the helper: its start was still unanswered (L9 review 50)")
         #expect(!h.coordinator.isStartInFlight, "cleared on the timeout path")
         #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.last?.title == "Recording Failed")
@@ -3416,10 +3475,11 @@ struct Harness {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.coordinator.startDeadline = .milliseconds(150)
-        h.coordinator.preflight = { _ in Thread.sleep(forTimeInterval: 0.6); return (false, false) }
-        let began = ContinuousClock.now
+        let lookup = HungStep()   // the lookup hangs until released
+        defer { lookup.release() }
+        h.coordinator.preflight = { _ in lookup.hang(); return (false, false) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        #expect(ContinuousClock.now - began < .milliseconds(450), "bounded by the 150 ms deadline, never the 600 ms lookup")
+        #expect(lookup.isHanging, "ended by the deadline, never by the lookup: it had still not answered")
         #expect(!h.coordinator.isStartInFlight && h.appState.isIdle)
         #expect(h.client.startCalls.isEmpty && h.client.stopCalls == 0, "the helper was never involved")
         #expect(h.notified.value.last?.body == "Parley couldn’t start recording — the audio system didn’t respond.")
@@ -3433,15 +3493,17 @@ struct Harness {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.stopDeadline = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         h.client.stopResult = AudioPaths(systemAudio: URL(fileURLWithPath: "/nonexistent/a.wav"), micAudio: URL(fileURLWithPath: "/nonexistent/a_mic.wav"))
-        let began = ContinuousClock.now
         await h.coordinator.stopRecording()
-        #expect(ContinuousClock.now - began < .milliseconds(500), "bounded by the 200 ms deadline, never the helper's 2 s")
+        #expect(helper.isHanging, "ended by the deadline, never by the helper: its stop was still unanswered")
         #expect(h.appState.isIdle, "never left on Finishing…")
         let critical = try #require(h.criticals.value.first)
-        // The title follows what the salvage wrote (L6); the body says why the stop failed.
-        #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within"), "\(critical.body)")
+        // The title follows what the salvage wrote (L6); the body says why the stop failed — and which bound ran out: the
+        // 200 ms one (said as 1 s, the least it says), never the default 25 s.
+        #expect(critical.body.hasPrefix("Stopping the recording failed (the capture helper did not respond within 1 s)"), "\(critical.body)")
         #expect(RecordingSentinel.read(directory: h.tmp) == nil && h.client.everyRecordedEvent.contains { $0.kind == .xpcTimeout })
     }
 
@@ -3677,10 +3739,11 @@ struct Harness {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
-        let began = ContinuousClock.now
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "ended by its bound, never by the helper: its stop was still unanswered")
         let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(sentinel.quitDuringFinalize && sentinel.stopping, "salvage-only, worded as a quit (L review 109)")
         #expect(h.client.droppedConnections == 1, "the hung helper's connection is dropped: its invalidation handler stops it")
@@ -3693,16 +3756,18 @@ struct Harness {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
-        await Harness.until { h.client.stopCalls == 1 }
-        let began = ContinuousClock.now
+        await Harness.until(within: 20) { helper.reached }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "ended by its bound, never by the helper: the Stop's ask was still unanswered")
         #expect(h.client.stopCalls == 1, "the Stop in flight asks the helper — never a second stop")
         #expect(h.client.droppedConnections == 1, "dropped at the bound, once")
         #expect(RecordingSentinel.read(directory: h.tmp).map { $0.stopping && $0.quitDuringFinalize } == true)
+        helper.release()
         await stopping.value
     }
 
@@ -3757,15 +3822,21 @@ struct Harness {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         try stopReturnsTheFirstChunk(h)
-        h.runner.finalizeDelayForTesting = .milliseconds(600)
+        // The finalize hangs — in its first look at the folder — until released, and every bound that could end a wait for
+        // it is longer than the hang's own watchdog: a preparation that waited for the finalize returns only once it ended.
+        let finalize = HungStep()
+        defer { finalize.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-termination-\(UUID().uuidString)",
+                                                beforeEachRead: { if $0 == "transcript: chunk files" { finalize.hang() } })
+        h.coordinator.folderReadDeadline = .seconds(60)
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
-        await Harness.until { h.appState.isTranscribing }
-        #expect(h.coordinator.hasWorkInFlight, "a finalize is busy")
-        let began = ContinuousClock.now
-        await h.coordinator.prepareForTermination(bound: .seconds(5))
-        #expect(ContinuousClock.now - began < .milliseconds(500))
+        await Harness.until(within: 20) { finalize.reached }
+        #expect(h.appState.isTranscribing && h.coordinator.hasWorkInFlight, "a finalize is busy")
+        await h.coordinator.prepareForTermination(bound: .seconds(60))
+        #expect(finalize.isHanging, "at once: it returned with the transcript still being finished")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
+        finalize.release()
         await stopping.value   // awaited, never cancelled into the next test
     }
 
@@ -3943,10 +4014,11 @@ struct Harness {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.quitStopBound = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(3)) }
-        let began = ContinuousClock.now
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
-        #expect(ContinuousClock.now - began < .milliseconds(600))
+        #expect(helper.isHanging, "quit at its bound, never held by the helper: its stop was still unanswered")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
     }
 
@@ -5848,18 +5920,48 @@ struct Harness {
         defer { tearDown(h) }
         let s = try fresh(h)
         // Another pending session, elsewhere: the alarm's read of the pending folders is then not the scan's folder
-        // alone — it answers, once the slow scan has let the queue go.
+        // alone — it answers, once the hung scan has let the queue go.
         let other = h.tmp.appendingPathComponent("elsewhere")
         try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
         try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "o", systemAudioPath: other.appendingPathComponent("o-0.wav").path,
                                                               micAudioPath: other.appendingPathComponent("o-0_mic.wav").path)], directory: h.tmp)
-        h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderReads = reads { label in if label == "resume: session folder" { Thread.sleep(forTimeInterval: 0.15) } }
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the other one stays pending: no salvage here
+        // Nothing here races a timer (the scan used to sleep 150 ms against a 100 ms bound: a bound that fired 50 ms late
+        // found the scan answered, and the session resumed). The scan HANGS until released, so its bound runs out however
+        // late it fires; only the scan's bound is short — set once the helper was asked, the step before the scan — and
+        // every read after it has all the time it needs: raised on the scan's own queue, the scan's bound already taken.
+        let coordinator = h.coordinator
+        /// The reads made, by label: written on the reads' queues.
+        final class Labels: @unchecked Sendable {
+            private let lock = NSLock()
+            private var labels: [String] = []
+            var all: [String] { lock.withLock { labels } }
+            func note(_ label: String) { lock.withLock { labels.append(label) } }
+        }
+        let scan = HungStep(), stop = HungStep(), reads = Labels()
+        defer { scan.release(); stop.release() }
+        h.client.onIsCapturing = { coordinator.folderReadDeadline = .milliseconds(100) }
+        h.coordinator.folderReads = self.reads { label in
+            reads.note(label)
+            guard label == "resume: session folder" else { return }
+            // Never from the main thread itself (a scan made there would deadlock here): `scan.hang()` then says so.
+            if !Thread.isMainThread {
+                DispatchQueue.main.sync { MainActor.assumeIsolated { coordinator.folderReadDeadline = .seconds(60) } }
+            }
+            scan.hang()
+        }
+        h.client.onStop = { await stop.hangAwaited() }   // the other one stays pending: no salvage here
         h.coordinator.helperStopDeadline = .milliseconds(50)
-        await h.coordinator.recoverAtLaunch()
+        let recovering = Task { await coordinator.recoverAtLaunch() }
+        // The scan timed out — it is still hung — and the session was kept: only now does the folder answer again.
+        await Harness.until(within: 20) { pending(h).map(\.sessionKey).contains(s.sessionKey) }
+        #expect(scan.isHanging, "kept because the scan ran out its bound, never because it answered")
+        scan.release()
+        await recovering.value
         #expect(pending(h).map(\.sessionKey).contains(s.sessionKey))
-        #expect(h.appState.activeAlarms[.recordingFolderUnavailable] != nil, "said until the next event resolves it")
+        let alarm = try #require(h.appState.activeAlarms[.recordingFolderUnavailable]?.message, "said until the next event resolves it")
+        #expect(alarm.contains("isn’t answering"), "\(alarm)")
+        #expect(reads.all.filter { $0 == "pending folder" }.count >= 2 && h.client.stopCalls == 1,
+                "the folders were read again, and answered: the retry went on to the helper's stop (\(reads.all))")
     }
 
     /// L review 128: a hung relaunch read of a STOPPING session's folder waits for the folder — but first stops the

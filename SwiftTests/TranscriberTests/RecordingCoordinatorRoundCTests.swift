@@ -296,11 +296,15 @@ final class HungRead: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.client.onStop = { try? await Task.sleep(for: .milliseconds(250)) }
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(3)) }
-        h.coordinator.evidenceFlushBound = .seconds(1)
-        let began = ContinuousClock.now
+        // The flush hangs until released, and its OWN bound is far longer than the hang's watchdog: a flush given a whole
+        // flush bound would hold the preparation until the hang was let go. Given what was left of the 400 ms, the
+        // preparation returns with the flush still hung (by order — however late a loaded machine fires the 400 ms).
+        let flush = HungStep()
+        defer { flush.release() }
+        h.client.onFlush = { await flush.hangAwaited() }
+        h.coordinator.evidenceFlushBound = .seconds(60)
         await h.coordinator.prepareForTermination(bound: .milliseconds(400))
-        #expect(ContinuousClock.now - began < .milliseconds(800), "the flush got only what was left of the 400 ms")
+        #expect(flush.isHanging, "the flush got only what was left of the 400 ms: its own bound was never waited out")
         #expect(h.client.flushCalls == 1)
     }
 
@@ -311,22 +315,21 @@ final class HungRead: @unchecked Sendable {
         defer { tearDown(h) }
         let s = try slot(h, alive: 3600, boot: "another-boot")
         try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
-        let inBuild = Harness.Box(false), release = Harness.Box(false)
-        h.client.onFinalizeDiagnostics = {
-            inBuild.value = true
-            while !release.value { try? await Task.sleep(for: .milliseconds(5)) }
-        }
+        let build = HungStep()   // the salvage hangs in its record's build until released
+        defer { build.release() }
+        h.client.onFinalizeDiagnostics = { await build.hangAwaited() }
         let coordinator = h.coordinator
         let relaunch = Task { await coordinator.recoverAtLaunch() }
-        await Harness.until { inBuild.value }
+        await Harness.until(within: 20) { build.reached }
         #expect(!coordinator.isStartInFlight, "the helper settled: the salvage is no start")
         let confirmed = Harness.Box(false)
         #expect(await coordinator.prepareForQuit(confirm: { confirmed.value = true; return true }))
         #expect(!confirmed.value, "nothing to ask: no recording, no start")
-        let began = ContinuousClock.now
-        await coordinator.prepareForTermination(bound: .seconds(2))
-        #expect(ContinuousClock.now - began < .milliseconds(500), "never held for the salvage")
-        release.value = true
+        // Its bound is longer than the hang's watchdog: a termination that waited for the salvage returns only once the
+        // salvage ended. By order, never a stopwatch.
+        await coordinator.prepareForTermination(bound: .seconds(60))
+        #expect(build.isHanging, "never held for the salvage: it returned with the salvage still in its build")
+        build.release()
         await relaunch.value
     }
 
