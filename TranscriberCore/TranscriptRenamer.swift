@@ -249,11 +249,13 @@ public enum TranscriptRenamer {
 
     /// Whether a rename leaves this segment's label alone (#245).
     ///
-    /// A flagged segment (an echo, gate noise, a repeat, no usable time) is never relabelled by a
-    /// re-detect. On a channel one has rewritten it therefore keeps the label an EARLIER diarization
-    /// gave it, and that label can now belong to someone else: the rename must not reach it. On a
-    /// channel that was never re-detected the label is still the pipeline's, and it is renamed like
-    /// any other line — the JSON is the record, and it must not show two labels for one person.
+    /// A flagged segment (an echo, gate noise, a repeat, no usable time) is never given to a person
+    /// by a re-detect. On a channel one has rewritten, an echo line of the mic channel carries its
+    /// echo cluster's label or the unattributed one (#277), and every other flagged segment keeps the
+    /// label an EARLIER diarization gave it, which can now belong to someone else: the rename must
+    /// not reach any of them. On a channel that was never re-detected the label is still the
+    /// pipeline's, and it is renamed like any other line — the JSON is the record, and it must not
+    /// show two labels for one person.
     ///
     /// - Parameter rediarized: `rediarizedChannels(in:)`; nil = unreadable, and every flagged
     ///   segment keeps its label.

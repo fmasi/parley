@@ -32,7 +32,8 @@ public struct SalvageOutcome: Equatable, Sendable {
     /// Whether `recognitionFailures` was read: false when the written transcript could not be read back to check —
     /// then nothing is called "transcribed" (L review 149).
     public let recognitionChecked: Bool
-    /// Whether the in-progress chunk is on disk could not be checked: the folder did not answer (L review 163).
+    /// Whether the in-progress chunk is on disk could not be checked: the folder did not answer (L review 163) — or it is
+    /// in the transcript, read before its file was known to be sealed (#232).
     public let lastChunkUnchecked: Bool
     /// The transcript was REBUILT because the finished one could not be read back; the damaged copy is kept under this
     /// name (L review 150) — only when a look FOUND it (L review 190).

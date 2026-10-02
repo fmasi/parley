@@ -688,12 +688,17 @@ about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detec
   - PASS: `python3 -c 'import json,sys,collections;d=json.load(open(sys.argv[1]));print(collections.Counter((s["speaker"],bool(s.get("echo") or s.get("filtered") or s.get("duplicate"))) for s in d["segments"]))' <transcript.json>`
     shows no `Local Speaker N` / `Remote Speaker N` label that you named — flagged lines carry the
     name too.
-- [ ] **F-02 Re-detected: the flagged lines of that channel keep their label.**
+- [ ] **F-02 Re-detected: the flagged lines of that channel do not take the name.**
   - Do: on another such transcript press Re-detect on "This side" first, then name the speakers
     and Save.
-  - PASS: the same command shows every flagged line (`True`) of the mic side still under a
-    `Local Speaker N` label, its unflagged lines under your name, and every line of the other
-    side — flagged or not — under the name you gave it.
+  - PASS: the same command shows every flagged line (`True`) of the mic side under a
+    `Local Speaker N` label or `Local Unknown`, never under your name; its unflagged lines under
+    your name; and every line of the other side — flagged or not — under the name you gave it.
+- [ ] **F-03 Re-detected: an echo line is the echo voice's or nobody's (#277).**
+  - Do: on the F-02 transcript, after the re-detect and before naming anyone, run the same command.
+  - PASS: every mic-side line with `echo: true` is under the echo voice's label (the card that
+    carries the echo caption) or `Local Unknown`. None is under the label your own visible lines
+    carry.
 
 ## Mic-only recordings (#183) — added 2026-09-03
 
@@ -788,3 +793,15 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
     then Stop after 1 more minute.
   - PASS: `dev.py` printed "Building a RELEASE build + installing" and "RELEASE build installed to
     /Applications/Parley.app". `diag <id>.diag.jsonl | grep captureStart` shows `"build": "release"`.
+
+## Stop-path bounds (#226 / #232) — added 2026-10-02
+
+- [ ] **S-01 A normal Stop is unchanged.**
+  - Do: `cfg chunk_duration_minutes 10`, record 25 minutes with audio on both sides (3 chunks), on the usual local recording folder. Stop.
+  - PASS: "Transcribing…", then the transcript and the rename dialog, as before. No "Transcription Failed" alert, no "isn't answering" row. `stream.log` has no `chunk(s) were still being processed after` line and no `last chunk` line.
+- [ ] **S-02 The M1 Air: how long the last chunk takes.**
+  - Do: on the MacBook Air M1, default 30-minute chunks, stop a recording 28 minutes into a chunk. Read `Chunk N processing complete — Ns` for the last chunk in `stream.log`.
+  - PASS: the Stop completes normally. Record the seconds: the bound is the chunk's own length (here about 28 minutes, never under 5), so the number says how much margin there is, and whether a shorter bound would be safe.
+- [ ] **S-03 A recording folder that stops answering (optional: needs a network share).**
+  - Do: set `recording_directory` to a folder on an SMB share, record 2 minutes, disconnect the network, Stop.
+  - PASS: within about 6 minutes the menu leaves "Transcribing…" with an alert that the recording folder isn't answering and that Parley will finish the recording; Start works again. Reconnect the share: the recording is finished without a relaunch (or at the next launch), and its transcript holds the whole recording once.

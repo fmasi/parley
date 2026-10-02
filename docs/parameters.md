@@ -186,6 +186,8 @@ A measurement, not a detector: it changes nothing about the recording. Each tap 
 | Termination stop bound | `TerminationPolicy.terminationBound` | `5` s | A logout, shutdown, restart or outside quit stops a recording within this bound; the next launch salvages. |
 | Disk headroom | `DiskSpaceCheck.headroomBytes` | `200 MB` | Start is refused below 2 chunks + this. A chunk is `chunk_duration_minutes × 60 × 2 × 96 000` bytes. `diskLow` is raised below 1 chunk at a rotation and cleared at 2. |
 | Folder read bound | `SessionEvidence.folderDeadlineSeconds` | `5` | Bound on the record's reads of a recording folder at finalize. |
+| Chunk processing bound | `RecordingCoordinator.chunkProcessingBound` | the audio still being processed, at least `300` s (`chunkProcessingFloor`) | How long a Stop or a salvage waits for the chunks still being transcribed (#226): the time from when the oldest unfinished chunk began recording until now, never under the floor. Past it the session is kept pending ("Parley will finish it when the folder answers"), its chunks go on being processed, and it is finished once they end, or at the next launch. Not a config key. |
+| Last-chunk seal wait | `RecordingCoordinator.sealWait` | stable `1` s, looked at every `200` ms, at most `3` s | Before a live chunk is re-ingested after a stop the helper did not answer (or a crash), its files must keep their size this long (#232). When the wait runs out the chunk is processed as it is, and the message says the last chunk could not be checked. Not a config key. |
 
 ### Record
 
