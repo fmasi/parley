@@ -5597,6 +5597,9 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         h.coordinator.quitStopBound = .milliseconds(300)
+        // The stopping mark is WAITED for, whatever the disk's speed: with the default 1 s a mark still queued when the Quit
+        // returns is correct (the stop is then kept apart), but it is not what this test reads.
+        h.coordinator.exitMarkBound = .seconds(60)
         let audio = HungStep()   // the audio system hangs until released
         defer { audio.release() }
         h.client.onStartAsync = { await audio.hangAwaited() }
