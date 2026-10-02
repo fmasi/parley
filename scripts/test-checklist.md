@@ -249,6 +249,10 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: a 2-chunk recording with the other side talking (a call, or a video playing) while you say nothing at all.
   - PASS: the completion notice is "Transcription Complete", never "N chunks had processing problems". `meta` shows `processing_issue_count` 0 and no `diarization_failed` in `processing_issues`. `grep '"diarization"' <id>.json` reads `true`. The remote speakers are labelled as usual.
 
+- [ ] **D-20c A listen-only recording transcribes from the command line (#264).**
+  - Do: `Parley transcribe -i <listen-only>.m4a --split --output-dir <a scratch folder>` on the merged archive of a listen-only recording (D-20b's will do).
+  - PASS: it ends with "Output saved to: …", never a "no speech detected" error. The transcript has the remote speakers labelled as usual and no local lines.
+
 - [ ] **D-21 A mic-empty chunk (opportunistic).**
   - A chunk whose mic delivered nothing while the remote played. Unplugging a USB mic does NOT produce it: Parley follows the next mic (log "Mic input removed — … following to …"). Run this only if it happens naturally, or with a mic that stops delivering while staying selected.
   - PASS: that chunk archives system-only. The merged `.m4a` keeps the remote on the RIGHT, with the LEFT silent for that stretch. No WAV is left behind unless `preserve_source_wav` is on.

@@ -443,6 +443,22 @@ import Testing
         return (dir, system, mic)
     }
 
+    /// A listen-only recording: words on the system stream, audio and no words on the microphone. The microphone is not
+    /// diarized — diarizing it threw (no speech) and failed the whole run — and the system stream is labelled as usual.
+    @Test func aStreamWithNoWordsIsNotDiarizedAndTheRunCompletes() async throws {
+        let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+        let diarizer = NoSpeechDiarizer(silent: ["m_mic.wav"])
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system]), diarizer) }
+        let result = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
+        #expect(await diarizer.asked == ["m.wav"], "the stream with no words is not diarized")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]])
+        #expect(segments.map { $0["speaker"] as? String } == ["Remote Speaker 1"] && segments.map { $0["source"] as? String } == ["remote"])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["diarization"] as? Bool == true && metadata["dual_stream"] as? Bool == true)
+    }
+
     /// ...while a diarizer that throws on a stream that DOES have words still fails the run: no transcript is written.
     @Test func aDiarizerThrowOnAStreamWithWordsStillFailsTheRun() async throws {
         let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }

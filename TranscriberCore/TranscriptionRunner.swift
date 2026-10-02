@@ -1114,7 +1114,9 @@ public final class TranscriptionRunner {
 
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
-        if let diarizer {
+        // No words, nothing to label: the stream is not diarized (as in `ChunkProcessor`). FluidAudio throws
+        // `noSpeechDetected` on audio it finds no speech in, and here that throw fails the whole run (#264).
+        if let diarizer, !segments.isEmpty {
             // Run VAD concurrently with diarization (both read the same audio file)
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)

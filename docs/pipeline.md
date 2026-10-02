@@ -266,7 +266,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
 - `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
 - `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
-- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one.
+- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one. The single-file path (`run()`: the CLI, the legacy recovery) skips it the same way; there a diarizer failure on a stream that does have segments fails the run.
 
 **Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`). A rename applies to them too, except on a channel a re-detect has rewritten (`rediarized_channels` above).
 
