@@ -6,9 +6,9 @@ import AVFoundation
 /// Rewriting one channel's speakers after a re-diarization (#67).
 ///
 /// Re-diarization is NOT a relabel in place: word-level boundary splitting (#120) can turn one
-/// ASR segment into two when a speaker change lands mid-segment. On `150633-Paul feedback` it
-/// turned 73 segments into 84. So the operation replaces one source's segments wholesale and
-/// leaves the other source untouched.
+/// ASR segment into two when a speaker change lands mid-segment. On a speakerphone call with two
+/// people on one mic it turned 73 segments into 84. So the operation replaces one source's
+/// segments wholesale and leaves the other source untouched.
 @Suite("TranscriptRediarizer")
 struct TranscriptRediarizerTests {
 

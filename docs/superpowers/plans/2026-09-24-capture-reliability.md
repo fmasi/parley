@@ -87,7 +87,7 @@ The owner wants maximum parallelism. The work is partitioned into **streams whos
 - Stream F is the **foundation**: its file set deliberately overlaps later streams', so **F merges before any other stream except C branches**. Stream C (pure cores) touches only NEW files and can branch at the base commit `6a9966e` at t=0, in parallel with F.
 - Recipe per stream (`<s>` = f, c1…c13, h, e, r, l, d, x):
   ```bash
-  cd /Users/fmasi/Git/wt-capture-reliability
+  cd ~/Git/wt-capture-reliability
   git worktree add ../wt-cr-<s> -b cr/<s> fix/capture-reliability     # after F merged (C: at 6a9966e is fine)
   # …work, commit per task…
   # before merging: rebase on the current integration head, then run the Stream gate below
@@ -6521,7 +6521,7 @@ Diagnostic knobs in `config.json` (docs/parameters.md → Debugging): `tap_auto_
 - [ ] **D-20 Coverage on a real call.** 2-chunk call: `metadata.capture.remote.status healthy`, `expected_seconds ≈ delivered_seconds`, `processing_issues: []`, `dual_stream: true`.
 - [ ] **D-21 Mic-empty chunk.** Unplug a USB mic for a whole chunk: that chunk archives system-only, the merged `.m4a` keeps R = remote, L silent for that stretch; no WAV left behind unless `preserve_source_wav`.
 - [ ] **D-22 Re-detect timeline.** On a recording with a mic-only chunk, re-detect the remote channel: speaker turns land at the same timestamps as before; a `<transcript>.json.bak` exists *(X2 amendment: the code names it `.json.bak`, written before the first re-detect only; was `.rediarize-backup.json`)*.
-- [ ] **D-23 Summary honesty.** Re-summarise `2026-09-24/160032-….json` after stamping `capture.remote.status: neverDelivered`: the summary opens by stating the remote side was not captured.
+- [ ] **D-23 Summary honesty.** Re-summarise a copy of the 09-24 incident transcript after stamping `capture.remote.status: neverDelivered`: the summary opens by stating the remote side was not captured.
 - [ ] **D-24 Engine preflight.** Settings → Engine → Apple Speech — not yet usable (#223) → Save: "Not saved — this engine cannot transcribe on this Mac: …" and the engine stays FluidAudio.
 
 ## P3 — lifecycle

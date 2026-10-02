@@ -11,6 +11,12 @@ pre-commit:
     workflows:
       glob: ".github/workflows/*.yml"
       run: actionlint {staged_files}
+    # A real recording's file name is six digits, a dash and a capitalised word (HHMMSS-Title), and
+    # the title is often a person or a meeting subject (#275). Checks the staged content, like
+    # `secrets`. A fixture that needs a session name uses a lowercase word: `110851-standup`.
+    recording-names:
+      run: "! git grep --cached -nIE '[0-9]{6}-[A-Z][a-z]+' -- {staged_files}"
+      fail_text: "a real recording name? Describe the recording, or use a lowercase synthetic name such as 110851-standup (#275)"
 pre-push:
   commands:
     ci:
