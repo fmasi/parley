@@ -52,6 +52,11 @@ struct RenameDialog: View {
     /// What the last Re-detect on each channel produced, shown under its row (P5) — so a run that
     /// found fewer speakers than asked for, or relabeled nothing, says so instead of looking done.
     @State private var rediarizeOutcomes: [String: TranscriptRediarizer.Outcome] = [:]
+    /// What the echo check recorded in the transcript (#244): which speaker rows it judged to be the
+    /// other side's voice through the loudspeakers, and with what numbers. Loaded with the rows by
+    /// `RenameWindowController` (one read, off the main thread) and again after a re-detect, which
+    /// rewrites it. The copy and the people count are `EchoNotice`'s; nothing is worked out here.
+    @State private var echo: EchoNotice.Findings
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -61,12 +66,14 @@ struct RenameDialog: View {
         jsonPath: URL,
         speakers: [SpeakerEntry],
         initialChannelNames: [String: [String: String]] = [:],
+        initialEcho: EchoNotice.Findings = .none,
         onSave: @escaping ([String: String]) -> Void,
         onCancel: @escaping () -> Void = {}
     ) {
         self.jsonPath = jsonPath
         self._speakers = State(initialValue: speakers)
         self._cachedChannelNames = State(initialValue: initialChannelNames)
+        self._echo = State(initialValue: initialEcho)
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -90,7 +97,11 @@ struct RenameDialog: View {
         // transcript whose speakers have been renamed, a prefix test matches nothing, the count
         // floors to 1, and the stepper pre-fills 1 however many speakers were actually detected:
         // wrong on exactly the recordings #205 made Re-detect reachable for again.
-        max(1, speakers.filter { self.channel(of: $0) == channel }.count)
+        //
+        // PEOPLE, not rows (#244): a row judged to be the other side's voice through the
+        // loudspeakers is not somebody on this channel, and a stated count does not include it.
+        // Pre-filling the number of rows offered "2" for the user plus an echo voice.
+        echo.people(on: channel, rows: speakers.filter { self.channel(of: $0) == channel }.map(\.id))
     }
 
     /// Manual override for the diarizer's speaker count (#67).
@@ -150,9 +161,17 @@ struct RenameDialog: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let outcome = rediarizeOutcomes[channel] {
-                        Text("\(outcome.speakerCount) speaker\(outcome.speakerCount == 1 ? "" : "s") found · \(outcome.segmentsRelabeled) line\(outcome.segmentsRelabeled == 1 ? "" : "s") relabeled")
+                        Text(EchoNotice.redetectOutcome(outcome))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let hint = echo.redetectHint(on: channel) {
+                        // Before a re-detect: why the count is one less than the rows above, and
+                        // what a re-detect does with an echo voice (#244).
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -317,7 +336,9 @@ struct RenameDialog: View {
                 // to name. A single combined read (not two independent ones) for the same reason
                 // as `RenameWindowController.show` — one round trip to what can be an
                 // iCloud-mounted path instead of two.
-                let (refreshed, namesNow) = await Task.detached(priority: .userInitiated) {
+                // What the echo check recorded comes from the same read: the re-detect has just
+                // rewritten this channel's verdicts and labels (#244).
+                let (refreshed, namesNow, echoNow) = await Task.detached(priority: .userInitiated) {
                     RenameWindowController.parseSpeakersAndChannelNames(from: path, minSegments: 1)
                 }.value
                 await MainActor.run {
@@ -330,6 +351,9 @@ struct RenameDialog: View {
                         speakers = refreshed
                     }
                     cachedChannelNames = namesNow
+                    // Only from a transcript that was read: an unreadable one answers "no echo",
+                    // which would drop the notices from the rows still on screen.
+                    if !refreshed.isEmpty { echo = echoNow }
                     absorbedClusters[channel] = nil
                     rediarizeOutcomes[channel] = outcome
                     sampleIndices = [:]
@@ -503,6 +527,15 @@ struct RenameDialog: View {
                     .contentShape(Rectangle())
                     .help("Next Sample")
                 }
+            }
+
+            // The echo check judged this row to be the other side's voice through the loudspeakers,
+            // not a person on this side (#244): said above the name field, before anyone names it.
+            if let notice = echo.cardNotice(forRow: speakerId) {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             TextField("Name", text: speaker.displayName)

@@ -23,7 +23,8 @@ public enum CaptureQualityNotice {
     private static let couldNotCheck = "Parley couldn't re-read the transcript to check it"
 
     /// Notification title for a completed transcription, with precedence unreadable > no speech > a side
-    /// not captured > a side partly captured > capture anomalies > processing problems > complete (§7.3).
+    /// not captured > a side partly captured > capture anomalies > processing problems > echo marked >
+    /// complete (§7.3).
     ///
     /// A transcript that could not be re-read leads: none of the others can be known, and
     /// "Complete" would be a clean bill for a file nobody checked. An empty transcript comes next:
@@ -36,8 +37,12 @@ public enum CaptureQualityNotice {
     ///
     /// `remoteStatus` / `localStatus`: a `TrackAccounting.Status` raw value, nil when the record has none
     /// (never an invented alarm); `idle` and `healthy` say nothing.
+    ///
+    /// `echoLines`: `EchoNotice.Findings.completionLines` — above 0 when the recording has an echo voice
+    /// (#244). Last in the precedence: the lines are marked and nothing is missing, so it is information,
+    /// never said in place of a problem. The body carries it either way.
     public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
-                                       remoteStatus: String? = nil, localStatus: String? = nil) -> String {
+                                       remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "Transcription finished — \(couldNotCheck)" }
         if segmentCount == 0 { return "Transcription Complete — no speech was transcribed" }
         let remote = side(remoteStatus), local = side(localStatus)
@@ -50,12 +55,14 @@ public enum CaptureQualityNotice {
         }
         if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
         if problemChunkCount > 0 { return "Transcription Complete — \(problemPhrase(problemChunkCount))" }
+        if echoLines > 0 { return "Transcription Complete — \(EchoNotice.completionTitle)" }
         return "Transcription Complete"
     }
 
-    /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count.
+    /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count,
+    /// then the echo voice (`echoLines`, as for the title).
     public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
-                                      remoteStatus: String? = nil, localStatus: String? = nil) -> String {
+                                      remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }
@@ -71,6 +78,7 @@ public enum CaptureQualityNotice {
             parts.append("\(anomalyCount) capture \(noun) recorded; audio may be affected")
         }
         if problemChunkCount > 0 { parts.append(problemPhrase(problemChunkCount)) }
+        if let echo = EchoNotice.completionNotice(lines: echoLines) { parts.append(echo) }
         guard !parts.isEmpty else { return fileName }
         return "\(fileName) — " + parts.joined(separator: "; ")
     }

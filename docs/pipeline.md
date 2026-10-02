@@ -255,7 +255,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 **Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
 - `metadata.speaker_count_local` / `metadata.speaker_count_remote` — how many PEOPLE the channel ended up with: its labels that are neither `Unknown` nor an echo cluster, counted over unflagged lines. Can be 0 (a mic channel that holds only the other side's voice). Absent on a transcript that was never re-detected.
-- `metadata.rediarized_channels` — the channels a re-detect has rewritten (`"local"` / `"remote"`), each once, in the order they were first re-detected. Absent on a transcript that never was. A channel listed here no longer carries the labels the pipeline wrote.
+- `metadata.rediarized_channels` — the channels a re-detect has rewritten (`"local"` / `"remote"`), each once, in the order they were first re-detected. Absent on a transcript that never was. A channel listed here no longer carries the labels the pipeline wrote. A rename reads it (#245): a flagged segment is never relabelled by a re-detect, so on a listed channel it keeps the label an earlier diarization gave it, which may now be somebody else's, and the rename leaves it alone; on a channel that was never re-detected it is renamed like any other segment, so the JSON never shows two labels for one person. A channel with a `speaker_count_<channel>` counts as listed (builds before this key stamped only the count), a flagged segment with no `source` is renamed only when no channel was re-detected, and a `rediarized_channels` that is not a list of strings protects every flagged segment.
 - `metadata.echo_clusters`, after a re-detect of the mic channel: the track's entries are that pass's. No `chunk` (it runs over the whole channel); one entry per RAW cluster the diarizer returned, under the label its lines now carry, so clusters the stated count merged share a label (an echo cluster is never merged, so an `"echo"` entry's label is its own); the unattributed lines are judged as a group and appear as `Local Unknown`, or under the stated speaker's label when a count of 1 folded them in. Lines already flagged `echo` are counted as well as the unflagged ones. No `embedding_similarity`: the transcript holds no embedding for the other channel.
 - `processing_issues`, after a re-detect of the mic channel: the track's `echo_flagged` / `echo_cluster` entries are replaced by one of each for the whole channel (no `chunk`), when there is something to report. A transcript with no `processing_issues` key (the CLI path) gets none.
 - `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
@@ -267,7 +267,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
 - `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one.
 
-**Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`).
+**Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`). A rename applies to them too, except on a channel a re-detect has rewritten (`rediarized_channels` above).
 
 **Files beside the recording**:
 - `<session>.diag.live.jsonl` — every non-`info` capture event plus the coverage-carrying ones (`captureStop`, `trackCoverage`), appended as it happens, with ms-precision dates (`LiveDiagnosticsLog`). The record's build merges it, deduplicated, into the ring, and so into `<session>.diag.jsonl`. It is deleted only once the session's transcript exists.
@@ -348,6 +348,21 @@ What follows from that:
 - **One blended cluster** (the diarizer honoured the count): there is nothing to keep out; only the per-segment rule applies.
 - **The other channel is not checked.** The deduplicator judges mic clusters against system audio and has no answer to the reverse, so re-detecting the remote channel does what it always did. One consequence: the keys of `echo_clusters[].matched_remote` are the remote labels at the time of the check, and a later re-detect of the remote channel does not rewrite them.
 - **If the raw labelling is ever not one-to-one** the check is skipped (logged as an error) and the re-detect is the unguarded one: a relabel must never lose or misplace words.
+
+### What the user is told (#244)
+
+A second voice on the mic side used to be listed as "Local Speaker 2" with nothing to explain it. Three places now say what the echo check recorded. All three read the transcript's metadata (`echo_clusters`, `echo_segments_flagged`, `speaker_count_<track>`, `speaker_names`) and recompute nothing; the copy and the counts are built by `EchoNotice` (TranscriberCore), the views only show them.
+
+- **Speaker card** (rename dialog) of a label with at least one `"echo"` verdict: "Looks like the other side's voice through your loudspeakers: N of M lines (P% of its speaking time) match <remote label(s)> at the same time and are marked as echo. The other K lines stay under this label." The numbers are the label's `echo_clusters` entries summed (one per chunk); P is `matched_seconds / seconds`, the measure the verdict is taken on. A label whose entries are all `"kept"` gets no notice.
+- **Re-detect row**: before, "The count is people only, not the echo voice. Re-detect checks for echo again and keeps an echo voice separate; its matched lines stay marked as echo." After, the outcome: "1 speaker found · 1 echo voice kept separate · N lines marked as echo · R lines relabeled" (without echo it reads as before: "2 speakers found · 84 lines relabeled"). The stepper pre-fills the number of PEOPLE on the channel: its rows that are not an echo voice, never below `speaker_count_<track>`, never below 1.
+- **Completion notice** of a recording with an echo voice: the title is "Transcription Complete — echo marked" (last in the title's precedence: every problem is said first), and the body adds "it looks like part of the other side's voice came through your microphone, and N lines are marked as echo (headphones avoid this)", N being `echo_segments_flagged`. Lines flagged in a cluster that was kept (the 3-word rule) do not make a notice.
+
+What follows from reading only the metadata:
+
+- **Labels, not names.** The copy names the labels `echo_clusters` holds ("Remote Speaker 1"), which a rename does not rewrite. The echo voice's own row is still found after a rename, through `speaker_names` (followed as a chain, since each rename is keyed by the label current at the time).
+- **"Looks like", not "is".** The check sees lines on this side that repeat the other side's words at the same moment. The mirror case (this side's voice coming back on the other side's track) gives the same numbers.
+- **A label can be echo in one chunk and too short to judge in the next.** All its entries are summed; in the chunk where it was kept a matched line of one or two words is not flagged, so N can exceed the lines actually marked by those few.
+- **After a re-detect of the other channel** the remote labels in `matched_remote` are the ones at the time of the check (see above), and the card names those.
 
 ### Windowed Comparison and Containment Fallback
 

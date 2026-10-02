@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2415%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2442%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -118,6 +118,8 @@ faithful and private.
   be echo and every matched line of it is flagged, and elsewhere only matches of three words or more
   are. A flagged line is kept in the JSON record and hidden from the TXT/SRT transcript and the
   summary, and the transcript records the numbers behind each verdict (`metadata.echo_clusters`).
+  The rename dialog and the completion notice say it in words: which speaker row looks like the far end
+  through your loudspeakers, how many lines were marked, and that headphones avoid it.
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
@@ -202,7 +204,7 @@ TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC clien
 TranscriberCore/       engines, diarization, echo-dedup, speaker reconciliation, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2415 tests across 268 suites
+SwiftTests/            2442 tests across 271 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```
