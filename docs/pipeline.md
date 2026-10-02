@@ -461,7 +461,7 @@ All Swift components log via `os.Logger` with:
 # Dump recent history to file (useful after a crash — no live stream needed)
 /usr/bin/log show --predicate 'subsystem == "eu.fmasi.parley"' --last 30m --style compact > ~/Desktop/transcriber.log
 
-# Via dev.py (launches app + tails log automatically)
+# Via dev.py (builds a release build, installs, launches app + tails log automatically)
 python3 scripts/dev.py --debug
 
 # Callback timing (#247): one line per track at each Stop, logged at notice level so `log show` keeps it
@@ -510,10 +510,17 @@ Developer iteration CLI. Key flags:
 
 | Flag | Action |
 |---|---|
-| (default) | Kill app, build, install bundle, launch |
-| `--debug` | Launch app + tail unified log (subsystem filter) |
+| (default) | Kill app, build a **release** build, install bundle, launch |
+| `--debug-build` | Build the unoptimised debug configuration instead (faster to compile). For the inner loop only: not for real meetings or for timings (gotcha 84) |
+| `--debug` | Launch app + tail unified log (subsystem filter). Nothing to do with the build configuration |
 | `--reset-tcc` | Reset TCC permissions (microphone + screen recording) |
-| `--no-build` | Skip build step (reuse last binary) |
+| `--build` | Build only, into `dist/`: nothing is killed, installed or launched. `just build` runs `--build --debug-build` |
+| `--kill --launch` | Relaunch the installed app without building |
+
+`dev.py` prints the configuration it built and installed, and `package_app.sh` prints it next to the
+version (`package_app.sh` alone still defaults to debug; `--release` is what `dev.py` and
+`scripts/release.sh` pass). The capture helper writes the configuration into each recording's
+`captureStart` diagnostic event as `"build"` (`TranscriberCore/BuildConfiguration.swift`, #271).
 
 ### scripts/test-checklist.md
 

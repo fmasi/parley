@@ -10,7 +10,8 @@ stayed up, and `metadata.capture.<side>.status` says which.
 
 ## Setup (once per session)
 
-1. Build and install the merged tree: `python3 scripts/dev.py`. Settings → Audio → Capture Method →
+1. Build and install the merged tree: `python3 scripts/dev.py` (a release build; it prints
+   "RELEASE build installed"). Settings → Audio → Capture Method →
    **Core Audio Tap** (the default for new installs).
 2. Evidence folder and a copy of your config:
    `mkdir -p ~/Desktop/parley-x1 && cp ~/Library/Application\ Support/Parley/config.json ~/Desktop/parley-x1/config.before.json`.
@@ -473,7 +474,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
 
 - [ ] **M-IO Does recording stall the IO callback, and is the periodic `fsync` why? (#247)**
   - Why: `coreaudiod` reported the capture helper's IO callback at 56.5 ms against an 11.35 ms budget, with ~0.5 ms of CPU in that cycle: it was waiting. The tap's callback runs on the helper's shared audio queue, with the mic, the WAV writes and an `fsync` every 0.5 s per writer. This run measures where the time goes. **Nothing here has been measured on a device yet**: the instrument itself is under test too (see Sanity).
-  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: Quit Parley, `bash package_app.sh --release --install`, open Parley. `dev.py` installs a debug build, whose callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which.
+  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: `python3 scripts/dev.py` installs one (since #271) and prints "RELEASE build installed". Never `--debug-build` here: a debug build's callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which (`captureStart` in a `.diag.jsonl` says: `"build"`).
   - Do: three runs of each condition, interleaved A B C A B C A B C (so a drift in the room or the link does not line up with one condition). Before each run: `T0=$(date '+%Y-%m-%d %H:%M:%S')`.
     - **A, not recording:** Parley open and idle, the call running.
     - **B, recording:** Quit, `cfg debug_skip_wav_sync null`, open Parley, Record 10 min, Stop.
@@ -776,3 +777,13 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
   line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`).
 - [ ] **E-06 An old config still loads.** `cfg echo_embedding_threshold 0.99`, relaunch, repeat E-01
   for 1 minute: the result is the same as E-01 (the key is ignored). `cfg echo_embedding_threshold null`.
+
+## Build configuration (#271) — added 2026-10-02
+
+- [ ] **B-01 The everyday install is a release build, and the record says so.**
+  - Do: `python3 scripts/dev.py`. Record with audio playing; after 30 s run
+    `pkill -9 -f audio-capture-helper-xpc` (a clean recording writes no `.diag.jsonl`; the helper
+    restart is the anomaly that makes this one keep its event log). Wait for "Recording Resumed",
+    then Stop after 1 more minute.
+  - PASS: `dev.py` printed "Building a RELEASE build + installing" and "RELEASE build installed to
+    /Applications/Parley.app". `diag <id>.diag.jsonl | grep captureStart` shows `"build": "release"`.

@@ -45,9 +45,12 @@ red-first base="origin/main":
     PARLEY_FETCH_MODELS=1 bash scripts/verify-regression-tests.sh "$(git merge-base {{base}} HEAD)"
 
 # Build ONLY: plain `dev.py` would also kill the running app and install to /Applications.
+# A DEBUG build, unlike plain `dev.py` (release, #271): this step proves the app and the helper
+# compile, and a debug build reuses what `just test` has just compiled (~15 s; a release build
+# compiles the whole package again, ~1.5 min more on every push). Nothing is installed from it.
 # The app bundle (TranscriberApp + XPC service); CI doesn't build it
 build:
-    python3 scripts/dev.py --build
+    python3 scripts/dev.py --build --debug-build
 
 # scan the staged changes for secrets (the pre-commit hook runs this)
 secrets:

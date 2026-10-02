@@ -716,6 +716,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
                         "tap_auto_start": "\(options.tapAutoStart)",
                         "debug_skip_wav_sync": "\(options.debugSkipWavSync)",
+                        // Debug or release (#271): a timing from a debug build is not the shipped app's.
+                        "build": BuildConfiguration.name,
                     ])
                     switch source {
                     case .screenCaptureKit:
