@@ -353,8 +353,11 @@ public enum TranscriptRediarizer {
             // What the check found, line by line (#243):
             // - a line of an echo cluster carries that cluster's own label; its matched lines are
             //   flagged, the rest are not — nothing of it is given to the stated speaker;
-            // - elsewhere, a flagged line (a match of 3+ words) is not relabelled: it keeps the label
-            //   it had, as every flagged line does. A line that already carried the flag keeps it.
+            // - elsewhere, a flagged line (a match of 3+ words) is not given to the stated speaker,
+            //   and does not keep the label it had either (#277): it is the other side's words, and
+            //   after a repair the old label is the user's. It takes the channel's unattributed
+            //   label, which nothing counts as a person or a voice. A line that already carried the
+            //   flag keeps it.
             // The flag is one-way: a later re-detect whose clustering no longer judges that line
             // echo does not clear it, so the line stays hidden. A re-detect cannot un-mark echo.
             var relabeled: [LabeledSegment] = []
@@ -367,7 +370,7 @@ public enum TranscriptRediarizer {
                 var line = labeled[i]
                 if echo.result.segments[i].echo {
                     line.echo = true
-                    if !echo.isInEchoCluster(i) { line.speaker = candidate.speaker ?? unattributed }
+                    if !echo.isInEchoCluster(i) { line.speaker = unattributed }
                 }
                 relabeled.append(line)
             }

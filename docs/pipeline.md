@@ -340,7 +340,7 @@ A stated count is about people. With the far side on loudspeakers the diarizer f
 3. `SpeakerCountEnforcer.enforce(_:to:keeping:)` enforces the count on the other clusters. A cluster judged echo is never merged away, never merged into and not counted.
 4. The segments are labelled with the result:
    - a line of an echo cluster carries that cluster's own label; its matched lines are flagged `echo`, its unmatched lines are not. Nothing of it is given to the stated speaker, and at a count of 1 unattributed speech is never folded into it;
-   - in any other cluster a matched line of 3 words or more is flagged `echo` and keeps the label it had before the re-detect (a flagged line is never relabelled to a stated speaker). A 1–2-word match is an ordinary line.
+   - in any other cluster a matched line of 3 words or more is flagged `echo` and takes the channel's unattributed label (`Local Unknown`). It is never relabelled to a stated speaker, and it does not keep the label it had before the re-detect either (#277): after a repair that label is the user's, and the words are the other side's. A 1–2-word match is an ordinary line.
 5. The metadata is rewritten as listed under "Re-detect" in the transcript metadata above; `Outcome` reports `speakerCount` (people), `segmentsRelabeled` (unflagged lines labelled), `echoClusters` and `echoFlagged`.
 
 What follows from that:
@@ -349,7 +349,8 @@ What follows from that:
 - **Lines already flagged `echo` count as evidence.** The pipeline flags an echo cluster's matched lines when it transcribes; judged on the unmatched rest alone, that cluster would look like a person and be merged. They keep their flag (a re-detect never removes one) and take the cluster's new label, since speaker numbers are positional and the old one may now be somebody else's. A line flagged `filtered` or `duplicate` is neither evidence nor touched.
 - **It repairs a transcript that was merged this way.** Re-detecting it again finds the echo voice in the raw clusters and takes it back out.
 - **Speech the diarizer gave no turn to is judged as a group** (`Local Unknown`). When that group is echo, a count of 1 does not fold its unmatched lines into the user.
-- **One blended cluster** (the diarizer honoured the count): there is nothing to keep out; only the per-segment rule applies.
+- **One blended cluster** (the diarizer honoured the count): there is nothing to keep out; only the per-segment rule applies, and the lines it flags are unattributed.
+- **The unattributed label is nobody.** A line flagged outside an echo cluster adds no person to `speaker_count_<track>`, no entry to `echo_clusters`, no row to the rename dialog and no participant to the summary; a rename does not reach it.
 - **The other channel is not checked.** The deduplicator judges mic clusters against system audio and has no answer to the reverse, so re-detecting the remote channel does what it always did. One consequence: the keys of `echo_clusters[].matched_remote` are the remote labels at the time of the check, and a later re-detect of the remote channel does not rewrite them.
 - **If the raw labelling is ever not one-to-one** the check is skipped (logged as an error) and the re-detect is the unguarded one: a relabel must never lose or misplace words.
 
