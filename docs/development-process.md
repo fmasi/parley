@@ -89,6 +89,22 @@ fix-plus-regression-test PR the gate exists to reward. Mark such a test
 (`bash scripts/fetch-diarization-fixtures.sh`), and rely on the `test` job — which does run it — for
 the real signal.
 
+**A `RED-FIRST-EXEMPT:` marker lasts as long as it is in the file.** It exempts the whole file from
+the gate in every later PR, not only the one that added it. A reason such as "this file's only
+change in this PR is…" is false from the moment that PR merges, and six files carried such markers
+until they were removed (#260). Remove a marker when its reason expires; a later PR that adds a
+characterization test next to a production change adds a fresh one with its own reason.
+
+**RED is a verdict on the tests, not any non-zero exit.** The gate resolves the packages, builds the
+production targets, builds the tests, then runs them, at the merge base and again at HEAD. It is RED
+only when the tests ran and failed, or when a changed test file did not compile against the merge
+base. If the merge base cannot be resolved, built, linked or run, the gate fails with "could not
+build the parent — not RED" and names the step. It used to pass: on one Mac SwiftPM could not check
+a dependency out of its local cache, nothing compiled, and six pushes went through as "RED at
+parent". When that message appears locally with "Couldn't check out revision" or "unable to read
+tree" above it, run `swift package purge-cache` and push again. A test that crashes the test process
+at the merge base also lands here (no summary is printed): make it fail with an assertion instead.
+
 **What CI cannot cover:** anything needing real audio hardware — the capture path, Bluetooth/HFP
 behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,
 and the measurements belong in the commit message.
