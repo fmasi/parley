@@ -401,3 +401,68 @@ import Testing
         runner.teardownChunkedPipeline()
     }
 }
+
+/// #264: `run()` — the CLI and the legacy single-file recovery — driven with a fake engine and diarizer through
+/// `engineFactoryForTesting`. A side with audio and no speech has no words to label.
+@MainActor
+@Suite struct TranscriptionRunnerNoSpeechTests {
+    /// Hears one line on the streams it is told speak, and nothing on the others.
+    private struct ScriptedEngine: TranscriptionEngine {
+        let name = "Scripted"
+        let speaks: Set<AudioSourceType>
+        func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+            speaks.contains(audioSource) ? [TranscriptSegment(start: 0, end: 0.5, text: "hello", language: "en")] : []
+        }
+        func isReady() -> Bool { true }
+        func prepare() async throws {}
+    }
+
+    /// Throws on the files it finds no speech in, as FluidAudio's offline diarizer does (`noSpeechDetected`); one speaker
+    /// on any other. Keeps the names of the files it was asked to diarize.
+    private actor NoSpeechDiarizer: DiarizationProvider {
+        struct NoSpeech: Error {}
+        private let silent: Set<String>
+        private(set) var asked: [String] = []
+        init(silent: Set<String>) { self.silent = silent }
+
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
+            asked.append(audioPath.lastPathComponent)
+            if silent.contains(audioPath.lastPathComponent) { throw NoSpeech() }
+            return DiarizationResult(segments: [DiarizedSegment(start: 0, end: 1, speaker: "S1")], speakerDatabase: ["S1": [1, 0, 0]])
+        }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { throw NoSpeech() }
+    }
+
+    /// A folder with both streams, one second each unless told: `m.wav` (system) and `m_mic.wav`.
+    private func recording(seconds: Double = 1) throws -> (dir: URL, system: URL, mic: URL) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("runner-no-speech-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let system = dir.appendingPathComponent("m.wav"), mic = dir.appendingPathComponent("m_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: system, seconds: seconds)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: seconds)
+        return (dir, system, mic)
+    }
+
+    /// ...while a diarizer that throws on a stream that DOES have words still fails the run: no transcript is written.
+    @Test func aDiarizerThrowOnAStreamWithWordsStillFailsTheRun() async throws {
+        let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+        let diarizer = NoSpeechDiarizer(silent: ["m.wav"])
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), diarizer) }
+        await #expect(throws: NoSpeechDiarizer.NoSpeech.self) {
+            _ = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
+        }
+        #expect(await diarizer.asked == ["m.wav"])
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("m.json").path))
+    }
+
+    /// The seam left unset — as in production — `run` builds its own engine and diarizer: two header-only files are
+    /// skipped before either is asked anything, and the transcript says diarization was on.
+    @Test func withoutTheSeamRunBuildsItsOwnEngineAndDiarizer() async throws {
+        let (dir, system, mic) = try recording(seconds: 0); defer { try? FileManager.default.removeItem(at: dir) }
+        let result = try await TranscriptionRunner().run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        #expect((json["segments"] as? [Any])?.isEmpty == true)
+        #expect((json["metadata"] as? [String: Any])?["diarization"] as? Bool == true)
+    }
+}
