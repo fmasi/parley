@@ -2803,7 +2803,9 @@ final class HungStep: @unchecked Sendable {
         let s = try writeSentinel(h, alive: 600)
         h.client.captureStateResult = .unknown
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.recoverAtLaunch()
         #expect(RecordingSentinel.readPending(directory: h.tmp).map(\.sessionKey) == [s.sessionKey])
         #expect(h.presented.value.isEmpty && h.client.droppedConnections == 1)
@@ -3526,7 +3528,9 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         h.coordinator.stopDeadline = .milliseconds(150)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         let runner = h.runner, tmp = h.tmp, mic = h.recordingMic
         let atDrop = Harness.Box<(stopping: Bool?, pipelineUp: Bool, micMarked: Bool)?>(nil)
         h.client.onDropConnection = {
@@ -3548,7 +3552,9 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(150)
         h.client.stopResult = AudioPaths(systemAudio: h.tmp.appendingPathComponent("a.wav"), micAudio: h.tmp.appendingPathComponent("a_mic.wav"))
-        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStart = HungStep()   // the helper's start hangs until released: it never outlives the test
+        defer { stuckStart.release() }
+        h.client.onStartAsync = { await stuckStart.hangAwaited() }
         let appState = h.appState, coordinator = h.coordinator
         let atStop = Harness.Box<(message: String?, inFlight: Bool)?>(nil)
         h.client.onStop = { atStop.value = (appState.errorMessage, coordinator.isStartInFlight) }
@@ -3566,8 +3572,12 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(150)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStart = HungStep()   // the helper's start hangs until released: it never outlives the test
+        defer { stuckStart.release() }
+        h.client.onStartAsync = { await stuckStart.hangAwaited() }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
         // Held (L review 81): pending, marked stopping, the mic kept marked.
@@ -3598,7 +3608,9 @@ final class HungStep: @unchecked Sendable {
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.handleXPCCrash()
         #expect(h.client.stopCalls == 1 && h.client.droppedConnections == 1)
         #expect(h.appState.isIdle)
@@ -4238,7 +4250,9 @@ final class HungStep: @unchecked Sendable {
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(150)
         let hang = Harness.Box(true)
-        h.client.onStop = { if hang.value { try? await Task.sleep(for: .seconds(1)) } }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { if hang.value { await stuckStop.hangAwaited() } }
         await h.coordinator.recoverAtLaunch()
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
         #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "a file still being written is never salvaged")
@@ -4258,7 +4272,9 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.runner.failSetupForTesting = true
         h.coordinator.helperStopDeadline = .milliseconds(150)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         // Held (L review 81): pending, marked stopping — salvage-only — and out of the slot a next Start writes.
         let held = try #require(RecordingSentinel.readPending(directory: h.tmp).first)
@@ -4287,7 +4303,9 @@ final class HungStep: @unchecked Sendable {
         defer { h.runner.stopChunkRotation(); h.runner.teardownChunkedPipeline() }
         h.runner.failSetupForTesting = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "first", microphoneDeviceId: nil)
         let first = try #require(h.client.startCalls.first)
         h.runner.failSetupForTesting = false
@@ -4306,7 +4324,9 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         h.runner.failSetupForTesting = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.runner.failSetupForTesting = false
         h.client.onStop = nil   // the helper lets go now
@@ -4325,7 +4345,9 @@ final class HungStep: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.runner.failSetupForTesting = true   // the resume's capture starts, its pipeline cannot be built
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.recoverAtLaunch()
         #expect(RecordingSentinel.read(directory: h.tmp) == nil, "not in the slot")
         let held = RecordingSentinel.readPending(directory: h.tmp)
@@ -4343,7 +4365,9 @@ final class HungStep: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.captureStateResult = .notCapturing   // the ping says so…
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // …but the helper does not let go
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // …but the helper does not let go
         await h.coordinator.recoverAtLaunch()
         #expect(h.presented.value.isEmpty && h.client.finalizeCalls.isEmpty, "never salvaged on a ping")
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
@@ -4363,7 +4387,9 @@ final class HungStep: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.recoverAtLaunch()
         #expect(h.recordingMic.current == .some("mic-7"))
         h.client.onStop = nil
@@ -5052,8 +5078,12 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         h.coordinator.startDeadline = .milliseconds(150)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStartAsync = { try? await Task.sleep(for: .seconds(2)) }
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStart = HungStep()   // the helper's start hangs until released: it never outlives the test
+        defer { stuckStart.release() }
+        h.client.onStartAsync = { await stuckStart.hangAwaited() }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         #expect(h.client.discardedSessions.isEmpty && RecordingSentinel.readPending(directory: h.tmp).count == 1)
     }
@@ -5299,7 +5329,9 @@ final class HungStep: @unchecked Sendable {
         try Harness.headerOnlyWAV().write(to: outDir.appendingPathComponent(base + "-0.wav"))
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.handleXPCCrash()
         #expect(RecordingSentinel.readPending(directory: h.tmp).count == 1, "held")
         #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "why it is held travels with it (L review 177)")
@@ -5407,7 +5439,9 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.evidenceFlushBound = .milliseconds(100)
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(3)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         let began = ContinuousClock.now
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
         #expect(h.client.flushCalls == 1)
@@ -5856,7 +5890,9 @@ final class HungStep: @unchecked Sendable {
         try RecordingSentinel.writePending([s], directory: h.tmp)
         RecordingSentinel.delete(directory: h.tmp)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.retryPendingSessions()
         #expect(h.client.droppedConnections == 1)
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey] && h.client.finalizeCalls.isEmpty)
@@ -5878,7 +5914,9 @@ final class HungStep: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go of `s`
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go of `s`
         await h.coordinator.recoverAtLaunch()
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey], "held; the older one finished")
         #expect(h.presented.value.count == 1 && h.presented.value.first?.lastPathComponent == "old.json")
@@ -6121,7 +6159,9 @@ final class HungStep: @unchecked Sendable {
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
         let tmp = h.tmp
-        h.client.onStop = { RecordingSentinel.delete(directory: tmp); try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { RecordingSentinel.delete(directory: tmp); await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-9")
         #expect(pending(h).count == 1 && pending(h).first?.stopping == true, "held from the start's own copy")
         #expect(h.appState.activeAlarms[.recordingStopped] != nil, "said")
@@ -6159,7 +6199,9 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }
         await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
         let held = try #require(pending(h).first)
         h.client.startError = nil

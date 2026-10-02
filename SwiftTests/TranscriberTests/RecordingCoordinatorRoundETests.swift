@@ -186,7 +186,9 @@ import Testing
         _ = try await recording(h)
         let client = h.client
         client.stopError = RefusedStoppingError()
-        client.onStop = { if client.stopCalls >= 2 { try? await Task.sleep(for: .seconds(1)) } }   // the re-ask never answers
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        client.onStop = { if client.stopCalls >= 2 { await stuckStop.hangAwaited() } }   // the re-ask never answers
         h.coordinator.stopDeadline = .milliseconds(400)
         h.coordinator.stopReaskInterval = .milliseconds(20)
         h.coordinator.stopReaskMinimumBudget = .milliseconds(100)
@@ -291,7 +293,9 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await recording(h)
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(3)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         h.coordinator.evidenceFlushBound = .milliseconds(200)
         await h.coordinator.prepareForTermination(bound: .seconds(2))
         #expect(h.coordinator.exitFlushTimedOut)
@@ -388,7 +392,9 @@ import Testing
         defer { tearDown(h) }
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go: HELD
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go: HELD
         await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
         let held = try #require(pending(h).first)
         #expect(held.stopCause == .startFailed && held.heldReason == .startFailed, "\(String(describing: held.stopCause))")

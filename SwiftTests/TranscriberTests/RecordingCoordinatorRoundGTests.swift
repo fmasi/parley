@@ -151,7 +151,9 @@ final class StuckSentinelQueue: @unchecked Sendable {
     @Test func aFlushWithNoBudgetLeftIsNotAHungFolder() async throws {
         let h = try Harness()
         defer { roundFTearDown(h) }
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .milliseconds(20))
         #expect(!h.coordinator.exitFlushTimedOut)
         h.coordinator.evidenceFlushBound = .milliseconds(200)
@@ -163,14 +165,16 @@ final class StuckSentinelQueue: @unchecked Sendable {
     @Test func eachExitAttemptSaysItsOwnFlush() async throws {
         let h = try Harness()
         defer { roundFTearDown(h) }
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         h.coordinator.evidenceFlushBound = .milliseconds(200)
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .seconds(2))
         #expect(h.coordinator.exitFlushTimedOut)
         h.client.onFlush = nil
         await h.coordinator.prepareForTermination(bound: .seconds(2))   // nothing in flight: a quick exit
         #expect(!h.coordinator.exitFlushTimedOut)
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .seconds(2))
         h.client.onFlush = nil
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
@@ -412,7 +416,9 @@ final class StuckSentinelQueue: @unchecked Sendable {
         try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }   // the stream's stop never answers in time
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the stream's stop never answers in time
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.builtRecords.contains { $0.sessionId == "old" }, "the other session's salvage adopted — and reset — the evidence")
         let held = try #require(RecordingSentinel.readPending(directory: h.tmp).first { $0.sessionKey == s.sessionKey })

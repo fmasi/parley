@@ -208,7 +208,9 @@ typealias HungRead = HungStep
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go of `s`
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go of `s`
         await h.coordinator.recoverAtLaunch()
         #expect(h.presented.value.map(\.lastPathComponent) == ["old.json"], "the other one is finished")
         #expect(h.client.evidenceOrder.contains("adopt-undrained:old"), "\(h.client.evidenceOrder)")
@@ -721,7 +723,9 @@ typealias HungRead = HungStep
         try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: list.path)   // cannot be moved aside
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go: HELD
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go: HELD
         await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
         let held = try #require(pending(h).first, "the hold is tracked")
         h.client.startError = nil
