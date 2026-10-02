@@ -357,14 +357,15 @@ public enum TranscriptRediarizer {
             //   and does not keep the label it had either (#277): it is the other side's words, and
             //   after a repair the old label is the user's. It takes the channel's unattributed
             //   label, which nothing counts as a person or a voice. A line that already carried the
-            //   flag keeps it.
+            //   flag keeps it, and is labelled the same way: its old label comes from an earlier
+            //   clustering (and perhaps a rename), and may now be a person's.
             // The flag is one-way: a later re-detect whose clustering no longer judges that line
             // echo does not clear it, so the line stays hidden. A re-detect cannot un-mark echo.
             var relabeled: [LabeledSegment] = []
             for (i, candidate) in pool.enumerated() {
                 finalLabels[echo.rawLabels[i]] = labeled[i].speaker
                 if candidate.wasEcho {
-                    if echo.isInEchoCluster(i) { segments[candidate.index]["speaker"] = labeled[i].speaker }
+                    segments[candidate.index]["speaker"] = echo.isInEchoCluster(i) ? labeled[i].speaker : unattributed
                     continue
                 }
                 var line = labeled[i]

@@ -688,12 +688,17 @@ about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detec
   - PASS: `python3 -c 'import json,sys,collections;d=json.load(open(sys.argv[1]));print(collections.Counter((s["speaker"],bool(s.get("echo") or s.get("filtered") or s.get("duplicate"))) for s in d["segments"]))' <transcript.json>`
     shows no `Local Speaker N` / `Remote Speaker N` label that you named — flagged lines carry the
     name too.
-- [ ] **F-02 Re-detected: the flagged lines of that channel keep their label.**
+- [ ] **F-02 Re-detected: the flagged lines of that channel do not take the name.**
   - Do: on another such transcript press Re-detect on "This side" first, then name the speakers
     and Save.
-  - PASS: the same command shows every flagged line (`True`) of the mic side still under a
-    `Local Speaker N` label, its unflagged lines under your name, and every line of the other
-    side — flagged or not — under the name you gave it.
+  - PASS: the same command shows every flagged line (`True`) of the mic side under a
+    `Local Speaker N` label or `Local Unknown`, never under your name; its unflagged lines under
+    your name; and every line of the other side — flagged or not — under the name you gave it.
+- [ ] **F-03 Re-detected: an echo line is the echo voice's or nobody's (#277).**
+  - Do: on the F-02 transcript, after the re-detect and before naming anyone, run the same command.
+  - PASS: every mic-side line with `echo: true` is under the echo voice's label (the card that
+    carries the echo caption) or `Local Unknown`. None is under the label your own visible lines
+    carry.
 
 ## Mic-only recordings (#183) — added 2026-09-03
 

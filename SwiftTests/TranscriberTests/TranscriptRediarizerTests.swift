@@ -1270,6 +1270,37 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(prompt.count == voice.own.count + voice.copies.count)
     }
 
+    /// The line was flagged by an EARLIER pass (the pipeline's own per-line rule), and the user then
+    /// named the speaker: on a channel that was never re-detected a rename reaches flagged lines too,
+    /// so the other side's words sit under the name. This re-detect puts them in no echo cluster.
+    /// `orphan` is such a line whose match the check can no longer see (nothing on the other channel).
+    @Test("a line already flagged as echo, outside an echo cluster, becomes unattributed and stays flagged")
+    func anAlreadyFlaggedLineOutsideAnEchoClusterIsUnattributed() async throws {
+        let voice = BlendedVoice()
+        let orphan = [Line(start: 215, end: 220, text: Self.words("orphan", 6))]
+        let before = voice.segments(label: "Robin", copiesFlagged: true)
+            + orphan.map { Self.segment($0, "Robin", "local", echo: true) }
+        let (t, cleanup) = try makeRecording(segments: before, metadata: ["speaker_names": ["Local Speaker 1": "Robin"]]); defer { cleanup() }
+        let diarization = DiarizationResult(segments: Self.turns(voice.own + voice.copies + orphan, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: diarization))
+
+        let (segments, metadata) = try read(t)
+        // The flag is one-way; the label an earlier diarization (and a rename) left is not kept.
+        #expect(echoCount(found(voice.copies + orphan, in: segments)) == voice.copies.count + 1)
+        #expect(speakers(found(voice.copies + orphan, in: segments)) == ["Local Unknown"])
+        #expect(speakers(found(voice.own, in: segments)) == ["Local Speaker 1"])
+        #expect(echoCount(found(voice.own, in: segments)) == 0)
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.echoClusters == 0)
+        #expect(outcome.segmentsRelabeled == voice.own.count)
+        #expect(metadata["echo_segments_flagged"] as? Int == voice.copies.count + 1)
+        #expect(clusters(metadata, track: "local").compactMap { $0["label"] as? String } == ["Local Speaker 1"])
+    }
+
     /// Both rules in one re-detect: an echo cluster, and one more copy of the other side inside the
     /// user's own cluster. The cluster's lines are untouched by #277; only the stray copy changes.
     @Test("an echo cluster's lines carry the cluster's label; a flagged line outside it is unattributed")
