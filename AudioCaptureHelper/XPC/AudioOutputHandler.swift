@@ -105,7 +105,7 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Invoked when the SCStream stops with an error, so the service can decide whether to restart
-    /// in place (benign route change) or surface a fatal failure (#86). Set by the service.
+    /// in place (benign route change) or give up on the remote stream (#86). Set by the service.
     var onStreamStopped: ((Error) -> Void)?
 
     /// Seconds the system track was EXPECTED to deliver so far (the gate-open time, §4.3/§7.1): what

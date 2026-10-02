@@ -20,7 +20,8 @@ class ServiceDelegate: NSObject, NSXPCListenerDelegate {
         newConnection.exportedObject = service
 
         // Reverse channel (#86): let the service call back into the app to report an in-place
-        // restart or a fatal failure. The app sets a matching exported object on its side.
+        // restart, a give-up on the remote stream, and its alarms. The app sets a matching exported
+        // object on its side.
         newConnection.remoteObjectInterface = NSXPCInterface(
             with: AudioCaptureClientProtocol.self
         )

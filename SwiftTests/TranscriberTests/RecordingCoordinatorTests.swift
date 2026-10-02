@@ -9,7 +9,6 @@ import Foundation
 final class FakeCaptureClient: RecordingCaptureClient {
     var onServiceCrash: (@Sendable () -> Void)?
     var onMicDeviceChanged: (@Sendable (String?) -> Void)?
-    var onFatalFailure: (@Sendable (String) -> Void)?
     var onQualityAnomaly: (@Sendable (String, String) -> Void)?
     var onSystemAudioUnrecoverable: (@Sendable (String) -> Void)?
     var onBriefInterruption: (@Sendable () -> Void)?
@@ -625,9 +624,8 @@ final class HungStep: @unchecked Sendable {
         #expect(RecordingSentinel.read(directory: h.tmp) == nil)
         #expect(h.notified.value.map { $0.title } == ["Recording Failed"])
         #expect(h.client.captureEndedCalls == 1, "a start that failed must disarm crash detection (C1)")
-        // The crash/fatal/mic-change/quality-anomaly callbacks are wired before start is attempted.
+        // The crash/mic-change/quality-anomaly callbacks are wired before start is attempted.
         #expect(h.client.onServiceCrash != nil)
-        #expect(h.client.onFatalFailure != nil)
         #expect(h.client.onMicDeviceChanged != nil)
         #expect(h.client.onQualityAnomaly != nil)
         // Sentinel was written before start (then deleted on failure); start saw the -0 base name.
@@ -2484,11 +2482,10 @@ final class HungStep: @unchecked Sendable {
         await Harness.until { h.client.startCalls.count >= wiredStarts + 1 && !h.coordinator.recoveryInFlight }
         #expect(h.client.startCalls.count == wiredStarts + 1)
 
-        // guard appState.isRecording: when idle, the same callbacks must do nothing.
+        // guard appState.isRecording: when idle, the same callback must do nothing.
         h.appState.phase = .idle
         h.appState.criticalError = nil
         h.client.onServiceCrash?()
-        h.client.onFatalFailure?("boom")
         await Harness.settle()
         #expect(h.client.startCalls.count == wiredStarts + 1)  // no further restart attempt
         #expect(h.appState.criticalError == nil)
