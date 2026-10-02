@@ -17,7 +17,8 @@ import os
 ///   97): a crash while the transcript is written is salvaged with all of it.
 /// - Every status pull's coverage is kept per helper session (council A-I4 / C-I1). At finalize a helper
 ///   session's latest snapshot stands in for the `captureStop` a crashed helper never wrote; a
-///   `captureStop` of that helper session, when there is one, supersedes it (never counted twice).
+///   `captureStop` of that helper session, when there is one, supersedes it (never counted twice) — also when it
+///   arrives after a finalize that already counted the stand-in: it replaces it at the next one (#229).
 /// - Nothing here waits on a recording folder on the main actor (L review 158): the record's build — its reads of the
 ///   live log and its write of `.diag.jsonl` — runs through `FolderReads`, bounded; appends, coverage writes and the
 ///   commit's delete are queued on the folder's own queue.
@@ -247,7 +248,7 @@ public final class SessionEvidence {
     /// updates the file this process wrote.
     ///
     /// The folder is read and written off the main actor, bounded (L review 158): a folder that does not answer gets a
-    /// record built from the ring alone, which says so, and its live log is kept.
+    /// record built from the ring alone, which says so — its coverage marked a lower bound (#229) — and its live log is kept.
     public func finalize(sessionId: String, directory: URL) async -> CaptureDiagnostics {
         let bound = isBound(to: sessionId, in: directory)
         // The ring is this session's when bound to it, or — nothing bound (a salvage at launch) — the events
@@ -280,6 +281,7 @@ public final class SessionEvidence {
         var merged: CaptureDiagnostics
         if let built {
             merged = built.record
+            merged.coverageIsLowerBound = false   // the folder was read: an earlier build's mark no longer holds
             if built.written != nil {
                 unwrittenRecords[recordKey] = nil   // written: the record has a copy beside the live log now
             } else if built.writeFailed {
@@ -289,6 +291,9 @@ public final class SessionEvidence {
             // Nothing could be read or written: the ring alone, said — and its live log is its record, never committed.
             Logger.files.error("The recording folder did not answer the record's build — built from this process's events alone, its live log kept")
             merged = ring
+            // The live log and the crashed helpers' coverage are in that folder: what the ring holds is part of the
+            // session, never stamped as the whole of it (#229) — both sides' seconds are lower bounds.
+            merged.coverageIsLowerBound = true
             merged.record(CaptureEvent(timestamp: Date(), origin: .app, kind: .folderNotAnswering, severity: .anomaly,
                                        detail: ["during": "the diagnostic record's build"]))
             unwrittenRecords[recordKey] = build   // until its write lands, if it ever does (L review 246)
@@ -323,7 +328,7 @@ public final class SessionEvidence {
             .filter { !stopped.contains($0.key) }
             .map { helper, snapshot in
                 CaptureEvent(timestamp: snapshot.at, origin: .helper, kind: .captureStop, severity: .info,
-                             detail: snapshot.facts.merging(["helper_session": helper, "from": "status pull"]) { _, new in new })
+                             detail: snapshot.facts.merging(["helper_session": helper, "from": CaptureDiagnostics.standInSource]) { _, new in new })
             }
         if !standIns.isEmpty { merged.merge(standIns) }
         guard merged.isAnomalous else { return Built(record: merged) }
