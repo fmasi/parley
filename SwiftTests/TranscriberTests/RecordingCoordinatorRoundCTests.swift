@@ -5,22 +5,9 @@ import Testing
 // Stream L, round C (items 139–168): the coordinator's side. The fake client and the harness are
 // RecordingCoordinatorTests.swift's.
 
-/// A read queue whose read named `label` hangs until released (or a watchdog does it, so a regression fails instead
-/// of wedging the run).
-final class HungRead: @unchecked Sendable {
-    let label: String
-    private let semaphore = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var began = false
-    var reached: Bool { lock.withLock { began } }
-    init(_ label: String) { self.label = label }
-    func hangIfNamed(_ name: String) {
-        guard name == label else { return }
-        lock.withLock { began = true }
-        _ = semaphore.wait(timeout: .now() + 10)   // the watchdog: never a wedged run
-    }
-    func release() { semaphore.signal() }
-}
+/// The older name of `HungStep` (RecordingCoordinatorTests.swift), which took over what this was: a read named by its label,
+/// hung on its queue until released, with a watchdog. Kept for the test files that still spell it so.
+typealias HungRead = HungStep
 
 // MARK: - Folder reads per volume, coalescing (160, 164)
 
@@ -37,7 +24,7 @@ final class HungRead: @unchecked Sendable {
         let h = try Harness()
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
-        let hung = HungRead("dead share")
+        let hung = HungStep("dead share")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-c-\(UUID().uuidString)",
                                                 volumeOf: { $0.hasPrefix("/Volumes/Dead") ? "/Volumes/Dead" : "/" },
@@ -63,7 +50,7 @@ final class HungRead: @unchecked Sendable {
         try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: folder.appendingPathComponent("p-0.wav").path,
                                                               micAudioPath: folder.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
                                            directory: h.tmp)
-        let hung = HungRead("earlier read")
+        let hung = HungStep("earlier read")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         let reads = h.coordinator.folderReads
@@ -221,7 +208,9 @@ final class HungRead: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go of `s`
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go of `s`
         await h.coordinator.recoverAtLaunch()
         #expect(h.presented.value.map(\.lastPathComponent) == ["old.json"], "the other one is finished")
         #expect(h.client.evidenceOrder.contains("adopt-undrained:old"), "\(h.client.evidenceOrder)")
@@ -284,7 +273,7 @@ final class HungRead: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         return s
     }
-    private func hanging(_ hung: HungRead) -> FolderReads {
+    private func hanging(_ hung: HungStep) -> FolderReads {
         FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
     }
 
@@ -339,7 +328,7 @@ final class HungRead: @unchecked Sendable {
         let h = try Harness()
         defer { tearDown(h) }
         let s = try slot(h, alive: 5)
-        let hung = HungRead("resume: session folder")
+        let hung = HungStep("resume: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         let coordinator = h.coordinator
@@ -362,7 +351,7 @@ final class HungRead: @unchecked Sendable {
         try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
         _ = try #require(try await ChunkedSessionRecovery.recover(outputDirectory: outDir(s), sessionId: "sess", config: h.config.config,
                                                                    transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: h.runner))
-        let hung = HungRead("resume: session folder")
+        let hung = HungStep("resume: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         let coordinator = h.coordinator
@@ -381,7 +370,7 @@ final class HungRead: @unchecked Sendable {
         let h = try Harness()
         defer { tearDown(h) }
         let s = try slot(h, alive: 5)
-        let hung = HungRead("relaunch: recording folder")
+        let hung = HungStep("relaunch: recording folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         let coordinator = h.coordinator
@@ -404,7 +393,7 @@ final class HungRead: @unchecked Sendable {
         try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: folder.appendingPathComponent("p-0.wav").path,
                                                               micAudioPath: folder.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
                                            directory: h.tmp)
-        let hung = HungRead("pending folder")
+        let hung = HungStep("pending folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         let coordinator = h.coordinator
@@ -495,7 +484,7 @@ final class HungRead: @unchecked Sendable {
     }
     private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
     private func outDir(_ s: RecordingSentinel) -> URL { URL(fileURLWithPath: s.systemAudioPath).deletingLastPathComponent() }
-    private func hanging(_ hung: HungRead) -> FolderReads {
+    private func hanging(_ hung: HungStep) -> FolderReads {
         FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
     }
 
@@ -596,7 +585,7 @@ final class HungRead: @unchecked Sendable {
         try RecordingSentinel.writePending([RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: dir.appendingPathComponent("p-0.wav").path,
                                                               micAudioPath: dir.appendingPathComponent("p-0_mic.wav").path, stopping: true)],
                                            directory: h.tmp)
-        let hung = HungRead("salvage: transcript")
+        let hung = HungStep("salvage: transcript")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -681,7 +670,7 @@ final class HungRead: @unchecked Sendable {
         h.client.startError = FakeCaptureError()
         h.client.stopResult = AudioPaths(systemAudio: call.outputDirectory.appendingPathComponent("x.wav"),
                                          micAudio: call.outputDirectory.appendingPathComponent("x_mic.wav"))
-        let hung = HungRead("crash restart: restart file")
+        let hung = HungStep("crash restart: restart file")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -706,7 +695,7 @@ final class HungRead: @unchecked Sendable {
         h.runner.failSetupForTesting = true   // re-attached without a pipeline: the Stop reads the folder itself
         await h.coordinator.recoverAtLaunch()
         RecordingSentinel.delete(directory: h.tmp)   // the recovery file is gone
-        let hung = HungRead("stop: session folder")
+        let hung = HungStep("stop: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -734,7 +723,9 @@ final class HungRead: @unchecked Sendable {
         try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: list.path)   // cannot be moved aside
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go: HELD
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go: HELD
         await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
         let held = try #require(pending(h).first, "the hold is tracked")
         h.client.startError = nil
@@ -760,7 +751,7 @@ final class HungRead: @unchecked Sendable {
         try? FileManager.default.removeItem(at: h.tmp)
     }
     private func pending(_ h: Harness) -> [RecordingSentinel] { RecordingSentinel.readPending(directory: h.tmp) }
-    private func hanging(_ hung: HungRead) -> FolderReads {
+    private func hanging(_ hung: HungStep) -> FolderReads {
         FolderReads(label: "rc-c-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
     }
 
@@ -777,7 +768,7 @@ final class HungRead: @unchecked Sendable {
         let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
         try Harness.headerOnlyWAV().write(to: sys)
         h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
-        let hung = HungRead("transcript: chunk files")
+        let hung = HungStep("transcript: chunk files")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -801,7 +792,7 @@ final class HungRead: @unchecked Sendable {
         let p = RecordingSentinel(startedAt: Date(), sessionName: "p", systemAudioPath: dir.appendingPathComponent("p-0.wav").path,
                                   micAudioPath: dir.appendingPathComponent("p-0_mic.wav").path, stopping: true)
         try RecordingSentinel.writePending([p], directory: h.tmp)
-        let hung = HungRead("recovery: session folder")
+        let hung = HungStep("recovery: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = hanging(hung)
         h.coordinator.folderReadDeadline = .milliseconds(150)
