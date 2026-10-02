@@ -230,20 +230,24 @@ public enum MeetingSummarizer {
         // what anybody said to the meeting: the model never sees them (P10/P11). Nor does it see a
         // segment with no usable time (R2b item 5) — never placed at 00:00:00 — and the header says
         // how many were left out.
+        let echo = EchoNotice.Findings(json: json)
         let segments = rawSegments.filter { !TranscriptAssembler.isFlagged($0) }.map { seg in
-            SummarySegment(
+            let source = seg["source"] as? String ?? ""
+            return SummarySegment(
                 start: seg["start"] as? Double ?? .nan,   // unreachable: flagged when not a Double
                 end: seg["end"] as? Double ?? .nan,
-                speaker: seg["speaker"] as? String ?? "",
+                speaker: promptSpeaker(seg["speaker"] as? String ?? "", source: source, echo: echo),
                 text: seg["text"] as? String ?? "",
-                source: seg["source"] as? String ?? ""
+                source: source
             )
         }
 
+        // People only (#269): "Unknown" is an absence of attribution, not somebody who attended.
+        // Its lines stay in the prompt; a real summary listed "Local Unknown" as a participant.
         var seen = Set<String>()
         var speakers: [String] = []
         for seg in segments {
-            if !seg.speaker.isEmpty && seen.insert(seg.speaker).inserted {
+            if !seg.speaker.isEmpty && !TranscriptMerger.isUnknown(seg.speaker) && seen.insert(seg.speaker).inserted {
                 speakers.append(seg.speaker)
             }
         }
@@ -272,6 +276,28 @@ public enum MeetingSummarizer {
         )
 
         return (segments, metadata)
+    }
+
+    /// The speaker a visible line reaches the model under (#269).
+    ///
+    /// The visible lines of an echo voice — the other side's voice through the loudspeakers, found
+    /// as a speaker of its own on the microphone (`metadata.echo_clusters`) — are what its flagged
+    /// lines left over: a mix of both people's words. They stay in the prompt, under the channel's
+    /// unattributed label ("Local Unknown"), so the model has no label to make a participant of.
+    ///
+    /// Two lines keep the label they have:
+    /// - one on another channel than the echo voice's;
+    /// - one whose label is a name the user also gave to a speaker that is not an echo voice. Those
+    ///   lines cannot be told apart from that person's, and taking the name off all of them would
+    ///   remove someone who attended.
+    private static func promptSpeaker(_ speaker: String, source: String, echo: EchoNotice.Findings) -> String {
+        guard let voice = echo.voice(forRow: speaker), voice.track == source,
+              !echo.names.contains(where: { $0.value == speaker && echo.voice(forRow: $0.key) == nil })
+        else { return speaker }
+        // Through `tagWithSourcePrefix`, so the label is the one the pipeline itself writes.
+        var unattributed = [LabeledSegment(start: 0, end: 0, speaker: SpeakerAssignment.unknownSpeaker, text: "", source: source)]
+        SpeakerAssignment.tagWithSourcePrefix(&unattributed)
+        return unattributed[0].speaker
     }
 
     /// One side of `metadata.capture` (§7.2) as a `CaptureSideNote`; nil when the side is absent.

@@ -280,6 +280,8 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 **What it does:** Reads the transcript JSON, builds a prompt with speaker-labeled lines (and source labels in dual-stream mode), calls the configured LLM provider, and writes `<sessionName>-summary.md` alongside the transcript. Called via `summarizeIfConfigured()` — logs errors, never throws, fire-and-forget.
 
+**Participants are people only (#269).** The prompt's `Participants:` line lists the speakers of the visible lines, minus two kinds of label that are not somebody who attended: the unattributed ones (`Unknown`, `Local Unknown`, `Remote Unknown`), whose lines stay in the prompt as they are, and an echo voice (a label `metadata.echo_clusters` records with verdict `echo`, found through `EchoNotice.Findings` so a renamed one is still recognised). An echo voice's flagged lines are already hidden; its visible lines mix both people's words, so they stay in the prompt with the speaker shown as the channel's unattributed label (`Local Unknown`). The transcript file is not changed. A name the user gave to both the echo voice and another speaker stays a participant, lines and all: those lines cannot be told apart. With no echo voice and no unattributed line the prompt is what it was before.
+
 **Providers:** `OpenAISummaryProvider` (OpenAI-compatible `/v1/chat/completions`) or `LMStudioSummaryProvider` (LM Studio native `/api/v1/chat` with per-request `context_length` and self-correcting retry on context overflow).
 
 **Input:** Transcript JSON path, `Config`. Output: `-summary.md` file.
