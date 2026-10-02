@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Round J: the Stop path's bounds (#226). The fake client, the harness and `HungStep` are
+// Round J: the Stop path's bounds (#226, #232). The fake client, the harness and `HungStep` are
 // RecordingCoordinatorTests.swift's; `roundFTearDown` is RecordingCoordinatorRoundFTests.swift's; `RefusedStoppingError`
 // is RecordingCoordinatorTests.swift's.
 
@@ -34,8 +34,8 @@ final class RoundJEngine: TranscriptionEngine, @unchecked Sendable {
 private enum RoundJ {
     nonisolated static let pcmBytes = 4_800
 
-    /// A WAV with silence after its header: unlike a header-only one, the engine is asked to read it.
-    static func wav() -> Data { Harness.headerOnlyWAV() + Data(count: pcmBytes) }
+    /// A WAV with `writes` × `pcmBytes` of silence after its header: unlike a header-only one, the engine is asked to read it.
+    static func wav(writes: Int = 1) -> Data { Harness.headerOnlyWAV() + Data(count: pcmBytes * writes) }
 
     /// A recording started on `engine`, its first chunk's system file holding audio. Returns that file.
     static func start(_ h: Harness, engine: RoundJEngine) async throws -> URL {
@@ -211,5 +211,89 @@ private enum RoundJ {
         #expect(bound(30 * 60) == .seconds(1_800), "a 30-minute chunk: 30 minutes")
         #expect(bound(3 * 3_600) == .seconds(10_800), "three unfinished chunks back, or one chunk no rotation cut: all of it")
         #expect(bound(-60) == .seconds(300), "a clock set back: the floor, never a negative wait")
+    }
+}
+
+// MARK: - The orphan is re-ingested only once the helper sealed it (#232)
+
+@MainActor
+@Suite struct OrphanSealWaitRoundJTests {
+    /// A harness whose folder reader lets the test's fake helper write: `beforeLook` runs before every look the app takes
+    /// at the last chunk's files.
+    private func harness(beforeLook: @escaping @Sendable () -> Void) throws -> Harness {
+        let h = try Harness()
+        h.coordinator.folderReads = FolderReads(label: "rc-roundj-\(UUID().uuidString)", beforeEachRead: { label in
+            if label == "salvage: last chunk seal" { beforeLook() }
+        })
+        return h
+    }
+
+    private nonisolated static func append(_ url: URL) {
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(count: RoundJ.pcmBytes))
+    }
+
+    /// #232: a Stop the helper never answered drops the connection, and the helper seals its live chunk in its
+    /// invalidation handler — after the app has moved on. The chunk used to be read at once, up to half a second short,
+    /// and recorded as transcribed. The fake helper here seals in three more writes, one before each look the app takes
+    /// at the file (a helper writing on a timer would make this a stopwatch test): the engine reads the file only after
+    /// the last of them.
+    @Test func theLastChunkIsReadOnlyOnceTheHelperSealedIt() async throws {
+        let live = Harness.Box<URL?>(nil), writes = Harness.Box(0), dropped = Harness.Box(false)
+        let h = try harness {
+            guard dropped.value, writes.value < 3, let url = live.value else { return }
+            writes.value += 1
+            Self.append(url)
+        }
+        defer { roundFTearDown(h) }
+        let engine = RoundJEngine()
+        live.value = try await RoundJ.start(h, engine: engine)
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
+        h.client.onDropConnection = { dropped.value = true }
+        h.coordinator.stopDeadline = .milliseconds(200)
+        h.coordinator.sealWait = (stable: .milliseconds(100), poll: .milliseconds(10), limit: .seconds(10))
+
+        await h.coordinator.stopRecording()
+
+        let sealedBytes = RoundJ.wav(writes: 4).count
+        #expect(writes.value == 3, "the helper finished sealing")
+        let read = try #require(engine.transcribed.first)
+        #expect(read.bytes == sealedBytes, "read at \(read.bytes) bytes, sealed at \(sealedBytes): never before the last write")
+        #expect(engine.transcribed.count == 1)
+        let critical = try #require(h.criticals.value.last)
+        #expect(critical.title == "Transcript Saved After an Error", "\(critical)")
+        #expect(!critical.body.contains("couldn’t check the last chunk"), "sealed: nothing left unchecked — \(critical.body)")
+        #expect(!h.client.everyRecordedEvent.contains { $0.detail["during"] == "last chunk seal" })
+    }
+
+    /// #232: a file that never stops changing — the helper never let go — is not waited for past the limit. The chunk is
+    /// still transcribed (its audio is never left out), and the record and the user are told it could not be checked.
+    @Test func aLastChunkThatNeverSettlesIsProcessedAndSaidUnchecked() async throws {
+        let live = Harness.Box<URL?>(nil), dropped = Harness.Box(false)
+        let h = try harness {
+            guard dropped.value, let url = live.value else { return }
+            Self.append(url)   // every look finds it longer
+        }
+        defer { roundFTearDown(h) }
+        let engine = RoundJEngine()
+        live.value = try await RoundJ.start(h, engine: engine)
+        let helper = HungStep()
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
+        h.client.onDropConnection = { dropped.value = true }
+        h.coordinator.stopDeadline = .milliseconds(200)
+        h.coordinator.sealWait = (stable: .milliseconds(100), poll: .milliseconds(5), limit: .milliseconds(300))
+
+        await h.coordinator.stopRecording()
+
+        #expect(engine.transcribed.count == 1, "transcribed all the same: \(engine.transcribed)")
+        let critical = try #require(h.criticals.value.last)
+        #expect(critical.body.contains("Parley couldn’t check the last chunk"), "\(critical.body)")
+        #expect(h.client.everyRecordedEvent.contains { $0.kind == .folderNotAnswering && $0.detail["during"] == "last chunk seal" })
+        #expect(h.appState.isIdle)
     }
 }

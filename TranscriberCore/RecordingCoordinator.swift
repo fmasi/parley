@@ -3639,7 +3639,7 @@ public final class RecordingCoordinator {
         let outputDir = location.outputDir
         transcriptionRunner.stopChunkRotation()
 
-        var orphan: (index: Int, baseName: String)?
+        var orphan: (index: Int, baseName: String, sealed: Bool)?
         if reingestOrphan, let rotator = transcriptionRunner.chunkRotator {
             orphan = await reingestOrphanChunk(rotator: rotator, processor: processor, outputDir: outputDir)
         }
@@ -3672,6 +3672,11 @@ public final class RecordingCoordinator {
                 case false?:
                     break
                 }
+            }
+            // In the transcript, but read before its file was known to be sealed (#232): said, never a clean bill.
+            if let orphan, !orphan.sealed {
+                return SalvageOutcome(kind: outcome.kind, chunkCount: outcome.chunkCount,
+                                      recognitionFailures: outcome.recognitionFailures, lastChunkUnchecked: true)
             }
             return outcome
         case .finalizeFailed, .folderNotAnswering, .transcriptUnreadable, .transcriptMissing:
@@ -3796,13 +3801,50 @@ public final class RecordingCoordinator {
 
     /// Re-ingest the orphaned in-progress chunk into the processor, for the callers that run once the helper
     /// stopped or let go (the salvage). Uses the rotator's live-index base name, NOT the stale sentinel path.
-    /// Returns the orphan's (index, baseName) for logging.
+    /// Returns the orphan's (index, baseName) for logging, and whether its files were seen sealed.
+    ///
+    /// The helper seals the file when it stops — or, after a Stop it never answered, in its invalidation handler once the
+    /// connection is dropped — and nothing tells the app when (#232). Read before that, the chunk is cut at its last
+    /// periodic header sync (up to 0.5 s short), and its WAV may be archived and deleted under the seal. So the files are
+    /// waited for, bounded: processed once their sizes stand still. A wait that runs out processes the chunk as it is —
+    /// its audio is never left out — recorded, and said ("couldn't check the last chunk").
     private func reingestOrphanChunk(
         rotator: ChunkRotator, processor: ChunkProcessor, outputDir: URL
-    ) async -> (index: Int, baseName: String) {
+    ) async -> (index: Int, baseName: String, sealed: Bool) {
         let orphan = await locateOrphanChunk(rotator: rotator, outputDir: outputDir)
+        let sealed = await awaitSeal(of: orphan, in: outputDir)
+        if !sealed {
+            Logger.state.error("The last chunk's files were still changing, or could not be looked at — processed as they are")
+            captureClient.record(.folderNotAnswering, .anomaly, ["during": "last chunk seal", "chunk": "\(orphan.index)"])
+        }
         processor.processChunk(orphan)
-        return (orphan.index, rotator.currentBaseName)
+        return (orphan.index, rotator.currentBaseName, sealed)
+    }
+
+    /// The wait for the helper's seal (#232): how long the chunk's files must keep their size, how often they are looked
+    /// at, and when the wait gives up. Tests shorten it.
+    var sealWait: (stable: Duration, poll: Duration, limit: Duration) = (.seconds(1), .milliseconds(200), .seconds(3))
+
+    /// Whether `chunk`'s files kept their size for `sealWait.stable` — looked at off the main actor, bounded — before
+    /// `sealWait.limit` ran out. A file that is not there counts as one that stays so (a system-only chunk has no mic
+    /// file); a chunk with no file at all has nothing to seal.
+    private func awaitSeal(of chunk: ChunkRotator.FinalizedChunk, in outputDir: URL) async -> Bool {
+        let files = [chunk.systemPath, chunk.micPath]
+        let giveUp = SuspendingClock.now + sealWait.limit
+        var last: [Int]?, since = SuspendingClock.now
+        while true {
+            let left = giveUp - SuspendingClock.now
+            guard left > .zero, let sizes = await readOffMain("salvage: last chunk seal", folder: outputDir, bound: min(folderReadDeadline, left), {
+                files.map { ((try? FileManager.default.attributesOfItem(atPath: $0))?[.size] as? Int) ?? -1 }
+            }) else { return false }
+            if sizes.allSatisfy({ $0 < 0 }) { return true }
+            if sizes != last {
+                (last, since) = (sizes, .now)
+            } else if SuspendingClock.now - since >= sealWait.stable {
+                return true
+            }
+            try? await Task.sleep(for: sealWait.poll)
+        }
     }
 
     /// The orphaned in-progress chunk — the file the helper was writing — located, NOT processed: the crash restart
