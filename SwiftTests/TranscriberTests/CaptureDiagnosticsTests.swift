@@ -346,6 +346,23 @@ struct CaptureDiagnosticsTests {
         #expect(provenance(d).remoteCoverage?.deliveredSeconds == 65)
     }
 
+    /// #229: a record that holds only part of its session marks BOTH sides' coverage as a lower bound, changes no
+    /// number, invents no coverage where there is none, and a new session starts unmarked.
+    @Test func aPartialRecordMarksBothSidesCoverageAsALowerBound() {
+        var d = CaptureDiagnostics()
+        d.coverageIsLowerBound = true
+        #expect(provenance(d).remoteCoverage == nil && provenance(d).localCoverage == nil, "no coverage is not marked coverage")
+        d.record(stop(30, helper: "1000-0", at: 0))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == true && provenance(d).localCoverage?.coverageIncomplete == true)
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 30 && provenance(d).remoteStatus == "healthy")
+        d.coverageIsLowerBound = false
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false && provenance(d).localCoverage?.coverageIncomplete == false)
+        d.coverageIsLowerBound = true
+        d.resetSession()
+        d.record(stop(10, helper: "3000-0", at: 5))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false, "the next session's record is its own")
+    }
+
     private func provenance(_ d: CaptureDiagnostics) -> CaptureProvenance {
         d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
     }

@@ -498,6 +498,10 @@ public struct CaptureDiagnostics: Sendable {
     private var coverageTallies: [String: HelperCoverage] = [:]
     /// The helper sessions in the order first seen: the sum is made in that order, as it always was.
     private var coverageOrder: [String] = []
+    /// The record was built without its recording folder (#229: the live log and the crashed helpers' coverage are
+    /// there): what it holds is part of the session, so both sides' coverage is a lower bound and `makeProvenance`
+    /// marks it `coverageIncomplete`. Set by the build; a later build that read the folder clears it.
+    public var coverageIsLowerBound = false
 
     private struct HelperCoverage: Sendable {
         var tracks: [String: TrackAccounting]
@@ -631,6 +635,7 @@ public struct CaptureDiagnostics: Sendable {
         contentAnomalyTallies.removeAll()
         coverageTallies.removeAll()
         coverageOrder.removeAll()
+        coverageIsLowerBound = false
         stoppedHelperSessions.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
@@ -763,6 +768,7 @@ public struct CaptureDiagnostics: Sendable {
             // The first session is the sum itself (see `tally`).
             if var running = sum { running += part; sum = running } else { sum = part }
         }
+        if coverageIsLowerBound { sum?.coverageIncomplete = true }
         return sum
     }
 
