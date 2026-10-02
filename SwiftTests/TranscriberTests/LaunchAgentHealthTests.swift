@@ -259,3 +259,70 @@ import Testing
         #expect(runs == 3 && !checks.isRunning)
     }
 }
+
+/// #236, #237: what a crash-protection verdict does to the row that is already up.
+@MainActor
+@Suite struct CrashProtectionRowTests {
+    private typealias Health = LaunchAgentHealth
+    private let recording = LaunchAgentHealth.CrashProtectionAction.deferUntilIdle(
+        message: LaunchAgentHealth.recordingUnprotectedMessage, recheckAfter: nil)
+
+    private func rowMessage(_ state: AppState) -> String? { state.activeAlarms[.crashProtectionOff]?.message }
+
+    /// #237: the "close Parley's windows" row is up and Record is pressed. The row must say "off for this recording".
+    @Test func aRecordingStartingUnderTheWindowsRowRewordsIt() {
+        #expect(Health.rowChange(for: recording, currentMessage: Health.windowsBlockingMessage)
+                == .revise(old: Health.windowsBlockingMessage, new: Health.recordingUnprotectedMessage))
+
+        let state = AppState()
+        let t0 = Date(timeIntervalSince1970: 1000)
+        state.showCrashProtection(.deferUntilIdle(message: Health.windowsBlockingMessage, recheckAfter: nil), now: t0)
+        #expect(rowMessage(state) == Health.windowsBlockingMessage)
+        state.showCrashProtection(recording, now: t0 + 60)
+        #expect(rowMessage(state) == Health.recordingUnprotectedMessage, "the row says the new reason, and only it")
+        #expect(state.activeAlarms[.crashProtectionOff]?.raisedAt == t0, "the same row re-worded, not a new one")
+    }
+
+    /// The same for every reason: a row that promised "automatically" must not keep saying so once the hand-over is given up.
+    @Test func aRowUpWithAnotherReasonIsRewordedWhateverTheVerdict() throws {
+        let automatic = try #require(Health.userMessage(for: .loadedButNotThisProcess, holdsInstanceLock: true))
+        #expect(Health.rowChange(for: .alarm(Health.handOverImpossibleMessage), currentMessage: automatic)
+                == .revise(old: automatic, new: Health.handOverImpossibleMessage))
+        #expect(Health.rowChange(for: .retryAfter(seconds: 20, message: automatic), currentMessage: Health.recordingUnprotectedMessage)
+                == .revise(old: Health.recordingUnprotectedMessage, new: automatic))
+        #expect(Health.rowChange(for: .deferUntilIdle(message: Health.windowsBlockingMessage, recheckAfter: nil),
+                                 currentMessage: Health.recordingUnprotectedMessage)
+                == .revise(old: Health.recordingUnprotectedMessage, new: Health.windowsBlockingMessage))
+    }
+
+    @Test func aRowThatAlreadySaysItIsKept() {
+        #expect(Health.rowChange(for: recording, currentMessage: Health.recordingUnprotectedMessage) == .keep)
+        #expect(Health.rowChange(for: .alarm(Health.noLockMessage), currentMessage: Health.noLockMessage) == .keep)
+    }
+
+    @Test func noRowYetIsRaisedAndAVerdictWithNothingToSayLeavesTheRowAlone() {
+        #expect(Health.rowChange(for: recording, currentMessage: nil) == .raise(Health.recordingUnprotectedMessage))
+        #expect(Health.rowChange(for: .alarm(Health.noLockMessage), currentMessage: nil) == .raise(Health.noLockMessage))
+        #expect(Health.rowChange(for: .retryAfter(seconds: 20, message: Health.noLockMessage), currentMessage: nil)
+                == .raise(Health.noLockMessage))
+        for current in [nil, Health.windowsBlockingMessage] {
+            #expect(Health.rowChange(for: .handOver, currentMessage: current) == .keep)
+            #expect(Health.rowChange(for: .retryAfter(seconds: 20, message: nil), currentMessage: current) == .keep)
+            #expect(Health.rowChange(for: .healthy, currentMessage: current) == .clear)
+            #expect(Health.rowChange(for: .deferUntilIdle(message: nil, recheckAfter: 60), currentMessage: current) == .clear)
+        }
+    }
+
+    /// #236: the check run as the recording ends finds transcription in flight, and that verdict clears the recording's
+    /// row. (The app runs that check on the transition out of recording: `TranscriberApp`, not testable here.)
+    @Test func theRecordingsRowGoesWhenTheCheckRunsDuringTranscription() {
+        let state = AppState()
+        state.showCrashProtection(recording)
+        #expect(rowMessage(state) == Health.recordingUnprotectedMessage)
+        let transcribing = Health.crashProtectionAction(
+            state: .loadedButNotThisProcess, holdsInstanceLock: true, isLaunchdJob: false, isBusy: true, isRecording: false,
+            anyWindowVisible: false, windowDeferredFor: 0, lastHandOverAt: nil, now: Date(), failedHandOvers: 0)
+        state.showCrashProtection(transcribing)
+        #expect(rowMessage(state) == nil)
+    }
+}

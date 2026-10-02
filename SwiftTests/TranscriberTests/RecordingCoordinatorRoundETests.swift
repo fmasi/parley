@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round E (items 186–218): the coordinator's side. The fake client and the harness are
-// RecordingCoordinatorTests.swift's; `HungRead` is RecordingCoordinatorRoundCTests.swift's.
+// Stream L, round E (items 186–218): the coordinator's side. The fake client, the harness and `HungStep` are
+// RecordingCoordinatorTests.swift's.
 
 // MARK: - Evidence: held helpers, commits, waiting rows (198, 200, 201, 205)
 
@@ -165,12 +165,15 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await recording(h)
+        // What is left of the Stop's budget after the refusal is less than a re-ask needs — by the numbers alone, no timer
+        // raced (it used to be 150 ms refusals against a 400 ms deadline: a refusal a loaded machine stretched past the
+        // deadline was a timeout with no refusal seen, and the connection was dropped): the whole budget, the default
+        // 25 s, is less than the 60 s a re-ask must have left.
         h.client.stopError = RefusedStoppingError()
-        h.client.onStop = { try? await Task.sleep(for: .milliseconds(150)) }   // each refusal takes 150 ms
-        h.coordinator.stopDeadline = .milliseconds(400)
         h.coordinator.stopReaskInterval = .milliseconds(20)
-        h.coordinator.stopReaskMinimumBudget = .milliseconds(150)
+        h.coordinator.stopReaskMinimumBudget = .seconds(60)
         await h.coordinator.stopRecording()
+        #expect(h.client.stopCalls == 1, "held without asking again")
         #expect(h.client.droppedConnections == 0, "never dropped while another stop may still be writing")
         #expect(pending(h).first?.heldReason == .stopUnderWay && h.client.finalizeCalls.isEmpty, "held, nothing finalized")
         #expect(h.recordingMic.current == .some("mic-1"))
@@ -183,7 +186,9 @@ import Testing
         _ = try await recording(h)
         let client = h.client
         client.stopError = RefusedStoppingError()
-        client.onStop = { if client.stopCalls >= 2 { try? await Task.sleep(for: .seconds(1)) } }   // the re-ask never answers
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        client.onStop = { if client.stopCalls >= 2 { await stuckStop.hangAwaited() } }   // the re-ask never answers
         h.coordinator.stopDeadline = .milliseconds(400)
         h.coordinator.stopReaskInterval = .milliseconds(20)
         h.coordinator.stopReaskMinimumBudget = .milliseconds(100)
@@ -242,13 +247,21 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         let s = try await reattachedWithoutPipeline(h)
-        // The rebuild's look answers too late; a look after it answers at once.
-        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { name in
-            if name == "recovery: session folder" { Thread.sleep(forTimeInterval: 0.3) }
-        })
-        h.coordinator.folderReadDeadline = .milliseconds(200)
+        // The rebuild's look HANGS until released, so its bound — the only short one — runs out however late it fires (it
+        // used to sleep 300 ms against 200 ms). Any look after it has all the time it needs, and answers once the hung one
+        // has let the queue go: a second look "that answers and forgets" would wait for that, and the session would not be
+        // kept while the rebuild's look is still hung.
+        let rebuild = HungStep("recovery: session folder")
+        defer { rebuild.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { rebuild.hangIfNamed($0) })
         h.coordinator.folderPrepareDeadline = .milliseconds(200)
-        await h.coordinator.stopRecording()
+        h.coordinator.folderReadDeadline = .seconds(60)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until(within: 20) { !pending(h).isEmpty }
+        #expect(rebuild.isHanging, "kept at the look's own bound: the folder had still not answered")
+        rebuild.release()
+        await stopping.value
         let kept = try #require(pending(h).first, "kept")
         #expect(kept.sessionKey == s.sessionKey && kept.stopCause == .folderNotAnswering)
         #expect(h.criticals.value.last?.body.contains("isn’t answering") == true, "\(h.criticals.value)")
@@ -280,7 +293,9 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await recording(h)
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(3)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         h.coordinator.evidenceFlushBound = .milliseconds(200)
         await h.coordinator.prepareForTermination(bound: .seconds(2))
         #expect(h.coordinator.exitFlushTimedOut)
@@ -322,7 +337,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await finalized(h, keepProgress: true) { try Data("{ damaged".utf8).write(to: $0) }
-        let hung = HungRead("salvage: transcript")
+        let hung = HungStep("salvage: transcript")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -377,7 +392,9 @@ import Testing
         defer { tearDown(h) }
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go: HELD
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the helper will not let go: HELD
         await h.coordinator.startRecording(sessionName: "held", microphoneDeviceId: nil)
         let held = try #require(pending(h).first)
         #expect(held.stopCause == .startFailed && held.heldReason == .startFailed, "\(String(describing: held.stopCause))")
@@ -499,7 +516,7 @@ import Testing
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         let rotator = try #require(h.runner.chunkRotator)
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         rotator.folderProbeSeconds = 0.3
@@ -522,7 +539,7 @@ import Testing
         h.client.rotateError = CaptureCallTimeout(call: "rotateChunk", seconds: 10)
         await rotator.rotateForTesting()   // chunk 1 asked for: timed out
         await rotator.rotateForTesting()   // chunk 2 asked for: timed out
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         rotator.folderProbeSeconds = 0.2
@@ -582,7 +599,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
-        let hung = HungRead("start: recording folder")
+        let hung = HungStep("start: recording folder")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderReadDeadline = .milliseconds(200)
@@ -618,7 +635,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
@@ -681,7 +698,7 @@ import Testing
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
         try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
-        let hung = HungRead("transcript: mic file")
+        let hung = HungStep("transcript: mic file")
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
@@ -826,7 +843,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: d) }
         let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
         try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
-        let hung = HungRead("transcript: segments")
+        let hung = HungStep("transcript: segments")
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })

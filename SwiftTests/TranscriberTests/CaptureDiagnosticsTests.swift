@@ -299,6 +299,74 @@ struct CaptureDiagnosticsTests {
         #expect(meta["local_coverage"] == nil)
     }
 
+    /// A `captureStop` as a helper session reports it; `standIn` = made from that helper's last status pull.
+    private func stop(_ seconds: Double, helper: String, at offset: TimeInterval, standIn: Bool = false) -> CaptureEvent {
+        var a = TrackAccounting(); a.expectedSeconds = seconds; a.deliveredSeconds = seconds
+        var detail = a.asDetail(prefix: "remote").merging(a.asDetail(prefix: "local")) { x, _ in x }
+        detail["helper_session"] = helper
+        if standIn { detail["from"] = "status pull" }
+        return CaptureEvent(timestamp: base.addingTimeInterval(offset), origin: .helper, kind: .captureStop, severity: .info, detail: detail)
+    }
+
+    /// #229: coverage is tallied per helper session. A helper's real `captureStop` REPLACES the stand-in made from its
+    /// last status pull — whichever arrives first — and the helper sessions are then summed.
+    @Test func aRealStopReplacesItsHelperSessionsStandIn() {
+        var d = CaptureDiagnostics()
+        d.record(stop(40, helper: "1000-0", at: 0))
+        d.record(stop(60, helper: "2000-0", at: 1, standIn: true))
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 100, "a stand-in counts while its helper has no stop")
+        d.record(stop(65, helper: "2000-0", at: 2))
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 105, "40 + 65: the stop replaced the stand-in")
+        #expect(provenance(d).remoteCoverage?.expectedSeconds == 105 && provenance(d).localCoverage?.deliveredSeconds == 105)
+        d.record(stop(64, helper: "2000-0", at: 3, standIn: true))
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 105, "a stand-in never counts once its helper stopped")
+    }
+
+    /// … a later status pull of the same helper is the same counters, further on: the latest stands in, never their sum.
+    @Test func aHelperSessionsLatestStandInIsTheOneThatCounts() {
+        var d = CaptureDiagnostics()
+        d.record(stop(60, helper: "2000-0", at: 5, standIn: true))
+        d.record(stop(50, helper: "2000-0", at: 1, standIn: true))   // an older pull, seen later
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 60)
+        d.record(stop(70, helper: "2000-0", at: 9, standIn: true))
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 70)
+    }
+
+    /// … and the per-helper tally lives outside the ring, like the sum it replaced: a stand-in evicted from the ring is
+    /// still replaced by its helper's stop, and a re-merge of the same events counts nothing twice.
+    @Test func theStandInIsReplacedEvenAfterItLeftTheRing() {
+        var d = CaptureDiagnostics(maxEvents: 2)
+        d.record(stop(60, helper: "2000-0", at: 0, standIn: true))
+        d.record(event(.captureStart, .info, at: 1))
+        d.record(event(.captureStart, .info, at: 2))
+        #expect(!d.events.contains { $0.kind == .captureStop }, "evicted")
+        let real = stop(65, helper: "2000-0", at: 3)
+        d.record(real)
+        d.merge([real, stop(60, helper: "2000-0", at: 0, standIn: true)])
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 65)
+    }
+
+    /// #229: a record that holds only part of its session marks BOTH sides' coverage as a lower bound, changes no
+    /// number, invents no coverage where there is none, and a new session starts unmarked.
+    @Test func aPartialRecordMarksBothSidesCoverageAsALowerBound() {
+        var d = CaptureDiagnostics()
+        d.coverageIsLowerBound = true
+        #expect(provenance(d).remoteCoverage == nil && provenance(d).localCoverage == nil, "no coverage is not marked coverage")
+        d.record(stop(30, helper: "1000-0", at: 0))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == true && provenance(d).localCoverage?.coverageIncomplete == true)
+        #expect(provenance(d).remoteCoverage?.deliveredSeconds == 30 && provenance(d).remoteStatus == "healthy")
+        d.coverageIsLowerBound = false
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false && provenance(d).localCoverage?.coverageIncomplete == false)
+        d.coverageIsLowerBound = true
+        d.resetSession()
+        d.record(stop(10, helper: "3000-0", at: 5))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false, "the next session's record is its own")
+    }
+
+    private func provenance(_ d: CaptureDiagnostics) -> CaptureProvenance {
+        d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+    }
+
     /// Spec §7.1 (scan C12): only CONTENT-compromising kinds mark a side compromised. A stall that
     /// healed is evidence in the ring, not a verdict on the record.
     @Test func aHealedStallDoesNotCompromiseTheTrackButRateDriftDoes() {

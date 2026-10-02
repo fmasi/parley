@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round G (items 235–250). The fake client and the harness are RecordingCoordinatorTests.swift's; `HungRead` is
-// RecordingCoordinatorRoundCTests.swift's; `roundFPendingSession` and `roundFTearDown` are RecordingCoordinatorRoundFTests.swift's.
+// Stream L, round G (items 235–250). The fake client, the harness and `HungStep` are RecordingCoordinatorTests.swift's;
+// `roundFPendingSession` and `roundFTearDown` are RecordingCoordinatorRoundFTests.swift's.
 
 /// A pending session `name` whose transcript was already written (its finalized marker there): a retry's gate only cleans
 /// it up.
@@ -151,7 +151,9 @@ final class StuckSentinelQueue: @unchecked Sendable {
     @Test func aFlushWithNoBudgetLeftIsNotAHungFolder() async throws {
         let h = try Harness()
         defer { roundFTearDown(h) }
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .milliseconds(20))
         #expect(!h.coordinator.exitFlushTimedOut)
         h.coordinator.evidenceFlushBound = .milliseconds(200)
@@ -163,14 +165,16 @@ final class StuckSentinelQueue: @unchecked Sendable {
     @Test func eachExitAttemptSaysItsOwnFlush() async throws {
         let h = try Harness()
         defer { roundFTearDown(h) }
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        let stuckFlush = HungStep()   // the flush hangs until released: it never outlives the test
+        defer { stuckFlush.release() }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         h.coordinator.evidenceFlushBound = .milliseconds(200)
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .seconds(2))
         #expect(h.coordinator.exitFlushTimedOut)
         h.client.onFlush = nil
         await h.coordinator.prepareForTermination(bound: .seconds(2))   // nothing in flight: a quick exit
         #expect(!h.coordinator.exitFlushTimedOut)
-        h.client.onFlush = { try? await Task.sleep(for: .seconds(1)) }
+        h.client.onFlush = { await stuckFlush.hangAwaited() }
         await h.coordinator.flushEvidenceForExit(by: SuspendingClock.now + .seconds(2))
         h.client.onFlush = nil
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
@@ -196,17 +200,18 @@ final class StuckSentinelQueue: @unchecked Sendable {
     /// L review 237: a resolution that hangs (a dying local disk under a link) never makes another folder's read wait: the
     /// resolutions run on a queue of their own, never the one a read with no volume yet falls back to.
     @Test func aHungResolutionNeverDelaysAnotherFoldersRead() async throws {
-        let gate = Gate()
-        defer { gate.release() }
+        let dying = HungStep()   // the resolution hangs until released
+        defer { dying.release() }
         let reads = FolderReads(label: "folder-reads-g-\(UUID().uuidString)", volumeOf: { folder in
-            if folder.hasPrefix("/Volumes/Dying") { gate.hang() }
+            if folder.hasPrefix("/Volumes/Dying") { dying.hang() }
             return folder.hasPrefix("/Volumes/Dying") ? "/Volumes/Dying" : "/"
         })
         _ = await reads.read("dying", folder: "/Volumes/Dying/rec", seconds: 0.3) { 1 }
-        let began = ContinuousClock.now
-        let healthy = await reads.read("healthy", folder: "/Users/me/Recordings/2026-09-25", seconds: 0.5) { 2 }
+        // By order, never a stopwatch: its bound is longer than the hung resolution can last, so a read held behind that
+        // resolution answers only once it let go. It answers with the resolution STILL hung.
+        let healthy = await reads.read("healthy", folder: "/Users/me/Recordings/2026-09-25", seconds: 30) { 2 }
         #expect(healthy == 2, "answered")
-        #expect(ContinuousClock.now - began < .seconds(1), "within its bound")
+        #expect(dying.isHanging, "while the other folder's resolution was still hung")
     }
 
     /// L review 237: only the recording root is resolved — once — and every folder under it is derived from it lexically.
@@ -369,7 +374,7 @@ final class StuckSentinelQueue: @unchecked Sendable {
     /// disk now, so the commit lets the live log go — never a stale mark keeping it forever.
     @Test func aLateWriteThatLandsClearsTheUnwrittenMark() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        let hung = HungStep("evidence: build"), once = Harness.Box(true)
         defer { hung.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-g-\(UUID().uuidString)", beforeEachRead: { name in
             guard once.value, name == hung.label else { return }
@@ -411,7 +416,9 @@ final class StuckSentinelQueue: @unchecked Sendable {
         try RecoveryFixtures.writeSessionJSON(dir: outDir(s), sessionId: "sess", meetingStart: s.startedAt, chunkIndices: [0])
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }   // the stream's stop never answers in time
+        let stuckStop = HungStep()   // the helper's stop hangs until released: it never outlives the test
+        defer { stuckStop.release() }
+        h.client.onStop = { await stuckStop.hangAwaited() }   // the stream's stop never answers in time
         await h.coordinator.recoverAtLaunch()
         #expect(h.client.builtRecords.contains { $0.sessionId == "old" }, "the other session's salvage adopted — and reset — the evidence")
         let held = try #require(RecordingSentinel.readPending(directory: h.tmp).first { $0.sessionKey == s.sessionKey })

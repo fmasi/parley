@@ -138,7 +138,7 @@ struct LaunchAgentManagerTests {
     private let samplePrintOutput = """
     gui/501/eu.fmasi.parley = {
     \tactive count = 1
-    \tpath = /Users/fmasi/Library/LaunchAgents/eu.fmasi.parley.plist
+    \tpath = /Users/me/Library/LaunchAgents/eu.fmasi.parley.plist
     \ttype = LaunchAgent
     \tstate = running
 
@@ -556,7 +556,7 @@ struct LaunchAgentManagerTests {
         let liveShapeNoPid = """
         gui/501/eu.fmasi.parley = {
         \tactive count = 0
-        \tpath = /Users/fmasi/Library/LaunchAgents/eu.fmasi.parley.plist
+        \tpath = /Users/me/Library/LaunchAgents/eu.fmasi.parley.plist
         \ttype = LaunchAgent
         \tstate = not running
 

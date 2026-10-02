@@ -335,6 +335,63 @@ import Testing
         #expect(r.tap.rebuilds.isEmpty, "a stopped session's restart never reaches the next one")
     }
 
+    // MARK: - #235: a grant parked behind a rung in flight, then sleep
+
+    /// A rung is in flight, the grant arrives and is parked behind it, and the Mac sleeps before the rung
+    /// returns. Sleep resets the ladder; the parked grant must not go with it, or nothing rebuilds the tap
+    /// under the new permission and the other side keeps recording as silence.
+    private func sleepWithAGrantParked() -> Rig {
+        let r = rig()
+        r.healer.trigger(.stalled)
+        r.clock.advance(by: 0)                // the rung is in flight
+        r.healer.trigger(.permissionGrant)    // parked behind it
+        r.healer.cancelAll()                  // sleep
+        return r
+    }
+
+    @Test func aGrantParkedBehindARungSurvivesSleepAndRunsOnWake() {
+        let r = sleepWithAGrantParked()
+        r.healer.rebuildResult(rung: .rebuildAggregate, token: 1, succeeded: true)   // the rung returns while asleep
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.count == 1, "nothing runs while asleep")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate, .rebuildAggregate], "the grant's rebuild runs on the wake")
+    }
+
+    /// coreaudiod restarts while asleep: its new tap is built under the new permission, so one tap rung
+    /// covers the parked grant too — whichever way sleep was announced last.
+    @Test func aServiceRestartWhileAsleepCoversAParkedGrant() {
+        let r = sleepWithAGrantParked()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.cancelAll()                  // sleep announced a second time (the app and IOKit both say it)
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.count == 1, "nothing runs while asleep")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate, .rebuildTap])
+    }
+
+    @Test func aParkedGrantRunsOnceHoweverManyWakes() {
+        let r = sleepWithAGrantParked()
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.count == 2, "one rebuild for the grant, none for the second wake")
+    }
+
+    /// No grant parked: sleep and wake rebuild nothing, as before.
+    @Test func sleepWithNoGrantParkedRebuildsNothingOnWake() {
+        let r = rig()
+        r.healer.trigger(.stalled)
+        r.clock.advance(by: 0)
+        r.healer.cancelAll()
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.count == 1, "the wake never rebuilds blind")
+    }
+
     // MARK: - Final review H-I1: nothing expected at the deadline
 
     /// Recording started before the call; the grant rebuilds the tap while nothing plays. The rung's

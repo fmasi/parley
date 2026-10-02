@@ -235,7 +235,7 @@ What the record states about how the recording was captured and processed (spec 
 **`metadata.capture_provenance`** (`CaptureProvenance.asMetadataDictionary`, always present for a recording made by the app):
 - `engine`, `route_changes`, `retries`, `recovered`, `anomaly_count`, `quality_anomaly_count`, `system_audio_unrecovered`, `system_permission_denied_confirmed`; `system_format`, `mic_format`, `mic_device`, `system_delivered_seconds`, `system_exact_zero_seconds` when known.
 - `events_dropped` — how many diagnostic-ring events were evicted before the stamp was built: the ring's own admission that it does not hold the whole session. Always written (0 when none).
-- `local_coverage` / `remote_coverage` — per-track coverage summed over every helper session (`TrackAccounting.asMetadataDictionary`): `status` (`healthy` | `idle` | `neverDelivered` | `compromised`), `expected_seconds`, `delivered_seconds`, `padded_seconds`, `longest_gap_seconds`, `gap_count`, `rebuilds`, and when measured `exact_zero_seconds`, `heartbeat_callbacks` (with `*_is_lower_bound: true` when a measured and an unmeasured helper session were summed), plus `content_anomaly_count`. The status is computed once from the coverage and that side's content anomalies, and recomputed (fail closed, never defaulted to healthy) when a stored status is missing or unreadable.
+- `local_coverage` / `remote_coverage` — per-track coverage summed over every helper session (`TrackAccounting.asMetadataDictionary`): `status` (`healthy` | `idle` | `neverDelivered` | `compromised`), `expected_seconds`, `delivered_seconds`, `padded_seconds`, `longest_gap_seconds`, `gap_count`, `rebuilds`, and when measured `exact_zero_seconds`, `heartbeat_callbacks` (with `*_is_lower_bound: true` when a measured and an unmeasured helper session were summed), plus `content_anomaly_count`. Each helper session is tallied on its own: a crashed helper's last status pull stands in for the `captureStop` it never wrote, and that helper's real stop, whenever it arrives (a later finalize included), replaces the stand-in, never adds to it (#229). `coverage_incomplete: true` marks every value of a side as a lower bound (the summary then says "at least"): a stop whose seal timed out, or a record built while the recording folder did not answer (built from this process's events alone, so both sides carry the mark). The status is computed once from the coverage and that side's content anomalies, and recomputed (fail closed, never defaulted to healthy) when a stored status is missing or unreadable.
 - `reconstructed: true` + `reconstructed_note` when the transcript was rebuilt by a recovery run and these facts come from that run.
 
 In `session.json` the same stamp is persisted under `provenance`, with the per-side status in separate `local_status` / `remote_status` keys.
@@ -266,7 +266,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
 - `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
 - `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
-- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one.
+- `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one. The single-file path (`run()`: the CLI, the legacy recovery) skips it the same way; there a diarizer failure on a stream that does have segments fails the run.
 
 **Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`). A rename applies to them too, except on a channel a re-detect has rewritten (`rediarized_channels` above).
 
@@ -279,6 +279,8 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 ### Stage 10 — Summary Generation
 
 **What it does:** Reads the transcript JSON, builds a prompt with speaker-labeled lines (and source labels in dual-stream mode), calls the configured LLM provider, and writes `<sessionName>-summary.md` alongside the transcript. Called via `summarizeIfConfigured()` — logs errors, never throws, fire-and-forget.
+
+**Participants are people only (#269).** The prompt's `Participants:` line lists the speakers of the visible lines, minus two kinds of label that are not somebody who attended: the unattributed ones (`Unknown`, `Local Unknown`, `Remote Unknown`), whose lines stay in the prompt as they are, and an echo voice (a label `metadata.echo_clusters` records with verdict `echo`, found through `EchoNotice.Findings` so a renamed one is still recognised). An echo voice's flagged lines are already hidden; its visible lines mix both people's words, so they stay in the prompt with the speaker shown as the channel's unattributed label (`Local Unknown`). The transcript file is not changed. A name the user gave to both the echo voice and another speaker stays a participant, lines and all: those lines cannot be told apart. With no echo voice and no unattributed line the prompt is what it was before.
 
 **Providers:** `OpenAISummaryProvider` (OpenAI-compatible `/v1/chat/completions`) or `LMStudioSummaryProvider` (LM Studio native `/api/v1/chat` with per-request `context_length` and self-correcting retry on context overflow).
 
@@ -459,7 +461,7 @@ All Swift components log via `os.Logger` with:
 # Dump recent history to file (useful after a crash — no live stream needed)
 /usr/bin/log show --predicate 'subsystem == "eu.fmasi.parley"' --last 30m --style compact > ~/Desktop/transcriber.log
 
-# Via dev.py (launches app + tails log automatically)
+# Via dev.py (builds a release build, installs, launches app + tails log automatically)
 python3 scripts/dev.py --debug
 
 # Callback timing (#247): one line per track at each Stop, logged at notice level so `log show` keeps it
@@ -508,10 +510,17 @@ Developer iteration CLI. Key flags:
 
 | Flag | Action |
 |---|---|
-| (default) | Kill app, build, install bundle, launch |
-| `--debug` | Launch app + tail unified log (subsystem filter) |
+| (default) | Kill app, build a **release** build, install bundle, launch |
+| `--debug-build` | Build the unoptimised debug configuration instead (faster to compile). For the inner loop only: not for real meetings or for timings (gotcha 84) |
+| `--debug` | Launch app + tail unified log (subsystem filter). Nothing to do with the build configuration |
 | `--reset-tcc` | Reset TCC permissions (microphone + screen recording) |
-| `--no-build` | Skip build step (reuse last binary) |
+| `--build` | Build only, into `dist/`: nothing is killed, installed or launched. `just build` runs `--build --debug-build` |
+| `--kill --launch` | Relaunch the installed app without building |
+
+`dev.py` prints the configuration it built and installed, and `package_app.sh` prints it next to the
+version (`package_app.sh` alone still defaults to debug; `--release` is what `dev.py` and
+`scripts/release.sh` pass). The capture helper writes the configuration into each recording's
+`captureStart` diagnostic event as `"build"` (`TranscriberCore/BuildConfiguration.swift`, #271).
 
 ### scripts/test-checklist.md
 

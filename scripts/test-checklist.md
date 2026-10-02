@@ -10,7 +10,8 @@ stayed up, and `metadata.capture.<side>.status` says which.
 
 ## Setup (once per session)
 
-1. Build and install the merged tree: `python3 scripts/dev.py`. Settings → Audio → Capture Method →
+1. Build and install the merged tree: `python3 scripts/dev.py` (a release build; it prints
+   "RELEASE build installed"). Settings → Audio → Capture Method →
    **Core Audio Tap** (the default for new installs).
 2. Evidence folder and a copy of your config:
    `mkdir -p ~/Desktop/parley-x1 && cp ~/Library/Application\ Support/Parley/config.json ~/Desktop/parley-x1/config.before.json`.
@@ -90,11 +91,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: menu → Quit, `chmod 500 ~/Library/LaunchAgents`, and open Parley. Then `chmod 700 ~/Library/LaunchAgents`, menu → Quit, and open Parley again.
   - PASS: with 500, the row "Crash protection is off" and ONE notification appear at once, not after 2 min. With 700, one blink and no row.
   - Capture: shot of the row.
-  - Optional (15 min): on a non-job instance (the D-02e trick), leave Settings open 15 min. PASS: the row reads "Crash protection is waiting for you to close Parley’s windows…".
+  - Optional (15 min): on a non-job instance (the D-02e trick), leave Settings open 15 min. PASS: the row reads "Crash protection is waiting for you to close Parley’s windows…". Then press Record with that row still up. PASS: the row re-words to "Crash protection is off for this recording…" (#237), with no second notification.
 
 - [ ] **D-02h Crash protection during a recording (final review A-I2).**
   - Do: make Parley a non-job instance whose hand-over is deferred: launch it from Finder with the Setup/repair window open (or the D-02e cooldown trick), or click Record within a second of launch. Record 5 min with audio, then Stop and let the transcript finish.
-  - PASS: when the recording starts, the row "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it…" appears with ONE notification, and no further notification for the rest of the call (not every 2 min). After Stop, once Parley is idle (no panel open): the hand-over runs (one icon blink) and the row clears.
+  - PASS: when the recording starts, the row "Crash protection is off for this recording — if Parley crashes now it will not relaunch or resume it…" appears with ONE notification, and no further notification for the rest of the call (not every 2 min). After Stop the row clears as transcription begins, not when the transcript is done (#236); once Parley is idle (no panel open) the hand-over runs (one icon blink).
   - Capture: shot of the row, the log line "Crash-protection hand-over deferred…" if any.
 
 - [ ] **D-03 A crash relaunches and resumes within 5 s.**
@@ -249,6 +250,10 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: a 2-chunk recording with the other side talking (a call, or a video playing) while you say nothing at all.
   - PASS: the completion notice is "Transcription Complete", never "N chunks had processing problems". `meta` shows `processing_issue_count` 0 and no `diarization_failed` in `processing_issues`. `grep '"diarization"' <id>.json` reads `true`. The remote speakers are labelled as usual.
 
+- [ ] **D-20c A listen-only recording transcribes from the command line (#264).**
+  - Do: `Parley transcribe -i <listen-only>.m4a --split --output-dir <a scratch folder>` on the merged archive of a listen-only recording (D-20b's will do).
+  - PASS: it ends with "Output saved to: …", never a "no speech detected" error. The transcript has the remote speakers labelled as usual and no local lines.
+
 - [ ] **D-21 A mic-empty chunk (opportunistic).**
   - A chunk whose mic delivered nothing while the remote played. Unplugging a USB mic does NOT produce it: Parley follows the next mic (log "Mic input removed — … following to …"). Run this only if it happens naturally, or with a mic that stops delivering while staying selected.
   - PASS: that chunk archives system-only. The merged `.m4a` keeps the remote on the RIGHT, with the LEFT silent for that stretch. No WAV is left behind unless `preserve_source_wav` is on.
@@ -258,12 +263,13 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - PASS: the speaker turns land at the same timestamps as before (±0.5 s), and `<id>.json.bak` exists next to the transcript.
 
 - [ ] **D-23 The summary is honest.**
-  - Do: make a stamped COPY of the 09-24 incident transcript, never the original:
+  - Do: make a stamped COPY of a transcript whose remote side was never captured (the 09-24 incident's), never the original. Set `SRC` to that transcript's `.json`:
     ```zsh
-    mkdir -p ~/Desktop/parley-x1/D-23 && python3 -c 'import json,sys;j=json.load(open(sys.argv[1]));j["metadata"].setdefault("capture",{})["remote"]={"status":"neverDelivered","expected_seconds":2736.0,"delivered_seconds":0.0};json.dump(j,open(sys.argv[2],"w"),ensure_ascii=False,indent=1)' ~/Documents/Recordings/2026-09-24/160032-*.json ~/Desktop/parley-x1/D-23/stamped.json
+    SRC=<recordings>/<date>/<id>.json
+    mkdir -p ~/Desktop/parley-x1/D-23 && python3 -c 'import json,sys;j=json.load(open(sys.argv[1]));j["metadata"].setdefault("capture",{})["remote"]={"status":"neverDelivered","expected_seconds":2736.0,"delivered_seconds":0.0};json.dump(j,open(sys.argv[2],"w"),ensure_ascii=False,indent=1)' "$SRC" ~/Desktop/parley-x1/D-23/stamped.json
     /Applications/Parley.app/Contents/MacOS/Parley summarize -i ~/Desktop/parley-x1/D-23/stamped.json
     ```
-  - PASS: `stamped-summary.md` opens with a banner containing "Remote audio: not captured (0 s delivered of 2736 s expected)", and its Summary section says the other side was not captured. It does not read "Frederic met to prepare…" as if both sides were there.
+  - PASS: `stamped-summary.md` opens with a banner containing "Remote audio: not captured (0 s delivered of 2736 s expected)", and its Summary section says the other side was not captured. It does not describe the call as a meeting between two parties ("A and B met to discuss…") as if both sides were there.
 
 - [ ] **D-24 The engine preflight.**
   - Do: Settings → Engine → "Apple Speech — not yet usable (#223)" → Save.
@@ -469,7 +475,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
 
 - [ ] **M-IO Does recording stall the IO callback, and is the periodic `fsync` why? (#247)**
   - Why: `coreaudiod` reported the capture helper's IO callback at 56.5 ms against an 11.35 ms budget, with ~0.5 ms of CPU in that cycle: it was waiting. The tap's callback runs on the helper's shared audio queue, with the mic, the WAV writes and an `fsync` every 0.5 s per writer. This run measures where the time goes. **Nothing here has been measured on a device yet**: the instrument itself is under test too (see Sanity).
-  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: Quit Parley, `bash package_app.sh --release --install`, open Parley. `dev.py` installs a debug build, whose callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which.
+  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: `python3 scripts/dev.py` installs one (since #271) and prints "RELEASE build installed". Never `--debug-build` here: a debug build's callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which (`captureStart` in a `.diag.jsonl` says: `"build"`).
   - Do: three runs of each condition, interleaved A B C A B C A B C (so a drift in the room or the link does not line up with one condition). Before each run: `T0=$(date '+%Y-%m-%d %H:%M:%S')`.
     - **A, not recording:** Parley open and idle, the call running.
     - **B, recording:** Quit, `cfg debug_skip_wav_sync null`, open Parley, Record 10 min, Stop.
@@ -560,7 +566,7 @@ lands. Verify the error message is the readable one.
 ## Re-detect: binding count + name safety (#201 / #202) — added 2026-09-15
 
 - [ ] **Re-detect is reachable on an ALREADY-NAMED transcript.** Open the rename dialog on a
-      recording whose speakers you have already named (the rows read "Jacques", not "Remote
+      recording whose speakers you have already named (the rows read a name, not "Remote
       Speaker 1"). The "Wrong number of speakers?" section must still be there. It used to vanish
       outright, because the channel list was derived from the label prefix — so re-detect was
       unreachable on exactly the transcripts someone had already invested naming effort in.
@@ -772,6 +778,16 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
   line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`).
 - [ ] **E-06 An old config still loads.** `cfg echo_embedding_threshold 0.99`, relaunch, repeat E-01
   for 1 minute: the result is the same as E-01 (the key is ignored). `cfg echo_embedding_threshold null`.
+
+## Build configuration (#271) — added 2026-10-02
+
+- [ ] **B-01 The everyday install is a release build, and the record says so.**
+  - Do: `python3 scripts/dev.py`. Record with audio playing; after 30 s run
+    `pkill -9 -f audio-capture-helper-xpc` (a clean recording writes no `.diag.jsonl`; the helper
+    restart is the anomaly that makes this one keep its event log). Wait for "Recording Resumed",
+    then Stop after 1 more minute.
+  - PASS: `dev.py` printed "Building a RELEASE build + installing" and "RELEASE build installed to
+    /Applications/Parley.app". `diag <id>.diag.jsonl | grep captureStart` shows `"build": "release"`.
 
 ## Stop-path bounds (#226 / #232) — added 2026-10-02
 

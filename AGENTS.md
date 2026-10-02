@@ -17,8 +17,9 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 
 1. Branch from `main`. Never commit on `main`. Group related bugs and features into one PR; file a
    second, unrelated defect found mid-branch instead of bundling it.
-2. Commit in small steps. The pre-commit hook (lefthook) runs gitleaks, shellcheck and actionlint.
-   Once per clone: `lefthook install`.
+2. Commit in small steps. The pre-commit hook (lefthook) runs gitleaks, shellcheck and actionlint,
+   and refuses a staged file that contains a real recording's name (#275). Once per clone:
+   `lefthook install`.
 3. `just ci` must pass before every push. The pre-push hook runs it (~10 minutes: the serial suite).
 4. Push the branch and open a draft PR: `gh pr create --draft --fill`. CI does nothing on drafts.
 5. Review locally before asking for the GitHub review: a code council over the full diff
@@ -42,18 +43,23 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 
 `just --list` shows every recipe. The ones that matter:
 
-- `just ci`: exactly what CI runs (workflow lint, the serial Swift suite, the release-tooling tests,
-  the red-first gate), then the app-bundle build, which CI doesn't do.
+- `just ci`: exactly what CI runs (workflow lint, the toolchain report, the serial Swift suite, the
+  release-tooling tests, the red-first gate), then the app-bundle build, which CI doesn't do.
 - `just workflows`: actionlint + zizmor on `.github/workflows`, as the `test` job runs them.
+- `just toolchain`: this Mac's Swift and macOS, and "N tests not run on this toolchain" (the tests
+  an older Swift doesn't compile or an older macOS skips). CI prints the same in each job summary.
 - `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
-- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier).
+- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier)
+  and of the red-first gate's own classifier.
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
-- `just build`: build the app bundle (app + XPC service) without installing it.
+- `just build`: build the app bundle (app + XPC service) without installing it. A debug build: it
+  reuses what the test step compiled.
 - `just secrets`: gitleaks on the staged changes (the pre-commit hook runs it).
 - `just lint`: shellcheck the scripts (not part of CI).
 
-Not recipes: `python3 scripts/dev.py` builds, installs to /Applications and relaunches the app
-(`--debug` also tails the log); `scripts/release.sh` and `scripts/publish.sh` build, sign and publish
+Not recipes: `python3 scripts/dev.py` builds a release build, installs it to /Applications and
+relaunches the app (`--debug` also tails the log; `--debug-build` builds unoptimised, for the inner
+loop only, never for a real meeting or a timing); `scripts/release.sh` and `scripts/publish.sh` build, sign and publish
 a release (see `docs/release-checklist.md`).
 
 ## Repo rules
@@ -62,7 +68,11 @@ a release (see `docs/release-checklist.md`).
   (happy path, edge cases, invalid input). A bug fix comes with a test that fails without it: the
   `red-first` check runs the changed tests at the merge base and requires them RED there.
   `RED-FIRST-EXEMPT: <reason>` in a test file is only for characterization tests of existing
-  behaviour and for the documented diarization-fixture gap.
+  behaviour and for the documented diarization-fixture gap. The marker exempts the whole file for
+  as long as it stays in it, in every later PR too: remove it when its reason expires. RED means
+  the tests ran and failed, or a changed test file did not compile. A merge base that cannot be
+  resolved, built or run fails the check as "could not build the parent — not RED"; when SwiftPM
+  cannot check out a dependency locally, `swift package purge-cache` rebuilds its cache.
 - **Testable seams.** The test target links only `TranscriberCore` and `VerifyEdSignatureCore`.
   Decision logic (capture health, permission state, recording lifecycle) goes in `TranscriberCore`
   behind a protocol seam and is tested there with fakes; `AudioCaptureHelper/` and `TranscriberApp/`
@@ -70,6 +80,14 @@ a release (see `docs/release-checklist.md`).
 - **The test suite runs serially.** `--no-parallel`, the timeouts, the caches, the conditional
   cancel and the `red-first` job in `test.yml` are load-bearing (their comments say why). Don't
   loosen them. `PARLEY_REQUIRE_AMI_FIXTURE=1` makes a missing fixture a failure, never a skip.
+- **CI toolchain.** `test` and `red-first` run on GitHub's `macos-26` image (arm64) with its
+  default Xcode: Xcode 26.6, Swift 6.3 and macOS 26 when this was written. `runs-on` in `test.yml`
+  is the source of truth, and each job's summary prints the exact versions. Development uses
+  Xcode 27 (Swift 6.4), which GitHub offers only as a preview image, so CI's Swift is one minor
+  version behind: a Swift 6.4-only language feature or an unguarded macOS 27 API fails the CI
+  build. The same summary prints "N tests not run on this toolchain" (`just toolchain` locally).
+  N is 0 today and must stay 0: don't put a test behind `#if compiler(...)`, and say so in the PR
+  if a change makes N anything else.
 - **No silent audio loss.** Every way capture can stop, turn to zeros or be padded over must
   surface as an anomaly the user sees, for as long as it lasts. A denied or revoked permission
   never produces a normal-looking recording.
