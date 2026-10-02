@@ -5980,9 +5980,12 @@ final class HungStep: @unchecked Sendable {
         defer { tearDown(h) }
         let s = try fresh(h, stopping: true)
         h.coordinator.folderReadDeadline = .milliseconds(100)
-        h.coordinator.folderReads = reads { label in if label == "relaunch: recording folder" { Thread.sleep(forTimeInterval: 0.3) } }
+        let folder = HungStep("relaunch: recording folder")   // hung until released: its bound runs out however late it fires
+        defer { folder.release() }
+        h.coordinator.folderReads = reads { folder.hangIfNamed($0) }
         h.client.isCapturingResult = true
         await h.coordinator.recoverAtLaunch()
+        #expect(folder.isHanging, "waiting for a folder that had still not answered")
         #expect(h.client.stopCalls == 1, "stopped before waiting")
         #expect(pending(h).map(\.sessionKey) == [s.sessionKey])
     }

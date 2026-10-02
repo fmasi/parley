@@ -165,12 +165,15 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await recording(h)
+        // What is left of the Stop's budget after the refusal is less than a re-ask needs — by the numbers alone, no timer
+        // raced (it used to be 150 ms refusals against a 400 ms deadline: a refusal a loaded machine stretched past the
+        // deadline was a timeout with no refusal seen, and the connection was dropped): the whole budget, the default
+        // 25 s, is less than the 60 s a re-ask must have left.
         h.client.stopError = RefusedStoppingError()
-        h.client.onStop = { try? await Task.sleep(for: .milliseconds(150)) }   // each refusal takes 150 ms
-        h.coordinator.stopDeadline = .milliseconds(400)
         h.coordinator.stopReaskInterval = .milliseconds(20)
-        h.coordinator.stopReaskMinimumBudget = .milliseconds(150)
+        h.coordinator.stopReaskMinimumBudget = .seconds(60)
         await h.coordinator.stopRecording()
+        #expect(h.client.stopCalls == 1, "held without asking again")
         #expect(h.client.droppedConnections == 0, "never dropped while another stop may still be writing")
         #expect(pending(h).first?.heldReason == .stopUnderWay && h.client.finalizeCalls.isEmpty, "held, nothing finalized")
         #expect(h.recordingMic.current == .some("mic-1"))
@@ -242,13 +245,21 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         let s = try await reattachedWithoutPipeline(h)
-        // The rebuild's look answers too late; a look after it answers at once.
-        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { name in
-            if name == "recovery: session folder" { Thread.sleep(forTimeInterval: 0.3) }
-        })
-        h.coordinator.folderReadDeadline = .milliseconds(200)
+        // The rebuild's look HANGS until released, so its bound — the only short one — runs out however late it fires (it
+        // used to sleep 300 ms against 200 ms). Any look after it has all the time it needs, and answers once the hung one
+        // has let the queue go: a second look "that answers and forgets" would wait for that, and the session would not be
+        // kept while the rebuild's look is still hung.
+        let rebuild = HungStep("recovery: session folder")
+        defer { rebuild.release() }
+        h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { rebuild.hangIfNamed($0) })
         h.coordinator.folderPrepareDeadline = .milliseconds(200)
-        await h.coordinator.stopRecording()
+        h.coordinator.folderReadDeadline = .seconds(60)
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until(within: 20) { !pending(h).isEmpty }
+        #expect(rebuild.isHanging, "kept at the look's own bound: the folder had still not answered")
+        rebuild.release()
+        await stopping.value
         let kept = try #require(pending(h).first, "kept")
         #expect(kept.sessionKey == s.sessionKey && kept.stopCause == .folderNotAnswering)
         #expect(h.criticals.value.last?.body.contains("isn’t answering") == true, "\(h.criticals.value)")
