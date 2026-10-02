@@ -5,7 +5,7 @@ import Foundation
 /// When archiving fails, the chunk keeps raw WAV(s) and the transcript records one of them.
 /// Which one it records decides whether the rename dialog can play anything (#183).
 ///
-/// On `2026-09-02/150633-Paul feedback` it recorded the SYSTEM wav — a 44-byte empty header — and
+/// On a speakerphone call (2026-09-02) it recorded the SYSTEM wav — a 44-byte empty header — and
 /// never mentioned the 60.8 MB `_mic.wav` that held the only audio the recording had. The layout
 /// then resolved `local: nil`, every segment was `source: "local"`, and the dialog drew no play
 /// button.
