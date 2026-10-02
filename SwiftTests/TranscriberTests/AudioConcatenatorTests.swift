@@ -1,4 +1,3 @@
-// RED-FIRST-EXEMPT: R2c (C-M19) removed the dead AudioConcatenator.concatenate(sources:), which deleted its sources unconditionally; its five callers here were converted to concatenate(chunks:deleteSources: true), a pure refactor of existing tests
 import Testing
 import Foundation
 import AVFoundation

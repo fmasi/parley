@@ -1,5 +1,3 @@
-// RED-FIRST-EXEMPT: characterization tests of merged cross-stream behaviour (streams C, F, D, E, H, R); each test was proven able to fail by temporarily breaking the production line it pins (task XI report). The R2c changes (the two re-enabled BUG tests, the neutral muted-remote line in (e), the mid-call denial in (c′)) were run red first (task R2c report)
-// RED-FIRST-EXEMPT: characterization of the Incident-B chain at HEAD (final review E-I2); the red-first proof for HF-1 lives in TapRecoveryLadderTests/TapHealerTests
 import Foundation
 import Testing
 @testable import TranscriberCore

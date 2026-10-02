@@ -1,4 +1,3 @@
-// RED-FIRST-EXEMPT: v2 F1 — this file's only change is the deletion of PadRatioMonitorDeadTrackTests (an unreachable path, L-N2); the remaining tests are unchanged characterization
 import Testing
 @testable import TranscriberCore
 

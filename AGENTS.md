@@ -48,7 +48,8 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 - `just toolchain`: this Mac's Swift and macOS, and "N tests not run on this toolchain" (the tests
   an older Swift doesn't compile or an older macOS skips). CI prints the same in each job summary.
 - `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
-- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier).
+- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier)
+  and of the red-first gate's own classifier.
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
 - `just build`: build the app bundle (app + XPC service) without installing it. A debug build: it
   reuses what the test step compiled.
@@ -66,7 +67,11 @@ a release (see `docs/release-checklist.md`).
   (happy path, edge cases, invalid input). A bug fix comes with a test that fails without it: the
   `red-first` check runs the changed tests at the merge base and requires them RED there.
   `RED-FIRST-EXEMPT: <reason>` in a test file is only for characterization tests of existing
-  behaviour and for the documented diarization-fixture gap.
+  behaviour and for the documented diarization-fixture gap. The marker exempts the whole file for
+  as long as it stays in it, in every later PR too: remove it when its reason expires. RED means
+  the tests ran and failed, or a changed test file did not compile. A merge base that cannot be
+  resolved, built or run fails the check as "could not build the parent — not RED"; when SwiftPM
+  cannot check out a dependency locally, `swift package purge-cache` rebuilds its cache.
 - **Testable seams.** The test target links only `TranscriberCore` and `VerifyEdSignatureCore`.
   Decision logic (capture health, permission state, recording lifecycle) goes in `TranscriberCore`
   behind a protocol seam and is tested there with fakes; `AudioCaptureHelper/` and `TranscriberApp/`
