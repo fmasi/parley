@@ -17,8 +17,9 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 
 1. Branch from `main`. Never commit on `main`. Group related bugs and features into one PR; file a
    second, unrelated defect found mid-branch instead of bundling it.
-2. Commit in small steps. The pre-commit hook (lefthook) runs gitleaks, shellcheck and actionlint.
-   Once per clone: `lefthook install`.
+2. Commit in small steps. The pre-commit hook (lefthook) runs gitleaks, shellcheck and actionlint,
+   and refuses a staged file that contains a real recording's name (#275). Once per clone:
+   `lefthook install`.
 3. `just ci` must pass before every push. The pre-push hook runs it (~10 minutes: the serial suite).
 4. Push the branch and open a draft PR: `gh pr create --draft --fill`. CI does nothing on drafts.
 5. Review locally before asking for the GitHub review: a code council over the full diff
