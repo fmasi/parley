@@ -486,6 +486,7 @@ dictionaries; `system_delivered_seconds` / `system_exact_zero_seconds` stay for 
   | `segments_filtered` | informational | segments that failed the VAD/quality gate, kept and flagged `filtered` |
   | `clusters_absorbed` | informational | minority diarization clusters absorbed into the dominant speaker |
   | `echo_flagged` | informational | local segments flagged `echo` (mic bleed) |
+  | `echo_cluster` | informational | local clusters judged to be the remote side's voice through the speakers (`count` = clusters); the numbers are in `metadata.echo_clusters` (#242) |
   | `duplicate_source_other_index` | informational | a file already processed under one index arrived again under another and was skipped (`count` = the incoming index); nothing lost |
   | `seed_engine_changed` | informational | a resumed session's seed was transcribed with another engine |
   | `session_file_displaced` | informational | the day folder's `session.json` held another session and was moved aside (`session-<id>.json`) |

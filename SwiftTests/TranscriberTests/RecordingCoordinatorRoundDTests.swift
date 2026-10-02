@@ -483,9 +483,9 @@ struct NotReadyEngine: TranscriptionEngine {
         let mic = call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav")
         try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
         h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: mic)
-        let hung = HungRead("transcript: write")
+        let hung = HungStep()
         defer { hung.release() }
-        h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
+        h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { if $0 == "transcript: write" { hung.hang() } })
         h.coordinator.folderWriteDeadline = .seconds(1)
         h.coordinator.folderReadDeadline = .milliseconds(300)
         let coordinator = h.coordinator
@@ -494,10 +494,12 @@ struct NotReadyEngine: TranscriptionEngine {
         await Harness.until { hung.reached }
         #expect(hung.reached, "the transcript's write runs on the folder's queue")
         #expect(h.appState.phase == .transcribing(progress: "Finishing…"), "\(h.appState.phase)")
-        // The main actor is free while the write hangs: a main-actor ticker runs on time.
-        let tickerBegan = ContinuousClock.now
+        // The main actor is free while the write hangs — by ORDER, never by a stopwatch (a loaded machine stretches ten
+        // 10 ms sleeps past any threshold): ten main-actor turns run here, and the write is STILL hung, never made on the
+        // main thread. A main actor that waited for the write could not have run before it ended.
         for _ in 0..<10 { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(ContinuousClock.now - tickerBegan < .milliseconds(500), "the UI stays responsive")
+        #expect(!hung.ranOnMainThread, "never written on the main thread")
+        #expect(hung.isHanging, "the UI stays responsive: the main actor ran while the write was still hung")
         await stopping.value
         #expect(ContinuousClock.now - began < .seconds(4), "bounded")
         #expect(h.appState.isIdle)

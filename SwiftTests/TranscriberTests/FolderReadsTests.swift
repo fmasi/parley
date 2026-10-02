@@ -9,10 +9,12 @@ import Testing
     private final class Gate: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
         private let lock = NSLock()
-        private var ran = 0
+        private var ran = 0, ended = 0
         var runs: Int { lock.withLock { ran } }
+        /// Reads hung now: begun, and neither released nor let go by their own bound.
+        var hanging: Int { lock.withLock { ran - ended } }
         /// Bounded (L review 216): a regression fails at the watchdog, never wedges the run.
-        func hang() { lock.withLock { ran += 1 }; _ = semaphore.wait(timeout: .now() + 10) }
+        func hang() { lock.withLock { ran += 1 }; _ = semaphore.wait(timeout: .now() + 10); lock.withLock { ended += 1 } }
         func release(_ n: Int) { for _ in 0..<n { semaphore.signal() } }
     }
 
@@ -51,15 +53,18 @@ import Testing
             for i in 0..<n {
                 group.addTask { await reads.read("hung \(i)", folder: "/Volumes/Dead/\(i)", seconds: 0.3) { gate.hang(); return i } }
             }
-            // Meanwhile, an unrelated deadline must still fire on time: the pool is free.
+            while gate.runs == 0, !watchdog.fired { try? await Task.sleep(for: .milliseconds(5)) }   // a read is hung on the volume's queue
+            // Meanwhile, an unrelated deadline must still fire: the pool is free. By ORDER, never a stopwatch — it fires
+            // while the read is still hung. Were the reads on the pool, it could not fire before a hung one let go.
             let deadlineFired: Bool
             do {
-                _ = try await withDeadline(seconds: 0.1, label: "unrelated") { try await Task.sleep(for: .seconds(10)); return 0 }
+                _ = try await withDeadline(seconds: 0.1, label: "unrelated") { try await Task.sleep(for: .seconds(60)); return 0 }
                 deadlineFired = false
             } catch {
                 deadlineFired = true
             }
-            #expect(deadlineFired && ContinuousClock.now - began < .milliseconds(900), "the deadline fired on time")
+            #expect(deadlineFired && gate.runs == 1 && gate.hanging == 1 && !watchdog.fired,
+                    "the deadline fired with the read still hung (\(gate.hanging) of \(gate.runs) hung)")
             for await answer in group { #expect(answer == nil, "a hung read answers nothing at its deadline") }
         }
         #expect(ContinuousClock.now - began < .seconds(2), "every hung read ended at its own deadline")
@@ -76,9 +81,9 @@ import Testing
         let watchdog = Watchdog(after: 10, releasing: gate, count: 4)
         let hung = Task { await reads.read("hung", folder: "/Volumes/A/rec", seconds: 5) { gate.hang(); return 0 } }
         while gate.runs == 0, !watchdog.fired { try await Task.sleep(for: .milliseconds(5)) }
-        let began = ContinuousClock.now
-        let healthy = await reads.read("healthy", folder: "/Users/me/rec", seconds: 2) { 1 }
-        #expect(healthy == 1 && ContinuousClock.now - began < .milliseconds(500), "the other volume answers at once")
+        // Its bound is longer than the hung read can last: a read held behind volume A's answers only once that let go.
+        let healthy = await reads.read("healthy", folder: "/Users/me/rec", seconds: 30) { 1 }
+        #expect(healthy == 1 && gate.hanging == 1 && !watchdog.fired, "the other volume answers while the first is still hung")
         gate.release(1)
         _ = await hung.value
         #expect(!watchdog.fired)

@@ -243,7 +243,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
 
 - [ ] **D-20 Coverage on a real call.**
   - Do: a 2-chunk real call.
-  - PASS: `meta` shows `capture.remote.status` `healthy`, `expected_seconds ≈ delivered_seconds` on both sides, `processing_issue_count` 0 (informational entries such as `echo_flagged` or `duplicates_flagged` in `processing_issues` are fine), and `dual_stream: true`. The completion notice is "Transcription Complete". There is no alarm at the chunk boundary.
+  - PASS: `meta` shows `capture.remote.status` `healthy`, `expected_seconds ≈ delivered_seconds` on both sides, `processing_issue_count` 0 (informational entries such as `echo_flagged` or `duplicates_flagged` in `processing_issues` are fine), and `dual_stream: true`. The completion notice is "Transcription Complete" (on headphones; with the call on the loudspeakers it can read "Transcription Complete — echo marked", see N-01 under "Echo notice"). There is no alarm at the chunk boundary.
 
 - [ ] **D-20b A listen-only call is not a diarization failure (pre-PR review).**
   - Do: a 2-chunk recording with the other side talking (a call, or a video playing) while you say nothing at all.
@@ -469,7 +469,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
 
 - [ ] **M-IO Does recording stall the IO callback, and is the periodic `fsync` why? (#247)**
   - Why: `coreaudiod` reported the capture helper's IO callback at 56.5 ms against an 11.35 ms budget, with ~0.5 ms of CPU in that cycle: it was waiting. The tap's callback runs on the helper's shared audio queue, with the mic, the WAV writes and an `fsync` every 0.5 s per writer. This run measures where the time goes. **Nothing here has been measured on a device yet**: the instrument itself is under test too (see Sanity).
-  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: Quit Parley, `bash package_app.sh --release --install`, open Parley. `dev.py` installs a debug build, whose callback path is slower and allocates where the release build does not (gotcha #83), so its numbers are not the shipped app's. Use one build for all nine runs and write down which.
+  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: Quit Parley, `bash package_app.sh --release --install`, open Parley. `dev.py` installs a debug build, whose callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which.
   - Do: three runs of each condition, interleaved A B C A B C A B C (so a drift in the room or the link does not line up with one condition). Before each run: `T0=$(date '+%Y-%m-%d %H:%M:%S')`.
     - **A, not recording:** Parley open and idle, the call running.
     - **B, recording:** Quit, `cfg debug_skip_wav_sync null`, open Parley, Record 10 min, Stop.
@@ -594,6 +594,101 @@ get** — run them all.
 - [ ] **No warning when there is nothing to lose.** On a channel with no names at all, Re-detect
       must run straight away with no alert.
 
+## Re-detect keeps the echo voice apart (#243) — added 2026-10-01
+
+Needs the echo cluster detection above (#242). The remote audio is a public podcast or video with
+clear speech, never a real third party. `echo_meta` is the helper defined under "Echo cluster
+detection".
+
+- [ ] **R-01 A count of 1 does not hand the echo voice to you.**
+  - Do: output = the laptop speakers, mic = built-in (or a webcam mic). Play 5 minutes of remote
+    speech and talk for about half of it. Stop. Open the rename dialog: "This side" shows two
+    speakers (you, and the other side's voice through the speakers). Set "This side" to **1** and
+    press Re-detect.
+  - PASS: the echo voice is still a speaker of its own, not merged into you. In the JSON
+    (`echo_meta`): `speaker_count_local` is 1; `echo_clusters` has a `local` entry with `verdict`
+    `"echo"` and no `chunk`, and its `label` is not your label; `echo_segments` equals
+    `echo_segments_flagged`; `rediarized_channels` is `["local"]`. In the TXT, none of the remote
+    lines appears under your label, and the lines of the echo voice that are shown (the ones the
+    remote transcript has no match for) are under the echo voice's label.
+  - Log line: `Re-diarized local at 1 speakers: 1 label(s) across N segments, 1 echo cluster(s), M segment(s) flagged as echo`.
+- [ ] **R-02 Nothing is lost.** Before and after R-01's Re-detect, run
+      `python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(len(d["segments"]),sum(len(s["text"]) for s in d["segments"]))' <transcript.json>`
+      (the `.json.bak` next to it is the "before"). Both numbers are the same.
+- [ ] **R-03 Re-detecting again changes nothing.** Press Re-detect at 1 once more: the same two
+      rows, the same `echo_clusters` verdict, the same `echo_segments_flagged`.
+- [ ] **R-04 Repair of an already-merged transcript.** If you have a transcript re-detected to 1
+      with an older build after a speaker-mode call (every line of the other side under your
+      name), open it and press Re-detect at 1 again.
+  - PASS: as R-01 — the other side's lines leave your label; the matched ones are marked `echo`.
+- [ ] **R-05 Headphones: a count of 1 still merges.** Record with headphones, on a channel the
+      diarizer split into two (you plus a short fragment), set 1, Re-detect: exactly one speaker,
+      `echo_clusters` entries all `"kept"`, nothing flagged.
+- [ ] **R-06 The other side is unaffected.** Re-detect "Other side" on the R-01 transcript: the
+      `local` entries of `echo_clusters` and the `echo: true` segments are as they were;
+      `rediarized_channels` is `["local", "remote"]`.
+
+## Echo notice: the dialog and the completion notice (#244) — added 2026-10-01
+
+Nothing here can be checked without a screen: the copy is unit-tested, where it appears is not.
+Same setup as E-02 / R-01: output = the laptop speakers, mic = built-in (or a webcam mic), the
+remote audio a public podcast or video, never a real third party. Play 5 minutes and talk for
+about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detection".
+
+- [ ] **N-01 The completion notice says so.**
+  - PASS: the notification's title is "Transcription Complete — echo marked" and its body reads
+    `<file>.json — it looks like part of the other side's voice came through your microphone, and
+    N lines are marked as echo (headphones avoid this)`. N equals `echo_segments_flagged` in
+    `echo_meta`. If the recording also has a problem (capture anomalies, a side not captured,
+    processing problems), the title names the problem instead and the body carries both.
+- [ ] **N-02 The echo voice's card explains itself.**
+  - Do: the rename dialog opens after Stop. Find the mic-side row that is not you (usually
+    "Local Speaker 2"; its sample is the remote voice).
+  - PASS: between the row's label and its Name field there is a grey caption: "Looks like the
+    other side's voice through your loudspeakers: N of M lines (P% of its speaking time) match
+    Remote Speaker 1 at the same time and are marked as echo. The other K lines stay under this
+    label." It wraps over several lines and is not cut off. In `echo_meta`, the `"echo"` entries of
+    that label sum to M (`segments`) and N (`matched_segments`), K = M − N, and P is
+    `matched_seconds / seconds` in percent. Your own card and the remote cards have no caption.
+  - If the echo voice has fewer than 5 unmarked lines it has no row at all; N-03 still applies.
+- [ ] **N-03 The count is people.**
+  - PASS: under "Wrong number of speakers?", the "This side" stepper reads **1 speaker** although
+    two mic-side rows are listed, and under that row a grey caption reads "The count is people
+    only, not the echo voice. Re-detect checks for echo again and keeps an echo voice separate;
+    its matched lines stay marked as echo." "Other side" has no such caption and shows its own
+    row count.
+- [ ] **N-04 After Re-detect.**
+  - Do: leave "This side" at 1 and press Re-detect.
+  - PASS: the caption under the row is replaced by the outcome, on one or two lines:
+    "1 speaker found · 1 echo voice kept separate · N lines marked as echo · R lines relabeled".
+    The echo voice's card is still there with its caption (the numbers can differ from N-02: the
+    re-detect judged the whole channel at once), and the stepper still reads 1.
+- [ ] **N-05 Reopen.** Save without naming the echo voice, reopen the dialog from the menu
+      ("Rename Speakers…"): the card caption, the stepper at 1 and the caption under "This side"
+      are as in N-02 / N-03 (the outcome line is gone — it describes a run, not the transcript).
+- [ ] **N-06 A named echo voice is still recognised.** Type a name on the echo voice's card, Save,
+      reopen: its card (now under that name) still has the caption and the stepper still reads 1.
+      The caption still says "Remote Speaker 1" even if you named that speaker too: it names the
+      labels the check compared.
+- [ ] **N-07 Headphones: nothing.** Record 3 minutes on headphones. The completion notice is plain
+      "Transcription Complete", no card has a caption, the stepper shows the row count, and there
+      is no caption under "This side".
+
+## Rename reaches flagged lines (#245) — added 2026-10-01
+
+- [ ] **F-01 Never re-detected: one label per person in the JSON.**
+  - Do: on a fresh transcript that has flagged lines (N-01's has `echo: true` ones), name the
+    speakers and Save. Do NOT press Re-detect first.
+  - PASS: `python3 -c 'import json,sys,collections;d=json.load(open(sys.argv[1]));print(collections.Counter((s["speaker"],bool(s.get("echo") or s.get("filtered") or s.get("duplicate"))) for s in d["segments"]))' <transcript.json>`
+    shows no `Local Speaker N` / `Remote Speaker N` label that you named — flagged lines carry the
+    name too.
+- [ ] **F-02 Re-detected: the flagged lines of that channel keep their label.**
+  - Do: on another such transcript press Re-detect on "This side" first, then name the speakers
+    and Save.
+  - PASS: the same command shows every flagged line (`True`) of the mic side still under a
+    `Local Speaker N` label, its unflagged lines under your name, and every line of the other
+    side — flagged or not — under the name you gave it.
+
 ## Mic-only recordings (#183) — added 2026-09-03
 
 - [ ] Answer a phone call, put it on speaker, record it. On stop, expect a `.m4a` to appear —
@@ -636,3 +731,44 @@ get** — run them all.
       Known gap: SWITCHING TO the not-responding mic itself can leave the dialog on "Switching…" for
       a long time (the app stays responsive) — the helper waits on the same stuck device and the
       call has no deadline yet (#194). Don't switch to a mic that says Not responding.
+
+## Echo cluster detection (#242) — added 2026-10-01
+
+The remote side's voice through the laptop speakers is judged per mic-side speaker, on time and
+words. The remote audio for these items is a public podcast or video with clear speech (`afplay`
+or a browser), never a real third party. Helper, next to `meta`:
+
+```zsh
+# the echo verdicts and counts of a transcript
+echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["metadata"];print(json.dumps({"echo_segments_flagged":m.get("echo_segments_flagged"),"echo_segments_removed":m.get("echo_segments_removed"),"echo_clusters":m.get("echo_clusters"),"echo_issues":[i for i in m.get("processing_issues",[]) if i["code"].startswith("echo_")],"segments":len(d["segments"]),"echo_segments":sum(1 for s in d["segments"] if s.get("echo"))},indent=1))' "$1"; }
+```
+
+- [ ] **E-01 Speaker mode: the bleed is flagged.**
+  - Do: output = the laptop speakers at a normal listening volume, mic = built-in (or a webcam mic).
+    Play 3 minutes of remote speech and stay silent. Stop.
+  - PASS: `echo_meta` shows one `echo_clusters` entry with `verdict` `"echo"`, `share` ≥ 0.5 and
+    `matched_remote` naming the remote speaker; `echo_segments_flagged` equals `matched_segments` of
+    that entry and equals `echo_segments` (the count of segments carrying `echo: true`);
+    `echo_issues` holds `echo_flagged` and `echo_cluster`. The TXT shows the remote lines once, not
+    twice. Write down `share` and `embedding_similarity`.
+- [ ] **E-02 Speaker mode with you talking.**
+  - Do: the same setup, 5 minutes. Talk for about half of it, in the pauses and over the remote
+    speech; say "yes" / "okay" a few times at the same moment the remote does.
+  - PASS: your own lines are in the TXT under your label and none of them is flagged (check the
+    segments with `echo: true` in the JSON: they are all remote words). If the mic side shows two
+    speakers, your cluster's entry reads `"kept"` with a `share` under 0.2 and the other reads
+    `"echo"`. Your short "yes" / "okay" are not flagged.
+- [ ] **E-03 Headphones: nothing is flagged.**
+  - Do: output = headphones or AirPods, 3 minutes of remote speech while you talk now and then.
+  - PASS: `echo_segments_flagged` is absent (null), every `echo_clusters` entry reads `"kept"` with a
+    `share` near 0, and there is no `echo_cluster` issue.
+- [ ] **E-04 The verdicts survive a crash.**
+  - Do: `cfg chunk_duration_minutes 10`, speaker mode as in E-01 for 12 minutes; after the first
+    chunk rotated, `kill -9` the app; let it relaunch and resume, then Stop.
+  - PASS: `echo_clusters` has an entry for the chunk processed before the kill (its `chunk` index)
+    and for the later ones, each with its `verdict`, and the labels match the speaker labels of the
+    flagged segments in the transcript.
+- [ ] **E-05 The log line.** In `stream.log`, each chunk has one `Echo cluster <private>: verdict …`
+  line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`).
+- [ ] **E-06 An old config still loads.** `cfg echo_embedding_threshold 0.99`, relaunch, repeat E-01
+  for 1 minute: the result is the same as E-01 (the key is ignored). `cfg echo_embedding_threshold null`.

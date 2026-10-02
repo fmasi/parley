@@ -304,16 +304,16 @@ struct MeetingSummarizerTests {
     @Test func summaryMetadataDefaultDualStreamFields() {
         let meta = SummaryMetadata(sessionName: "test", date: Date(), durationSeconds: 60, speakers: ["A"])
         #expect(meta.dualStream == false)
-        #expect(meta.echoSegmentsRemoved == 0)
+        #expect(meta.echoSegmentsFlagged == 0)
     }
 
     @Test func summaryMetadataRecordsDualStreamFields() {
         let meta = SummaryMetadata(
             sessionName: "test", date: Date(), durationSeconds: 120, speakers: ["A", "B"],
-            dualStream: true, echoSegmentsRemoved: 5
+            dualStream: true, echoSegmentsFlagged: 5
         )
         #expect(meta.dualStream == true)
-        #expect(meta.echoSegmentsRemoved == 5)
+        #expect(meta.echoSegmentsFlagged == 5)
     }
 
     @Test func summarizePopulatesDualStreamFromJSON() async throws {
@@ -346,7 +346,7 @@ struct MeetingSummarizerTests {
         try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: "http://localhost:1234")
 
         #expect(capturedMeta?.dualStream == true)
-        #expect(capturedMeta?.echoSegmentsRemoved == 7)
+        #expect(capturedMeta?.echoSegmentsFlagged == 7)
         #expect(capturedSegs[0].source == "local")
         #expect(capturedSegs[1].source == "remote")
     }
@@ -445,6 +445,21 @@ struct MeetingSummarizerTests {
         ]]).write(to: url)
         let (segments, _) = try MeetingSummarizer.parseTranscriptForTesting(at: url)
         #expect(segments.map(\.text) == ["keep"])
+    }
+
+    /// #231: the reader takes the count from `echo_segments_flagged`, and from the old
+    /// `echo_segments_removed` in a transcript written before the rename.
+    @Test func readsTheEchoCountFromTheNewKeyAndFallsBackToTheOldOne() throws {
+        func count(_ metadata: [String: Any]) throws -> Int {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("echo-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": [] as [Any]]).write(to: url)
+            return try MeetingSummarizer.parseTranscriptForTesting(at: url).1.echoSegmentsFlagged
+        }
+        #expect(try count(["echo_segments_flagged": 36]) == 36)
+        #expect(try count(["echo_segments_removed": 7]) == 7, "a transcript written before the rename")
+        #expect(try count(["echo_segments_flagged": 36, "echo_segments_removed": 7]) == 36, "the new key wins")
+        #expect(try count([:]) == 0)
     }
 
     @Test func parsesCaptureCoverageFromMetadata() throws {

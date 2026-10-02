@@ -47,7 +47,8 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         //
         // channelNames is read here too (once, off-main) rather than by the dialog re-reading the
         // transcript on every "Re-detect" press — the file open+parse that used to happen
-        // synchronously on the main actor for the "this will clear your names" warning (#207).
+        // synchronously on the main actor for the "this will clear your names" warning (#207). What the
+        // echo check recorded comes from the same parse (#244).
         //
         // The parse is bounded (L review 134): a recordings folder that does not answer skips this panel with a note —
         // never a rename queue wedged behind it. On the rename's OWN reader (L review 175), never the coordinator's: a
@@ -60,7 +61,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 onDismiss?()
                 return
             }
-            guard let (speakers, channelNames) = parsed else {
+            guard let (speakers, channelNames, echo) = parsed else {
                 Logger.files.error("Rename: the transcript could not be read in time — its panel is skipped")
                 let alert = NSAlert()
                 alert.messageText = "Speaker names can be set later"
@@ -84,7 +85,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 onDismiss?()
                 return
             }
-            self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, onDismiss: onDismiss)
+            self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, echo: echo, onDismiss: onDismiss)
         }
     }
 
@@ -98,7 +99,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
     private func present(
         jsonPath: URL, speakers: [SpeakerEntry], channelNames: [String: [String: String]],
-        onDismiss: (() -> Void)?
+        echo: EchoNotice.Findings, onDismiss: (() -> Void)?
     ) {
 
         self.onDismissCallback = onDismiss
@@ -115,6 +116,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             jsonPath: jsonPath,
             speakers: speakers,
             initialChannelNames: channelNames,
+            initialEcho: echo,
             onSave: { mapping in
                 guard TranscriptRenamer.applyRenames(mapping, jsonPath: jsonPath) else {
                     // Keep the panel open: the names are still in the fields, so the user can
@@ -227,27 +229,29 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         ]
     }
 
-    /// `parseSpeakers` and `loadChannelNames` combined behind a SINGLE `Data(contentsOf:)` +
-    /// JSON parse of the transcript, instead of each independently re-reading the same file.
+    /// `parseSpeakers`, `loadChannelNames` and what the echo check recorded (`EchoNotice.Findings`,
+    /// #244) behind a SINGLE `Data(contentsOf:)` + JSON parse of the transcript, instead of each
+    /// independently re-reading the same file.
     ///
-    /// Both `show()` here and `RenameDialog`'s post-re-detect refresh need both results from the
+    /// Both `show()` here and `RenameDialog`'s post-re-detect refresh need all of them from the
     /// same transcript at the same moment — a stale-out-of-sync pair between two separate reads
     /// is unlikely but not impossible if something rewrites the file between them. More
     /// concretely, a recording directory can be iCloud-mounted, where `Data(contentsOf:)` blocks
     /// on the network per call — halving the round trips halves that latency.
     ///
-    /// An unreadable/unparseable transcript degrades to `([], [:])`, matching what the two
+    /// An unreadable/unparseable transcript degrades to `([], [:], .none)`, matching what the two
     /// individual URL-based helpers above would have returned on the same failure.
     nonisolated static func parseSpeakersAndChannelNames(
         from jsonPath: URL, minSegments: Int = 5
-    ) -> (speakers: [SpeakerEntry], channelNames: [String: [String: String]]) {
+    ) -> (speakers: [SpeakerEntry], channelNames: [String: [String: String]], echo: EchoNotice.Findings) {
         guard let data = try? Data(contentsOf: jsonPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .sensitive)")
-            return ([], [:])
+            return ([], [:], .none)
         }
-        return (parseSpeakers(json: json, minSegments: minSegments), loadChannelNames(json: json))
+        return (parseSpeakers(json: json, minSegments: minSegments), loadChannelNames(json: json),
+                EchoNotice.Findings(json: json))
     }
 
     // MARK: - Generate Format File

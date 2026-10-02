@@ -139,6 +139,104 @@ import Testing
         #expect(dicts[3]["chunk"] == nil && dicts[3]["code"] as? String == "session_write_failed")
     }
 
+    // MARK: - #242: echo verdicts at finalize
+
+    private func verdict(_ label: String, echo: Bool, remote: [String: Double] = [:]) -> EchoDeduplicator.ClusterVerdict {
+        EchoDeduplicator.ClusterVerdict(
+            label: label, segments: echo ? 40 : 10, matchedSegments: echo ? 36 : 0, seconds: echo ? 400 : 60, matchedSeconds: echo ? 360 : 0,
+            words: echo ? 480 : 90, matchedWords: echo ? 432 : 0, share: echo ? 0.9 : 0, verdict: echo ? .echo : .kept,
+            bestEmbeddingSimilarity: echo ? 0.68 : 0.08, matchedRemote: remote)
+    }
+
+    /// Two chunks whose diarizers numbered the speakers differently: in chunk 1 the bleed voice is
+    /// "Local Speaker 1", the user "Local Speaker 2", and the only remote voice "Remote Speaker 1" is
+    /// chunk 0's "Remote Speaker 2".
+    private func twoChunksWithABleedClusterInTheSecond() -> SessionState {
+        let user: [Float] = [1, 0, 0], bleed: [Float] = [0, 1, 0], remoteA: [Float] = [0, 0, 1], remoteB: [Float] = [1, 1, 0]
+        let first = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a", segments: [
+            .init(start: 0, end: 5, text: "w1 w2 w3", speaker: "Remote Speaker 1", source: "remote"),
+            .init(start: 5, end: 10, text: "w4 w5 w6", speaker: "Remote Speaker 2", source: "remote"),
+            .init(start: 10, end: 15, text: "w7 w8 w9", speaker: "Local Speaker 1", source: "local"),
+        ], speakerDatabase: ["Speaker 1": remoteA, "Speaker 2": remoteB], localSpeakerDatabase: ["Speaker 1": user],
+           echoClusters: [verdict("Local Speaker 1", echo: false)], isDualStream: true)
+        let second = ProcessedChunk(index: 1, startTime: Date(timeIntervalSince1970: 600), audioPath: "m-1.m4a", segments: [
+            .init(start: 0, end: 5, text: "w10 w11 w12", speaker: "Remote Speaker 1", source: "remote"),
+            .init(start: 0.2, end: 5.2, text: "w10 w11 w12", speaker: "Local Speaker 1", source: "local", echo: true),
+            .init(start: 6, end: 9, text: "w13 w14 w15", speaker: "Local Speaker 2", source: "local"),
+        ], speakerDatabase: ["Speaker 1": remoteB], localSpeakerDatabase: ["Speaker 1": bleed, "Speaker 2": user],
+           echoSegmentsFlagged: 36,
+           echoClusters: [verdict("Local Speaker 1", echo: true, remote: ["Remote Speaker 1": 352.8]), verdict("Local Speaker 2", echo: false)],
+           isDualStream: true,
+           issues: [ChunkIssue(code: .echoFlagged, track: "local", count: 36), ChunkIssue(code: .echoCluster, track: "local", count: 1)])
+        return SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [first, second])
+    }
+
+    /// The verdicts reach `metadata.echo_clusters`, one entry per (chunk, local cluster), with the
+    /// labels of the transcript's global speaker namespace — the ones its segments carry — and the
+    /// count under `echo_segments_flagged`. Read back from session.json first, as a crash-recovered
+    /// finalize does.
+    @Test func finalizeWritesEchoClustersInTheGlobalSpeakerNamespace() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(twoChunksWithABleedClusterInTheSecond(), directory: dir)
+        let state = try #require(SessionState.read(directory: dir, sessionId: "m"))
+        var config = Config.default
+        config.mergeChunkedAudio = false
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: config)
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]])
+
+        let clusters = try #require(metadata["echo_clusters"] as? [[String: Any]])
+        #expect(clusters.map { "\($0["chunk"] as? Int ?? -1) \($0["label"] as? String ?? "") \($0["verdict"] as? String ?? "")" }
+                == ["0 Local Speaker 1 kept", "1 Local Speaker 2 echo", "1 Local Speaker 1 kept"],
+                "chunk 1's bleed cluster was its Speaker 1 and is the transcript's Local Speaker 2; its user is Local Speaker 1")
+        let echo = try #require(clusters.first { $0["verdict"] as? String == "echo" })
+        #expect(echo["track"] as? String == "local")
+        #expect(echo["segments"] as? Int == 40 && echo["matched_segments"] as? Int == 36)
+        #expect(echo["seconds"] as? Double == 400 && echo["matched_seconds"] as? Double == 360 && echo["share"] as? Double == 0.9)
+        #expect(echo["words"] as? Int == 480 && echo["matched_words"] as? Int == 432)
+        #expect(echo["embedding_similarity"] as? Double == 0.68)
+        #expect(echo["matched_remote"] as? [String: Double] == ["Remote Speaker 2": 352.8], "chunk 1's Remote Speaker 1 is the transcript's Remote Speaker 2")
+        // The cluster's label is the one the echo-flagged segment carries in the same transcript.
+        let flagged = try #require(segments.first { $0["echo"] as? Bool == true })
+        #expect(flagged["speaker"] as? String == echo["label"] as? String)
+        #expect(clusters.allSatisfy { $0["text"] == nil }, "numbers and labels only")
+
+        #expect(metadata["echo_segments_flagged"] as? Int == 36 && metadata["echo_segments_removed"] as? Int == 36)
+        let issues = try #require(metadata["processing_issues"] as? [[String: Any]])
+        #expect(issues.contains { $0["code"] as? String == "echo_cluster" && $0["chunk"] as? Int == 1 && $0["count"] as? Int == 1 && $0["track"] as? String == "local" })
+        #expect(metadata["processing_issue_count"] as? Int == 0, "echo_cluster and echo_flagged are informational")
+        #expect(segments.count == 6, "nothing is deleted")
+    }
+
+    /// The remap is the merger's: a label the mapping does not hold is kept, and a chunk with no
+    /// verdicts adds nothing.
+    @Test func echoClusterDictionariesRemapWithTheMergersMapping() {
+        let chunks = [
+            ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a", segments: [], speakerDatabase: [:]),
+            ProcessedChunk(index: 4, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-4.m4a", segments: [], speakerDatabase: [:],
+                           echoClusters: [verdict("Local Speaker 1", echo: true, remote: ["Remote Speaker 1": 10, "Remote Unknown": 2])]),
+        ]
+        let dicts = TranscriptionRunner.echoClusterDictionaries(
+            chunks: chunks, speakerMapping: [4: ["Local Speaker 1": "Local Speaker 3", "Remote Speaker 1": "Remote Speaker 2"]])
+        #expect(dicts.count == 1)
+        #expect(dicts[0]["chunk"] as? Int == 4 && dicts[0]["label"] as? String == "Local Speaker 3")
+        #expect(dicts[0]["matched_remote"] as? [String: Double] == ["Remote Speaker 2": 10, "Remote Unknown": 2])
+        let unmapped = TranscriptionRunner.echoClusterDictionaries(chunks: chunks, speakerMapping: [:])
+        #expect(unmapped[0]["label"] as? String == "Local Speaker 1")
+    }
+
+    /// A session with no mic stream ran no echo dedup: the key is left out, never written empty.
+    @Test func finalizeLeavesEchoClustersOutOfASingleStreamTranscript() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "m-0.m4a",
+            segments: [.init(start: 0, end: 5, text: "hi", speaker: "Speaker 1", source: "remote")], speakerDatabase: ["Speaker 1": [1, 0, 0]])
+        let state = SessionState(sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), engine: "fluid_audio", chunkDurationMinutes: 10, chunks: [chunk])
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+        let metadata = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect(metadata["echo_clusters"] == nil && metadata["echo_segments_flagged"] == nil)
+    }
+
     /// §7.2: `metadata.diarization` is false when a chunk's diarization failed; a clean tracked
     /// session writes an empty `processing_issues`.
     @Test func finalizeStampsDiarizationFromChunkIssues() async throws {

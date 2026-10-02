@@ -339,31 +339,102 @@ struct TranscriptRenamerTests {
         }
     }
 
-    // MARK: - Flagged segments (R7 review round 1)
+    // MARK: - Flagged segments (R7 review round 1, #245)
 
-    private func flaggedTranscript() throws -> URL {
+    /// Five local lines and two remote ones: every kind of flag on the mic channel, one on the other.
+    private func flaggedTranscript(rediarized: [String]? = nil) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("flags-rename-\(UUID().uuidString).json")
-        try JSONSerialization.data(withJSONObject: ["metadata": [:] as [String: Any], "segments": [
+        var metadata: [String: Any] = [:]
+        if let rediarized { metadata[TranscriptRediarizer.rediarizedChannelsKey] = rediarized }
+        try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": [
             ["start": 0.0, "end": 2.0, "text": "real words", "speaker": "Local Speaker 1", "source": "local"],
             ["start": 2.0, "end": 4.0, "text": "bleed of the other side", "speaker": "Local Speaker 1", "source": "local", "echo": true],
+            ["start": 4.0, "end": 5.0, "text": "hum", "speaker": "Local Speaker 1", "source": "local", "filtered": true],
+            ["start": 5.0, "end": 6.0, "text": "real words", "speaker": "Local Speaker 1", "source": "local", "duplicate": true],
+            ["text": "words without a time", "speaker": "Local Speaker 1", "source": "local", "time_unknown": true],
+            ["start": 6.0, "end": 8.0, "text": "other words", "speaker": "Remote Speaker 1", "source": "remote"],
+            ["start": 8.0, "end": 9.0, "text": "other words", "speaker": "Remote Speaker 1", "source": "remote", "duplicate": true],
         ]]).write(to: url)
         return url
+    }
+
+    private func speakersAfterRenaming(_ url: URL) throws -> [String] {
+        #expect(TranscriptRenamer.applyRenames(["Local Speaker 1": "Alex", "Remote Speaker 1": "Sam"], jsonPath: url))
+        return try speakers(of: readJSON(url))
     }
 
     @Test func samplesSkipFlaggedSegments() throws {
         let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
         let speakers = try TranscriptRenamer.collectSpeakerSamples(from: url, maxSamplesPerSpeaker: 5)
         let texts = speakers.flatMap { $0.samples.map(\.text) }
-        #expect(texts == ["real words"])
+        #expect(texts == ["real words", "other words"])
     }
 
-    /// An echo keeps the label it had when it was flagged; after a local re-detect that label can
-    /// belong to someone else, so a rename must not reach it.
-    @Test func renamesApplyToUnflaggedSegmentsOnly() throws {
+    /// #245: on a channel that was never re-detected a flagged line's label is still the one the
+    /// pipeline gave it, so a rename reaches it — the JSON must not show two labels for one person.
+    @Test func aFlaggedSegmentOnANeverRedetectedChannelIsRenamed() throws {
         let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
-        #expect(TranscriptRenamer.applyRenames(["Local Speaker 1": "Frederic"], jsonPath: url))
-        let segs = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["segments"] as? [[String: Any]])
-        #expect(segs[0]["speaker"] as? String == "Frederic")
-        #expect(segs[1]["speaker"] as? String == "Local Speaker 1")
+        #expect(try speakersAfterRenaming(url) == ["Alex", "Alex", "Alex", "Alex", "Alex", "Sam", "Sam"])
+    }
+
+    /// After a re-detect of the mic channel a flagged line there keeps the label an EARLIER
+    /// diarization gave it, and that label can now be somebody else's: the rename must not reach it.
+    /// The other channel was not re-detected, so its flagged line is renamed.
+    @Test func aFlaggedSegmentOnARedetectedChannelKeepsItsLabel() throws {
+        let url = try flaggedTranscript(rediarized: ["local"]); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try speakersAfterRenaming(url)
+                == ["Alex", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Sam", "Sam"])
+    }
+
+    @Test func redetectingTheOtherChannelProtectsOnlyItsOwnFlaggedSegments() throws {
+        let url = try flaggedTranscript(rediarized: ["remote"]); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try speakersAfterRenaming(url) == ["Alex", "Alex", "Alex", "Alex", "Alex", "Sam", "Remote Speaker 1"])
+    }
+
+    @Test func bothChannelsRedetectedRenamesUnflaggedSegmentsOnly() throws {
+        let url = try flaggedTranscript(rediarized: ["local", "remote"]); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try speakersAfterRenaming(url)
+                == ["Alex", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Sam", "Remote Speaker 1"])
+    }
+
+    /// A flagged line that does not say which channel it is on cannot be shown to be on one that was
+    /// left alone: once any channel has been re-detected it keeps its label.
+    @Test func aFlaggedSegmentWithNoSourceIsRenamedOnlyWhenNothingWasRedetected() throws {
+        func renamed(rediarized: [String]?) throws -> [String] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("flags-nosource-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: url) }
+            var metadata: [String: Any] = [:]
+            if let rediarized { metadata[TranscriptRediarizer.rediarizedChannelsKey] = rediarized }
+            try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": [
+                ["start": 0.0, "end": 2.0, "text": "real words", "speaker": "Speaker 1"],
+                ["start": 2.0, "end": 3.0, "text": "real words", "speaker": "Speaker 1", "duplicate": true],
+            ]]).write(to: url)
+            #expect(TranscriptRenamer.applyRenames(["Speaker 1": "Alex"], jsonPath: url))
+            return try speakers(of: readJSON(url))
+        }
+        #expect(try renamed(rediarized: nil) == ["Alex", "Alex"])
+        #expect(try renamed(rediarized: []) == ["Alex", "Alex"])
+        #expect(try renamed(rediarized: ["remote"]) == ["Alex", "Speaker 1"])
+    }
+
+    /// Builds before `rediarized_channels` existed stamped only `speaker_count_<channel>` at a
+    /// re-detect: a transcript re-detected by one of them is protected the same way.
+    @Test func aChannelRedetectedByAnOlderBuildKeepsItsFlaggedLabels() throws {
+        let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
+        var json = try readJSON(url)
+        json["metadata"] = ["speaker_count_local": 1]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        #expect(try speakersAfterRenaming(url)
+                == ["Alex", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Sam", "Sam"])
+    }
+
+    /// A `rediarized_channels` that is not a list of strings is not read as "never re-detected".
+    @Test func anUnreadableRedetectRecordProtectsEveryFlaggedSegment() throws {
+        let url = try flaggedTranscript(); defer { try? FileManager.default.removeItem(at: url) }
+        var json = try readJSON(url)
+        json["metadata"] = [TranscriptRediarizer.rediarizedChannelsKey: "local"]
+        try JSONSerialization.data(withJSONObject: json).write(to: url)
+        #expect(try speakersAfterRenaming(url)
+                == ["Alex", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Sam", "Remote Speaker 1"])
     }
 }

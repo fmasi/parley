@@ -189,9 +189,9 @@ Defaults: `vadSpeechThreshold = 0.5`, `qualityScoreThreshold = 0.3`.
 
 ### Stage 7 — Echo Deduplication
 
-**What it does:** Flags local (mic) segments that are mic bleed of the remote speaker — i.e., the local microphone picked up audio playing through the speakers. A flagged segment is kept in the JSON (`echo: true`) and hidden from TXT, SRT, the summary prompt and the rename samples; nothing is deleted. See Section 4 for a full deep dive.
+**What it does:** Flags local (mic) segments that are mic bleed of the remote side — i.e., the local microphone picked up audio playing through the speakers — and judges each local cluster (speaker label) as echo or kept. A flagged segment is kept in the JSON (`echo: true`) and hidden from TXT, SRT, the summary prompt and the rename samples; nothing is deleted. See Section 4 for a full deep dive.
 
-**Input:** `[LabeledSegment]` (combined local+remote), local speaker embeddings, remote speaker embeddings. Output: `EchoDeduplicator.DeduplicationResult(segments, flaggedCount)` — every input segment, echoes flagged; the chunk records an `echo_flagged` issue with the count.
+**Input:** `[LabeledSegment]` (combined local+remote), local speaker embeddings, remote speaker embeddings (evidence only). Output: `EchoDeduplicator.DeduplicationResult(segments, flaggedCount, clusters)` — every input segment, echoes flagged, and one `ClusterVerdict` per local cluster. The chunk keeps the verdicts (`ProcessedChunk.echoClusters`) and records an `echo_flagged` issue with the segment count and, when a cluster was judged echo, an `echo_cluster` issue with the cluster count. It runs once per chunk (and once over the whole file on the single-file path); finalize does not run it again.
 
 **Key code path:**
 - `TranscriberCore/EchoDeduplicator.swift` — `deduplicate(segments:localSpeakerDatabase:remoteSpeakerDatabase:...)`
@@ -249,19 +249,32 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.processing_issue_count` — content-affecting issues only (`asr_failed`, `diarization_failed`, `vad_failed`, `stream_missing`, `archive_failed`, `session_write_failed`, `chunk_index_collision`, `seed_mismatch`).
 - `metadata.processing_problem_chunks` — distinct chunks with a content-affecting issue (a session-level one counts as one more). The completion notice uses this.
 
+**Echo** (Section 4):
+- `metadata.echo_segments_flagged` — how many local segments carry `echo: true`; written only when above 0. `metadata.echo_segments_removed` is the same number under the key's old name, still written for one release (nothing is removed).
+- `metadata.echo_clusters` — why each local cluster was or was not judged to be echo, numbers and labels only, never text: `[{track, chunk?, label, segments, matched_segments, seconds, matched_seconds, words, matched_words, share, verdict, embedding_similarity?, matched_remote}]`. One entry per (chunk, local cluster); `chunk` is absent when the dedup ran over the whole file (the single-file / CLI path). `label` and the keys of `matched_remote` (`{remote label: seconds}`) are in the transcript's global speaker namespace — the labels its segments carry at finalize; a later rename does not rewrite them. Only unflagged local segments are counted. `share` = `matched_seconds / seconds`; `verdict` is `"echo"` or `"kept"`; `embedding_similarity` is the cluster's best voice similarity to any remote speaker, evidence only, absent when there is no embedding. Written for every dual-stream transcript (`[]` when there was no local speech); absent when no mic stream was captured. A re-detect of the mic channel replaces the `local` entries with its own — see "Re-detect" below.
+- `processing_issues` codes `echo_flagged` (`count` = segments) and `echo_cluster` (`count` = local clusters judged echo in that chunk), both informational.
+
+**Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
+- `metadata.speaker_count_local` / `metadata.speaker_count_remote` — how many PEOPLE the channel ended up with: its labels that are neither `Unknown` nor an echo cluster, counted over unflagged lines. Can be 0 (a mic channel that holds only the other side's voice). Absent on a transcript that was never re-detected.
+- `metadata.rediarized_channels` — the channels a re-detect has rewritten (`"local"` / `"remote"`), each once, in the order they were first re-detected. Absent on a transcript that never was. A channel listed here no longer carries the labels the pipeline wrote. A rename reads it (#245): a flagged segment is never relabelled by a re-detect, so on a listed channel it keeps the label an earlier diarization gave it, which may now be somebody else's, and the rename leaves it alone; on a channel that was never re-detected it is renamed like any other segment, so the JSON never shows two labels for one person. A channel with a `speaker_count_<channel>` counts as listed (builds before this key stamped only the count), a flagged segment with no `source` is renamed only when no channel was re-detected, and a `rediarized_channels` that is not a list of strings protects every flagged segment.
+- `metadata.echo_clusters`, after a re-detect of the mic channel: the track's entries are that pass's. No `chunk` (it runs over the whole channel); one entry per RAW cluster the diarizer returned, under the label its lines now carry, so clusters the stated count merged share a label (an echo cluster is never merged, so an `"echo"` entry's label is its own); the unattributed lines are judged as a group and appear as `Local Unknown`, or under the stated speaker's label when a count of 1 folded them in. Lines already flagged `echo` are counted as well as the unflagged ones. No `embedding_similarity`: the transcript holds no embedding for the other channel.
+- `processing_issues`, after a re-detect of the mic channel: the track's `echo_flagged` / `echo_cluster` entries are replaced by one of each for the whole channel (no `chunk`), when there is something to report. A transcript with no `processing_issues` key (the CLI path) gets none.
+- `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
+- `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable.
+
 **Merged audio and timeline**:
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
 - `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
 - `metadata.transcript_written_at` — when finalize wrote the transcript (ms precision); late audio is judged from it.
 - `metadata.diarization` — true only when a diarizer ran and no chunk has `diarization_failed`. A stream with audio but no transcript segments (a listen-only side) has nothing to label and is not diarized, so it never records one.
 
-**Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`).
+**Segment flags** — kept in the JSON, hidden from TXT/SRT, the summary prompt and the rename samples: `filtered` (failed the VAD/quality gate), `echo` (mic bleed), `duplicate` (abutting repeat), `time_unknown` (a non-finite time, written as `null`). A rename applies to them too, except on a channel a re-detect has rewritten (`rediarized_channels` above).
 
 **Files beside the recording**:
 - `<session>.diag.live.jsonl` — every non-`info` capture event plus the coverage-carrying ones (`captureStop`, `trackCoverage`), appended as it happens, with ms-precision dates (`LiveDiagnosticsLog`). The record's build merges it, deduplicated, into the ring, and so into `<session>.diag.jsonl`. It is deleted only once the session's transcript exists.
 - `<session>.diag.coverage.json` — the latest per-track coverage of each helper session, rewritten on every status pull; stands in for the `captureStop` a crashed helper never wrote.
 - Callback timing in the record (#247): `captureStop` also carries `remote_io_*` (system) and `local_io_*` (mic): `cycles`, `overruns` (callbacks over 8 ms), and for each stage that ran `<stage>_n`, `<stage>_p50_ms`, `<stage>_p99_ms`, `<stage>_max_ms`, with `<stage>` one of `queue_wait`, `convert`, `pad`, `write`, `sync`, `check`, `total`. A stage that never ran (or was not measured: the mic's queue wait) is left out. `ioOverrun` events carry `track`, `total_ms` and the stages of that one callback, and `overruns`, the track's count so far. An `ioOverrun` is an anomaly for the record (the session keeps its `.diag.jsonl`) but not a quality anomaly: `quality_anomaly_count` and the per-side status do not move. A session with no anomaly writes no `.diag.jsonl`; its timing is in the unified log.
-- `session.json` — besides `chunks` (each with its `issues`) and `provenance`: `gaps` (`CaptureGap`, as above) and `issues` (`SessionIssue` `{chunk?, issue}`: issues that could not be stored on a chunk, such as a failed write after the chunk was appended, or a session-level issue).
+- `session.json` — besides `chunks` (each with its `issues`, its `echo_segments_flagged` count and its `echo_clusters` verdicts with the chunk's own speaker labels, so a crash-recovered finalize still writes `metadata.echo_clusters`) and `provenance`: `gaps` (`CaptureGap`, as above) and `issues` (`SessionIssue` `{chunk?, issue}`: issues that could not be stored on a chunk, such as a failed write after the chunk was appended, or a session-level issue).
 
 ### Stage 10 — Summary Generation
 
@@ -285,37 +298,90 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 
 In a video call, the local machine plays remote speaker audio through speakers. The microphone picks this up as bleed, so the local audio stream contains both local speech and echoes of remote speech. Without deduplication, the transcript shows the remote speaker twice — once in the system audio stream and once in the mic stream.
 
-### Triple-Gate Algorithm
+### Cluster Verdict Algorithm
 
-A local segment is classified as an echo only when **all three gates pass**:
+The decision uses time and text only, and is made in three steps (`EchoDeduplicator.deduplicate`, #242):
 
-**Gate 1 — Embedding similarity (checked first for efficiency):**
-The local speaker's embedding is compared against every remote speaker embedding via cosine similarity. If the best match is below 0.8, the segment is kept immediately — it's a genuinely different speaker.
+**Step 1 — per-segment match, speaker-independent.** An unflagged local segment MATCHES when an unflagged remote segment, of ANY remote speaker:
 
-**Gate 2 — Temporal overlap:**
-The local segment must overlap with at least one remote segment by >50% of the shorter segment's duration.
+- overlaps it in time by more than 50% of the shorter segment's duration (`echo_temporal_threshold`), and
+- repeats its words: word-level Jaccard similarity above 0.7 (`echo_text_threshold`), or one of the two fallbacks below.
 
-**Gate 3 — Text similarity:**
-The overlapping remote text must match the local text with >70% word-level Jaccard similarity.
+A segment already flagged `filtered` or `duplicate` is neither a candidate nor evidence.
 
-Thresholds: `defaultEmbeddingThreshold = 0.8`, `defaultTemporalThreshold = 0.5`, `defaultTextThreshold = 0.7`.
+**Step 2 — cluster verdict.** The unflagged local segments are grouped by speaker label (one group per diarized local cluster). `share = matched seconds / total seconds`. The cluster is **echo** when `share >= 0.5` and it holds at least 30 s; otherwise it is **kept**.
+
+**Step 3 — flag.**
+
+- In an echo cluster, every matched segment is flagged `echo`, whatever its length. Its unmatched segments stay unflagged under the cluster's label: there is no per-segment voice evidence to move them anywhere.
+- In a kept cluster, a matched segment is flagged only when it has 3 words or more. This is what keeps "Yes." said on both sides at the same moment from being flagged, and still catches bleed that diarization folded into the user's own cluster.
+
+The three numbers (0.5, 30 s, 3 words) are constants, not config keys.
+
+**The voice similarity is evidence, not a gate.** Until #242 a third gate required the local cluster's speaker embedding to score above 0.8 against a remote speaker. That gate was all-or-nothing per cluster: on a real speaker-mode call the bleed cluster scored 0.68 (speaker playback into a far-field mic changes a voice), so none of its 146 segments were flagged, although 91% of its duration matched concurrent remote speech; the user's own cluster never exceeded 5% on the same measure. Bleed that minority absorption folds into the user's cluster carries the user's embedding and fails any such gate by construction. The similarity is now computed, written to `metadata.echo_clusters[].embedding_similarity` and logged, and decides nothing. `echo_embedding_threshold` is accepted and ignored.
+
+**What is recorded.** One verdict per (chunk, local cluster) in `metadata.echo_clusters` (see "Echo" under the transcript metadata above), an `echo_cluster` processing issue for each chunk with an echo cluster, and one `.info` log line per verdict with public numbers only (the label is `.private`).
+
+**Known limits.**
+- The dedup runs per chunk, before cross-chunk reconciliation: a cluster is judged within its chunk, and there is no second pass at finalize.
+- Minority absorption runs before it, so a bleed cluster under 5% of a chunk is absorbed into the user's cluster and never judged as a cluster; only the per-segment rule (3 words or more) sees it.
+- The text gates and the 3-word rule count whitespace-separated words, so they do little for a language written without spaces.
+
+### Re-detect at a stated speaker count
+
+The rename dialog lets the user state how many people were on a channel and re-detect it (`TranscriptRediarizer.rediarize`). It diarizes the channel's audio again, relabels the transcript's segments and never re-runs ASR: the number of segments and every text stay what they were.
+
+A stated count is about people. With the far side on loudspeakers the diarizer finds its voice as a cluster of its own on the mic channel, and "one speaker on this side" used to merge that cluster into the user: on a real call about 2,400 of the other participant's words took the user's name (#243). So on the mic channel the echo check runs **before** the count is enforced:
+
+1. The channel's segments are labelled with the diarizer's RAW clusters. With no word timings at re-detect this is one segment in, one out.
+2. `EchoDeduplicator.deduplicate` judges those clusters against the other channel's unflagged segments — the same rule as at transcription (above), with the default thresholds.
+3. `SpeakerCountEnforcer.enforce(_:to:keeping:)` enforces the count on the other clusters. A cluster judged echo is never merged away, never merged into and not counted.
+4. The segments are labelled with the result:
+   - a line of an echo cluster carries that cluster's own label; its matched lines are flagged `echo`, its unmatched lines are not. Nothing of it is given to the stated speaker, and at a count of 1 unattributed speech is never folded into it;
+   - in any other cluster a matched line of 3 words or more is flagged `echo` and keeps the label it had before the re-detect (a flagged line is never relabelled to a stated speaker). A 1–2-word match is an ordinary line.
+5. The metadata is rewritten as listed under "Re-detect" in the transcript metadata above; `Outcome` reports `speakerCount` (people), `segmentsRelabeled` (unflagged lines labelled), `echoClusters` and `echoFlagged`.
+
+What follows from that:
+
+- **It never refuses.** Asking for 1 on a channel with the user and an echo voice gives one person and one echo cluster; a mic channel that is nothing but echo gives 0 people.
+- **Lines already flagged `echo` count as evidence.** The pipeline flags an echo cluster's matched lines when it transcribes; judged on the unmatched rest alone, that cluster would look like a person and be merged. They keep their flag (a re-detect never removes one) and take the cluster's new label, since speaker numbers are positional and the old one may now be somebody else's. A line flagged `filtered` or `duplicate` is neither evidence nor touched.
+- **It repairs a transcript that was merged this way.** Re-detecting it again finds the echo voice in the raw clusters and takes it back out.
+- **Speech the diarizer gave no turn to is judged as a group** (`Local Unknown`). When that group is echo, a count of 1 does not fold its unmatched lines into the user.
+- **One blended cluster** (the diarizer honoured the count): there is nothing to keep out; only the per-segment rule applies.
+- **The other channel is not checked.** The deduplicator judges mic clusters against system audio and has no answer to the reverse, so re-detecting the remote channel does what it always did. One consequence: the keys of `echo_clusters[].matched_remote` are the remote labels at the time of the check, and a later re-detect of the remote channel does not rewrite them.
+- **If the raw labelling is ever not one-to-one** the check is skipped (logged as an error) and the re-detect is the unguarded one: a relabel must never lose or misplace words.
+
+### What the user is told (#244)
+
+A second voice on the mic side used to be listed as "Local Speaker 2" with nothing to explain it. Three places now say what the echo check recorded. All three read the transcript's metadata (`echo_clusters`, `echo_segments_flagged`, `speaker_count_<track>`, `speaker_names`) and recompute nothing; the copy and the counts are built by `EchoNotice` (TranscriberCore), the views only show them.
+
+- **Speaker card** (rename dialog) of a label with at least one `"echo"` verdict: "Looks like the other side's voice through your loudspeakers: N of M lines (P% of its speaking time) match <remote label(s)> at the same time and are marked as echo. The other K lines stay under this label." The numbers are the label's `echo_clusters` entries summed (one per chunk); P is `matched_seconds / seconds`, the measure the verdict is taken on. A label whose entries are all `"kept"` gets no notice.
+- **Re-detect row**: before, "The count is people only, not the echo voice. Re-detect checks for echo again and keeps an echo voice separate; its matched lines stay marked as echo." After, the outcome: "1 speaker found · 1 echo voice kept separate · N lines marked as echo · R lines relabeled" (without echo it reads as before: "2 speakers found · 84 lines relabeled"). The stepper pre-fills the number of PEOPLE on the channel: its rows that are not an echo voice, never below `speaker_count_<track>`, never below 1.
+- **Completion notice** of a recording with an echo voice: the title is "Transcription Complete — echo marked" (last in the title's precedence: every problem is said first), and the body adds "it looks like part of the other side's voice came through your microphone, and N lines are marked as echo (headphones avoid this)", N being `echo_segments_flagged`. Lines flagged in a cluster that was kept (the 3-word rule) do not make a notice.
+
+What follows from reading only the metadata:
+
+- **Labels, not names.** The copy names the labels `echo_clusters` holds ("Remote Speaker 1"), which a rename does not rewrite. The echo voice's own row is still found after a rename, through `speaker_names` (followed as a chain, since each rename is keyed by the label current at the time).
+- **"Looks like", not "is".** The check sees lines on this side that repeat the other side's words at the same moment. The mirror case (this side's voice coming back on the other side's track) gives the same numbers.
+- **A label can be echo in one chunk and too short to judge in the next.** All its entries are summed; in the chunk where it was kept a matched line of one or two words is not flagged, so N can exceed the lines actually marked by those few.
+- **After a re-detect of the other channel** the remote labels in `matched_remote` are the ones at the time of the check (see above), and the card names those.
 
 ### Windowed Comparison and Containment Fallback
 
 Segment boundaries from independent ASR runs may not align. Two fallbacks handle this:
 
-1. **Containment check:** If Jaccard fails but `textContainment(local, remote) > 0.7` (most words from the short local segment appear in a longer remote segment), the local segment is flagged as echo. This handles short local excerpts of long remote utterances.
+1. **Containment check:** If Jaccard fails but `textContainment(local, remote) > 0.7` (most words from the short local segment appear in a longer remote segment), the local segment matches. This handles short local excerpts of long remote utterances.
 
-2. **Window concatenation:** If multiple remote segments overlap with the local segment, their texts are concatenated and Jaccard is re-evaluated against the window. This handles one long local segment that covers what the remote side split into several shorter segments.
+2. **Window concatenation:** If multiple remote segments overlap with the local segment, their texts are concatenated and Jaccard is re-evaluated against the window. This handles one long local segment that covers what the remote side split into several shorter segments — also when those belong to different remote speakers, each of which is then recorded in `matched_remote`.
 
 ### LLM Text-Level AEC in Summary Prompt
 
-When `dualStream = true`, the summary prompt receives source labels ("Local" / "Remote") on each transcript line and includes a hint instructing the LLM to treat repeated identical content across streams as echo and to use only the remote stream's version for attribution. This is a text-level fallback for any echoes that survive the triple-gate filter.
+When `dualStream = true`, the summary prompt receives source labels ("Local" / "Remote") on each transcript line and includes a hint instructing the LLM to treat repeated identical content across streams as echo and to use only the remote stream's version for attribution. This is a text-level fallback for any echoes the cluster verdict and the per-segment rule leave unflagged.
 
 ### Courtroom Safety
 
 - The raw WAV files and the AAC archive are **never modified** after writing.
-- Echo removals are tracked in `metadata.echo_segments_removed` (integer count) in the transcript JSON. The segments are kept, flagged `echo: true`; the count is of flagged segments.
+- Echo is flagged, never removed: the segments are kept, flagged `echo: true`, and their text and number never change. `metadata.echo_segments_flagged` counts them (`metadata.echo_segments_removed` is the same count under the old name, for one release), and `metadata.echo_clusters` records the numbers behind each cluster's verdict.
 - `metadata.dual_stream` is the capture-time flag (a mic stream was captured next to the remote one). It does not say the remote side delivered audio: `metadata.capture.remote.status` is the authority for that.
 - The transcript JSON is the processed record; the `.m4a` is the raw evidence. The two are independent.
 - `AudioArchiverError.verificationFailed` is thrown (and WAVs are preserved) if the output archive is empty or has no audio tracks.

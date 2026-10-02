@@ -176,6 +176,64 @@ struct ChunkSessionTests {
         #expect(try decoder.decode(SessionState.self, from: session).issues.map(\.issue.code.rawValue) == ["from_the_future"])
     }
 
+    // MARK: - Echo verdicts (#242) and the flagged count (#231)
+
+    private var bleedVerdict: EchoDeduplicator.ClusterVerdict {
+        EchoDeduplicator.ClusterVerdict(
+            label: "Local Speaker 2", segments: 40, matchedSegments: 36, seconds: 400, matchedSeconds: 360,
+            words: 480, matchedWords: 432, share: 0.9, verdict: .echo, bestEmbeddingSimilarity: 0.68,
+            matchedRemote: ["Remote Speaker 1": 352.8])
+    }
+
+    /// The verdicts are part of the chunk in session.json, so a crash-recovered finalize still has them.
+    @Test("echoVerdictsRoundTripThroughSessionJson")
+    func echoVerdictsRoundTripThroughSessionJson() throws {
+        let dir = try makeTempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let kept = EchoDeduplicator.ClusterVerdict(
+            label: "Local Speaker 1", segments: 10, matchedSegments: 0, seconds: 6, matchedSeconds: 0,
+            words: 60, matchedWords: 0, share: 0, verdict: .kept)
+        let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 1_700_000_000), audioPath: "m-0.m4a",
+                                   segments: [makeSegment()], speakerDatabase: [:], echoSegmentsFlagged: 36,
+                                   echoClusters: [kept, bleedVerdict], isDualStream: true,
+                                   issues: [ChunkIssue(code: .echoCluster, track: "local", count: 1)])
+        try SessionState.write(makeSession(chunks: [chunk]), directory: dir)
+        let back = try #require(SessionState.read(directory: dir)?.chunks.first)
+        #expect(back.echoClusters == [kept, bleedVerdict])
+        #expect(back.echoSegmentsFlagged == 36)
+        #expect(back.issues == [ChunkIssue(code: .echoCluster, track: "local", count: 1)])
+
+        let raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: dir.appendingPathComponent("session.json"))) as? [String: Any])
+        let stored = try #require((raw["chunks"] as? [[String: Any]])?.first)
+        #expect(stored["echo_segments_flagged"] as? Int == 36 && stored["echo_segments_removed"] == nil)
+        #expect((stored["echo_clusters"] as? [[String: Any]])?.map { $0["verdict"] as? String } == ["kept", "echo"])
+    }
+
+    /// A session.json written before #242 / #231 (no `echo_clusters`, the count under its old name)
+    /// still decodes, and keeps its count: a recovery across an update must not lose the session.
+    @Test("aSessionJsonFromBeforeTheEchoVerdictsStillDecodes")
+    func aSessionJsonFromBeforeTheEchoVerdictsStillDecodes() throws {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let old = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{},"echo_segments_removed":4,"is_dual_stream":true}"#.utf8)
+        let chunk = try decoder.decode(ProcessedChunk.self, from: old)
+        #expect(chunk.echoClusters.isEmpty)
+        #expect(chunk.echoSegmentsFlagged == 4)
+        let bare = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{}}"#.utf8)
+        #expect(try decoder.decode(ProcessedChunk.self, from: bare).echoSegmentsFlagged == 0)
+        let both = Data(#"{"index":0,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[],"speakerDatabase":{},"echo_segments_removed":4,"echo_segments_flagged":9}"#.utf8)
+        #expect(try decoder.decode(ProcessedChunk.self, from: both).echoSegmentsFlagged == 9, "the new key wins")
+    }
+
+    /// Verdicts are evidence: a shape this build cannot read (written by a newer one) drops them and
+    /// keeps the chunk and its words.
+    @Test("echoVerdictsThisBuildCannotReadNeverCostTheChunk")
+    func echoVerdictsThisBuildCannotReadNeverCostTheChunk() throws {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let future = Data(#"{"index":3,"startTime":"2026-09-24T16:00:00Z","audioPath":"a.m4a","segments":[{"start":0,"end":1,"text":"hi","speaker":"S","source":"remote"}],"speakerDatabase":{},"echo_clusters":[{"label":"Local Speaker 1","verdict":"from_the_future"}]}"#.utf8)
+        let chunk = try decoder.decode(ProcessedChunk.self, from: future)
+        #expect(chunk.index == 3 && chunk.segments.map(\.text) == ["hi"])
+        #expect(chunk.echoClusters.isEmpty)
+    }
+
     @Test("issueCodesThatAffectContent")
     func issueCodesThatAffectContent() {
         #expect(ChunkIssue.Code.vadFailed.affectsContent && ChunkIssue.Code.streamMissing.affectsContent)

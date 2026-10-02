@@ -156,6 +156,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var debugSkipWavSync: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
+    /// DEPRECATED (#242): read and written back so existing config files keep working, and ignored.
+    /// The echo decision no longer uses the voice similarity; it is recorded as evidence only.
     public var echoEmbeddingThreshold: Double?
     public var archiveBitrateKbps: Int
     public var audioArchiveLimitHours: Int

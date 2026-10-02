@@ -25,7 +25,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, benchmark) to their handlers
 - `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: prompts per speaker and plays samples; collection + rename application live in TranscriptRenamer (TranscriberCore)
 - `TranscriberApp/Services/MicSwitchWindowController.swift` -- opens mic switch dialog as floating NSPanel during recording
-- `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel
+- `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel; one off-main parse of the transcript gives the dialog its speaker rows, the saved channel names (#207) and the echo findings (`EchoNotice.Findings`, #244)
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
 - `TranscriberApp/Services/SystemPermissionChecker.swift` -- real macOS permission API wrapper (AVCaptureDevice, CGPreflight, EventKit, UNUserNotificationCenter); System Audio Recording is asked of the helper over XPC
@@ -40,7 +40,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Views/DesignSystem.swift` -- shared "Quiet Confidence" components (MenuActionRow, IconTile, StatusDot, AlertBanner, folder-picker helpers); see docs/design/design-system-0.8.x.md
 - `TranscriberApp/Views/SettingsView.swift` -- tabbed settings window (General/Audio/Transcription/Summary/Permissions), manual Save semantics; triggers eager model download on Save when engine requires it
 - `TranscriberApp/Views/SetupView.swift` -- permission + engine setup window (shown at first launch or when model not cached); gates Continue on permissions AND model download
-- `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet with sample text and audio playback from source WAV timestamps
+- `TranscriberApp/Views/RenameDialog.swift` -- speaker rename sheet with sample text and audio playback from source WAV timestamps; per-channel speaker count + Re-detect; shows `EchoNotice`'s copy on an echo voice's card and under the re-detect row, and pre-fills the count with the people on the channel, not the rows (#244)
 - `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording (includes mic picker)
 - `TranscriberApp/Views/MicrophonePicker.swift` -- mic device dropdown + live level meter (used in SessionNameDialog)
 - `TranscriberApp/Views/MicSwitchDialog.swift` -- mic device picker for switching microphone mid-recording
@@ -64,7 +64,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/ChunkProcessor.swift` -- processes finalized audio chunks in background: transcribe, diarize, VAD, speaker assignment, archive to AAC, persist to session
 - `TranscriberCore/ChunkRotator.swift` -- @MainActor timer-based WAV file rotation during recording, emits FinalizedChunk on each rotation
 - `TranscriberCore/ChunkRotationClient.swift` -- protocol seam: the one capability ChunkRotator needs from the XPC audio client
-- `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, and atomic JSON persistence
+- `TranscriberCore/ChunkSession.swift` -- Codable session state (SessionState) with ProcessedChunk model: segments, speaker embeddings, processing issues, echo cluster verdicts, and atomic JSON persistence
 - `TranscriberCore/RecordingCaptureClient.swift` -- protocol seam (refines ChunkRotationClient) for everything RecordingCoordinator needs from the XPC capture client, plus the AudioPaths stop-result type; lets orchestration be tested with a fake
 - `TranscriberCore/RecordingCoordinator.swift` -- recording lifecycle + crash-recovery orchestration (start/stop, XPC-crash retry/restart, abandoned-session salvage), moved out of MenuView (#139 PR-6) so it is unit-testable; app-side UI effects (notifications, rename dialog) are injected closures
 - `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization; owns the chunked pipeline (setup/teardown, finalize)
@@ -78,8 +78,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores; isDiarizationCached()/preDownloadModels() for eager download; ensureLoaded() is load-only (never downloads)
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), guarded with `#if compiler(>=6.2)`
 - `TranscriberCore/DiarizationCleanup.swift` -- post-processes a raw `DiarizationResult` before labeling: absorbs clusters holding under `diarization_min_speaker_share` of a stream's speech into the dominant speaker, only when one cluster holds >=50% (#65)
-- `TranscriberCore/TranscriptRediarizer.swift` -- re-runs diarization on ONE channel at a user-stated speaker count and rewrites the transcript in place (#67); relabels only, never re-runs ASR
-- `TranscriberCore/SpeakerCountEnforcer.swift` -- makes a user-stated speaker count binding: merges the smallest clusters into their nearest surviving cluster (cosine over the result's embeddings, duration as fallback) until exactly N remain (#201); the diarizer's forced count is a target, not a ceiling
+- `TranscriberCore/TranscriptRediarizer.swift` -- re-runs diarization on ONE channel at a user-stated speaker count and rewrites the transcript in place (#67); relabels only, never re-runs ASR. On the mic channel it runs `EchoDeduplicator` on the diarizer's RAW clusters before the count is enforced (#243): a cluster judged echo is kept out of the merge and not counted as a person, its matched lines are flagged `echo`, and the track's `echo_clusters` / echo issues are rewritten; stamps `speaker_count_<track>` (people) and `rediarized_channels`
+- `TranscriberCore/SpeakerCountEnforcer.swift` -- makes a user-stated speaker count binding: merges the smallest clusters into their nearest surviving cluster (cosine over the result's embeddings, duration as fallback) until exactly N remain (#201); the diarizer's forced count is a target, not a ceiling. Clusters passed in `keeping` (echo clusters, #243) are never merged away, never merged into and not counted
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/SessionNameSuggestionPolicy.swift` -- pure decision: whether a late-arriving calendar title should replace the current session-name field value (#197)
@@ -98,7 +98,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeakerReconciler.swift` -- cross-chunk speaker matching via greedy cosine similarity on embeddings, maps local per-chunk speaker IDs to global namespace
 - `TranscriberCore/TranscriptAssembler.swift` -- assembles labeled segments + metadata into transcript JSON dictionary for file output
 - `TranscriberCore/TranscriptMerger.swift` -- merges processed chunks into a single time-sorted transcript with absolute timestamps and cross-chunk speaker remapping
-- `TranscriberCore/TranscriptRenamer.swift` -- shared speaker-rename logic (SpeakerSample struct, per-speaker sample collection, rename application that merges into metadata.speaker_names — #162) used by both CLIRename and the GUI rename dialog
+- `TranscriberCore/TranscriptRenamer.swift` -- shared speaker-rename logic (SpeakerSample struct, per-speaker sample collection, rename application that merges into metadata.speaker_names — #162; flagged segments are renamed too, except on a channel listed in `metadata.rediarized_channels`, where their label is an earlier diarization's — #245) used by both CLIRename and the GUI rename dialog
 - `TranscriberCore/TranscriptWriter.swift` -- formats and writes transcripts in multiple formats (JSON, TXT, SRT) with timestamp formatting
 - `TranscriberCore/TranscriptionRunner.swift` -- creates engine from config.engine, runs transcription + optional diarization
 - `TranscriberCore/VadSpeechMap.swift` -- wraps FluidAudio VadManager to produce SpeechRegion map with probabilities for quality filtering
@@ -159,7 +159,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/LMStudioSummaryProvider.swift` -- LM Studio native REST API v1 provider via /api/v1/chat with per-request context_length, token stats, and self-correcting retry on context overflow
 - `TranscriberCore/MeetingSummarizer.swift` -- orchestrator: reads transcript JSON, selects provider from config, calls provider, writes -summary.md; createProvider(from:) factory for both provider types; summarizeIfConfigured returns a SummaryOutcome (skipped/succeeded/failed) so callers can surface failures instead of them being silent (#134)
 - `TranscriberCore/TokenRatioCache.swift` -- per-model chars-per-token ratio cache at ~/Library/Application Support/Parley/token-ratios.json; probe calibration on first use, continuous refinement from real transcript stats, seed vs measured distinction, legacy format migration
-- `TranscriberCore/EchoDeduplicator.swift` -- triple-confirmed echo dedup: FLAGS local segments that are mic bleed of remote speakers (temporal overlap >50% + word overlap >70% + speaker embedding cosine >0.8) as `echo: true`, kept in the JSON and hidden from TXT/SRT/summary; never deletes them
+- `TranscriberCore/EchoDeduplicator.swift` -- echo dedup by cluster verdict (#242): matches each local segment against every remote speaker on time (>50% overlap) and text (>70% word overlap), judges each local cluster (echo at >=50% of its duration matched over >=30 s), and FLAGS as `echo: true` every matched segment of an echo cluster and, elsewhere, matches of 3+ words; kept in the JSON and hidden from TXT/SRT/summary, never deleted. The speaker-embedding cosine is recorded as evidence only. `ClusterVerdict` (per local cluster: counts, share, verdict, matched remote labels) feeds `ProcessedChunk.echoClusters` and `metadata.echo_clusters`
+- `TranscriberCore/EchoNotice.swift` -- what the UI says about echo (#244), from the transcript's metadata only: `Findings` sums `echo_clusters` by label (a label with an `"echo"` verdict is an echo voice), finds its speaker row through `speaker_names`, and counts the PEOPLE on a channel (rows that are not an echo voice, never below `speaker_count_<track>`); pure copy builders for the speaker card, the re-detect row (hint + outcome) and the completion notice (`CaptureQualityNotice` takes `echoLines`). Labels, never names; "looks like", never "is"
 
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)
@@ -180,7 +181,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 2405 tests across 265 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, KeychainStore, etc.)
+# 2480 tests across 272 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -210,13 +211,13 @@ fault outright.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 83 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 83 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

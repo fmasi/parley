@@ -406,22 +406,21 @@ public final class ChunkProcessor {
         }
         allSegments.sort { $0.start < $1.start }
 
-        // 3b. Remove echo segments (mic bleed of remote speaker)
-        var echoRemoved = 0
+        // 3b. Flag echo segments (mic bleed of the remote side) and keep each local cluster's verdict.
+        var echoFlagged = 0
+        var echoClusters: [EchoDeduplicator.ClusterVerdict] = []
         if hasDualStream {
             let dedupResult = EchoDeduplicator.deduplicate(
                 segments: allSegments,
                 localSpeakerDatabase: micResult.speakerDatabase,
                 remoteSpeakerDatabase: systemResult.speakerDatabase,
                 temporalThreshold: config.echoTemporalThreshold,
-                textThreshold: config.echoTextThreshold,
-                embeddingThreshold: config.echoEmbeddingThreshold
+                textThreshold: config.echoTextThreshold
             )
             allSegments = dedupResult.segments
-            echoRemoved = dedupResult.flaggedCount
-            if echoRemoved > 0 {
-                issues.append(ChunkIssue(code: .echoFlagged, track: "local", count: echoRemoved))
-            }
+            echoFlagged = dedupResult.flaggedCount
+            echoClusters = dedupResult.clusters
+            issues.append(contentsOf: dedupResult.issues)
         }
 
         // 4. Convert to ProcessedChunk.Segment
@@ -534,7 +533,8 @@ public final class ChunkProcessor {
             segments: chunkSegments,
             speakerDatabase: speakerDatabase,
             localSpeakerDatabase: localSpeakerDatabase,
-            echoSegmentsRemoved: echoRemoved,
+            echoSegmentsFlagged: echoFlagged,
+            echoClusters: echoClusters,
             isDualStream: hasDualStream,
             issues: issues
         )

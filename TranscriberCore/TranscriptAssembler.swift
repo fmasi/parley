@@ -18,6 +18,15 @@ public enum TranscriptAssembler {
     /// The stamp's time; nil when it is not one.
     public static func parseWrittenAt(_ stamp: String) -> Date? { writtenAtFormatter().date(from: stamp) }
 
+    /// `metadata.echo_segments_flagged`: how many local segments carry `echo: true`. They are kept
+    /// in `segments`; nothing is removed. Written only when above 0.
+    static func stampEchoFlagged(_ count: Int, in metadata: inout [String: Any]) {
+        guard count > 0 else { return }
+        metadata["echo_segments_flagged"] = count
+        // The key's name before #231, still written for one release for readers of older builds.
+        metadata["echo_segments_removed"] = count
+    }
+
     public static func assemble(
         segments: [LabeledSegment],
         audioPaths: [URL],
@@ -26,7 +35,8 @@ public enum TranscriptAssembler {
         numSpeakers: Int?,
         diarization: Bool,
         dualStream: Bool,
-        echoSegmentsRemoved: Int = 0,
+        echoSegmentsFlagged: Int = 0,
+        echoClusters: [[String: Any]]? = nil,
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
@@ -55,8 +65,12 @@ public enum TranscriptAssembler {
         if let recordedAt {
             metadata["recorded_at"] = ISO8601DateFormatter().string(from: recordedAt)
         }
-        if echoSegmentsRemoved > 0 {
-            metadata["echo_segments_removed"] = echoSegmentsRemoved
+        stampEchoFlagged(echoSegmentsFlagged, in: &metadata)
+        // Why each local cluster was or was not judged to be echo (#242): numbers and labels only,
+        // `EchoDeduplicator.ClusterVerdict.metadataDictionary`. nil = echo dedup did not run (no mic
+        // stream), and the key is left out; an empty list = it ran and found no local speech.
+        if let echoClusters {
+            metadata["echo_clusters"] = echoClusters
         }
         // Capture provenance (#95): a compact, always-present stamp of how this recording was
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.
