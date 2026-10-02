@@ -241,6 +241,33 @@ struct StorageManagerTests {
         #expect(try Self.archivesLeft(in: finished).isEmpty)
     }
 
+    /// #230: the folder is read for session files only when a delete is about to happen — never under the quota, never for
+    /// a file the caller protects — and once per folder, however many files it holds.
+    @Test func sessionFilesAreReadOnlyBeforeADeleteAndOncePerFolder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("storage-test-\(UUID().uuidString)")
+        let days = ["day-1", "day-2"].map { root.appendingPathComponent($0) }
+        defer { try? FileManager.default.removeItem(at: root) }
+        var mine: [URL] = []
+        for day in days {
+            try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+            for name in ["a-0.m4a", "a-1.m4a", "a-2.m4a"] { try Self.createFakeM4a(at: day.appendingPathComponent(name), sizeBytes: 4096) }
+            mine.append(day.appendingPathComponent("a-0.m4a"))
+        }
+        var asked: [String] = []
+        let scan: (URL) -> Set<String>? = { asked.append($0.lastPathComponent); return [] }
+
+        _ = try StorageManager.enforceQuotaReport(in: root, limitHours: 1, bitrateKbps: 64, protectedFiles: [], sessionsWithState: scan)
+        #expect(asked.isEmpty, "under the quota: nothing to delete, nothing read")
+
+        let all = days.flatMap { day in ["a-0.m4a", "a-1.m4a", "a-2.m4a"].map { day.appendingPathComponent($0) } }
+        _ = try StorageManager.enforceQuotaReport(in: root, limitHours: 0, bitrateKbps: 64, protectedFiles: all, sessionsWithState: scan)
+        #expect(asked.isEmpty, "every file is the caller's own: nothing to delete, nothing read")
+
+        let report = try StorageManager.enforceQuotaReport(in: root, limitHours: 0, bitrateKbps: 64, protectedFiles: mine, sessionsWithState: scan)
+        #expect(asked.sorted() == ["day-1", "day-2"], "once per folder, for four deletes")
+        #expect(report.deleted.count == 4)
+    }
+
     /// #230 (missing test): a pass already past its deadline deletes nothing — not even with nothing protected — and says
     /// it did not finish.
     @Test func aPassPastItsDeadlineDeletesNothing() throws {
