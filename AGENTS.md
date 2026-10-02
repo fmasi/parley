@@ -48,12 +48,14 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 - `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
 - `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier).
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
-- `just build`: build the app bundle (app + XPC service) without installing it.
+- `just build`: build the app bundle (app + XPC service) without installing it. A debug build: it
+  reuses what the test step compiled.
 - `just secrets`: gitleaks on the staged changes (the pre-commit hook runs it).
 - `just lint`: shellcheck the scripts (not part of CI).
 
-Not recipes: `python3 scripts/dev.py` builds, installs to /Applications and relaunches the app
-(`--debug` also tails the log); `scripts/release.sh` and `scripts/publish.sh` build, sign and publish
+Not recipes: `python3 scripts/dev.py` builds a release build, installs it to /Applications and
+relaunches the app (`--debug` also tails the log; `--debug-build` builds unoptimised, for the inner
+loop only, never for a real meeting or a timing); `scripts/release.sh` and `scripts/publish.sh` build, sign and publish
 a release (see `docs/release-checklist.md`).
 
 ## Repo rules

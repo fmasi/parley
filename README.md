@@ -88,8 +88,8 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
 ```bash
 git clone https://github.com/fmasi/parley.git
 cd parley
-bash package_app.sh --install      # builds the Swift targets, assembles the .app + XPC service,
-                                   # ad-hoc signs everything, installs to /Applications
+bash package_app.sh --release --install   # builds the Swift targets (optimised), assembles the .app +
+                                          # XPC service, ad-hoc signs everything, installs to /Applications
 open /Applications/Parley.app
 ```
 
