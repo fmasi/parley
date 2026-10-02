@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round G (items 235–250). The fake client and the harness are RecordingCoordinatorTests.swift's; `HungRead` is
-// RecordingCoordinatorRoundCTests.swift's; `roundFPendingSession` and `roundFTearDown` are RecordingCoordinatorRoundFTests.swift's.
+// Stream L, round G (items 235–250). The fake client, the harness and `HungStep` are RecordingCoordinatorTests.swift's;
+// `roundFPendingSession` and `roundFTearDown` are RecordingCoordinatorRoundFTests.swift's.
 
 /// A pending session `name` whose transcript was already written (its finalized marker there): a retry's gate only cleans
 /// it up.
@@ -369,7 +369,7 @@ final class StuckSentinelQueue: @unchecked Sendable {
     /// disk now, so the commit lets the live log go — never a stale mark keeping it forever.
     @Test func aLateWriteThatLandsClearsTheUnwrittenMark() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        let hung = HungStep("evidence: build"), once = Harness.Box(true)
         defer { hung.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-g-\(UUID().uuidString)", beforeEachRead: { name in
             guard once.value, name == hung.label else { return }

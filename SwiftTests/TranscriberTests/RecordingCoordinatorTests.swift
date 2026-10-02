@@ -425,8 +425,12 @@ struct Harness {
 /// for its default is let go before that default, and fails too. Once released, or let go, it never hangs again.
 final class HungStep: @unchecked Sendable {
     static let watchdog: TimeInterval = 15
+    /// The read `hangIfNamed` hangs, by its label; nil for a step hung only where the test calls `hang()` itself.
+    let label: String?
     private let condition = NSCondition()
     private var began = false, over = false, onMain = false
+
+    init(_ label: String? = nil) { self.label = label }
 
     var reached: Bool { condition.withLock { began } }
     /// Hung now: begun, and neither released nor let go by the watchdog.
@@ -446,6 +450,11 @@ final class HungStep: @unchecked Sendable {
             while !over { if !condition.wait(until: giveUp) { over = true } }
             condition.broadcast()
         }
+    }
+
+    /// `hang()`, for the read named `label` only: what a folder-read queue's `beforeEachRead` hook calls with every label.
+    func hangIfNamed(_ name: String) {
+        if name == label { hang() }
     }
 
     /// Suspends its task until released (or cancelled).

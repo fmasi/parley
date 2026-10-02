@@ -487,7 +487,7 @@ struct ChunkRotatorTests {
     /// answering mid-recording never blocks it: the look is skipped, the next index comes from the counter, and the
     /// folder is said not to answer. A crash recovery on the same folder is never blocked either.
     @Test func aRotationWhoseFolderDoesNotAnswerIsNeverBlocked() async throws {
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
         let notAnswering = Box<[String]>([])
@@ -579,7 +579,7 @@ struct ChunkRotatorTests {
 
     // MARK: - L round E (207, 208, 212, 213)
 
-    private func hanging(_ hung: HungRead) -> FolderReads {
+    private func hanging(_ hung: HungStep) -> FolderReads {
         FolderReads(label: "rotator-hung-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
     }
 
@@ -594,7 +594,7 @@ struct ChunkRotatorTests {
         await r.rotateForTesting()   // meeting-1: timed out, and the helper created it — with its pre-crash audio
         let audio = Data(repeating: 7, count: 4_096)
         try audio.write(to: dir.appendingPathComponent("meeting-1.wav"))
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = hanging(hung)
         r.folderProbeSeconds = 0.2
@@ -629,7 +629,7 @@ struct ChunkRotatorTests {
             }
         }
         let client = Counting()
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         let r = rotator(client, dir: URL(fileURLWithPath: "/tmp/out"), finalized: Box([]), rotated: Box(0))
         r.folderReads = hanging(hung)
@@ -651,7 +651,7 @@ struct ChunkRotatorTests {
         let finalized = Box<[(index: Int, system: String)]>([]), rotated = Box(0)
         let r = rotator(helper, dir: dir, finalized: finalized, rotated: rotated)
         await r.rotateForTesting()   // meeting-1 asked for: overran, its files on disk
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = hanging(hung)
         r.folderProbeSeconds = 0.2
@@ -678,7 +678,7 @@ struct ChunkRotatorTests {
         await r.rotateForTesting()   // the look adopts meeting-2; meeting-3 asked for: overran, nothing on disk
         let current = r.currentChunkInfo
         #expect(current.index == 2)
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = hanging(hung)
         r.folderProbeSeconds = 0.2
@@ -702,7 +702,7 @@ struct ChunkRotatorTests {
         r.onLateChunksUnchecked = { unchecked.value += $0 }
         await r.rotateForTesting()   // meeting-1: timed out
         await r.rotateForTesting()   // meeting-2: overran
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = hanging(hung)
         r.folderProbeSeconds = 0.2
@@ -741,7 +741,7 @@ struct ChunkRotatorTests {
         await r.rotateForTesting()   // meeting-2: timed out
         // The next rotation's look answers; its late reply's look — for the chunks before the one it names — does not.
         let looks = Box(0)
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = FolderReads(label: "rotator-hung-\(UUID().uuidString)", beforeEachRead: { name in
             looks.value += 1
@@ -809,7 +809,7 @@ struct ChunkRotatorTests {
         let client = FailsThenAnswers(dir: dir, failures: 1)
         let r = rotator(client, dir: dir, finalized: Box([]), rotated: Box(0))
         await r.rotateForTesting()   // meeting-1: failed
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = hanging(hung)
         r.folderProbeSeconds = 0.2
@@ -844,7 +844,7 @@ struct ChunkRotatorTests {
         await r.rotateForTesting()   // meeting-1: timed out
         await r.rotateForTesting()   // meeting-2: timed out
         let looks = Box(0)
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         r.folderReads = FolderReads(label: "rotator-hung-\(UUID().uuidString)", beforeEachRead: { name in
             looks.value += 1

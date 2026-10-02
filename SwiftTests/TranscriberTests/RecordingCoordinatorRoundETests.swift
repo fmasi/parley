@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round E (items 186–218): the coordinator's side. The fake client and the harness are
-// RecordingCoordinatorTests.swift's; `HungRead` is RecordingCoordinatorRoundCTests.swift's.
+// Stream L, round E (items 186–218): the coordinator's side. The fake client, the harness and `HungStep` are
+// RecordingCoordinatorTests.swift's.
 
 // MARK: - Evidence: held helpers, commits, waiting rows (198, 200, 201, 205)
 
@@ -322,7 +322,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         _ = try await finalized(h, keepProgress: true) { try Data("{ damaged".utf8).write(to: $0) }
-        let hung = HungRead("salvage: transcript")
+        let hung = HungStep("salvage: transcript")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderReadDeadline = .milliseconds(150)
@@ -499,7 +499,7 @@ import Testing
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         let rotator = try #require(h.runner.chunkRotator)
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         rotator.folderProbeSeconds = 0.3
@@ -522,7 +522,7 @@ import Testing
         h.client.rotateError = CaptureCallTimeout(call: "rotateChunk", seconds: 10)
         await rotator.rotateForTesting()   // chunk 1 asked for: timed out
         await rotator.rotateForTesting()   // chunk 2 asked for: timed out
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         rotator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         rotator.folderProbeSeconds = 0.2
@@ -582,7 +582,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
-        let hung = HungRead("start: recording folder")
+        let hung = HungStep("start: recording folder")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderReadDeadline = .milliseconds(200)
@@ -618,7 +618,7 @@ import Testing
         let h = try Harness()
         defer { tearDown(h) }
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
-        let hung = HungRead("rotation: chunk files")
+        let hung = HungStep("rotation: chunk files")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
@@ -681,7 +681,7 @@ import Testing
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
         try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
-        let hung = HungRead("transcript: mic file")
+        let hung = HungStep("transcript: mic file")
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
@@ -826,7 +826,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: d) }
         let sys = d.appendingPathComponent("older.wav"), mic = d.appendingPathComponent("older_mic.wav")
         try Harness.headerOnlyWAV().write(to: sys); try Harness.headerOnlyWAV().write(to: mic)
-        let hung = HungRead("transcript: segments")
+        let hung = HungStep("transcript: segments")
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "runner-e-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
