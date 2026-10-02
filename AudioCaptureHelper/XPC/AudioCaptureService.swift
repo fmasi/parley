@@ -242,14 +242,19 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     private struct CoverageCounts: Sendable {
         let micDelivered, micPad, micZero, sysDelivered, sysPad: Int64
         let tapZeros: Int64?
+        /// Each track's callback timing (#247): plain copies of fixed-size value types, summarised off
+        /// the audio queue at stop.
+        let micIO, systemIO: IOCycleStats
     }
 
     private func coverageCountsOnAudioQueue(_ h: AudioOutputHandler, tapActive: Bool) -> CoverageCounts {
         let t = h.trackTotals()
+        let io = h.ioCycleStats()
         // The guard only sees tap samples; on SCK it says nothing.
         return CoverageCounts(micDelivered: t.micDelivered, micPad: t.micPad, micZero: t.micZero,
                               sysDelivered: t.sysDelivered, sysPad: t.sysPad,
-                              tapZeros: tapActive ? tapGuard.exactZeroFrames : nil)
+                              tapZeros: tapActive ? tapGuard.exactZeroFrames : nil,
+                              micIO: io.mic, systemIO: io.system)
     }
 
     /// The last counts read on the audio queue, refreshed every tick (asynchronously): what `.captureStop`
@@ -636,8 +641,11 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             wireWriteFailure(systemWriter, track: "system")
             wireWriteFailure(micWriter, track: "mic")
             let outputHandler = AudioOutputHandler(
-                systemWriter: systemWriter, micWriter: micWriter
+                systemWriter: systemWriter, micWriter: micWriter, skipWavSync: options.debugSkipWavSync
             )
+            if options.debugSkipWavSync {
+                Logger.audio.warning("DIAGNOSTIC: debug_skip_wav_sync is on — this recording's WAVs are not fsynced while recording")
+            }
             outputHandler.diagnostics = diagnostics
             outputHandler.systemExpectedSeconds = { [weak self] in
                 self?.coverage.withLock { $0[.system]?.expectedSeconds ?? 0 } ?? 0
@@ -707,6 +715,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     self.record(.captureStart, .info, [
                         "mic": resolvedMic ?? "default", "system_source": source.rawValue,
                         "tap_auto_start": "\(options.tapAutoStart)",
+                        "debug_skip_wav_sync": "\(options.debugSkipWavSync)",
                     ])
                     switch source {
                     case .screenCaptureKit:
@@ -909,9 +918,21 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
 
     /// `.captureStop` with the seal's counts, or — when the seal timed out on a stalled audio queue — the
     /// last cached ones, marked `coverage_incomplete` (round 4 N2).
+    /// Next to the coverage: each track's callback timing (#247), as `remote_io_*` / `local_io_*` keys
+    /// and as one persisted log line per track — a clean session writes no `.diag.jsonl`, so the log is
+    /// where its timing can be read. On the stop's own thread, never the audio queue.
     private func recordCaptureStop(_ counts: CoverageCounts?, session: Int, mic: MicCaptureSession?, tap: SystemTapSession?) {
         let fallback = counts == nil ? lastCoverageCounts.withLock { $0.value(for: session) } : nil
-        record(.captureStop, .info, coverageFacts(counts ?? fallback, mic: mic, tap: tap, incomplete: counts == nil))
+        var facts = coverageFacts(counts ?? fallback, mic: mic, tap: tap, incomplete: counts == nil)
+        if let io = counts ?? fallback {
+            for (label, prefix, summary) in [("system", "remote_io", io.systemIO.summary()), ("mic", "local_io", io.micIO.summary())] {
+                facts.merge(summary.asDetail(prefix: prefix)) { coverage, _ in coverage }
+                if let line = summary.logLine {
+                    Logger.audio.notice("IO cycles (\(label, privacy: .public)): \(line, privacy: .public)")
+                }
+            }
+        }
+        record(.captureStop, .info, facts)
     }
 
     /// Stop an SCStream after the session has ended and replied (round 2 item 5): its files are sealed,
@@ -977,7 +998,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
         stateLock.sync { pendingOptions = options }
-        Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public)")
+        Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public) debug_skip_sync=\(options.debugSkipWavSync, privacy: .public)")
         reply(true)
     }
 
@@ -1483,11 +1504,17 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         let tap = SystemTapSession(
             deliveryQueue: audioQueue, tapAutoStart: options.tapAutoStart,
             dropFramesForDiagnostics: options.debugDropTapFrames
-        ) { [weak self, weak handler] samples, pts in
-            handler?.appendSystemSamples(samples, pts: pts)
+        ) { [weak self, weak handler] samples, pts, lead in
+            let handler = handler   // one strong reference for the whole callback
+            let openCycle = handler?.appendSystemSamples(samples, pts: pts, lead: lead)
             // Already on audioQueue.
-            guard let self else { return }
-            self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
+            if let self {
+                self.apply(self.tapGuard.samples(samples, rate: 48_000, now: self.guardNow()))
+            }
+            // #247: LAST statement. The HAL waits for this block, guard pass included, so the cycle's
+            // total and its "check" stage end here and not when the handler had written. Anything added
+            // to this closure goes above this line.
+            if let openCycle { handler?.endSystemCycle(openCycle) }
         }
         tap.onBuilt = { [weak self] in self?.tapDidBuild(epoch: epoch) }
         tap.onGenerationChanged = { [weak self] in self?.livenessWatchdog.arm(track: .system) }

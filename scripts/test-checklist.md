@@ -31,6 +31,10 @@ stayed up, and `metadata.capture.<side>.status` says which.
    zeros() { ffmpeg -hide_banner -ss "$3" -t "$4" -i "$1" -af "pan=mono|c0=c$2,aformat=sample_fmts=flt,silencedetect=noise=-100dB:d=1" -f null - 2>&1 | grep -E 'silence_(start|end)'; }
    dur()   { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
    # set a config key to a JSON value, or remove it with null. Quit Parley first (menu → Quit): Parley reads config.json only at launch.
+   # coreaudiod IO overloads since a time ("2026-10-01 14:00:00"): all of them, those reported for Parley's capture helper, and their causes
+   ovl()   { local all out; all=$(log show --start "$1" --predicate 'process == "coreaudiod" AND eventMessage CONTAINS "Audio IO Overload"' 2>/dev/null | grep -c "Audio IO Overload"); out=$(log show --start "$1" --style compact --predicate 'process == "coreaudiod" AND eventMessage CONTAINS "issue_type" AND eventMessage CONTAINS "eu.fmasi.parley.capture-helper"' 2>/dev/null | grep '"issue_type": overload'); echo "coreaudiod overloads: all=$all, reported for the capture helper=$(printf '%s' "$out" | grep -c overload)"; printf '%s\n' "$out" | grep -oE '"cause": [A-Za-z]+' | sort | uniq -c; }
+   # the capture callbacks' timing since a time: one "IO cycles (system|mic)" line per track per Stop (#247)
+   iocyc() { log show --start "$1" --style compact --predicate 'subsystem == "eu.fmasi.parley" AND eventMessage CONTAINS "IO cycles"' 2>/dev/null | grep "IO cycles"; }
    cfg()   { python3 -c 'import json,sys;p=sys.argv[3];c=json.load(open(p));k,v=sys.argv[1],json.loads(sys.argv[2]);c.pop(k,None) if v is None else c.update({k:v});json.dump(c,open(p,"w"),indent=2);print(k,"=",json.dumps(c.get(k)))' "$1" "$2" "$CFG"; }
    ```
 5. For multi-chunk items, `cfg chunk_duration_minutes 10` (the minimum) makes a 2-chunk recording take ~12 min.
@@ -462,6 +466,32 @@ columns in the plan need a helper debug line that does not exist; the columns ab
 | App | Route | tap_auto_start | Gate open while muted? | Callbacks/s | Exact-zero s / muted s | First audio after unmute (s) | neverDelivered or rung after unmute? | Rebuilds | Alarm? |
 |---|---|---|---|---|---|---|---|---|---|
 | | | | | | | | | | |
+
+- [ ] **M-IO Does recording stall the IO callback, and is the periodic `fsync` why? (#247)**
+  - Why: `coreaudiod` reported the capture helper's IO callback at 56.5 ms against an 11.35 ms budget, with ~0.5 ms of CPU in that cycle: it was waiting. The tap's callback runs on the helper's shared audio queue, with the mic, the WAV writes and an `fsync` every 0.5 s per writer. This run measures where the time goes. **Nothing here has been measured on a device yet**: the instrument itself is under test too (see Sanity).
+  - Setup: a Bluetooth headset (AirPods) as output AND microphone; a call in a browser (Meet in Safari or Chrome) with a second device as the other side, playing continuous speech; Capture Method = Core Audio Tap. Every run is 10 min on the same call and headset. **Build:** measure the release build, which is what ships: Quit Parley, `bash package_app.sh --release --install`, open Parley. `dev.py` installs a debug build, whose callback path is slower and allocates where the release build does not (gotcha #84), so its numbers are not the shipped app's. Use one build for all nine runs and write down which.
+  - Do: three runs of each condition, interleaved A B C A B C A B C (so a drift in the room or the link does not line up with one condition). Before each run: `T0=$(date '+%Y-%m-%d %H:%M:%S')`.
+    - **A, not recording:** Parley open and idle, the call running.
+    - **B, recording:** Quit, `cfg debug_skip_wav_sync null`, open Parley, Record 10 min, Stop.
+    - **C, recording with the sync skipped:** Quit, `cfg debug_skip_wav_sync true`, open Parley, Record 10 min, Stop. The log must show "DIAGNOSTIC: debug_skip_wav_sync is on".
+  - Measure after each run:
+    1. `ovl "$T0"`: all overloads, those reported for the capture helper, and their causes (`ClientHALIODurationExceededBudget` is the one from #247).
+    2. B and C: `iocyc "$T0"` gives two lines, `IO cycles (system): cycles=… overruns=… (over 8.000 ms) | queue_wait n=… p50=… p99=… max=… | convert … | write … | sync … | check … | total … (ms)` and the same for `(mic)` without `queue_wait`. A stage that never ran is absent. `check` is what the callback does after the write (the monitors and the exact-zero scan; on the system line that is the permission guard's pass), and `total` runs to the callback's very end on both lines.
+    3. B and C: `diag <id>.diag.jsonl | grep ioOverrun`, when the file exists (it does once a callback went over 8 ms): each line is one callback, with `track`, `total_ms` and its stages.
+    4. By ear: every dropout of the call in the headset, with the menu timer's time.
+  - Sanity (the instrument, on the first B run, before trusting anything):
+    - system `queue_wait` p50 is well under 1 ms and its `n` ≈ `cycles`. If it reads about one buffer (≈ 10 ms) on every cycle, or `queue_wait` is absent from the system line or its `n` is far below `cycles`, the cycle-start timestamp (`inNow`) is not what the code assumes: stop and report it, the totals mean nothing.
+    - `sync n` on each track ≈ 2 × the recording's seconds (one `fsync` per 0.5 s); in C there is no `sync` at all on either line.
+    - system `cycles` ≈ `remote_coverage.heartbeat_callbacks` from `meta`.
+    - `check n` ≈ `cycles` on both lines, and `total` max ≥ every other stage's max on its line.
+    - The instrument sees what `coreaudiod` sees: a run where `ovl` reports `ClientHALIODurationExceededBudget` for the capture helper must have system `overruns` ≥ 1 (the budget is above the 8 ms threshold, and the system total runs from the HAL's cycle start to the block's return). An overload of that cause next to `overruns=0` means time is spent where the instrument does not look: stop and report it.
+    - `quality_anomaly_count` in `meta` stays 0 on an otherwise clean call even when `diag` lists `ioOverrun` events (they count in `anomaly_count` only), and the completion notice stays "Transcription Complete".
+  - Read it:
+    - **The `fsync` is the stall** if, in B, the system `ioOverrun` events are mostly `queue_wait_ms`, the mic's `sync` p99 or max is in the same range (≥ 8 ms), and in C the system `overruns` and the helper's overloads from `ovl` drop clearly in all three runs.
+    - **Recording contributes to the dropouts** if B has more dropouts and more overloads than A in all three pairs. If A drops out as often as B, recording is not the cause.
+    - **C ≈ B:** the `fsync` is not it. The `ioOverrun` events say which stage is: `pad_ms` (a rebuild's silence), `write_ms`, `convert_ms`, `check_ms` (the monitors after the write: on the system track the permission guard's pass), or a `queue_wait_ms` with no slow mic stage near it (something else on the queue: a rotation's finalize, the tap-guard tick).
+  - Record (nine rows; it feeds #248): run · build · `ovl` all / helper / `ClientHALIODurationExceededBudget` · system `overruns` · system `queue_wait` p50 / p99 / max · system `total` p99 / max · system `check` p99 / max · mic `sync` p50 / p99 / max · mic `total` max · dropouts heard.
+  - Cleanup (required): Quit, `cfg debug_skip_wav_sync null`, open Parley.
 
 - [ ] **M-P1 The cost of the output probe on the M1 Air.**
   - Do: nothing playing, no call apps open, `tap_auto_start` at its default. Record. After 1 min, `sudo powermetrics --samplers tasks -i 10000 -n 60 > ~/Desktop/parley-x1/M-P1-overhaul.txt` (10 min), then Stop. If the previous release is available, repeat on it → `M-P1-baseline.txt`.

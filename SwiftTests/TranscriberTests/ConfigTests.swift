@@ -486,6 +486,24 @@ struct ConfigTests {
         #expect(try JSONDecoder().decode(Config.self, from: data) == c)
     }
 
+    /// #247: `debug_skip_wav_sync` is optional, snake_case and absent by default, like the other
+    /// capture knobs.
+    @Test func debugSkipWavSyncRoundTripsAndDefaultsToNil() throws {
+        var c = Config.default
+        #expect(c.debugSkipWavSync == nil)
+        let untouched = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(c)) as? [String: Any])
+        #expect(untouched["debug_skip_wav_sync"] == nil, "an unset knob is not written")
+        c.debugSkipWavSync = true
+        let data = try JSONEncoder().encode(c)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["debug_skip_wav_sync"] as? Bool == true)
+        #expect(try JSONDecoder().decode(Config.self, from: data) == c)
+        c.debugSkipWavSync = false
+        let off = try JSONEncoder().encode(c)
+        #expect(try #require(JSONSerialization.jsonObject(with: off) as? [String: Any])["debug_skip_wav_sync"] as? Bool == false)
+        #expect(try JSONDecoder().decode(Config.self, from: off).debugSkipWavSync == false)
+    }
+
     /// §11.1 (owner decision 2026-09-24): new installs use the Core Audio tap; an existing config.json
     /// without the key was written by an SCK-era build and stays SCK (no silent change of a live setup).
     @Test func newInstallsDefaultToTheCoreAudioTapAndOldConfigsKeepSCK() throws {

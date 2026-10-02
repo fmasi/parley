@@ -47,7 +47,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol; drives system-audio capture via the Core Audio tap (default) or ScreenCaptureKit (legacy), plus mic capture; owns the helper's alarm registry (`captureStatus` pull + `captureAlarmsChanged` push under an ordered `HelperSessionId`), the capture-session claim (`CaptureLifecycle`), the tap healer, the mic heal policy, write-progress checks and per-track coverage
-- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- writes system audio (from the SCStream `.audio` output) and mic buffers (fed via `appendMicSampleBuffer()` from `MicCaptureSession`, #96) to WavFileWriters; auto-detects sample format (Float32/Int16) and channel count. Since #96 the SCStream delivers system audio only — `.microphone` is no longer registered.
+- `AudioCaptureHelper/XPC/AudioOutputHandler.swift` -- writes system audio (from the SCStream `.audio` output) and mic buffers (fed via `appendMicSampleBuffer()` from `MicCaptureSession`, #96) to WavFileWriters; auto-detects sample format (Float32/Int16) and channel count. Since #96 the SCStream delivers system audio only — `.microphone` is no longer registered. Times every tap and mic callback per stage (`IOCycleStats`, #247) and records `ioOverrun`.
 - `AudioCaptureHelper/XPC/SystemTapSession.swift` -- Core Audio output process tap for system audio (#103), selected by `system_audio_source: core_audio_tap`; captures Continuity/VoIP calls ScreenCaptureKit misses
 - `AudioCaptureHelper/XPC/MicCaptureSession.swift` -- microphone capture session feeding the mic WAV stream
 - `AudioCaptureHelper/XPC/LivenessWatchdogDriver.swift` -- off-audio-queue 1 Hz driver for `TrackLivenessMonitor` with the process-level `OutputActivityProbe` gate, fed to the monitors on the tick only (the gate debounce counts ticks): owns its own `DispatchSourceTimer` on a dedicated serial queue, never the real-time audio callback path (#196); aggregate-listener accelerators, the sleep pause (`SleepPauseClock`)
@@ -83,7 +83,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/SessionNameSuggestionPolicy.swift` -- pure decision: whether a late-arriving calendar title should replace the current session-name field value (#197)
-- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync; throwing `FileHandle` writes are caught and surfaced as a write-failure anomaly instead of crashing the helper (#196)
+- `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync (timed for `IOCycleStats`; `debug_skip_wav_sync` leaves out the `fsync` only, #247); throwing `FileHandle` writes are caught and surfaced as a write-failure anomaly instead of crashing the helper (#196)
 - `TranscriberCore/ExactZeroRunMonitor.swift` -- pure detector: fires after a sustained run of exact-zero mic samples (hardware-muted mic, e.g. lid closed on the built-in mic) (#193)
 - `TranscriberCore/TrackLivenessMonitor.swift` -- pure liveness core: never-delivered / stalled (measured while the debounced gate is open) / first frames per track, from heartbeats stamped at the top of the audio callback (§4.2)
 - `TranscriberCore/FrameCountPlausibility.swift` -- session-wide finalize backstop: compares each track's total recorded frames against wall-clock session duration (#196)
@@ -113,7 +113,8 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/BootSession.swift` -- `kern.bootsessionuuid` reader: the sentinel's stale-boot check, immune to sleep and wall-clock changes (gotcha #76)
 - `TranscriberCore/CaptureAlarm.swift` -- capture-alarm vocabulary and state (§6): `CaptureTrack`, the ordered `HelperSessionId`, `AlarmKind` (owner, track, the evidence that disproves a stale one, acknowledgeable), `CaptureAlarmRegistry` (stale-until-disproved, per-kind notify floor), `CaptureStatusSnapshot` (tolerant of unknown kinds only), `AlarmRealarmPolicy` (2 min notify, idle backoff, presentation)
 - `TranscriberCore/CaptureLifecycle.swift` -- the helper's capture-session claim (pure): tokened start reservation, a stop or disconnect aborts a start, 20 s start deadline, per-connection ownership, rotation gate; `AbandonableStep` bounds a rotation's writer swap
-- `TranscriberCore/CaptureOptions.swift` -- what the app tells the helper before `startCapture` (`configureCapture`, strict decode): `tap_auto_start`, `remote_exact_zero_soft_alarm_seconds`, `debug_drop_tap_frames`
+- `TranscriberCore/CaptureOptions.swift` -- what the app tells the helper before `startCapture` (`configureCapture`, strict decode): `tap_auto_start`, `remote_exact_zero_soft_alarm_seconds`, `debug_drop_tap_frames`, `debug_skip_wav_sync`
+- `TranscriberCore/IOCycleStats.swift` -- per-stage timing of a capture callback (#247): inline fixed-size histograms (queue wait, convert, pad, write, sync, check, total; 4 buckets per octave), exact max and overrun count, a 10 s rate limit for the `ioOverrun` event, the stop summary (`remote_io_*` / `local_io_*`). Fed from the audio queue: no allocation, lock, log or clock inside. A measurement only; the structural fix is #248
 - `TranscriberCore/CaptureReplies.swift` -- helper reply strings both sides match exactly: `No capture in progress` on a rotate is a dead capture; refused / cancelled / timed-out replies are not
 - `TranscriberCore/CoalescingCheck.swift` -- runs one async check at a time; a caller arriving mid-check queues one merged re-run and waits for it (the permission repair check)
 - `TranscriberCore/Deadline.swift` -- `withDeadline` / `boundedReply`: every helper-call deadline (§8.8), on `SuspendingClock` (awake time), reply / error / deadline raced through `ResumeOnce`
@@ -180,7 +181,7 @@ swift build
 # Produces .build/debug/Parley and .build/debug/audio-capture-helper-xpc
 
 swift test --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 2442 tests across 271 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2480 tests across 272 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest -- no Xcode installed, only CommandLineTools
 # Test path: SwiftTests/TranscriberTests/ (not Tests/ -- case collision with Python tests/ on APFS)
 ```
@@ -210,13 +211,13 @@ fault outright.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 82 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 82 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 84 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

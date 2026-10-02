@@ -17,7 +17,17 @@ public final class WavFileWriter {
     // WAV format uses 32-bit size fields; max data payload is ~4.29 GB.
     private static let maxDataBytes: UInt32 = UInt32.max - 36
     private var lastSyncTime: ContinuousClock.Instant = .now
-    private static let syncInterval: Duration = .milliseconds(500)
+    /// How often an append also rewrites the header and `fsync`s. Internal: the tests shorten it.
+    var syncInterval: Duration = .milliseconds(500)
+    /// DIAGNOSTIC ONLY (`debug_skip_wav_sync`, #247): leave the periodic `fsync` out. The header is
+    /// still rewritten on the same cadence, so the file stays readable after a helper crash; what is
+    /// lost is the bound on how much audio a power cut or a kernel panic can take (0.5 s with the
+    /// `fsync`, whatever the OS had not flushed yet without it). Set before the first append, on the
+    /// capture queue's side of the writer like every other mutator.
+    public var skipPeriodicSync = false
+    /// Host-clock ticks (`mach_absolute_time`) this writer has spent in its periodic `fsync` (#247).
+    /// Cumulative; read on the capture queue. Two clock reads per `fsync`, none per append.
+    public private(set) var syncTicks: UInt64 = 0
 
     /// Invoked once per failure episode (re-armed by the next successful write) when a modern
     /// throwing `FileHandle` call fails — disk full
@@ -148,12 +158,16 @@ public final class WavFileWriter {
 
     private func syncIfNeeded() {
         let now = ContinuousClock.Instant.now
-        guard now - lastSyncTime >= Self.syncInterval else { return }
+        guard now - lastSyncTime >= syncInterval else { return }
         flushHeader()
-        do {
-            try fileHandle.synchronize()
-        } catch {
-            noteWriteFailure(error, context: "synchronize")
+        if !skipPeriodicSync {
+            let start = mach_absolute_time()
+            do {
+                try fileHandle.synchronize()
+            } catch {
+                noteWriteFailure(error, context: "synchronize")
+            }
+            syncTicks &+= IOCycleStats.elapsed(from: start, to: mach_absolute_time())
         }
         lastSyncTime = now
     }

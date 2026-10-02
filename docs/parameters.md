@@ -108,12 +108,13 @@ Diarization is performed by `FluidAudioDiarizer` (pyannote segmentation + WeSpea
 | `tap_auto_start` | bool | `true` | `kAudioAggregateDeviceTapAutoStartKey` for every aggregate the tap builds. `false` keeps the tap IOProc running continuously (zeros when idle), so "no callbacks" is never ambiguous (gotcha #78). The default is decided by measurement M-B (device item D-12). Sent to the helper before each start (`CaptureOptions`) and stamped into `captureStart` provenance. |
 | `remote_exact_zero_soft_alarm_seconds` | int | unset (off) | Seconds of exact-zero remote audio after which the helper says "can't confirm" (`remoteCantConfirm`). Stays off unless the M-A census shows no call app renders exact zeros for a muted remote. |
 | `debug_drop_tap_frames` | bool | `false` | DIAGNOSTIC: the helper drops every tap buffer before the heartbeat, reproducing Incident B ("expected but never delivered") on demand (device item D-04). **Never leave it on**: the remote side is not recorded while it is set. |
+| `debug_skip_wav_sync` | bool | `false` | DIAGNOSTIC (#247): both WAV writers skip their periodic `fsync`; the header is still rewritten every 0.5 s. It exists for one A/B: whether that `fsync` is what stalls the capture callback (device item M-IO). **Never leave it on**: with the `fsync`, a power cut or kernel panic costs at most the last 0.5 s of audio; without it, whatever the OS had not flushed yet. A helper crash costs nothing extra (the data is already with the OS). Sent to the helper before each start (`CaptureOptions`), logged as a warning at start and stamped into `captureStart`. |
 
 ---
 
 ## Capture Reliability Detectors
 
-The capture-reliability constants below are hardcoded (in `TranscriberCore` unless noted) and are **not configurable via `config.json`**. Design: `docs/superpowers/specs/2026-09-24-capture-reliability-design.md`. The only related `config.json` knobs are the three Debugging keys above.
+The capture-reliability constants below are hardcoded (in `TranscriberCore` unless noted) and are **not configurable via `config.json`**. Design: `docs/superpowers/specs/2026-09-24-capture-reliability-design.md`. The only related `config.json` knobs are the four capture keys in Debugging above (`tap_auto_start`, `remote_exact_zero_soft_alarm_seconds`, `debug_drop_tap_frames`, `debug_skip_wav_sync`).
 
 ### Detection
 
@@ -129,6 +130,17 @@ The capture-reliability constants below are hardcoded (in `TranscriberCore` unle
 | Frame-count tolerance ratio | `FrameCountPlausibility.defaultToleranceRatio` | `0.10` | Allowed fractional deviation between a track's total recorded frames and its expected count from wall-clock elapsed time, at finalize. |
 | Frame-count minimum elapsed | `FrameCountPlausibility.defaultMinimumElapsedSeconds` | `30` | Session must have run at least this long before the frame-count-vs-wall-clock check is judged (avoids false positives on very short sessions). |
 | Frame-count minimum deficit | `FrameCountPlausibility.defaultMinimumDeficitSeconds` | `15` | Minimum absolute shortfall (seconds of missing audio) before a tolerance-ratio breach is reported, so a technically-out-of-ratio but tiny gap doesn't fire. |
+
+### Callback timing (#247)
+
+A measurement, not a detector: it changes nothing about the recording. Each tap and mic callback is timed per stage (`IOCycleStats`: queue wait, convert, pad, write, sync, check, total), from its start to the last clock reading before it returns.
+
+| Parameter | Location | Value | Description |
+|-----------|----------|-------|-------------|
+| Overrun threshold | `IOCycleStats.overrunThresholdNanos` | `8` ms | A callback whose total is OVER this is counted as an overrun. It sits under the 11.35 ms IO budget `coreaudiod` reported for the tap (#247). For the tap the total starts at the HAL's cycle start, so it includes the wait for the helper's audio queue; for the mic it starts at the callback's first line. |
+| Overrun event interval | `IOCycleStats.overrunReportIntervalNanos` | `10` s | At most one `ioOverrun` event per track per this long. Every overrun is still counted (`remote_io_overruns` / `local_io_overruns` in `captureStop`). |
+| Histogram resolution | `IOCycleStats.bucketCount` | `70` per stage | Four buckets per octave from 8.192 µs to 1.074 s, one below, one above. A percentile is the upper edge of its bucket, never above the exact maximum: at most 25 % over the true value, never under. The maximum and the overrun count are exact. |
+| Periodic WAV sync | `WavFileWriter.syncInterval` | `500` ms | How often an append also rewrites the header and `fsync`s, per writer. `debug_skip_wav_sync` leaves out the `fsync` only. |
 
 ### Healing
 

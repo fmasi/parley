@@ -31,8 +31,9 @@ import TranscriberCore
 final class SystemTapSession {
     private let deliveryQueue: DispatchQueue
     /// Delivers normalized 48 kHz mono Int16 system samples + a host-clock PTS (aligned with the mic's
-    /// AVCapture PTS — both are mach host time) on the `deliveryQueue`.
-    private let onSamples: ([Int16], CMTime) -> Void
+    /// AVCapture PTS — both are mach host time) on the `deliveryQueue`, with what this callback measured
+    /// of its own cycle so far (#247).
+    private let onSamples: ([Int16], CMTime, TapCycleLead) -> Void
     /// Records a diagnostic event (build, rebuild, error) into the helper's anomaly ring.
     var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
     /// The result of every mid-session rebuild, on `configQueue`: (rung, token, succeeded, reason).
@@ -134,7 +135,7 @@ final class SystemTapSession {
 
     init(
         deliveryQueue: DispatchQueue, tapAutoStart: Bool = true, dropFramesForDiagnostics: Bool = false,
-        onSamples: @escaping ([Int16], CMTime) -> Void
+        onSamples: @escaping ([Int16], CMTime, TapCycleLead) -> Void
     ) {
         self.deliveryQueue = deliveryQueue
         self.tapAutoStart = tapAutoStart
@@ -369,8 +370,8 @@ final class SystemTapSession {
         // (format, converter on this serial queue) and calls onSamples on the same queue.
         var proc: AudioDeviceIOProcID?
         let ioSt = AudioDeviceCreateIOProcIDWithBlock(&proc, agg, deliveryQueue) {
-            [weak self] _, inInputData, inInputTime, _, _ in
-            self?.handleTapBuffers(inInputData, inInputTime)
+            [weak self] inNow, inInputData, inInputTime, _, _ in
+            self?.handleTapBuffers(inNow, inInputData, inInputTime)
         }
         guard ioSt == noErr, let proc else {
             AudioHardwareDestroyAggregateDevice(agg)
@@ -546,12 +547,21 @@ final class SystemTapSession {
     /// Wrap the tap's pulled buffers into an AVAudioPCMBuffer matching the tap format, normalize to
     /// 48 kHz mono Int16 via the shared converter, and deliver with a host-clock PTS. Runs on the
     /// capture service's audio queue.
+    ///
+    /// Timing (#247): the HAL dispatches this block synchronously on `deliveryQueue` and waits for it,
+    /// so the time the block waits for that queue is part of the IO cycle. `inNow` is when the HAL
+    /// started the cycle (`AudioHardware.h`); the first line here minus `inNow` is that wait. NOT
+    /// `inInputTime`: that is when the buffer's first frame was acquired, a whole buffer earlier. The
+    /// clock reads below are `mach_absolute_time()` (a counter read: no lock, no allocation); the numbers go
+    /// to `AudioOutputHandler`, which finishes the cycle and records it.
     private func handleTapBuffers(
+        _ inNow: UnsafePointer<AudioTimeStamp>,
         _ inInputData: UnsafePointer<AudioBufferList>, _ inInputTime: UnsafePointer<AudioTimeStamp>
     ) {
         // D-04: reproduce Incident B (no callbacks at all) on demand — the heartbeat is never stamped,
         // so never-delivered fires and the ladder runs against a tap this code keeps silent.
         if dropFramesForDiagnostics { return }
+        let entryTicks = mach_absolute_time()
         heartbeat.withLock { $0 = (DispatchTime.now().uptimeNanoseconds, $0.count + 1) }
         let (format, bpf, stopping) = stateLock.sync { (tapFormat, bytesPerFrame, isStopping) }
         guard !stopping, let format, bpf > 0 else { return }
@@ -561,6 +571,7 @@ final class SystemTapSession {
         let frames = Int(srcABL[0].mDataByteSize) / Int(bpf)
         guard frames > 0 else { return }
 
+        let convertStartTicks = mach_absolute_time()
         guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
         pcm.frameLength = AVAudioFrameCount(frames)
         // The PCM buffer was created with the SAME format as the tap, so its AudioBufferList layout
@@ -585,6 +596,7 @@ final class SystemTapSession {
             return
         }
         guard !samples.isEmpty else { return }
+        let convertEndTicks = mach_absolute_time()
 
         // Watchdog: delivered frames vs wall clock. A sustained shortfall means the declared format
         // no longer matches what the device is really producing.
@@ -600,7 +612,14 @@ final class SystemTapSession {
         let nanos = host != 0 ? AudioConvertHostTimeToNanos(host)
                               : AudioConvertHostTimeToNanos(mach_absolute_time())
         let pts = CMTime(value: CMTimeValue(nanos), timescale: 1_000_000_000)
-        onSamples(samples, pts)
+        // No host time in `inNow` (or one after the entry): the queue wait is unmeasured for this
+        // cycle (0 = not counted) and the total starts at the entry instead.
+        let cycleStartTicks = inNow.pointee.mHostTime
+        let anchored = cycleStartTicks != 0 && cycleStartTicks <= entryTicks
+        onSamples(samples, pts, TapCycleLead(
+            startTicks: anchored ? cycleStartTicks : entryTicks,
+            queueWaitTicks: anchored ? entryTicks &- cycleStartTicks : 0,
+            convertTicks: IOCycleStats.elapsed(from: convertStartTicks, to: convertEndTicks)))
     }
 
     // MARK: - Default-output monitoring (HAL) — clock continuity across output switches
@@ -1053,6 +1072,18 @@ final class SystemTapSession {
             Logger.audio.info("System tap swept orphaned aggregate \(uid, privacy: .public): \(st == noErr ? "ok" : "\(st)", privacy: .public)")
         }
     }
+}
+
+/// What one tap callback measured before it handed its samples over (#247), in host-clock ticks
+/// (`mach_absolute_time`). Three integers, passed by value.
+struct TapCycleLead {
+    /// Where the cycle's total is counted from: the HAL's cycle start (`inNow`), or the callback's
+    /// first line when `inNow` carried no host time.
+    let startTicks: UInt64
+    /// From the HAL's cycle start to the callback's first line. 0 = not measured.
+    let queueWaitTicks: UInt64
+    /// Buffer allocation, copy and conversion to 48 kHz mono Int16.
+    let convertTicks: UInt64
 }
 
 enum SystemTapError: LocalizedError {

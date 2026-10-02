@@ -103,6 +103,7 @@ Notes:
 - Mic audio: any native device rate/channel/format → `AudioConverter` normalizes to 48 kHz mono Int16.
 - `.screen` output type must be registered even for audio-only capture (ScreenCaptureKit requirement).
 - `SCStreamConfiguration.microphoneCaptureDeviceID` (macOS 15+) allows per-device mic selection.
+- Callback timing (#247): every tap and mic callback is timed per stage by `IOCycleStats` (queue wait, convert, pad, write, sync, check, total), with clock reads and integer arithmetic only. "check" is everything after the samples' write: the frame counters, the pad-ratio monitor and the exact-zero scan over the buffer (mic: `ExactZeroRunMonitor`; tap: `TapPermissionGuard`'s pass in the service). Each cycle is closed by one clock reading taken as the callback's last act, on both tracks, so the total covers all the callback did: the tap's is closed in the service's sample closure, after the guard pass, not when the handler has written. The tap's IOProc is a block on the helper's shared serial audio queue and the HAL waits for it, so the tap's queue wait (the callback's first line minus the HAL's cycle start, `inNow`) counts against the device's IO budget; the mic has no such timestamp and no queue-wait stage. A callback over 8 ms records an `ioOverrun` event with the stage breakdown in ms (at most one per track per 10 s). The ScreenCaptureKit system path is not timed. The numbers are in `captureStop` and in the log (see "Files beside the recording" and Debugging).
 
 ### Stage 2 — Chunk Rotation
 
@@ -272,6 +273,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 **Files beside the recording**:
 - `<session>.diag.live.jsonl` — every non-`info` capture event plus the coverage-carrying ones (`captureStop`, `trackCoverage`), appended as it happens, with ms-precision dates (`LiveDiagnosticsLog`). The record's build merges it, deduplicated, into the ring, and so into `<session>.diag.jsonl`. It is deleted only once the session's transcript exists.
 - `<session>.diag.coverage.json` — the latest per-track coverage of each helper session, rewritten on every status pull; stands in for the `captureStop` a crashed helper never wrote.
+- Callback timing in the record (#247): `captureStop` also carries `remote_io_*` (system) and `local_io_*` (mic): `cycles`, `overruns` (callbacks over 8 ms), and for each stage that ran `<stage>_n`, `<stage>_p50_ms`, `<stage>_p99_ms`, `<stage>_max_ms`, with `<stage>` one of `queue_wait`, `convert`, `pad`, `write`, `sync`, `check`, `total`. A stage that never ran (or was not measured: the mic's queue wait) is left out. `ioOverrun` events carry `track`, `total_ms` and the stages of that one callback, and `overruns`, the track's count so far. An `ioOverrun` is an anomaly for the record (the session keeps its `.diag.jsonl`) but not a quality anomaly: `quality_anomaly_count` and the per-side status do not move. A session with no anomaly writes no `.diag.jsonl`; its timing is in the unified log.
 - `session.json` — besides `chunks` (each with its `issues`, its `echo_segments_flagged` count and its `echo_clusters` verdicts with the chunk's own speaker labels, so a crash-recovered finalize still writes `metadata.echo_clusters`) and `provenance`: `gaps` (`CaptureGap`, as above) and `issues` (`SessionIssue` `{chunk?, issue}`: issues that could not be stored on a chunk, such as a failed write after the chunk was appended, or a session-level issue).
 
 ### Stage 10 — Summary Generation
@@ -459,6 +461,9 @@ All Swift components log via `os.Logger` with:
 
 # Via dev.py (launches app + tails log automatically)
 python3 scripts/dev.py --debug
+
+# Callback timing (#247): one line per track at each Stop, logged at notice level so `log show` keeps it
+/usr/bin/log show --predicate 'subsystem == "eu.fmasi.parley" AND eventMessage CONTAINS "IO cycles"' --last 1h --style compact
 ```
 
 ---
