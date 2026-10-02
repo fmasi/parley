@@ -793,3 +793,15 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
     then Stop after 1 more minute.
   - PASS: `dev.py` printed "Building a RELEASE build + installing" and "RELEASE build installed to
     /Applications/Parley.app". `diag <id>.diag.jsonl | grep captureStart` shows `"build": "release"`.
+
+## Stop-path bounds (#226 / #232) — added 2026-10-02
+
+- [ ] **S-01 A normal Stop is unchanged.**
+  - Do: `cfg chunk_duration_minutes 10`, record 25 minutes with audio on both sides (3 chunks), on the usual local recording folder. Stop.
+  - PASS: "Transcribing…", then the transcript and the rename dialog, as before. No "Transcription Failed" alert, no "isn't answering" row. `stream.log` has no `chunk(s) were still being processed after` line and no `last chunk` line.
+- [ ] **S-02 The M1 Air: how long the last chunk takes.**
+  - Do: on the MacBook Air M1, default 30-minute chunks, stop a recording 28 minutes into a chunk. Read `Chunk N processing complete — Ns` for the last chunk in `stream.log`.
+  - PASS: the Stop completes normally. Record the seconds: the bound is the chunk's own length (here about 28 minutes, never under 5), so the number says how much margin there is, and whether a shorter bound would be safe.
+- [ ] **S-03 A recording folder that stops answering (optional: needs a network share).**
+  - Do: set `recording_directory` to a folder on an SMB share, record 2 minutes, disconnect the network, Stop.
+  - PASS: within about 6 minutes the menu leaves "Transcribing…" with an alert that the recording folder isn't answering and that Parley will finish the recording; Start works again. Reconnect the share: the recording is finished without a relaunch (or at the next launch), and its transcript holds the whole recording once.

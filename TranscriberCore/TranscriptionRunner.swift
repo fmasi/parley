@@ -44,6 +44,8 @@ public final class TranscriptionRunner {
 
     /// Test seam: `setupChunkedPipeline` throws before creating the processor.
     var failSetupForTesting = false
+    /// Test seam: the engines the chunked pipeline is set up with, in place of the configured ones.
+    var enginesForTesting: (transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?)?
     /// Test seam: `finalize` sleeps this long before doing anything.
     var finalizeDelayForTesting: Duration?
     /// Test seam: `run` takes its engine and diarizer from here rather than `prepareEngine`. Never set in production.
@@ -816,6 +818,7 @@ public final class TranscriptionRunner {
     /// transcribed with the exact same engine construction as a live recording — never a second,
     /// diverging init path (#135).
     public func prepareEngine(config: Config) throws -> (transcriber: any TranscriptionEngine, diarizer: (any DiarizationProvider)?) {
+        if let enginesForTesting { return enginesForTesting }
         let engineID = config.engine
         if transcriber == nil || lastEngineID != engineID {
             Logger.transcription.info("Creating engine: \(engineID.descriptor.displayName, privacy: .public)")

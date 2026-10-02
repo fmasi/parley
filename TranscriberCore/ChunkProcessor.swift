@@ -19,6 +19,8 @@ public final class ChunkProcessor {
     private nonisolated let diarizer: (any DiarizationProvider)?
     private nonisolated let vadSpeechMap = VadSpeechMap()
     private nonisolated let stateStore: StateStore
+    /// The bound on one session.json write — and on the quota pass after a chunk's archive (#226).
+    private nonisolated let writeSeconds: Double
     private nonisolated let wavHeaderSize = 44
     private nonisolated let taskPriority: TaskPriority
     /// Where an archive-only chunk is split into scratch WAVs (the temp folder; a test's own folder).
@@ -34,6 +36,13 @@ public final class ChunkProcessor {
     private var tasksByIndex: [Int: Task<Void, Never>] = [:]
     /// Bookkeeping tasks (a duplicate's issue being recorded) that `awaitAllProcessed` also awaits.
     private var bookkeepingTasks: [Task<Void, Never>] = []
+    /// When each chunk still being processed here began recording, by index (#226): what a bounded wait for them is
+    /// scaled by. A chunk leaves once its processing ended — persisted or not.
+    private var unfinishedStarts: [Int: Date] = [:]
+    /// Chunks scheduled here whose processing has not ended.
+    public var unfinishedCount: Int { unfinishedStarts.count }
+    /// When the oldest of them began recording; nil when none is left.
+    public var oldestUnfinishedStart: Date? { unfinishedStarts.values.min() }
 
     /// Called on the main actor when session.json could not be written: with the chunk index after
     /// a chunk, nil after a session-level change (a capture gap). The coordinator raises
@@ -209,6 +218,7 @@ public final class ChunkProcessor {
         self.config = config
         self.outputDirectory = outputDirectory
         self.stateStore = StateStore(sessionState: sessionState, directory: outputDirectory, reads: folderReads, writeSeconds: writeSeconds)
+        self.writeSeconds = writeSeconds
         self.sourceByIndex = Dictionary(
             sessionState.chunks.map { ($0.index, Self.sourceBaseName(ofFile: $0.audioPath)) },
             uniquingKeysWith: { first, _ in first }
@@ -297,8 +307,10 @@ public final class ChunkProcessor {
         sourceByIndex[chunk.index] = source
         let scheduled = chunk
         let issues = extraIssues
+        unfinishedStarts[chunk.index] = chunk.startTime
         let task = Task(priority: priority) {
             await self.processChunkAsync(scheduled, extraIssues: issues)
+            self.unfinishedStarts[scheduled.index] = nil
         }
         tasksByIndex[chunk.index] = task
         return task
@@ -517,7 +529,10 @@ public final class ChunkProcessor {
                     in: outputDirectory,
                     limitHours: config.audioArchiveLimitHours,
                     bitrateKbps: config.archiveBitrateKbps,
-                    protectedFiles: protected
+                    protectedFiles: protected,
+                    // Bounded, as the transcript's quota pass is (L review 251, #226): a walk a slow share drags out stops
+                    // there — nothing deleted that it had not weighed — and the next chunk's pass takes over.
+                    deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
                 )
                 if report.protectedOverrunBytes > 0 { await stateStore.noteQuotaOverrun(report.protectedOverrunBytes) }
             } catch {
