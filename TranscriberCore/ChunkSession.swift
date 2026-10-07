@@ -72,8 +72,9 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// is not a real time or before the first chunk's): they were not merged, and the transcript
         /// lists each chunk's own audio file (round 5). Informational: no audio is missing.
         public static let mergeSkippedImplausibleTiming = Code(rawValue: "merge_skipped_implausible_timing")
-        /// The storage quota could not be met without deleting this session's own audio, which it
-        /// never does (round 8 item 2). Informational: nothing is missing; the folder is over quota.
+        /// The storage quota could not be met without deleting audio it may never delete (round 8 item 2): this session's
+        /// own, or — since #230 — another session's still in flight in the folder. The raw value is kept for the records
+        /// already written (#294). Informational: nothing is missing; the folder is over quota.
         public static let quotaExceededByCurrentSession = Code(rawValue: "quota_exceeded_by_current_session")
         /// The listed audio's lengths could not be read within their bound (L review 227): the record's `chunk_durations`
         /// are left out — unknown, never made up — and readers measure the files themselves. Informational.
@@ -468,6 +469,9 @@ public struct SessionState: Codable {
     /// Chunk issues that happened after the chunk was appended (a failed session.json write).
     /// Absent in legacy session.json → `[]`.
     public var issues: [SessionIssue]
+    /// The older recordings whose audio this session's chunk passes deleted to stay within the storage limit (#224), as
+    /// `StorageManager.QuotaReport.removedRecordings` names them: what the completion notice counts. Absent → `[]`.
+    public var quotaRemovedRecordings: [String] = []
 
     public init(
         sessionId: String,
@@ -492,7 +496,7 @@ public struct SessionState: Codable {
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case sessionId, meetingStart, engine, chunkDurationMinutes, chunks, provenance, gaps, issues
+        case sessionId, meetingStart, engine, chunkDurationMinutes, chunks, provenance, gaps, issues, quotaRemovedRecordings
     }
 
     public init(from decoder: Decoder) throws {
@@ -505,6 +509,7 @@ public struct SessionState: Codable {
         provenance = try c.decodeIfPresent(CaptureProvenance.self, forKey: .provenance)
         gaps = try c.decodeIfPresent([CaptureGap].self, forKey: .gaps) ?? []
         issues = try c.decodeIfPresent([SessionIssue].self, forKey: .issues) ?? []
+        quotaRemovedRecordings = try c.decodeIfPresent([String].self, forKey: .quotaRemovedRecordings) ?? []
     }
 
     // MARK: - File location

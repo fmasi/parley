@@ -313,7 +313,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("When over the limit, the oldest audio is deleted first. Transcripts are never deleted.")
+            Text("The limit covers every day in the recordings folder. When over it, the oldest audio is deleted first. Transcripts are never deleted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

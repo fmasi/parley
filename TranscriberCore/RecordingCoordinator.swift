@@ -3748,6 +3748,11 @@ public final class RecordingCoordinator {
         // headphones avoid it. Unanswered or unreadable reads as no echo — the notice then says it
         // could not check, which covers it.
         let unreadable = CaptureQualityNotice.unreadable
+        // What the storage limit removed (#224): the session's chunk passes, and the transcript's own quota pass — waited
+        // for alongside the read, with the same bound. A pass that has not run by then is left out of the notice; its
+        // deletions are still marked in the transcripts it touched.
+        let quotaPass = result.quotaPass, quotaSeconds = Self.seconds(folderReadDeadline)
+        async let removedByPass = quotaPass?.removedRecordings(within: quotaSeconds)
         let read = await readOffMain("completion: transcript", folder: jsonPath.deletingLastPathComponent()) {
             (CaptureQualityNotice.anomalyCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.problemChunkCount(inTranscriptAt: jsonPath),
@@ -3775,6 +3780,11 @@ public final class RecordingCoordinator {
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
             )
         }
+        let passRemoved = await removedByPass
+        if quotaPass != nil, passRemoved == nil {
+            Logger.files.error("The storage quota pass had not finished when the completion notice was posted — what it removes is marked in the transcripts, not named here")
+        }
+        let removedRecordings = Set(result.removedRecordings + (passRemoved ?? [])).count
         // The notification is passive, so it always fires: the transcript IS finished, and staying
         // silent about it would be the bigger failure.
         notify(
@@ -3783,7 +3793,8 @@ public final class RecordingCoordinator {
             CaptureQualityNotice.completionBody(
                 fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies,
                 problemChunkCount: problemChunks, segmentCount: segments,
-                remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines)
+                remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
+                removedRecordings: removedRecordings)
         )
         guard sessionStillOurs else {
             // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is

@@ -61,8 +61,25 @@ public enum CaptureQualityNotice {
 
     /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count,
     /// then the echo voice (`echoLines`, as for the title).
+    /// `removedRecordings` (#224): how many older recordings lost their audio to the storage limit — a line of its own.
     public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
-                                      remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0) -> String {
+                                      remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
+                                      removedRecordings: Int = 0) -> String {
+        let body = recordBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: problemChunkCount, segmentCount: segmentCount,
+                              remoteStatus: remoteStatus, localStatus: localStatus, echoLines: echoLines)
+        guard let line = storageLimitLine(removedRecordings: removedRecordings) else { return body }
+        return body + "\n" + line
+    }
+
+    /// The completion notice's line when the storage limit removed older audio (#224); nil when nothing was removed.
+    public static func storageLimitLine(removedRecordings count: Int) -> String? {
+        guard count > 0 else { return nil }
+        let noun = count == 1 ? "recording" : "recordings"
+        return "Removed the audio of \(count) older \(noun) to stay within the storage limit; transcripts are kept."
+    }
+
+    private static func recordBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                   remoteStatus: String?, localStatus: String?, echoLines: Int) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }

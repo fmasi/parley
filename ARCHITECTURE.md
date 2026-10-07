@@ -221,8 +221,10 @@ chunk pipeline and writes the transcript. Stage by stage: [docs/pipeline.md](doc
 - **Single-file path.** `TranscriptionRunner.run()` transcribes whole files without the chunk
   pipeline. The CLI uses it, and so does the stop path for a recording that has no chunked
   session on disk.
-- **Storage.** `StorageManager` keeps the `.m4a` archives within `audio_archive_limit_hours` by
-  deleting the oldest. It deletes nothing else: transcripts and WAVs are never touched.
+- **Storage.** `StorageManager` keeps the `.m4a` archives within `audio_archive_limit_hours`,
+  across every day folder of the recording directory, by deleting the oldest (#224). It deletes
+  nothing else: transcripts and WAVs are never touched; a transcript whose audio went gets an
+  `audio_removed` mark, and the completion notice says so.
 - **Summary** (optional). After the rename dialog, `MeetingSummarizer` sends the transcript to the
   endpoint the user configured and writes `<session>-summary.md`.
 

@@ -366,6 +366,46 @@ struct TranscriptRediarizerProgressTests {
         #expect(synced.contains(TranscriptRediarizer.backupURL(for: transcript).path))
     }
 
+    /// #224 review: the storage limit can mark a transcript while a re-detect of it is diarizing.
+    /// The re-detect read the file before that; its rewrite must keep the mark, not drop it.
+    @Test("a storage-limit mark written while diarization runs survives the rewrite")
+    func keepsAudioRemovedMarkWrittenMidway() async throws {
+        let (transcript, cleanup) = try makeMicOnlyRecording()
+        defer { cleanup() }
+        let mark: [String: Any] = ["at": "2026-10-07T10:00:00Z", "files": ["090000.m4a"], "reason": "storage_limit"]
+        let marked = MarkOnce(transcript: transcript, mark: mark)
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: transcript, source: "local", speakerCount: 1, diarizer: FakeDiarizer(),
+            onProgress: { if $0.phase == .detectingSpeakers { marked.write() } })
+
+        #expect(marked.wrote)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any]
+        let kept = (json?["metadata"] as? [String: Any])?["audio_removed"] as? [String: Any]
+        #expect(kept?["files"] as? [String] == ["090000.m4a"])
+    }
+
+    /// Writes the mark into the transcript once — what a storage-limit pass does mid re-detect.
+    private final class MarkOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private let transcript: URL
+        private let mark: [String: Any]
+        private var done = false
+        init(transcript: URL, mark: [String: Any]) { self.transcript = transcript; self.mark = mark }
+        var wrote: Bool { lock.lock(); defer { lock.unlock() }; return done }
+        func write() {
+            lock.lock(); defer { lock.unlock() }
+            guard !done,
+                  let data = try? Data(contentsOf: transcript),
+                  var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            var metadata = json["metadata"] as? [String: Any] ?? [:]
+            metadata["audio_removed"] = mark
+            json["metadata"] = metadata
+            guard let out = try? JSONSerialization.data(withJSONObject: json) else { return }
+            try? out.write(to: transcript)
+            done = true
+        }
+    }
+
     @Test("reports decodingAudio then detectingSpeakers, with the diarizer's own fraction forwarded")
     func progressSequenceMatchesDiarizerCallback() async throws {
         let (transcript, cleanup) = try makeMicOnlyRecording()

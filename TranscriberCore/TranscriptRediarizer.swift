@@ -426,15 +426,23 @@ public enum TranscriptRediarizer {
         // Last check before the only irreversible step. Cancelling after diarization has run just
         // wastes the work; cancelling after this leaves a transcript the user asked us not to write.
         try Task.checkCancellation()
-        let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        // Keep the transcript as the pipeline wrote it (P5): written once, before the FIRST
-        // re-detect, and never overwritten — after two re-detects the original labels would
-        // otherwise be gone. If it cannot be written, the transcript is not overwritten either.
-        let backup = backupURL(for: url)
-        if !FileManager.default.fileExists(atPath: backup.path) {
-            try DurableFile.replace(backup, with: data)   // round 4 item 6
+        try TranscriptWrites.exclusive(url) {
+            // The file was read before diarization, which can take minutes: a storage-limit pass may
+            // have marked it since (#224). Keep the mark on disk now, not the one read then.
+            let onDisk = (try? Data(contentsOf: url))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["metadata"] as? [String: Any]
+            metadata[TranscriptAudioMark.key] = onDisk?[TranscriptAudioMark.key]
+            json["metadata"] = metadata
+            let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            // Keep the transcript as the pipeline wrote it (P5): written once, before the FIRST
+            // re-detect, and never overwritten — after two re-detects the original labels would
+            // otherwise be gone. If it cannot be written, the transcript is not overwritten either.
+            let backup = backupURL(for: url)
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                try DurableFile.replace(backup, with: data)   // round 4 item 6
+            }
+            try DurableFile.replace(url, with: out)
         }
-        try DurableFile.replace(url, with: out)
         let outcome = Outcome(speakerCount: found, segmentsRelabeled: visible.count,
                               echoClusters: echo?.echoLabels.count ?? 0, echoFlagged: echo?.result.flaggedCount ?? 0)
         Logger.transcription.info(
