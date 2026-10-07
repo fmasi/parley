@@ -683,6 +683,8 @@ struct TranscriptRediarizerTimelineTests {
         #expect(flagged["filtered"] as? Bool == true)
         #expect(flagged["speaker"] as? String == "Remote Unknown")
         #expect(out.filter { $0["duplicate"] as? Bool == true }.count == 1, "a duplicate keeps its flag too")
+        // ...but not the label an earlier diarization gave it (#296).
+        #expect(out.first { $0["duplicate"] as? Bool == true }?["speaker"] as? String == "Remote Unknown")
         #expect(out.count == 3)
     }
 
@@ -1490,6 +1492,124 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(clusters(metadata, track: "remote").count == 1)
         #expect(issues(metadata) == ["echo_flagged/local/3/0", "echo_cluster/local/4/0", "asr_failed/remote/-/1"])
         #expect(metadata["rediarized_channels"] as? [String] == ["remote"])
+    }
+
+    // MARK: Every flagged line on a re-detected channel is unattributed (#296)
+
+    /// `segment`, with one more flag set.
+    static func segment(_ line: Line, _ speaker: String, _ source: String, flag: String) -> [String: Any] {
+        var d = segment(line, speaker, source)
+        d[flag] = true
+        return d
+    }
+
+    /// The case seen on a real file: the remote channel re-detected at 1, and its `duplicate` lines
+    /// still under `Remote Speaker 1` and `Remote Speaker 2` — labels of a diarization that no longer
+    /// exists, one of them now another person's number. Every kind of flag, the same rule.
+    @Test("remote re-detect: every flagged remote line takes Remote Unknown and keeps its flag")
+    func everyFlaggedRemoteLineIsUnattributed() async throws {
+        let talk = Self.lines("talk", count: 6, offset: 0, length: 8)
+        let repeats = Self.lines("again", count: 4, offset: 9, length: 1)
+        let noise = Line(start: 130, end: 131, text: Self.words("noise", 2))
+        let bled = Line(start: 150, end: 152, text: Self.words("bled", 4))
+        let untimed = Line(start: 0, end: 0, text: Self.words("untimed", 3))
+        let mine = Line(start: 170, end: 175, text: Self.words("mine", 5))
+        let mineAgain = Line(start: 176, end: 177, text: Self.words("mine0", 2))
+        var untimedSegment = Self.segment(untimed, "Remote Speaker 2", "remote")
+        untimedSegment["time_unknown"] = true
+        let before = talk.enumerated().map { Self.segment($1, $0 < 3 ? "Remote Speaker 1" : "Remote Speaker 2", "remote") }
+            + repeats.enumerated().map { Self.segment($1, $0 < 3 ? "Remote Speaker 1" : "Remote Speaker 2", "remote", flag: "duplicate") }
+            + [Self.segment(noise, "Remote Speaker 2", "remote", flag: "filtered"),
+               Self.segment(bled, "Remote Speaker 1", "remote", echo: true),
+               untimedSegment,
+               Self.segment(mine, "Local Speaker 1", "local"),
+               Self.segment(mineAgain, "Local Speaker 2", "local", flag: "duplicate")]
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarization = DiarizationResult(segments: Self.turns(talk, "S1"), speakerDatabase: ["S1": [1, 0, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "remote", speakerCount: 1, diarizer: ScriptedDiarizer(result: diarization))
+
+        let (segments, metadata) = try read(t)
+        let flagged = repeats + [noise, bled, untimed]
+        #expect(speakers(found(talk, in: segments, source: "remote")) == ["Remote Speaker 1"])
+        #expect(speakers(found(flagged, in: segments, source: "remote")) == ["Remote Unknown"])
+        // Flag, never delete: every flag is where it was.
+        let remote = segments.filter { $0["source"] as? String == "remote" }
+        #expect(remote.filter { $0["duplicate"] as? Bool == true }.count == repeats.count)
+        #expect(remote.filter { $0["filtered"] as? Bool == true }.count == 1)
+        #expect(remote.filter { $0["echo"] as? Bool == true }.count == 1)
+        #expect(remote.filter { $0["time_unknown"] as? Bool == true }.count == 1)
+        #expect(remote.filter(TranscriptAssembler.isFlagged).count == flagged.count)
+        #expect(record(segments) == record(before))
+        // The other channel is not this re-detect's: its flagged line keeps its label.
+        #expect(speakers(found([mine], in: segments)) == ["Local Speaker 1"])
+        #expect(speakers(found([mineAgain], in: segments)) == ["Local Speaker 2"])
+        // The unattributed label is nobody: not counted, and no row to rename.
+        #expect(metadata["speaker_count_remote"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
+        #expect(outcome.segmentsRelabeled == talk.count)
+        let rows = try TranscriptRenamer.collectSpeakerSamples(from: t, maxSamplesPerSpeaker: 1).map(\.id)
+        #expect(Set(rows) == ["Local Speaker 1", "Remote Speaker 1"])
+
+        // A rename after it names the person, and does not reach the flagged lines.
+        #expect(TranscriptRenamer.applyRenames(["Remote Speaker 1": "Ana"], jsonPath: t))
+        let renamed = try read(t).segments
+        #expect(speakers(found(talk, in: renamed, source: "remote")) == ["Ana"])
+        #expect(speakers(found(flagged, in: renamed, source: "remote")) == ["Remote Unknown"])
+    }
+
+    /// The mic channel, with the echo check running: a `filtered` or `duplicate` line is no evidence
+    /// and no candidate, but its old label is just as stale. Here the numbering flips, so the label
+    /// those lines carried ("Local Speaker 2") is the user's after the re-detect.
+    @Test("local re-detect: filtered and duplicate lines take Local Unknown, not a number that is now the user's")
+    func filteredAndDuplicateLocalLinesAreUnattributed() async throws {
+        let voices = TwoVoices()
+        let noise = Line(start: 220, end: 221, text: Self.words("noise", 4))
+        let again = Line(start: 240, end: 241, text: Self.words("again", 4))
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2", bleedFlagged: true)
+            + [Self.segment(noise, "Local Speaker 2", "local", flag: "filtered"),
+               Self.segment(again, "Local Speaker 2", "local", flag: "duplicate")]
+        let (t, cleanup) = try makeRecording(segments: before, metadata: Self.staleEchoMetadata); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization(echoFirst: true)))
+
+        // The echo cluster's lines carry the cluster's label: the one exception to the rule.
+        try expectTheEchoVoiceKeptApart(t, voices, outcome, before: before, user: "Local Speaker 2", echo: "Local Speaker 1")
+        let segments = try read(t).segments
+        #expect(speakers(found([noise, again], in: segments)) == ["Local Unknown"])
+        #expect(found([noise], in: segments).first?["filtered"] as? Bool == true)
+        #expect(found([again], in: segments).first?["duplicate"] as? Bool == true)
+    }
+
+    /// When the echo check stands down the re-detect is the unguarded one — but a line already
+    /// flagged does not keep the label it had either: there is no echo cluster to give it a label.
+    @Test("with the echo check stood down, every flagged local line takes Local Unknown")
+    func flaggedLinesAreUnattributedWhenTheCheckStandsDown() async throws {
+        let voices = TwoVoices()
+        let noise = Line(start: 220, end: 221, text: Self.words("noise", 4))
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 2", bleedFlagged: true)
+            + [Self.segment(noise, "Local Speaker 1", "local", flag: "filtered")]
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()),
+            rawLabeling: { segments, diarization in
+                let full = TranscriptRediarizer.label(segments, against: diarization)
+                return (Array(full.labeled.dropLast()), full.speakerDatabase)
+            })
+
+        let (segments, metadata) = try read(t)
+        #expect(outcome.echoClusters == 0)
+        #expect(speakers(found(voices.far + [noise], in: segments)) == ["Local Unknown"])
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(found([noise], in: segments).first?["filtered"] as? Bool == true)
+        // Unflagged lines are labelled exactly as before.
+        #expect(speakers(found(voices.own + voices.residue, in: segments)) == ["Local Speaker 1"])
+        #expect(record(segments) == record(before))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+        #expect(outcome.speakerCount == 1)
     }
 
     @Test("a re-detect never changes the number of segments or any text, at any stated count",
