@@ -82,7 +82,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/DiarizationCleanup.swift` -- post-processes a raw `DiarizationResult` before labeling: absorbs clusters holding under `diarization_min_speaker_share` of a stream's speech into the dominant speaker, only when one cluster holds >=50% (#65)
 - `TranscriberCore/TranscriptRediarizer.swift` -- re-runs diarization on ONE channel at a user-stated speaker count and rewrites the transcript in place (#67); relabels only, never re-runs ASR. On the mic channel it runs `EchoDeduplicator` on the diarizer's RAW clusters before the count is enforced (#243): a cluster judged echo is kept out of the merge and not counted as a person, its matched lines are flagged `echo`, and the track's `echo_clusters` / echo issues are rewritten; stamps `speaker_count_<track>` (people) and `rediarized_channels`
 - `TranscriberCore/SpeakerCountEnforcer.swift` -- makes a user-stated speaker count binding: merges the smallest clusters into their nearest surviving cluster (cosine over the result's embeddings, duration as fallback) until exactly N remain (#201); the diarizer's forced count is a target, not a ceiling. Clusters passed in `keeping` (echo clusters, #243) are never merged away, never merged into and not counted
-- `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model
+- `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model; `DiarizerThrow.isTooLittleSpeech` tells FluidAudio's "too little speech" throw (informational) from a real failure
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
 - `TranscriberCore/SessionNameSuggestionPolicy.swift` -- pure decision: whether a late-arriving calendar title should replace the current session-name field value (#197)
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync (timed for `IOCycleStats`; `debug_skip_wav_sync` leaves out the `fsync` only, #247); throwing `FileHandle` writes are caught and surfaced as a write-failure anomaly instead of crashing the helper (#196)
@@ -213,7 +213,7 @@ swift build
 # The whole suite, as `just test` and CI run it. --no-parallel is load-bearing (AGENTS.md): run in
 # parallel the suite wedges.
 swift test --no-parallel --filter TranscriberTests -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
-# 2530 tests across 278 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2548 tests across 280 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
 # Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
@@ -254,13 +254,13 @@ record of its build, and the live log does not carry it either.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 87 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 89 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 87 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 89 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

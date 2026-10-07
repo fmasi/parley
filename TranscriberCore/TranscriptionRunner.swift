@@ -1177,25 +1177,37 @@ public final class TranscriptionRunner {
         var labeled: [LabeledSegment]
         var speakerDatabase: [String: [Float]] = [:]
         // No words, nothing to label: the stream is not diarized (as in `ChunkProcessor`). FluidAudio throws
-        // `noSpeechDetected` on audio it finds no speech in, and here that throw fails the whole run (#264).
+        // `noSpeechDetected` on audio it finds no speech in (#264); on a stream with a few words it is handled below (#302).
         if let diarizer, !segments.isEmpty {
             // Run VAD concurrently with diarization (both read the same audio file)
             async let diarizedResult = diarizer.diarize(audioPath: audioPath, numSpeakers: nil)
             async let speechMapResult = vadSpeechMap.analyze(audioPath: audioPath)
 
-            let diarizationResult = try await diarizedResult
+            let diarizationResult: DiarizationResult?
+            do {
+                diarizationResult = try await diarizedResult
+            } catch where DiarizerThrow.isTooLittleSpeech(error) {
+                // Too little speech to attribute (#302), as in `ChunkProcessor`: the lines are unattributed and the run
+                // goes on. Every other diarizer throw still fails the run.
+                diarizationResult = nil
+                Logger.transcription.info("Too little speech to diarize \(label, privacy: .public): \(segments.count, privacy: .public) segment(s) left unattributed")
+            }
             // analyze() returns [SpeechRegion]? — flatten the try? double-optional
             let speechMap: [SpeechRegion]? = (try? await speechMapResult) ?? nil
 
-            let result = StreamLabeling.withDiarization(
-                segments: segments,
-                diarizationResult: diarizationResult,
-                speechMap: speechMap,
-                vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
-                minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
-            )
-            labeled = result.labeled
-            speakerDatabase = result.speakerDatabase
+            if let diarizationResult {
+                let result = StreamLabeling.withDiarization(
+                    segments: segments,
+                    diarizationResult: diarizationResult,
+                    speechMap: speechMap,
+                    vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
+                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
+                )
+                labeled = result.labeled
+                speakerDatabase = result.speakerDatabase
+            } else {
+                labeled = StreamLabeling.singleSpeaker(segments, speaker: SpeakerAssignment.unknownSpeaker)
+            }
         } else {
             labeled = StreamLabeling.singleSpeaker(segments, speaker: "Speaker 1")
         }

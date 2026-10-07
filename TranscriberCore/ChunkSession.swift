@@ -19,6 +19,10 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
 
         public static let asrFailed = Code(rawValue: "asr_failed")
         public static let diarizationFailed = Code(rawValue: "diarization_failed")
+        /// The stream has words, but the diarizer found too little speech in it to attribute them to anyone (FluidAudio's
+        /// `noSpeechDetected`: a few words in a short chunk, #302). Its lines are unattributed (`Unknown`). Informational:
+        /// nothing is missing, and the transcript stays diarized.
+        public static let diarizationTooLittleSpeech = Code(rawValue: "diarization_too_little_speech")
         /// The VAD model is not cached: the quality gate ran without a speech map (informational).
         public static let vadUnavailable = Code(rawValue: "vad_unavailable")
         /// VAD threw at runtime (a real failure, unlike `vadUnavailable`).

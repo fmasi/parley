@@ -743,8 +743,15 @@ public final class ChunkProcessor {
                     issues.append(ChunkIssue(code: .clustersAbsorbed, track: source, count: result.absorbed))
                 }
             } catch {
-                Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .private)")
-                issues.append(ChunkIssue(code: .diarizationFailed, track: source, count: nil))
+                // Too little speech to attribute (a few words in a short last chunk, #302) is not a failure: informational,
+                // and the transcript stays diarized. Every other throw is a failure.
+                if DiarizerThrow.isTooLittleSpeech(error) {
+                    Logger.transcription.info("Too little speech to diarize \(label, privacy: .public): \(segments.count, privacy: .public) segment(s) left unattributed")
+                    issues.append(ChunkIssue(code: .diarizationTooLittleSpeech, track: source, count: nil))
+                } else {
+                    Logger.transcription.error("Diarization failed for \(label, privacy: .public): \(error, privacy: .private)")
+                    issues.append(ChunkIssue(code: .diarizationFailed, track: source, count: nil))
+                }
                 // Label "Unknown", never "Speaker 1". Asserting a specific identity we do not have
                 // is worse than admitting we don't know: with an empty speakerDatabase the
                 // reconciler skips this chunk entirely, so a fabricated "Speaker 1" fuses with the

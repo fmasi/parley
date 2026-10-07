@@ -250,6 +250,10 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isnâ€
   - Do: a 2-chunk recording with the other side talking (a call, or a video playing) while you say nothing at all.
   - PASS: the completion notice is "Transcription Complete", never "N chunks had processing problems". `meta` shows `processing_issue_count` 0 and no `diarization_failed` in `processing_issues`. `grep '"diarization"' <id>.json` reads `true`. The remote speakers are labelled as usual.
 
+- [ ] **D-20d A short last chunk with a few words is not a diarization failure (#302).**
+  - Do: set `chunk_duration_minutes` to 10 (the minimum). Record a call for about 10 min 30 s, so the second chunk is about 30 s long; in those last 30 s the other side says one short sentence and nothing else.
+  - PASS: the completion notice is "Transcription Complete", never "1 chunk had processing problems". `meta` shows `processing_problem_chunks` 0, no `diarization_failed`, and, if the diarizer found too little speech, a `diarization_too_little_speech` entry for the last chunk. `grep '"diarization"' <id>.json` reads `true`. The last chunk's remote line reads `Remote Unknown` (or a real speaker if the diarizer managed one); earlier chunks are labelled as usual.
+
 - [ ] **D-20c A listen-only recording transcribes from the command line (#264).**
   - Do: `Parley transcribe -i <listen-only>.m4a --split --output-dir <a scratch folder>` on the merged archive of a listen-only recording (D-20b's will do).
   - PASS: it ends with "Output saved to: â€¦", never a "no speech detected" error. The transcript has the remote speakers labelled as usual and no local lines.

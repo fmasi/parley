@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+// Only the error type: FluidAudio's own `DiarizationResult` would make this file's bare name ambiguous.
+import enum FluidAudio.OfflineDiarizationError
 @testable import TranscriberCore
 
 /// An engine whose transcribe() always throws (ASR failure path).
@@ -19,7 +21,7 @@ struct NoWordsEngine: TranscriptionEngine {
     func prepare() async throws {}
 }
 
-/// A diarizer that throws — as FluidAudio's offline diarizer does on audio it finds no speech in (`noSpeechDetected`).
+/// A diarizer that throws an error of its own: a diarizer failure that is not FluidAudio's "no speech" outcome.
 struct ThrowingDiarizer: DiarizationProvider {
     struct NoSpeech: Error {}
     func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { throw NoSpeech() }
@@ -164,6 +166,88 @@ struct ChunkProcessorTests {
         let chunk = try #require(await processor.getSessionState().chunks.first)
         #expect(chunk.issues.contains(ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)))
         #expect(chunk.segments.map(\.speaker) == [SpeakerAssignment.unknownSpeaker], "never a made-up Speaker 1")
+    }
+
+    /// Hears a line on each stream, different words per side so the echo check has nothing to match.
+    private struct BothSidesEngine: TranscriptionEngine {
+        let name = "BothSides"
+        func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+            [TranscriptSegment(start: 0, end: 5, text: audioSource == .system ? "yes" : "shall we start the review", language: "en")]
+        }
+        func isReady() -> Bool { true }
+        func prepare() async throws {}
+    }
+
+    /// Throws `error` for the files named in `failing`; one speaker on any other.
+    private struct ScriptedDiarizer: DiarizationProvider {
+        let failing: Set<String>
+        let error: OfflineDiarizationError
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
+            if failing.contains(audioPath.lastPathComponent) { throw error }
+            return try await FakeDiarizer().diarize(audioPath: audioPath, numSpeakers: numSpeakers)
+        }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { throw error }
+    }
+
+    /// A 2-chunk dual-stream recording: both chunks have words on both sides; the diarizer throws `error` on chunk 1's
+    /// system stream (the short last chunk of #302). Returns the session state and the finalized transcript.
+    private func shortLastChunk(throwing error: OfflineDiarizationError) async throws
+        -> (dir: URL, state: SessionState, transcript: URL) {
+        let dir = try makeTempDir()
+        for i in 0..<2 {
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-\(i).wav"), seconds: 1)
+            try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-\(i)_mic.wav"), seconds: 1)
+        }
+        let processor = makeProcessor(dir: dir, engine: BothSidesEngine(),
+                                      diarizer: ScriptedDiarizer(failing: ["meeting-1.wav"], error: error))
+        for i in 0..<2 {
+            await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+                index: i, systemPath: dir.appendingPathComponent("meeting-\(i).wav").path,
+                micPath: dir.appendingPathComponent("meeting-\(i)_mic.wav").path, startTime: Date(timeIntervalSince1970: Double(i) * 600)))
+        }
+        let state = await processor.getSessionState()
+        let result = try await TranscriptionRunner().finalize(sessionState: state, outputDirectory: dir, config: .default)
+        return (dir, state, result.jsonPath)
+    }
+
+    /// #302: FluidAudio's `noSpeechDetected` (NSError code 5) on a stream that HAS words — a short last chunk where the
+    /// other side said a few words, too little speech for one embedding — is "too little speech to attribute", not a
+    /// failure. The lines stay unattributed, the issue is informational, and the transcript stays diarized.
+    @Test func tooLittleSpeechOnAShortLastChunkIsNotADiarizationFailure() async throws {
+        #expect((OfflineDiarizationError.noSpeechDetected as NSError).code == 5, "the code the log shows for it")
+        let (dir, state, transcript) = try await shortLastChunk(throwing: .noSpeechDetected)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let last = try #require(state.chunks.first { $0.index == 1 })
+        #expect(!last.issues.contains { $0.code == .diarizationFailed })
+        #expect(last.issues.contains(ChunkIssue(code: .diarizationTooLittleSpeech, track: "remote", count: nil)))
+        #expect(!last.issues.contains { $0.affectsContent }, "nothing for the completion notice to call a problem")
+        #expect(last.segments.filter { $0.source == "remote" }.map(\.speaker) == ["Remote Unknown"], "unattributed, never a made-up speaker")
+        #expect(last.segments.filter { $0.source == "local" }.map(\.speaker) == ["Local Speaker 1"], "the other side is diarized as usual")
+
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata["diarization"] as? Bool == true)
+        #expect(metadata["processing_problem_chunks"] as? Int == 0)
+        #expect(metadata["processing_issue_count"] as? Int == 0)
+        #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: transcript) == 0)
+        let issues = try #require(metadata["processing_issues"] as? [[String: Any]])
+        #expect(issues.contains { $0["code"] as? String == "diarization_too_little_speech" && $0["chunk"] as? Int == 1 && $0["track"] as? String == "remote" })
+    }
+
+    /// ...while any OTHER FluidAudio error on a stream with words is still a diarization failure: content-affecting, a
+    /// problem chunk, and the transcript is not stamped diarized.
+    @Test func anotherFluidAudioErrorOnAShortLastChunkIsStillADiarizationFailure() async throws {
+        let (dir, state, transcript) = try await shortLastChunk(throwing: .processingFailed("synthetic"))
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let last = try #require(state.chunks.first { $0.index == 1 })
+        #expect(last.issues.contains(ChunkIssue(code: .diarizationFailed, track: "remote", count: nil)))
+        #expect(!last.issues.contains { $0.code == .diarizationTooLittleSpeech })
+        #expect(last.segments.filter { $0.source == "remote" }.map(\.speaker) == ["Remote Unknown"])
+        let metadata = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: transcript)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect(metadata["diarization"] as? Bool == false)
+        #expect(metadata["processing_problem_chunks"] as? Int == 1)
     }
 
     /// L6/L7 (scan B P3.2): the orphan re-ingested by the crash path and the same index arriving again
