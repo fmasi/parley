@@ -284,6 +284,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// (and in provenance written before this field).
     public let localContentAnomalyCount: Int?
     public let remoteContentAnomalyCount: Int?
+    /// Each rate drift on the remote side, in order (#308): where it sits, how long audio was at the wrong rate, and
+    /// whether it healed. nil exactly when the remote coverage is (and in provenance written before this field).
+    public let remoteRateDrift: [RateDriftWindow]?
     /// The transcript was rebuilt by a recovery run (its original was unreadable), and these capture
     /// facts come from that run's diagnostics, not the recording's: they may be incomplete (round 4
     /// item 7).
@@ -319,6 +322,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case systemPermissionDeniedConfirmed = "system_permission_denied_confirmed"
         case localContentAnomalyCount = "local_content_anomaly_count"
         case remoteContentAnomalyCount = "remote_content_anomaly_count"
+        case remoteRateDrift = "remote_rate_drift"
         case reconstructed
     }
 
@@ -342,7 +346,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         eventsDropped: Int = 0,
         systemPermissionDeniedConfirmed: Bool = false,
         localContentAnomalyCount: Int? = nil,
-        remoteContentAnomalyCount: Int? = nil
+        remoteContentAnomalyCount: Int? = nil,
+        remoteRateDrift: [RateDriftWindow]? = nil
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -364,6 +369,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.systemPermissionDeniedConfirmed = systemPermissionDeniedConfirmed
         self.localContentAnomalyCount = localContentAnomalyCount
         self.remoteContentAnomalyCount = remoteContentAnomalyCount
+        self.remoteRateDrift = remoteRateDrift
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -397,6 +403,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         systemPermissionDeniedConfirmed = try c.decodeIfPresent(Bool.self, forKey: .systemPermissionDeniedConfirmed) ?? false
         localContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .localContentAnomalyCount)
         remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
+        remoteRateDrift = try c.decodeIfPresent([RateDriftWindow].self, forKey: .remoteRateDrift)
         reconstructed = try c.decodeIfPresent(Bool.self, forKey: .reconstructed) ?? false
     }
 
@@ -429,9 +436,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         // no coverage deficit; the coverage-only verdict is still never a silent "healthy" default.
         if let remoteCoverage {
             let status = remoteStatus.flatMap(TrackAccounting.Status.init(rawValue:))
-                ?? remoteCoverage.status(isTap: true, contentAnomalies: remoteContentAnomalyCount ?? 0)
+                ?? remoteCoverage.status(isTap: true, contentAnomalies: remoteContentAnomalyCount ?? 0,
+                                         healedDrifts: remoteRateDrift.map(RateDriftWindow.healedWithinBound) ?? 0)
             var side = remoteCoverage.asMetadataDictionary(status: status)
             if let remoteContentAnomalyCount { side["content_anomaly_count"] = remoteContentAnomalyCount }
+            if let remoteRateDrift, !remoteRateDrift.isEmpty { side["rate_drift"] = remoteRateDrift.map { $0.asMetadataDictionary() } }
             d["remote_coverage"] = side
         }
         if let localCoverage {
@@ -523,6 +532,14 @@ public struct CaptureDiagnostics: Sendable {
     private var routeChangeTally = 0
     private var sawSystemAudioUnrecovered = false
     private var lastDenial: Date?
+    /// The remote side's rate drifts and what ends one (#308), same out-of-ring lifetime: each drift (with the
+    /// helper's `onset_within_seconds`, nil when unknown), each `restartInPlace` made to remediate one, each system
+    /// `firstFrames`, and the session's first `captureStart` (the origin of the offsets). Paired at `makeProvenance`,
+    /// in time order, so the order merges present them in does not matter.
+    private var systemDrifts: [(at: Date, onsetWithin: Double?)] = []
+    private var driftRemediations: [Date] = []
+    private var systemFirstFrames: [Date] = []
+    private var firstCaptureStart: Date?
 
     /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
     /// events the ring already evicted (read back from the live log) alongside events the ring
@@ -563,7 +580,18 @@ public struct CaptureDiagnostics: Sendable {
         if e.kind == .systemAudioPermissionDenied { lastDenial = max(lastDenial ?? e.timestamp, e.timestamp) }
         if CaptureEventKind.contentCompromising.contains(e.kind), let track = Self.side(of: e) {
             contentAnomalyTallies[track, default: 0] += 1
+            if e.kind == .rateDrift, track == "system" {
+                let onset = e.detail["onset_within_seconds"].flatMap(Double.init).flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+                systemDrifts.append((e.timestamp, onset))
+            }
         }
+        // Only the remediation's START (`checkRateDrift`, which carries `attempt`) marks it: the rebuild's own success
+        // event repeats the reason (with `rung`) later, and could fall inside the NEXT drift's window (#311 review).
+        if e.kind == .restartInPlace, e.detail["reason"] == Self.driftRemediationReason, e.detail["attempt"] != nil {
+            driftRemediations.append(e.timestamp)
+        }
+        if e.kind == .firstFrames, e.detail["track"] == CaptureTrack.system.rawValue { systemFirstFrames.append(e.timestamp) }
+        if e.kind == .captureStart { firstCaptureStart = min(firstCaptureStart ?? e.timestamp, e.timestamp) }
         if e.kind == .systemAudioPermissionDenied, Self.confirmedDenialStatuses.contains(e.detail["status"] ?? "") {
             lastConfirmedDenial = max(lastConfirmedDenial ?? e.timestamp, e.timestamp)
         }
@@ -576,6 +604,25 @@ public struct CaptureDiagnostics: Sendable {
             for prefix in ["local", "remote"] { tracks[prefix] = TrackAccounting(detail: e.detail, prefix: prefix) }
             tally(HelperCoverage(tracks: tracks, standInAt: e.detail["from"] == Self.standInSource ? e.timestamp : nil),
                   helper: e.detail["helper_session"] ?? "")
+        }
+    }
+
+    /// The `restartInPlace` reason `SystemTapSession` gives the rebuild that remediates a rate drift.
+    public static let driftRemediationReason = "rate drift remediation"
+
+    /// The remote side's rate drifts as windows (#308). A drift HEALED when the rebuild made to remediate it (the
+    /// first remediation after it, before the next drift) delivered its first frames. Not healed otherwise: no
+    /// rebuild (the remediation budget was spent), a rebuild that never delivered, or one the record never saw.
+    public func remoteRateDrift() -> [RateDriftWindow] {
+        let drifts = systemDrifts.sorted { $0.at < $1.at }
+        let remediations = driftRemediations.sorted(), firsts = systemFirstFrames.sorted()
+        return drifts.enumerated().map { i, drift in
+            let next = i + 1 < drifts.count ? drifts[i + 1].at : .distantFuture
+            let healedAt = remediations.first { $0 >= drift.at && $0 < next }
+                .flatMap { rebuild in firsts.first { $0 > rebuild } }
+            return RateDriftWindow(detectedOffsetSeconds: firstCaptureStart.map { max(0, drift.at.timeIntervalSince($0)) },
+                                   onsetWithinSeconds: drift.onsetWithin,
+                                   healedAfterSeconds: healedAt.map { $0.timeIntervalSince(drift.at) })
         }
     }
 
@@ -644,6 +691,10 @@ public struct CaptureDiagnostics: Sendable {
         routeChangeTally = 0
         sawSystemAudioUnrecovered = false
         lastDenial = nil
+        systemDrifts.removeAll()
+        driftRemediations.removeAll()
+        systemFirstFrames.removeAll()
+        firstCaptureStart = nil
         countedKeys.removeAll()
         droppedKeys.removeAll()
     }
@@ -780,6 +831,7 @@ public struct CaptureDiagnostics: Sendable {
     ) -> CaptureProvenance {
         let remote = coverage(prefix: "remote")
         let local = coverage(prefix: "local")
+        let drifts = remoteRateDrift()
         return CaptureProvenance(
             engine: engine,
             systemFormat: systemFormat,
@@ -801,11 +853,15 @@ public struct CaptureDiagnostics: Sendable {
             localCoverage: local,
             remoteCoverage: remote,
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
-            remoteStatus: remote.map { $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system")).rawValue },
+            remoteStatus: remote.map {
+                $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system"),
+                          healedDrifts: RateDriftWindow.healedWithinBound(drifts)).rawValue
+            },
             eventsDropped: droppedCount,
             systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed,
             localContentAnomalyCount: local.map { _ in contentAnomalyCount(track: "mic") },
-            remoteContentAnomalyCount: remote.map { _ in contentAnomalyCount(track: "system") }
+            remoteContentAnomalyCount: remote.map { _ in contentAnomalyCount(track: "system") },
+            remoteRateDrift: remote.map { _ in drifts }
         )
     }
 

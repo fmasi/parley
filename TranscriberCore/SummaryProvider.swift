@@ -18,7 +18,7 @@ public struct SummarySegment: Sendable {
 
 /// How much of one side of the meeting was captured, read from the transcript's
 /// `metadata.capture.remote` / `.local` (§7.1/§7.3). `status` is a `TrackAccounting.Status` raw
-/// value ("healthy", "idle", "neverDelivered", "compromised").
+/// value ("healthy", "idle", "neverDelivered", "degraded", "compromised").
 public struct CaptureSideNote: Equatable, Sendable {
     /// Empty when the transcript recorded coverage but no status (read as "unknown", fail closed).
     public let status: String
@@ -39,10 +39,14 @@ public struct CaptureSideNote: Equatable, Sendable {
     public let exactZeroIsLowerBound: Bool
     /// A stop's seal timed out (`coverage_incomplete`): the seconds are lower bounds (final review R-M1).
     public let coverageIncomplete: Bool
+    /// At most this many seconds were captured at the wrong rate, summed over the side's `rate_drift` windows that
+    /// state it (#308); nil when none does.
+    public let wrongRateSeconds: Double?
 
     public init(status: String, deliveredSeconds: Double, expectedSeconds: Double,
                 exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil, exactZeroIsLowerBound: Bool = false,
-                coverageIncomplete: Bool = false) {
+                coverageIncomplete: Bool = false, wrongRateSeconds: Double? = nil) {
+        self.wrongRateSeconds = wrongRateSeconds
         self.exactZeroIsLowerBound = exactZeroIsLowerBound
         self.coverageIncomplete = coverageIncomplete
         self.status = status

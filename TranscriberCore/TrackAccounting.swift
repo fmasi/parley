@@ -3,7 +3,9 @@ import Foundation
 /// Per-track coverage (§7.1): what was expected, what arrived, what was fabricated. Kept as plain
 /// counters outside the evicting diagnostic ring; emitted at every rotation and at stop.
 public struct TrackAccounting: Codable, Equatable, Sendable {
-    public enum Status: String, Codable, Sendable { case healthy, idle, neverDelivered, compromised }
+    /// `degraded` (#308): every content anomaly on the side was a rate drift the helper healed within
+    /// `RateDriftWindow.healedBoundSeconds` — a few seconds at the wrong rate, the rest captured correctly.
+    public enum Status: String, Codable, Sendable { case healthy, idle, neverDelivered, degraded, compromised }
 
     public var expectedSeconds: Double = 0
     /// nil = not measured (SCK counts no tap callbacks) — never a claimed 0.
@@ -83,16 +85,20 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     /// C-M12: a tap that was never expected (nothing played on this Mac) and delivered only exact
     /// digital zeros is `idle` too, not `healthy` — after the content-anomaly check, so a permission
     /// denial is never hidden. Unmeasured zeros (SCK) can't show that, so they never make it idle.
-    public func status(isTap: Bool, contentAnomalies: Int) -> Status {
+    ///
+    /// `healedDrifts` (#308): how many of `contentAnomalies` are rate drifts that healed within the bound, summed
+    /// over the side (`RateDriftWindow.healedWithinBound`). When they are ALL of them, the side is `.degraded`, not `.compromised` —
+    /// after every other rule, so a deficit still makes it compromised and nothing makes it healthy.
+    public func status(isTap: Bool, contentAnomalies: Int, healedDrifts: Int = 0) -> Status {
         if isTap, expectedSeconds < 1, deliveredSeconds == 0 { return .idle }
         if expectedSeconds >= 1, deliveredSeconds == 0 { return .neverDelivered }
-        if contentAnomalies > 0 { return .compromised }
-        if isTap, expectedSeconds < 1, let zeros = exactZeroSeconds, deliveredSeconds - zeros < 1 { return .idle }
+        if contentAnomalies > healedDrifts { return .compromised }
+        if contentAnomalies == 0, isTap, expectedSeconds < 1, let zeros = exactZeroSeconds, deliveredSeconds - zeros < 1 { return .idle }
         let deficit = expectedSeconds - deliveredSeconds
         if expectedSeconds > 0, deficit >= Self.minimumDeficitSeconds, deficit / expectedSeconds >= Self.deficitRatio {
             return .compromised
         }
-        return .healthy
+        return contentAnomalies > 0 ? .degraded : .healthy
     }
 
     /// Unmeasured plus unmeasured stays unmeasured; a measured value plus an unmeasured one keeps
@@ -185,4 +191,71 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         if coverageIncomplete { d["coverage_incomplete"] = true }
         return d
     }
+}
+
+/// One rate drift on the tap (#308): the output device changed rate under it, so audio was captured at the wrong
+/// rate from the drift's onset until the helper's rebuild delivered its first frames. Built by
+/// `CaptureDiagnostics.makeProvenance` from the `rateDrift`, its `restartInPlace` ("rate drift remediation") and the
+/// next system `firstFrames`; stamped under `metadata.capture.remote.rate_drift`.
+public struct RateDriftWindow: Codable, Equatable, Sendable {
+    /// Seconds from capture start to the detection; nil when no `captureStart` was seen.
+    public var detectedOffsetSeconds: Double?
+    /// How long before the detection the drift can have begun, at the earliest (the helper's
+    /// `onset_within_seconds`); nil = onset unknown (the event carries no measurement, e.g. a drift found at
+    /// setup, or one from an older helper).
+    public var onsetWithinSeconds: Double?
+    /// Seconds from the detection to the remediation rebuild's first frames; nil = never healed.
+    public var healedAfterSeconds: Double?
+
+    /// The most wrong-rate audio, summed over a side's drifts, that still reads `degraded` rather than `compromised`: the same 15 s the record
+    /// already tolerates as a coverage shortfall (`TrackAccounting.minimumDeficitSeconds`). A side may lose up to that
+    /// much audio and stay healthy; a heal that corrupted no more than that is a blemish to state, not a side to
+    /// distrust. The real 0.9.0 case (#308) measured a ~5 s window, a ~3 s rebuild and at most ~3 s before it: ~11 s.
+    public static let healedBoundSeconds: Double = TrackAccounting.minimumDeficitSeconds
+
+    public init(detectedOffsetSeconds: Double? = nil, onsetWithinSeconds: Double? = nil, healedAfterSeconds: Double? = nil) {
+        self.detectedOffsetSeconds = detectedOffsetSeconds
+        self.onsetWithinSeconds = onsetWithinSeconds
+        self.healedAfterSeconds = healedAfterSeconds
+    }
+
+    /// At most this many seconds were captured at the wrong rate; nil when the onset is unknown or it never healed.
+    public var affectedSeconds: Double? {
+        guard let onsetWithinSeconds, let healedAfterSeconds else { return nil }
+        return onsetWithinSeconds + healedAfterSeconds
+    }
+
+    /// How many of a side's drifts may count as healed for `TrackAccounting.status`: the healed ones with a known
+    /// window, and only while their windows SUM to no more than the bound (#311 review) — three 7 s drifts are 21 s
+    /// at the wrong rate, not three blemishes. 0 otherwise, which keeps the side `compromised`.
+    public static func healedWithinBound(_ windows: [RateDriftWindow]) -> Int {
+        let healed = windows.compactMap(\.affectedSeconds)
+        return healed.reduce(0, +) <= healedBoundSeconds ? healed.count : 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case detectedOffsetSeconds = "detected_offset_seconds"
+        case onsetWithinSeconds = "onset_within_seconds"
+        case healedAfterSeconds = "healed_after_seconds"
+    }
+
+    /// One entry of `metadata.capture.remote.rate_drift`. `offset_seconds` is where the wrong-rate window starts
+    /// (the earliest onset), `affected_seconds` its length at most; an unknown onset says so instead.
+    public func asMetadataDictionary() -> [String: Any] {
+        var d: [String: Any] = ["healed": healedAfterSeconds != nil]
+        if let detectedOffsetSeconds { d["detected_offset_seconds"] = Self.tenths(detectedOffsetSeconds) }
+        if let onsetWithinSeconds {
+            if let detectedOffsetSeconds { d["offset_seconds"] = Self.tenths(max(0, detectedOffsetSeconds - onsetWithinSeconds)) }
+        } else {
+            d["onset"] = "unknown"
+        }
+        if let healedAfterSeconds { d["healed_after_seconds"] = Self.tenths(healedAfterSeconds) }
+        if let affectedSeconds {
+            d["affected_seconds"] = Self.tenths(affectedSeconds)
+            d["affected_seconds_is_upper_bound"] = true
+        }
+        return d
+    }
+
+    private static func tenths(_ value: Double) -> Double { (value * 10).rounded() / 10 }
 }
