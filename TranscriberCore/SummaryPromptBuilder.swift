@@ -61,7 +61,7 @@ enum SummaryPromptBuilder {
     /// How one side's capture reads, from its recorded status and facts.
     enum SideVerdict: Hashable {
         case healthy, idle, notCaptured, partlyCaptured, permissionDeniedSilence, permissionDeniedPartialSilence,
-             uncertainSilence, localSilence, localPartialSilence, compromised, unknown,
+             uncertainSilence, localSilence, localPartialSilence, degraded, compromised, unknown,
              /// A healthy remote side that received only exact digital zeros (A-I2 ruling): information,
              /// never a failure claim.
              onlyDigitalSilence
@@ -92,6 +92,7 @@ enum SummaryPromptBuilder {
         // `idle` is a tap-only verdict (nothing played on this Mac); a mic is never idle.
         case .idle: return isRemote ? .idle : .healthy
         case .neverDelivered: return .notCaptured
+        case .degraded: return .degraded
         case nil: return .unknown
         case .compromised:
             if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
@@ -193,6 +194,10 @@ enum SummaryPromptBuilder {
         case .localPartialSilence:
             let count = (note.anomalyCount ?? 0) > 0 ? " (\(anomalies!))" : ""
             text = "\(label): captured, but \(silence) s of \(delivered) s was digital silence\(count)"
+        case .degraded:
+            // A rate drift healed in seconds (#308): stated, with how long, never as a compromised side.
+            let span = note.wrongRateSeconds.map { "up to \(seconds($0)) s" } ?? "a few seconds"
+            text = "\(label): captured; \(span) recorded at the wrong rate before Parley recovered (\(anomalies ?? "anomaly count not recorded"))"
         case .compromised:
             text = "\(label): captured, but compromised (\(anomalies ?? "anomaly count not recorded"))\(silenceSuffix)\(permission)"
         case .unknown: text = "\(label): capture status unknown (\(atLeast)\(delivered) s of \(atLeast)\(expected) s)"
