@@ -251,6 +251,16 @@ check "  ... says why it is RED" 0 "$RED (compile error in the changed test file
 scenario; given parent testbuild 1 "$LOG_TEST_ERROR_PLAIN"; head_green; run_gate fix
 check "compile error in the changed test file (plain)" 0 "$PASSED"
 
+# Far more compile errors than the gate prints (over a pipe buffer's worth, so a reader that
+# stops after ten lines reliably breaks the pipe): printing only the first ten must not end the gate.
+LOG_TEST_ERROR_MANY="Building for debugging..."
+for i in $(seq 1 2000); do
+  LOG_TEST_ERROR_MANY="$LOG_TEST_ERROR_MANY
+$CHANGED:$i:5: error: type 'Calc' has no member 'f$i'"
+done
+scenario; given parent testbuild 1 "$LOG_TEST_ERROR_MANY"; head_green; run_gate fix
+check "two thousand compile errors in the changed test file" 0 "$PASSED"
+
 scenario; given parent testbuild 1 "$LOG_TEST_ERROR_PREFIX"; head_green; run_gate fix
 check "compile error in the changed test file ('error: path' shape)" 0 "$PASSED"
 
