@@ -86,8 +86,8 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     /// digital zeros is `idle` too, not `healthy` — after the content-anomaly check, so a permission
     /// denial is never hidden. Unmeasured zeros (SCK) can't show that, so they never make it idle.
     ///
-    /// `healedDrifts` (#308): how many of `contentAnomalies` are rate drifts that healed within the bound
-    /// (`RateDriftWindow.isShortAndHealed`). When they are ALL of them, the side is `.degraded`, not `.compromised` —
+    /// `healedDrifts` (#308): how many of `contentAnomalies` are rate drifts that healed within the bound, summed
+    /// over the side (`RateDriftWindow.healedWithinBound`). When they are ALL of them, the side is `.degraded`, not `.compromised` —
     /// after every other rule, so a deficit still makes it compromised and nothing makes it healthy.
     public func status(isTap: Bool, contentAnomalies: Int, healedDrifts: Int = 0) -> Status {
         if isTap, expectedSeconds < 1, deliveredSeconds == 0 { return .idle }
@@ -207,7 +207,7 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
     /// Seconds from the detection to the remediation rebuild's first frames; nil = never healed.
     public var healedAfterSeconds: Double?
 
-    /// The longest wrong-rate window that still reads `degraded` rather than `compromised`: the same 15 s the record
+    /// The most wrong-rate audio, summed over a side's drifts, that still reads `degraded` rather than `compromised`: the same 15 s the record
     /// already tolerates as a coverage shortfall (`TrackAccounting.minimumDeficitSeconds`). A side may lose up to that
     /// much audio and stay healthy; a heal that corrupted no more than that is a blemish to state, not a side to
     /// distrust. The real 0.9.0 case (#308) measured a ~5 s window, a ~3 s rebuild and at most ~3 s before it: ~11 s.
@@ -225,8 +225,13 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
         return onsetWithinSeconds + healedAfterSeconds
     }
 
-    /// Healed, with a known onset, inside the bound. Anything else keeps the side `compromised`.
-    public var isShortAndHealed: Bool { affectedSeconds.map { $0 <= Self.healedBoundSeconds } ?? false }
+    /// How many of a side's drifts may count as healed for `TrackAccounting.status`: the healed ones with a known
+    /// window, and only while their windows SUM to no more than the bound (#311 review) — three 7 s drifts are 21 s
+    /// at the wrong rate, not three blemishes. 0 otherwise, which keeps the side `compromised`.
+    public static func healedWithinBound(_ windows: [RateDriftWindow]) -> Int {
+        let healed = windows.compactMap(\.affectedSeconds)
+        return healed.reduce(0, +) <= healedBoundSeconds ? healed.count : 0
+    }
 
     private enum CodingKeys: String, CodingKey {
         case detectedOffsetSeconds = "detected_offset_seconds"

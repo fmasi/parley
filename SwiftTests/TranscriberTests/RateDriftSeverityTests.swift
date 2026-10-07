@@ -29,6 +29,12 @@ import Testing
                      detail: ["source": "system-tap", "reason": "rate drift remediation", "attempt": "1"])
     }
 
+    /// The rebuild's own success event: same reason, `rung` instead of `attempt` (`SystemTapSession.rebuild`).
+    private func rebuildDone(_ t: TimeInterval) -> CaptureEvent {
+        CaptureEvent(timestamp: at(t), origin: .helper, kind: .restartInPlace, severity: .warning,
+                     detail: ["source": "system-tap", "reason": "rate drift remediation", "rung": "rebuildAggregate"])
+    }
+
     private func firstFrames(_ t: TimeInterval, track: String = "system") -> CaptureEvent {
         CaptureEvent(timestamp: at(t), origin: .helper, kind: .firstFrames, severity: .info, detail: ["track": track])
     }
@@ -114,8 +120,8 @@ import Testing
 
     @Test func theBoundIsTheCoverageDeficitFloor() {
         #expect(RateDriftWindow.healedBoundSeconds == TrackAccounting.minimumDeficitSeconds)
-        #expect(RateDriftWindow(onsetWithinSeconds: 10, healedAfterSeconds: 5).isShortAndHealed)
-        #expect(!RateDriftWindow(onsetWithinSeconds: 10, healedAfterSeconds: 5.1).isShortAndHealed)
+        #expect(RateDriftWindow.healedWithinBound([RateDriftWindow(onsetWithinSeconds: 10, healedAfterSeconds: 5)]) == 1)
+        #expect(RateDriftWindow.healedWithinBound([RateDriftWindow(onsetWithinSeconds: 10, healedAfterSeconds: 5.1)]) == 0)
     }
 
     /// An event with no onset measurement (setup-time drift, an older helper): the record says the onset is unknown
@@ -141,6 +147,41 @@ import Testing
                             stop(400, remote: coverage(expected: 400, delivered: 400))])
         #expect(p.remoteStatus == "compromised")
         #expect(p.remoteContentAnomalyCount == 2)
+    }
+
+    /// #311 review: each remediation posts TWO `restartInPlace` with its reason — the start (`attempt`) and the
+    /// rebuild's success (`rung`), later. A second drift detected before drift 1's rebuild finished, and never
+    /// remediated itself, must not take that success event as its own remediation.
+    @Test func aSecondUnremediatedDriftIsNotHealedByTheFirstOnesRebuild() throws {
+        let p = provenance([start(), drift(100, onsetWithin: "5.0"), remediation(100.01), drift(100.5, onsetWithin: "2.0"),
+                            rebuildDone(101), firstFrames(102), stop(200, remote: coverage(expected: 200, delivered: 200))])
+        let entries = driftEntries(p)
+        #expect(entries.count == 2)
+        #expect(entries.first?["healed"] as? Bool == true)
+        #expect(entries.last?["healed"] as? Bool == false)
+        #expect(p.remoteStatus == "compromised")
+    }
+
+    /// #311 review: the bound is on the side's total wrong-rate audio, not on each drift.
+    @Test func threeHealedSevenSecondDriftsAreCompromised() {
+        var events = [start()]
+        for t in [100.0, 600, 1100] {
+            events += [drift(t, onsetWithin: "4.0"), remediation(t + 0.01), rebuildDone(t + 2), firstFrames(t + 3)]
+        }
+        events.append(stop(1500, remote: coverage(expected: 1500, delivered: 1500)))
+        let p = provenance(events)
+        #expect(driftEntries(p).allSatisfy { $0["healed"] as? Bool == true && $0["affected_seconds"] as? Double == 7 })
+        #expect(p.remoteStatus == "compromised")
+        #expect(p.remoteContentAnomalyCount == 3)
+    }
+
+    @Test func twoHealedDriftsWithinTheBoundTogetherAreDegraded() {
+        var events = [start()]
+        for t in [100.0, 600] {
+            events += [drift(t, onsetWithin: "4.0"), remediation(t + 0.01), rebuildDone(t + 2), firstFrames(t + 3)]
+        }
+        events.append(stop(1000, remote: coverage(expected: 1000, delivered: 1000)))
+        #expect(provenance(events).remoteStatus == "degraded")
     }
 
     /// Merges present events in any order (a drain split across two pulls, the live log at finalize).

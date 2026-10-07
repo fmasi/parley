@@ -437,7 +437,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         if let remoteCoverage {
             let status = remoteStatus.flatMap(TrackAccounting.Status.init(rawValue:))
                 ?? remoteCoverage.status(isTap: true, contentAnomalies: remoteContentAnomalyCount ?? 0,
-                                         healedDrifts: remoteRateDrift?.filter(\.isShortAndHealed).count ?? 0)
+                                         healedDrifts: remoteRateDrift.map(RateDriftWindow.healedWithinBound) ?? 0)
             var side = remoteCoverage.asMetadataDictionary(status: status)
             if let remoteContentAnomalyCount { side["content_anomaly_count"] = remoteContentAnomalyCount }
             if let remoteRateDrift, !remoteRateDrift.isEmpty { side["rate_drift"] = remoteRateDrift.map { $0.asMetadataDictionary() } }
@@ -585,7 +585,11 @@ public struct CaptureDiagnostics: Sendable {
                 systemDrifts.append((e.timestamp, onset))
             }
         }
-        if e.kind == .restartInPlace, e.detail["reason"] == Self.driftRemediationReason { driftRemediations.append(e.timestamp) }
+        // Only the remediation's START (`checkRateDrift`, which carries `attempt`) marks it: the rebuild's own success
+        // event repeats the reason (with `rung`) later, and could fall inside the NEXT drift's window (#311 review).
+        if e.kind == .restartInPlace, e.detail["reason"] == Self.driftRemediationReason, e.detail["attempt"] != nil {
+            driftRemediations.append(e.timestamp)
+        }
         if e.kind == .firstFrames, e.detail["track"] == CaptureTrack.system.rawValue { systemFirstFrames.append(e.timestamp) }
         if e.kind == .captureStart { firstCaptureStart = min(firstCaptureStart ?? e.timestamp, e.timestamp) }
         if e.kind == .systemAudioPermissionDenied, Self.confirmedDenialStatuses.contains(e.detail["status"] ?? "") {
@@ -851,7 +855,7 @@ public struct CaptureDiagnostics: Sendable {
             localStatus: local.map { $0.status(isTap: false, contentAnomalies: contentAnomalyCount(track: "mic")).rawValue },
             remoteStatus: remote.map {
                 $0.status(isTap: true, contentAnomalies: contentAnomalyCount(track: "system"),
-                          healedDrifts: drifts.filter(\.isShortAndHealed).count).rawValue
+                          healedDrifts: RateDriftWindow.healedWithinBound(drifts)).rawValue
             },
             eventsDropped: droppedCount,
             systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed,
