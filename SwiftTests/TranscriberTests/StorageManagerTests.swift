@@ -296,3 +296,215 @@ struct StorageManagerTests {
         #expect(overrun == 4 * 4096)
     }
 }
+
+// MARK: - The whole recordings tree (#224)
+
+/// A synthetic recordings tree in a temp folder: day folders, archives with set modification dates, transcripts.
+private struct RecordingsTree {
+    let root: URL
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("quota-tree-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+    func day(_ name: String) throws -> URL {
+        let d = root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    /// An archive of `bytes` bytes, last modified `daysAgo` days ago (no sleeps: the order is set, not waited for).
+    @discardableResult
+    func archive(_ day: String, _ name: String, bytes: Int = 200_000, daysAgo: Double) throws -> URL {
+        let url = try self.day(day).appendingPathComponent(name)
+        try Data(repeating: 1, count: bytes).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-daysAgo * 86_400)], ofItemAtPath: url.path)
+        return url
+    }
+    /// A transcript listing `audio` (file names), as the assembler writes one.
+    @discardableResult
+    func transcript(_ day: String, _ name: String, audio: [String]) throws -> URL {
+        let d = try self.day(day)
+        let url = d.appendingPathComponent(name)
+        let json: [String: Any] = [
+            "metadata": ["audio_files": audio, "audio_paths": audio.map { d.appendingPathComponent($0).path }, "language": "en"],
+            "segments": [["start": 0.0, "end": 1.0, "text": "synthetic words", "speaker": "Speaker 1"]],
+        ]
+        try TranscriptAssembler.write(json, to: url)
+        return url
+    }
+    func exists(_ day: String, _ name: String) -> Bool {
+        FileManager.default.fileExists(atPath: root.appendingPathComponent(day).appendingPathComponent(name).path)
+    }
+    func remove() { try? FileManager.default.removeItem(at: root) }
+}
+
+/// The quota at 1 kbit/s for one hour: 450,000 bytes — room for two 200,000-byte archives, not three.
+private let smallLimit = (hours: 1, kbps: 1)
+
+private func json(_ url: URL) throws -> [String: Any] {
+    try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+}
+
+private func removedMark(_ url: URL) throws -> [String: Any]? {
+    (try json(url)["metadata"] as? [String: Any])?["audio_removed"] as? [String: Any]
+}
+
+@Suite struct StorageManagerTreeTests {
+
+    /// #224: a pass after a recording weighs the WHOLE recordings tree — every day folder — when the folder it wrote into is
+    /// a day folder of the configured root; anything else stays the folder alone.
+    @Test func theScopeIsTheWholeTreeOnlyForADayFolderOfTheRoot() throws {
+        let root = URL(fileURLWithPath: "/tmp/parley-synthetic/rec")
+        #expect(StorageManager.quotaScope(for: root.appendingPathComponent("2026-10-07"), recordingRoot: root.path) == .tree(root))
+        #expect(StorageManager.quotaScope(for: root.appendingPathComponent("2026-10-07/"), recordingRoot: root.path + "/") == .tree(root))
+        let elsewhere = URL(fileURLWithPath: "/tmp/parley-synthetic/other/2026-10-07")
+        #expect(StorageManager.quotaScope(for: elsewhere, recordingRoot: root.path) == .folder(elsewhere), "a day folder of another root")
+        let notADay = root.appendingPathComponent("imports")
+        #expect(StorageManager.quotaScope(for: notADay, recordingRoot: root.path) == .folder(notADay))
+        let deeper = root.appendingPathComponent("2026-10-07/sub")
+        #expect(StorageManager.quotaScope(for: deeper, recordingRoot: root.path) == .folder(deeper))
+    }
+
+    /// #224: archives in OTHER day folders are deleted, oldest first, and the pass stops as soon as usage is within the
+    /// limit — it deletes no more than needed. Before, the pass saw only one day folder and never deleted across days.
+    @Test func theTreePassDeletesAcrossDaysOldestFirstAndStopsAtTheLimit() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-a-0.m4a", daysAgo: 200)
+        try t.archive("2026-03-02", "090000-b-0.m4a", daysAgo: 199)
+        try t.archive("2026-03-02", "100000-c.m4a", daysAgo: 198)
+        try t.archive("2026-10-07", "101500-d-0.m4a", daysAgo: 0)   // 800,000 bytes against 450,000: two must go
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: smallLimit.hours,
+                                                           bitrateKbps: smallLimit.kbps, protectedFiles: [])
+
+        #expect(report.deleted.map(\.lastPathComponent) == ["090000-a-0.m4a", "090000-b-0.m4a"], "oldest first, across days")
+        #expect(t.exists("2026-03-02", "100000-c.m4a") && t.exists("2026-10-07", "101500-d-0.m4a"), "no more than needed")
+        #expect(report.finished && report.protectedOverrunBytes == 0)
+    }
+
+    /// #224 with #230: never the current session's archives (named by the caller) and never an archive of a session that
+    /// still has state in its folder, whatever day it is in. The next oldest finished archive goes instead.
+    @Test func theTreePassNeverDeletesTheCurrentOrAnInFlightSession() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-busy-0.m4a", daysAgo: 300)   // the oldest, but its session is still in flight
+        try RecoveryFixtures.writeSessionJSON(dir: try t.day("2026-03-01"), sessionId: "090000-busy", meetingStart: Date(), chunkIndices: [0])
+        let mine = try t.archive("2026-10-07", "101500-mine-0.m4a", daysAgo: 250)   // old file date, but this session's
+        try t.archive("2026-03-05", "090000-done-0.m4a", daysAgo: 100)
+        try t.archive("2026-03-06", "090000-newer-0.m4a", daysAgo: 50)
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: smallLimit.hours,
+                                                           bitrateKbps: smallLimit.kbps, protectedFiles: [mine])
+
+        #expect(report.deleted.map(\.lastPathComponent) == ["090000-done-0.m4a", "090000-newer-0.m4a"])
+        #expect(t.exists("2026-03-01", "090000-busy-0.m4a"), "an in-flight session's audio is kept")
+        #expect(t.exists("2026-10-07", "101500-mine-0.m4a"), "the current session's audio is kept")
+    }
+
+    /// #224: each transcript whose audio was removed is marked, with exactly its files — names only — and nothing else in
+    /// it changes. A transcript whose audio stayed is not touched.
+    @Test func theTranscriptsOfRemovedAudioAreMarkedWithTheirFiles() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-a-0.m4a", daysAgo: 200)
+        try t.archive("2026-03-01", "090000-a-1.m4a", daysAgo: 199)
+        try t.archive("2026-03-01", "100000-b.m4a", daysAgo: 1)
+        let a = try t.transcript("2026-03-01", "090000-a.json", audio: ["090000-a-0.m4a", "090000-a-1.m4a"])
+        let b = try t.transcript("2026-03-01", "100000-b.json", audio: ["100000-b.m4a"])
+        let segmentsBefore = try #require(try json(a)["segments"] as? [[String: Any]])
+        let bBefore = try Data(contentsOf: b)
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64,
+                                                           protectedFiles: [t.root.appendingPathComponent("2026-03-01/100000-b.m4a")])
+
+        #expect(report.deleted.count == 2)
+        #expect(report.removedRecordings == ["2026-03-01/090000-a.json"], "one recording, however many of its files")
+        let mark = try #require(try removedMark(a))
+        #expect(mark["files"] as? [String] == ["090000-a-0.m4a", "090000-a-1.m4a"])
+        #expect(mark["reason"] as? String == "storage_limit")
+        #expect((mark["at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } != nil, "an ISO 8601 time")
+        let after = try json(a)
+        #expect((after["segments"] as? [[String: Any]])?.count == segmentsBefore.count)
+        #expect((after["segments"] as? [[String: Any]])?.first?["text"] as? String == "synthetic words", "segments unchanged")
+        #expect((after["metadata"] as? [String: Any])?["audio_files"] as? [String] == ["090000-a-0.m4a", "090000-a-1.m4a"],
+                "the listing stays the record of what there was")
+        #expect(try Data(contentsOf: b) == bBefore, "a transcript whose audio stayed is not rewritten")
+    }
+
+    /// #224: a later pass adds to an earlier mark rather than replacing it.
+    @Test func aLaterRemovalAddsToTheMark() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-a-0.m4a", daysAgo: 200)
+        let keep = try t.archive("2026-03-01", "090000-a-1.m4a", daysAgo: 199)
+        let a = try t.transcript("2026-03-01", "090000-a.json", audio: ["090000-a-0.m4a", "090000-a-1.m4a"])
+        _ = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [keep])
+        _ = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+        #expect(try removedMark(a)?["files"] as? [String] == ["090000-a-0.m4a", "090000-a-1.m4a"])
+    }
+
+    /// #224: an archive no transcript lists — or whose transcript cannot be read — is still deleted when it is the oldest;
+    /// it counts as a recording of its own.
+    @Test func aMissingOrUnreadableTranscriptDoesNotStopTheDeletion() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-lost-0.m4a", daysAgo: 200)
+        try t.archive("2026-03-02", "090000-bad-0.m4a", daysAgo: 199)
+        try Data("not json".utf8).write(to: try t.day("2026-03-02").appendingPathComponent("090000-bad.json"))
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+
+        #expect(report.deleted.count == 2)
+        #expect(report.removedRecordings == ["2026-03-01/090000-lost", "2026-03-02/090000-bad"])
+        #expect(try String(contentsOf: t.root.appendingPathComponent("2026-03-02/090000-bad.json"), encoding: .utf8) == "not json",
+                "a file that is not a transcript is never rewritten")
+    }
+
+    /// #224: only Parley's archives are candidates — an `.m4a` named by the session rule (`HHmmss[-…].m4a`) directly in a
+    /// `yyyy-MM-dd` day folder. Another `.m4a` anywhere in the tree, a WAV, a transcript: never deleted.
+    @Test func filesThatAreNotParleyArchivesAreNeverDeleted() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        let strays = [("", "notes.m4a"), ("2026-03-01", "podcast.m4a"), ("imports", "090000-x-0.m4a"), ("2026-03-01/sub", "090000-y-0.m4a")]
+        for (folder, name) in strays {
+            let d = folder.isEmpty ? t.root : try t.day(folder)
+            try Data(repeating: 1, count: 1000).write(to: d.appendingPathComponent(name))
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: d.appendingPathComponent(name).path)
+        }
+        try Data(repeating: 1, count: 1000).write(to: try t.day("2026-03-01").appendingPathComponent("090000-z-0.wav"))
+        try t.archive("2026-03-02", "090000-real-0.m4a", daysAgo: 1)
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+
+        #expect(report.deleted.map(\.lastPathComponent) == ["090000-real-0.m4a"])
+        for (folder, name) in strays {
+            #expect(FileManager.default.fileExists(atPath: t.root.appendingPathComponent(folder).appendingPathComponent(name).path), "\(name)")
+        }
+        #expect(t.exists("2026-03-01", "090000-z-0.wav"))
+        #expect(report.protectedOverrunBytes == 4 * 1000, "what it may not delete is counted and reported, never silent")
+    }
+
+    /// #224: a day folder that is a symbolic link is not followed — as the Settings usage scan does not — so nothing behind
+    /// it is deleted.
+    @Test func aSymlinkedDayFolderIsNotFollowed() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        let elsewhere = FileManager.default.temporaryDirectory.appendingPathComponent("quota-elsewhere-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+        try Data(repeating: 1, count: 1000).write(to: elsewhere.appendingPathComponent("090000-far-0.m4a"))
+        try FileManager.default.createSymbolicLink(at: t.root.appendingPathComponent("2026-03-01"), withDestinationURL: elsewhere)
+        try t.archive("2026-03-02", "090000-near-0.m4a", daysAgo: 1)
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+
+        #expect(report.deleted.map(\.lastPathComponent) == ["090000-near-0.m4a"])
+        #expect(FileManager.default.fileExists(atPath: elsewhere.appendingPathComponent("090000-far-0.m4a").path))
+    }
+
+    /// #224 with L review 251: the deadline still bounds the walk of the whole tree — a spent one deletes nothing.
+    @Test func theDeadlineStillBoundsTheTreeWalk() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try t.archive("2026-03-01", "090000-a-0.m4a", daysAgo: 2)
+        try t.archive("2026-03-02", "090000-b-0.m4a", daysAgo: 1)
+
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [],
+                                                           deadline: SuspendingClock.now - .seconds(1))
+
+        #expect(!report.finished && report.deleted.isEmpty && report.removedRecordings.isEmpty)
+        #expect(t.exists("2026-03-01", "090000-a-0.m4a") && t.exists("2026-03-02", "090000-b-0.m4a"))
+    }
+}
