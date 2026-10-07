@@ -291,6 +291,10 @@ enum TranscriptAudioMark {
 
     /// Add `names` to the transcript's mark — after the files an earlier pass named — and write it durably.
     private static func write(_ names: [String], into url: URL, at stamp: String) throws {
+        try TranscriptWrites.exclusive { try writeUnlocked(names, into: url, at: stamp) }
+    }
+
+    private static func writeUnlocked(_ names: [String], into url: URL, at stamp: String) throws {
         guard var json = readTranscript(url), var metadata = json["metadata"] as? [String: Any] else {
             throw CocoaError(.fileReadCorruptFile)
         }

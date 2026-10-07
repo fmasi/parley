@@ -223,6 +223,10 @@ public enum TranscriptAssembler {
     /// A chunk whose duration can't be read gets `0`, a sentinel `SpeakerSampleLocator` treats as
     /// "distrust the cache, re-read the file" rather than a real zero-length chunk.
     public static func reconcileAudioPaths(in jsonPath: URL, to paths: [URL]) {
+        TranscriptWrites.exclusive { reconcileAudioPathsUnlocked(in: jsonPath, to: paths) }
+    }
+
+    private static func reconcileAudioPathsUnlocked(in jsonPath: URL, to paths: [URL]) {
         guard let data = try? Data(contentsOf: jsonPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var metadata = json["metadata"] as? [String: Any]

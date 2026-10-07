@@ -438,3 +438,44 @@ struct TranscriptRenamerTests {
                 == ["Alex", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Local Speaker 1", "Sam", "Remote Speaker 1"])
     }
 }
+
+/// #224 review: the storage limit marks older transcripts while a rename may be writing the same
+/// file. Every transcript read-modify-write runs one at a time, so neither edit is lost.
+@Suite(.serialized)
+struct TranscriptWritesTests {
+    @Test("a rename waits for a transcript write already in progress")
+    func renameWaitsForTheLock() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tw-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = ["metadata": [:] as [String: Any],
+                                  "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "A"]]]
+        try JSONSerialization.data(withJSONObject: doc).write(to: url)
+
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        // A mark's read-modify-write, paused between its read and its write.
+        let holder = Thread {
+            TranscriptWrites.exclusive {
+                var json = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] ?? [:]
+                held.signal()
+                release.wait()
+                json["metadata"] = ["audio_removed": ["files": ["x.m4a"]]]
+                try? JSONSerialization.data(withJSONObject: json).write(to: url)
+            }
+        }
+        holder.start()
+        held.wait()
+        let renamed = Task.detached { TranscriptRenamer.applyRenames(["A": "Ann"], jsonPath: url) }
+        // Room for a rename that does not wait to write first — the mark would then overwrite it.
+        // With the lock it cannot start, so this pause can only hide the bug, never fail a fix.
+        try await Task.sleep(for: .milliseconds(300))
+        release.signal()
+        #expect(await renamed.value)
+
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        let metadata = json?["metadata"] as? [String: Any]
+        #expect((metadata?["audio_removed"] as? [String: Any])?["files"] as? [String] == ["x.m4a"])
+        #expect((json?["segments"] as? [[String: Any]])?.first?["speaker"] as? String == "Ann")
+    }
+}
