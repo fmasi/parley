@@ -127,7 +127,7 @@ for f in $changed_test_files; do
   # grep -c, not -q: -q exits at the first match, and a large file then SIGPIPEs `git show`,
   # which `pipefail` turns into "not exempt".
   if git show "$HEAD_SHA:$f" | grep -c 'RED-FIRST-EXEMPT:' >/dev/null; then
-    echo "exempt: $f ($(git show "$HEAD_SHA:$f" | grep -o 'RED-FIRST-EXEMPT:.*' | head -1))"
+    echo "exempt: $f ($(git show "$HEAD_SHA:$f" | grep -m1 -o 'RED-FIRST-EXEMPT:.*'))"
   else
     gated_files="$gated_files $f"
   fi
@@ -260,7 +260,7 @@ run_suites() {
         RUN_WHY="compile error in the changed test files — they cannot compile, so cannot pass, without the fix"
         echo
         echo "compile errors in the changed test files:"
-        echo "$hits" | head -10
+        printf '%s\n' "$hits" | sed -n '1,10p'   # not head: under pipefail its early exit fails the gate (broken pipe)
         if [ -z "$gated_hits" ]; then
           echo "NOTE: none of these is in a GATED file — they are all in RED-FIRST-EXEMPT files. The"
           echo "gated suites could not be run at the parent, so this RED rests on the exempt files"
@@ -272,7 +272,7 @@ run_suites() {
       RUN_WHY="the test target did not build ('swift build --build-tests' exited $ec): the compiler reported errors, but none in a changed test file, so they are not evidence about the changed tests"
       echo
       echo "compile errors, none of them in a changed test file:"
-      echo "$others" | head -10
+      printf '%s\n' "$others" | sed -n '1,10p'   # not head: under pipefail its early exit fails the gate (broken pipe)
     else
       RUN_WHY="the test target did not build ('swift build --build-tests' exited $ec) and the compiler reported no error in a source file (linker or toolchain failure)"
     fi
