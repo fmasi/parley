@@ -199,7 +199,7 @@ public enum TranscriptRenamer {
     /// whether a channel has any name at all.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
-        TranscriptWrites.exclusive { applyRenamesUnlocked(mapping, jsonPath: jsonPath) }
+        TranscriptWrites.exclusive(jsonPath) { applyRenamesUnlocked(mapping, jsonPath: jsonPath) }
     }
 
     private static func applyRenamesUnlocked(_ mapping: [String: String], jsonPath: URL) -> Bool {

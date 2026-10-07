@@ -456,7 +456,7 @@ struct TranscriptWritesTests {
         let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         // A mark's read-modify-write, paused between its read and its write.
         let holder = Thread {
-            TranscriptWrites.exclusive {
+            TranscriptWrites.exclusive(url) {
                 var json = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] ?? [:]
                 held.signal()
                 release.wait()
@@ -476,6 +476,33 @@ struct TranscriptWritesTests {
         let json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         let metadata = json?["metadata"] as? [String: Any]
         #expect((metadata?["audio_removed"] as? [String: Any])?["files"] as? [String] == ["x.m4a"])
+        #expect((json?["segments"] as? [[String: Any]])?.first?["speaker"] as? String == "Ann")
+    }
+
+    /// #304 review: a write can hang on a stalled share. One on another transcript must not hold up a rename.
+    @Test("a rename does not wait for a write to a different transcript")
+    func renameDoesNotWaitForAnotherFile() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tw-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let other = dir.appendingPathComponent("old.json"), url = dir.appendingPathComponent("t.json")
+        let doc: [String: Any] = ["metadata": [:] as [String: Any],
+                                  "segments": [["start": 0.0, "end": 1.0, "text": "hi", "speaker": "A"]]]
+        try JSONSerialization.data(withJSONObject: doc).write(to: url)
+
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let holder = Thread { TranscriptWrites.exclusive(other) { held.signal(); release.wait() } }
+        holder.start()
+        held.wait()
+        // The rename runs while the other file's write is held; with a shared lock it would wait for it.
+        // Generous bound: it only decides how long a regression takes to show, never whether a fix passes.
+        let done = DispatchSemaphore(value: 0)
+        Thread { _ = TranscriptRenamer.applyRenames(["A": "Ann"], jsonPath: url); done.signal() }.start()
+        let finished = done.wait(timeout: .now() + 10) == .success
+        release.signal()
+        if !finished { done.wait() }
+        #expect(finished)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         #expect((json?["segments"] as? [[String: Any]])?.first?["speaker"] as? String == "Ann")
     }
 }

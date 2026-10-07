@@ -291,7 +291,7 @@ enum TranscriptAudioMark {
 
     /// Add `names` to the transcript's mark — after the files an earlier pass named — and write it durably.
     private static func write(_ names: [String], into url: URL, at stamp: String) throws {
-        try TranscriptWrites.exclusive { try writeUnlocked(names, into: url, at: stamp) }
+        try TranscriptWrites.exclusive(url) { try writeUnlocked(names, into: url, at: stamp) }
     }
 
     private static func writeUnlocked(_ names: [String], into url: URL, at stamp: String) throws {

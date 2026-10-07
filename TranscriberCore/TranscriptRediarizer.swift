@@ -426,7 +426,7 @@ public enum TranscriptRediarizer {
         // Last check before the only irreversible step. Cancelling after diarization has run just
         // wastes the work; cancelling after this leaves a transcript the user asked us not to write.
         try Task.checkCancellation()
-        try TranscriptWrites.exclusive {
+        try TranscriptWrites.exclusive(url) {
             // The file was read before diarization, which can take minutes: a storage-limit pass may
             // have marked it since (#224). Keep the mark on disk now, not the one read then.
             let onDisk = (try? Data(contentsOf: url))
