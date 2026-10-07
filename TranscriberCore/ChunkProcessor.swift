@@ -94,11 +94,19 @@ public final class ChunkProcessor {
             ))
         }
 
-        /// The current session alone keeps usage over the quota: recorded once (round 8 item 2).
+        /// Audio the quota may not delete — this session's, or another still in flight (#230, #294) — keeps usage over the
+        /// quota: recorded once (round 8 item 2).
         func noteQuotaOverrun(_ bytes: Int) {
             guard !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) else { return }
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
                 code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(bytes) bytes over the quota")))
+        }
+
+        /// Older recordings whose audio a chunk's quota pass deleted (#224): once each, for the completion notice.
+        func noteQuotaRemovals(_ recordings: [String]) {
+            for recording in recordings where !sessionState.quotaRemovedRecordings.contains(recording) {
+                sessionState.quotaRemovedRecordings.append(recording)
+            }
         }
 
         func appendGap(_ gap: CaptureGap) {
@@ -515,7 +523,9 @@ public final class ChunkProcessor {
 
         // Enforce the storage quota (P13). Outside the archive `catch`: a quota failure used to land
         // there and relabel an archived chunk as "archival failed", pointing the transcript at WAVs
-        // that were already deleted. No archive, no quota pass. Scope stays the day folder (#224).
+        // that were already deleted. No archive, no quota pass. The scope stays the day folder (#224): what it deletes
+        // there, the whole-tree pass at finalize would delete too (a day folder over the limit on its own means every
+        // older day goes first), and a walk of every day folder per chunk would pin a pool thread on a slow share.
         if let archivePath {
             do {
                 // Never this session's own audio (rounds 7-8 item 1): this chunk's archive, every chunk
@@ -535,6 +545,7 @@ public final class ChunkProcessor {
                     deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
                 )
                 if report.protectedOverrunBytes > 0 { await stateStore.noteQuotaOverrun(report.protectedOverrunBytes) }
+                if !report.removedRecordings.isEmpty { await stateStore.noteQuotaRemovals(report.removedRecordings) }
             } catch {
                 Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")
             }
