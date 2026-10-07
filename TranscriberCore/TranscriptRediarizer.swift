@@ -25,8 +25,8 @@ public enum TranscriptRediarizer {
         relabeled: [LabeledSegment]
     ) -> [[String: Any]] {
         // Flagged segments (`filtered` / `echo` / `duplicate`, or no usable time) on this channel are
-        // kept exactly as they were: they are not relabeled, and replacing the channel wholesale must
-        // not drop them (P10/P11, R2b item 5).
+        // kept as they are given: they are not relabeled here, and replacing the channel wholesale
+        // must not drop them (P10/P11, R2b item 5). `rediarize` sets their label first (#296).
         var kept = segments.filter { ($0["source"] as? String) != source || TranscriptAssembler.isFlagged($0) }
         kept.append(contentsOf: relabeled.map { seg in
             var dict: [String: Any] = [
@@ -347,6 +347,16 @@ public enum TranscriptRediarizer {
 
         let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
         var segments = rawSegments
+        // One rule for every line on this channel that is already flagged (`filtered`, `echo`,
+        // `duplicate`, no usable time), on either channel and whether or not the echo check runs
+        // (#296): it takes the channel's unattributed label, which nothing counts as a person or a
+        // voice. Its old label comes from an earlier clustering (and perhaps a rename); speaker
+        // numbers are positional, so after this re-detect that label can be somebody else's. The
+        // flag itself stays. The only exception is below: an echo line the check puts in an echo
+        // cluster carries that cluster's label, which this pass has just given it.
+        for i in segments.indices where segments[i]["source"] as? String == source && TranscriptAssembler.isFlagged(segments[i]) {
+            segments[i]["speaker"] = unattributed
+        }
         // Raw cluster label → the label its lines carry in the rewritten transcript.
         var finalLabels: [String: String] = [:]
         if let echo {
@@ -356,9 +366,8 @@ public enum TranscriptRediarizer {
             // - elsewhere, a flagged line (a match of 3+ words) is not given to the stated speaker,
             //   and does not keep the label it had either (#277): it is the other side's words, and
             //   after a repair the old label is the user's. It takes the channel's unattributed
-            //   label, which nothing counts as a person or a voice. A line that already carried the
-            //   flag keeps it, and is labelled the same way: its old label comes from an earlier
-            //   clustering (and perhaps a rename), and may now be a person's.
+            //   label, like every other flagged line on the channel (#296). A line that already
+            //   carried the flag keeps it, and is labelled by the same rule.
             // The flag is one-way: a later re-detect whose clustering no longer judges that line
             // echo does not clear it, so the line stays hidden. A re-detect cannot un-mark echo.
             var relabeled: [LabeledSegment] = []
@@ -469,7 +478,8 @@ public enum TranscriptRediarizer {
     }
 
     /// The channel's segments with a time and a text that are unflagged, or flagged only as echo.
-    /// A `filtered` or `duplicate` segment is neither relabelled nor evidence.
+    /// A `filtered` or `duplicate` segment is neither labelled by a cluster nor evidence: it takes
+    /// the unattributed label (#296).
     private static func relabelCandidates(in segments: [[String: Any]], source: String) -> [Candidate] {
         segments.enumerated().compactMap { index, dict in
             guard dict["source"] as? String == source,
