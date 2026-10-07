@@ -102,9 +102,10 @@ public struct IOCycleStats: Sendable {
     // The constants are computed properties, not stored statics: a stored static is initialised
     // lazily behind a once-token on its first read, and that first read would be on the audio queue.
 
-    /// A cycle whose total is OVER this is an overrun. 8 ms sits under the IO budget reported for
-    /// the tap aggregate (11.35 ms, #247), so a cycle is counted before it costs an overload.
-    public static var overrunThresholdNanos: UInt64 { 8_000_000 }
+    /// A cycle whose total is OVER this is an overrun: the IO budget `coreaudiod` reported for the tap
+    /// aggregate (11.35 ms, #247). It was 8 ms, an early warning, but healthy recordings logged cycles
+    /// of 8.8–11 ms that cost nothing; an overrun is now a cycle that missed the deadline.
+    public static var overrunThresholdNanos: UInt64 { 11_350_000 }
     /// At most one overrun EVENT per this long, per track. Every overrun is still counted.
     public static var overrunReportIntervalNanos: UInt64 { 10_000_000_000 }
 

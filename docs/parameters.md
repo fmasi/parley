@@ -137,7 +137,7 @@ A measurement, not a detector: it changes nothing about the recording. Each tap 
 
 | Parameter | Location | Value | Description |
 |-----------|----------|-------|-------------|
-| Overrun threshold | `IOCycleStats.overrunThresholdNanos` | `8` ms | A callback whose total is OVER this is counted as an overrun. It sits under the 11.35 ms IO budget `coreaudiod` reported for the tap (#247). For the tap the total starts at the HAL's cycle start, so it includes the wait for the helper's audio queue; for the mic it starts at the callback's first line. |
+| Overrun threshold | `IOCycleStats.overrunThresholdNanos` | `11.35` ms | A callback whose total is OVER this is counted as an overrun: the IO budget `coreaudiod` reported for the tap (#247). It was 8 ms until v0.9.1; healthy recordings logged 8.8–11 ms cycles that cost nothing. For the tap the total starts at the HAL's cycle start, so it includes the wait for the helper's audio queue; for the mic it starts at the callback's first line. |
 | Overrun event interval | `IOCycleStats.overrunReportIntervalNanos` | `10` s | At most one `ioOverrun` event per track per this long. Every overrun is still counted (`remote_io_overruns` / `local_io_overruns` in `captureStop`). |
 | Histogram resolution | `IOCycleStats.bucketCount` | `70` per stage | Four buckets per octave from 8.192 µs to 1.074 s, one below, one above. A percentile is the upper edge of its bucket, never above the exact maximum: at most 25 % over the true value, never under. The maximum and the overrun count are exact. |
 | Periodic WAV sync | `WavFileWriter.syncInterval` | `500` ms | How often an append also rewrites the header and `fsync`s, per writer. `debug_skip_wav_sync` leaves out the `fsync` only. |
