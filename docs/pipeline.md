@@ -263,6 +263,9 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
 - `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable.
 
+**Storage limit** (#224):
+- `metadata.audio_removed` — `{at, files, reason}` when the storage limit (`audio_archive_limit_hours`) deleted some of the audio this transcript lists: `at` the ISO 8601 time of the latest removal, `files` the deleted file names (names only, never paths; a later removal adds to the list), `reason` `"storage_limit"`. Nothing else in the transcript changes: `audio_files` / `audio_paths` still list what there was, and the segments are untouched. Absent while all its audio is there.
+
 **Merged audio and timeline**:
 - `metadata.merged_audio` — `{passthrough, gaps_inserted_seconds}` when the chunks were concatenated into one `.m4a` (silence is inserted for inter-chunk gaps > 1 s, up to a 12 h bound).
 - `metadata.chunk_durations` / `metadata.chunk_offsets` — per `audio_paths` entry: each file's length, and where the transcript placed it on the meeting timeline (what re-detect needs).
@@ -388,6 +391,7 @@ When `dualStream = true`, the summary prompt receives source labels ("Local" / "
 - Echo is flagged, never removed: the segments are kept, flagged `echo: true`, and their text and number never change. `metadata.echo_segments_flagged` counts them (`metadata.echo_segments_removed` is the same count under the old name, for one release), and `metadata.echo_clusters` records the numbers behind each cluster's verdict.
 - `metadata.dual_stream` is the capture-time flag (a mic stream was captured next to the remote one). It does not say the remote side delivered audio: `metadata.capture.remote.status` is the authority for that.
 - The transcript JSON is the processed record; the `.m4a` is the raw evidence. The two are independent.
+- The storage limit (`audio_archive_limit_hours`) deletes `.m4a` archives, never a transcript (#224). The pass after a recording's transcript is written weighs the whole recordings tree — every `yyyy-MM-dd` day folder of the configured recording directory, a day folder that is a symbolic link not followed — and deletes the oldest Parley archive first (`HHmmss[-…].m4a` directly in a day folder; nothing else), never the recording just made nor a session that still has state in its folder (#230), and no more than it needs. It runs after the record is written, on the folder's mutation queue, bounded by its deadline; the completion notice waits for it with the read's bound and adds "Removed the audio of N older recordings to stay within the storage limit; transcripts are kept." A chunk's pass during the recording weighs only its day folder. Every deleted file is recorded in the transcript that listed it (`metadata.audio_removed`); a file no transcript lists, or a transcript that cannot be rewritten, is logged and the deletion stands.
 - `AudioArchiverError.verificationFailed` is thrown (and WAVs are preserved) if the output archive is empty, has no audio tracks, or its duration does not match the source's.
 
 ### Validation

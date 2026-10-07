@@ -805,3 +805,21 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
 - [ ] **S-03 A recording folder that stops answering (optional: needs a network share).**
   - Do: set `recording_directory` to a folder on an SMB share, record 2 minutes, disconnect the network, Stop.
   - PASS: within about 6 minutes the menu leaves "Transcribing…" with an alert that the recording folder isn't answering and that Parley will finish the recording; Start works again. Reconnect the share: the recording is finished without a relaunch (or at the next launch), and its transcript holds the whole recording once.
+
+## Storage limit across days (#224) — added 2026-10-07
+
+Use a COPY of a recordings folder, never the real library: point Settings → recording folder at a
+scratch folder holding a few synthetic recordings in older day folders (copy them with `cp -p`:
+"oldest" is the file's modification date, not the day folder's name).
+
+- [ ] Settings shows usage over a limit set low enough (e.g. 1 hour at 64 kbps with ~1.5 h of audio
+      across several days). Record a short meeting and Stop.
+- [ ] The completion notice has a second line: "Removed the audio of N older recordings to stay
+      within the storage limit; transcripts are kept." N matches the number of older recordings
+      whose `.m4a` files are gone.
+- [ ] The oldest day folders lost their `.m4a` first; the meeting just recorded keeps its audio.
+      Every transcript and summary is still there.
+- [ ] Each affected transcript's JSON has `metadata.audio_removed` with `at`, `files` (names only)
+      and `reason: "storage_limit"`; its segments are unchanged.
+- [ ] Settings' usage is now within the limit (or over only by the meeting just recorded).
+- [ ] With usage under the limit, Stop gives the usual notice with no storage line.
