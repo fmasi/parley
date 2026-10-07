@@ -506,5 +506,9 @@ private func removedMark(_ url: URL) throws -> [String: Any]? {
 
         #expect(!report.finished && report.deleted.isEmpty && report.removedRecordings.isEmpty)
         #expect(t.exists("2026-03-01", "090000-a-0.m4a") && t.exists("2026-03-02", "090000-b-0.m4a"))
+        // The walk itself stops when told, part-way through the tree — not only the deletes after it.
+        var asked = 0
+        #expect(StorageManager.treeArchives(in: t.root, stop: { asked += 1; return asked > 2 }) == nil, "stopped mid-walk")
+        #expect(StorageManager.treeArchives(in: t.root, stop: { false })?.count == 2, "walked whole when not told to stop")
     }
 }

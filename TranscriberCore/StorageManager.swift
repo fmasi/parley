@@ -76,7 +76,7 @@ public enum StorageManager {
 
     /// Every `.m4a` in the tree, and whether each is a candidate (#224): a Parley archive directly in a day folder. The walk
     /// does not follow a day folder that is a symbolic link — as `currentUsageBytes` does not. nil when `stop` said to stop.
-    private static func treeArchives(in root: URL, stop: () -> Bool) -> [(url: URL, candidate: Bool)]? {
+    static func treeArchives(in root: URL, stop: () -> Bool) -> [(url: URL, candidate: Bool)]? {
         guard let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]
         ) else { return [] }
