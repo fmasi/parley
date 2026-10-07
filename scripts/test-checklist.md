@@ -487,14 +487,14 @@ columns in the plan need a helper debug line that does not exist; the columns ab
   - Measure after each run:
     1. `ovl "$T0"`: all overloads, those reported for the capture helper, and their causes (`ClientHALIODurationExceededBudget` is the one from #247).
     2. B and C: `iocyc "$T0"` gives two lines, `IO cycles (system): cycles=… overruns=… (over 8.000 ms) | queue_wait n=… p50=… p99=… max=… | convert … | write … | sync … | check … | total … (ms)` and the same for `(mic)` without `queue_wait`. A stage that never ran is absent. `check` is what the callback does after the write (the monitors and the exact-zero scan; on the system line that is the permission guard's pass), and `total` runs to the callback's very end on both lines.
-    3. B and C: `diag <id>.diag.jsonl | grep ioOverrun`, when the file exists (it does once a callback went over 8 ms): each line is one callback, with `track`, `total_ms` and its stages.
+    3. B and C: `diag <id>.diag.jsonl | grep ioOverrun`, when the file exists (it does once a callback went over 11.35 ms): each line is one callback, with `track`, `total_ms` and its stages.
     4. By ear: every dropout of the call in the headset, with the menu timer's time.
   - Sanity (the instrument, on the first B run, before trusting anything):
     - system `queue_wait` p50 is well under 1 ms and its `n` ≈ `cycles`. If it reads about one buffer (≈ 10 ms) on every cycle, or `queue_wait` is absent from the system line or its `n` is far below `cycles`, the cycle-start timestamp (`inNow`) is not what the code assumes: stop and report it, the totals mean nothing.
     - `sync n` on each track ≈ 2 × the recording's seconds (one `fsync` per 0.5 s); in C there is no `sync` at all on either line.
     - system `cycles` ≈ `remote_coverage.heartbeat_callbacks` from `meta`.
     - `check n` ≈ `cycles` on both lines, and `total` max ≥ every other stage's max on its line.
-    - The instrument sees what `coreaudiod` sees: a run where `ovl` reports `ClientHALIODurationExceededBudget` for the capture helper must have system `overruns` ≥ 1 (the budget is above the 8 ms threshold, and the system total runs from the HAL's cycle start to the block's return). An overload of that cause next to `overruns=0` means time is spent where the instrument does not look: stop and report it.
+    - The instrument sees what `coreaudiod` sees: a run where `ovl` reports `ClientHALIODurationExceededBudget` for the capture helper must have system `overruns` ≥ 1 (the threshold is the 11.35 ms budget `coreaudiod` reported in #247 — if `ovl` shows a different budget on this Mac, note it — and the system total runs from the HAL's cycle start to the block's return). An overload of that cause next to `overruns=0` means time is spent where the instrument does not look: stop and report it.
     - `quality_anomaly_count` in `meta` stays 0 on an otherwise clean call even when `diag` lists `ioOverrun` events (they count in `anomaly_count` only), and the completion notice stays "Transcription Complete".
   - Read it:
     - **The `fsync` is the stall** if, in B, the system `ioOverrun` events are mostly `queue_wait_ms`, the mic's `sync` p99 or max is in the same range (≥ 8 ms), and in C the system `overruns` and the helper's overloads from `ovl` drop clearly in all three runs.

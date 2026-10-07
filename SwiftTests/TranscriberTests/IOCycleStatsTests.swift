@@ -138,10 +138,10 @@ import Testing
 
     @Test func aCycleOfExactlyTheThresholdIsNotAnOverrun() {
         var stats = IOCycleStats()
-        #expect(IOCycleStats.overrunThresholdNanos == 8 * Self.ms)
-        #expect(stats.record(cycle(8 * Self.ms), nowNanos: 0) == false)
+        #expect(IOCycleStats.overrunThresholdNanos == 11_350 * Self.us)
+        #expect(stats.record(cycle(11_350 * Self.us), nowNanos: 0) == false)
         #expect(stats.overrunCount == 0)
-        #expect(stats.record(cycle(8 * Self.ms + 1), nowNanos: 0) == true)
+        #expect(stats.record(cycle(11_350 * Self.us + 1), nowNanos: 0) == true)
         #expect(stats.overrunCount == 1)
     }
 
@@ -178,16 +178,16 @@ import Testing
         var stats = IOCycleStats()
         for i in 0..<1_000 { #expect(stats.record(cycle(Self.ms), nowNanos: UInt64(i) * 10 * Self.ms) == false) }
         #expect(stats.overrunCount == 0)
-        #expect(stats.record(cycle(9 * Self.ms), nowNanos: 10 * Self.second + 1) == true)
+        #expect(stats.record(cycle(12 * Self.ms), nowNanos: 10 * Self.second + 1) == true)
     }
 
     /// The limit is 10 s of a monotonic clock. A reading before the last report (it cannot happen
     /// with `mach_absolute_time`) must neither trap nor report early.
     @Test func aClockReadingBeforeTheLastReportDoesNotReport() {
         var stats = IOCycleStats()
-        #expect(stats.record(cycle(9 * Self.ms), nowNanos: 100 * Self.second) == true)
-        #expect(stats.record(cycle(9 * Self.ms), nowNanos: 50 * Self.second) == false)
-        #expect(stats.record(cycle(9 * Self.ms), nowNanos: 0) == false)
+        #expect(stats.record(cycle(12 * Self.ms), nowNanos: 100 * Self.second) == true)
+        #expect(stats.record(cycle(12 * Self.ms), nowNanos: 50 * Self.second) == false)
+        #expect(stats.record(cycle(12 * Self.ms), nowNanos: 0) == false)
         #expect(stats.overrunCount == 3)
     }
 
@@ -292,19 +292,19 @@ import Testing
     @Test func aSlowPassAfterTheWriteIsAnOverrunAndIsNamed() {
         let timebase = IOCycleStats.Timebase(numer: 1, denom: 1)
         var stats = IOCycleStats()
-        // 0.4 ms up to the end of the write, then 9 ms before the callback returns.
+        // 0.4 ms up to the end of the write, then 12 ms before the callback returns.
         let cycle = timebase.cycle(
             startTicks: 1_000_000, queueWaitTicks: 20_000, convertTicks: 200_000,
-            stages: (pad: 0, write: 100_000, sync: 0), writeEndTicks: 1_400_000, endTicks: 10_400_000)
-        #expect(cycle.totalNanos == 9_400 * Self.us)
-        #expect(cycle.checkNanos == 9 * Self.ms)
-        #expect(stats.record(cycle, nowNanos: 0) == true, "over 8 ms: an overrun, reported")
+            stages: (pad: 0, write: 100_000, sync: 0), writeEndTicks: 1_400_000, endTicks: 13_400_000)
+        #expect(cycle.totalNanos == 12_400 * Self.us)
+        #expect(cycle.checkNanos == 12 * Self.ms)
+        #expect(stats.record(cycle, nowNanos: 0) == true, "over 11.35 ms: an overrun, reported")
         #expect(stats.overrunCount == 1)
-        #expect(stats.max(.check) == 9 * Self.ms)
+        #expect(stats.max(.check) == 12 * Self.ms)
         let detail = cycle.overrunEvent(track: .system, overruns: 1, at: Date()).detail
-        #expect(detail["check_ms"] == "9.000")
-        #expect(detail["total_ms"] == "9.400")
-        #expect(stats.summary().asDetail(prefix: "remote_io")["remote_io_check_max_ms"] == "9.000")
+        #expect(detail["check_ms"] == "12.000")
+        #expect(detail["total_ms"] == "12.400")
+        #expect(stats.summary().asDetail(prefix: "remote_io")["remote_io_check_max_ms"] == "12.000")
     }
 
     /// The writer counts the ticks it spends in `fsync`; the callback reads that counter around the
@@ -407,7 +407,7 @@ import Testing
         #expect(event.timestamp == at)
         #expect(event.detail == [
             "track": "system", "total_ms": "56.512", "queue_wait_ms": "55.870", "convert_ms": "0.210",
-            "write_ms": "0.130", "check_ms": "0.041", "threshold_ms": "8.000", "overruns": "13",
+            "write_ms": "0.130", "check_ms": "0.041", "threshold_ms": "11.350", "overruns": "13",
         ])
     }
 
@@ -486,7 +486,7 @@ import Testing
                                         syncNanos: 31_400 * Self.us, checkNanos: 25 * Self.us,
                                         totalNanos: 31_900 * Self.us), nowNanos: 0)
         let line = try #require(stats.summary().logLine)
-        #expect(line == "cycles=1 overruns=1 (over 8.000 ms) | convert n=1 p50=0.300 p99=0.300 max=0.300 | write n=1 p50=0.090 p99=0.090 max=0.090 | sync n=1 p50=31.400 p99=31.400 max=31.400 | check n=1 p50=0.025 p99=0.025 max=0.025 | total n=1 p50=31.900 p99=31.900 max=31.900 (ms)")
+        #expect(line == "cycles=1 overruns=1 (over 11.350 ms) | convert n=1 p50=0.300 p99=0.300 max=0.300 | write n=1 p50=0.090 p99=0.090 max=0.090 | sync n=1 p50=31.400 p99=31.400 max=31.400 | check n=1 p50=0.025 p99=0.025 max=0.025 | total n=1 p50=31.900 p99=31.900 max=31.900 (ms)")
     }
 
     /// The summary rides in `captureStop` next to the coverage keys, which the app parses by prefix:

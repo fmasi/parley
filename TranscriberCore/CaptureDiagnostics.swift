@@ -149,7 +149,7 @@ public enum CaptureEventKind: String, Codable, Sendable {
     /// captured again (#220). The stretch before it stays lost. Severity `.info`.
     case systemAudioPermissionRestored
 
-    /// One capture callback took more than `IOCycleStats.overrunThresholdNanos` (8 ms) from the start
+    /// One capture callback took more than `IOCycleStats.overrunThresholdNanos` (11.35 ms) from the start
     /// of its IO cycle to its end (#247). For the tap that includes the wait for the helper's shared
     /// audio queue, which the HAL counts against the device's IO budget. Detail: `track`, the stage
     /// breakdown in ms (`queue_wait_ms`, `convert_ms`, `pad_ms`, `write_ms`, `sync_ms`, `check_ms`, `total_ms`; a
