@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+// Only the error type: FluidAudio's own `DiarizationResult` would make this file's bare name ambiguous.
+import enum FluidAudio.OfflineDiarizationError
 @testable import TranscriberCore
 
 /// #135 H2: each per-segment WAV in a crash-recovered / CLI multi-segment run starts at its own
@@ -417,17 +419,18 @@ import Testing
         func prepare() async throws {}
     }
 
-    /// Throws on the files it finds no speech in, as FluidAudio's offline diarizer does (`noSpeechDetected`); one speaker
-    /// on any other. Keeps the names of the files it was asked to diarize.
+    /// Throws `error` on the files named in `silent` (by default an error of its own, not FluidAudio's); one speaker on
+    /// any other. Keeps the names of the files it was asked to diarize.
     private actor NoSpeechDiarizer: DiarizationProvider {
         struct NoSpeech: Error {}
         private let silent: Set<String>
+        private let error: any Error
         private(set) var asked: [String] = []
-        init(silent: Set<String>) { self.silent = silent }
+        init(silent: Set<String>, error: any Error = NoSpeech()) { self.silent = silent; self.error = error }
 
         func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult {
             asked.append(audioPath.lastPathComponent)
-            if silent.contains(audioPath.lastPathComponent) { throw NoSpeech() }
+            if silent.contains(audioPath.lastPathComponent) { throw error }
             return DiarizationResult(segments: [DiarizedSegment(start: 0, end: 1, speaker: "S1")], speakerDatabase: ["S1": [1, 0, 0]])
         }
         func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { throw NoSpeech() }
@@ -469,6 +472,35 @@ import Testing
             _ = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
         }
         #expect(await diarizer.asked == ["m.wav"])
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("m.json").path))
+    }
+
+    /// #302: FluidAudio's `noSpeechDetected` on a stream that HAS words (a few words, too little speech for one embedding)
+    /// is "too little speech to attribute": the run completes, those lines are unattributed, the other stream is
+    /// diarized as usual, and the transcript says diarization was on. Before, the throw failed the whole run.
+    @Test func tooLittleSpeechOnAStreamWithWordsLabelsItUnattributedAndTheRunCompletes() async throws {
+        let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+        let diarizer = NoSpeechDiarizer(silent: ["m.wav"], error: OfflineDiarizationError.noSpeechDetected)
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), diarizer) }
+        let result = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
+        #expect(await diarizer.asked == ["m.wav", "m_mic.wav"])
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]])
+        let speakers = Dictionary(segments.map { ($0["source"] as? String ?? "", [$0["speaker"] as? String ?? ""]) }, uniquingKeysWith: +)
+        #expect(speakers == ["remote": ["Remote Unknown"], "local": ["Local Speaker 1"]])
+        #expect((json["metadata"] as? [String: Any])?["diarization"] as? Bool == true)
+    }
+
+    /// ...while any OTHER FluidAudio error on a stream with words still fails the run.
+    @Test func anotherFluidAudioErrorOnAStreamWithWordsStillFailsTheRun() async throws {
+        let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+        let diarizer = NoSpeechDiarizer(silent: ["m.wav"], error: OfflineDiarizationError.processingFailed("synthetic"))
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), diarizer) }
+        await #expect(throws: OfflineDiarizationError.self) {
+            _ = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: .default)
+        }
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("m.json").path))
     }
 
