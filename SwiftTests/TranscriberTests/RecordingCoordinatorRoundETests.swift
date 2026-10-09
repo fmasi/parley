@@ -423,7 +423,7 @@ import Testing
         let relaunch = Task { await coordinator.recoverAtLaunch() }
         await Harness.until { inBuild.value }
         #expect(await coordinator.prepareForQuit(confirm: { true }))   // the Quit, during the salvage
-        let slot = try #require(RecordingSentinel.read(directory: h.tmp))
+        let slot = try #require(h.readSlotInOrder())   // by order behind the Quit's mark, never by its bound (#298)
         #expect(slot.quitDuringFinalize && slot.stopCause == .appCrash, "the first cause stands beside the quit")
         // The next launch (the process ended during the salvage): it says both.
         let next = try Harness()
