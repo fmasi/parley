@@ -4,8 +4,10 @@ This document captures every significant bug, crash, and design decision encount
 during development, along with the root cause and fix. It exists so a new Claude instance
 (or a new developer) has full context without re-discovering these issues.
 
-Many early entries date from the retired Python app (pyannote, torch, `requirements-*.txt`,
-`build_app.sh`). Those files are gone; the entries stay as history.
+Entries 1-24 date from the retired Python app (pyannote, mlx-whisper, rumps, `requirements-*.txt`,
+`build_app.sh`, `launcher.sh`). Those files are gone; the entries stay as history. The current
+Swift app's platform pitfalls are in [gotchas.md](gotchas.md), and its design in
+[ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ---
 
@@ -260,8 +262,6 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ---
 
----
-
 ## 21. `relocatable-python` not installable via pip
 
 **Symptom:** `ERROR: No matching distribution found for relocatable-python`
@@ -306,7 +306,7 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ## 25. App launches but menu bar icon is invisible
 
-**Symptom:** Double-clicking `Parley.app` shows the "verifying" spinner, then nothing appears. The app is actually running — `pgrep -la python | grep menu_bar` confirms the process is alive.
+**Symptom:** Double-clicking `Parley.app` shows the "verifying" spinner, then nothing appears. The app is actually running — `pgrep -l Parley` confirms the process is alive.
 
 **Root cause:** On MacBooks with a notch, macOS hides menu bar icons that overflow. The Parley icon appears to the left of the notch (outside the visible area) when the menu bar is full.
 
@@ -314,7 +314,11 @@ NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
 ---
 
-## Architecture Decisions & Rationale
+## Architecture Decisions & Rationale (Python app, superseded)
+
+These were the Python app's decisions. None holds for the Swift app: it captures system audio
+(a Core Audio process tap, or ScreenCaptureKit) and the microphone as two streams, is SwiftUI, and
+processes recordings in chunks in parallel. See [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ### Why sounddevice instead of AVAudioEngine?
 AVAudioEngine via PyObjC is too fragile — the buffer callback delivers `objc.varlist` objects that can't be bridged to numpy via ctypes on Python 3.14. `sounddevice` wraps the same CoreAudio stack through PortAudio with a clean Python API.

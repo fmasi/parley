@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2556%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2557%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -73,7 +73,7 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
   scores, and local/remote tags.
 - **Optional local LLM summaries** — point it at any OpenAI-compatible or LM Studio endpoint (including
   a fully local model) for a meeting summary, still without touching the cloud.
-- **CLI included** — transcribe, rename speakers, summarize, and benchmark from the terminal.
+- **CLI included** — transcribe, rename speakers, summarize and download models from the terminal.
 
 ## Screenshots
 
@@ -205,7 +205,7 @@ TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC clien
 TranscriberCore/       recording lifecycle, chunk processing, engines, diarization, echo detection, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2556 tests across 282 suites
+SwiftTests/            2557 tests across 282 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```

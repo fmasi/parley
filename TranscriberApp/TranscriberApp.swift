@@ -136,9 +136,7 @@ struct TranscriberApp: App {
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil
     )
-    private static let cliSubcommands: Set<String> = [
-        "transcribe", "rename", "rename-gui", "benchmark", "summarize", "download-models",
-    ]
+    private static let cliSubcommands = Set(CLIParser.subcommands)
 
     init() {
         let client = AudioCaptureClient()
