@@ -47,8 +47,9 @@ esac
 echo "$side.$step" >>"$FAKE_DIR/calls"
 # What the tree under test actually contains when the test target is compiled.
 if [ "$step" = testbuild ]; then
-  cat SwiftTests/TranscriberTests/CalcTests.swift >"$FAKE_DIR/$side.seen-test"
+  cat SwiftTests/TranscriberTests/CalcTests.swift >"$FAKE_DIR/$side.seen-test" 2>/dev/null || :
   cat TranscriberCore/Calc.swift >"$FAKE_DIR/$side.seen-prod"
+  ls SwiftTests/TranscriberTests >"$FAKE_DIR/$side.seen-files"
 fi
 if [ -f "$FAKE_DIR/$side.$step.log" ]; then
   sed "s|@TREE@|$(pwd -P)|g" "$FAKE_DIR/$side.$step.log"
@@ -69,6 +70,9 @@ echo '// swift-tools-version: 5.9' >"$repo/Package.swift"
 echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a - b } }' >"$repo/TranscriberCore/Calc.swift"
 echo 'struct CalcTests {}' >"$repo/SwiftTests/TranscriberTests/CalcTests.swift"
 echo 'struct OtherTests {}' >"$repo/SwiftTests/TranscriberTests/OtherTests.swift"
+# Long enough for git's rename detection to pair it with its renamed copy below.
+printf '%s\n' 'struct MovedTests {' '  // one' '  // two' '  // three' '  // four' '  // five' \
+  '  // six' '  // seven' '}' >"$repo/SwiftTests/TranscriberTests/MovedTests.swift"
 g add -A
 g commit -qm base
 g branch base
@@ -96,6 +100,20 @@ g checkout -q -b mixed fix
 printf '%s\n' '// RED-FIRST-EXEMPT: characterization of existing behaviour' 'struct OtherTests {}' \
   >"$repo/SwiftTests/TranscriberTests/OtherTests.swift"
 g commit -qam mixed
+
+# renamed: a production change, and a test file renamed AND modified (#297) — it is gated.
+g checkout -q -b renamed base
+echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
+g mv SwiftTests/TranscriberTests/MovedTests.swift SwiftTests/TranscriberTests/MovedAgainTests.swift
+sed 's|// four|// four: asserts add(2, 2) == 4|' "$repo/SwiftTests/TranscriberTests/MovedAgainTests.swift" >"$tmp/moved"
+cat "$tmp/moved" >"$repo/SwiftTests/TranscriberTests/MovedAgainTests.swift"
+g commit -qam renamed
+
+# moved: a production change, and a test file renamed WITHOUT a change — nothing new to gate.
+g checkout -q -b moved base
+echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
+g mv SwiftTests/TranscriberTests/MovedTests.swift SwiftTests/TranscriberTests/MovedAgainTests.swift
+g commit -qam moved
 
 # --- canned logs -----------------------------------------------------------------------------------
 
@@ -277,12 +295,30 @@ fi
 scenario; given parent run 1 "$LOG_RUN_FAILED_OLD"; head_green; run_gate fix
 check "the tests run and fail (older summary line)" 0 "$PASSED"
 
-# OtherTests is changed and exempt on this branch; the gated CalcTests has no error.
-scenario; given parent testbuild 1 "$LOG_TEST_ERROR_ELSEWHERE"; head_green; run_gate mixed
-check "compile error only in an EXEMPT changed test file: RED, with a warning" 0 "NOTE: none of these is in a GATED file"
-
 scenario; given parent testbuild 1 "$LOG_TEST_ERROR_COLOUR"; head_green; run_gate mixed
-check "  ... and no warning when the error is in the gated file" 0 "$PASSED" "NOTE: none of these"
+check "compile error in the gated file, next to an exempt one" 0 "$PASSED" "only in RED-FIRST-EXEMPT"
+
+# A renamed-and-modified test file is gated under its new name (#297), and the parent run sees it
+# only under that name: the old copy would declare the same types twice and fail to compile — a
+# false RED.
+scenario; parent_red; head_green; run_gate renamed
+check "a renamed and modified test file is gated" 0 "$PASSED" "" "$ALL_PARENT $ALL_HEAD"
+check "  ... under its new name" 0 "gated files: SwiftTests/TranscriberTests/MovedAgainTests.swift"
+seen=$(paste -s -d ' ' - 2>/dev/null <"$fake/parent.seen-files" || echo "(the parent's test target was never built)")
+if grep -qx 'MovedAgainTests.swift' "$fake/parent.seen-files" 2>/dev/null \
+  && ! grep -qx 'MovedTests.swift' "$fake/parent.seen-files"; then
+  echo "  ok:   ... and the parent tree holds it under the new name only"
+else
+  out="parent tree: $seen"; fail "the parent tree does not hold the renamed file under its new name only"
+fi
+
+echo "parent: RED only from a gated file (#297)"
+
+# OtherTests is changed and exempt on this branch; the gated CalcTests has no error. The gated
+# suites never ran at the parent, so nothing shows they fail without the fix.
+scenario; given parent testbuild 1 "$LOG_TEST_ERROR_ELSEWHERE"; head_green; run_gate mixed
+check "compile error only in an EXEMPT changed test file: not RED" 1 "only in RED-FIRST-EXEMPT" "$RED" "parent.resolve parent.build parent.testbuild"
+check "  ... says what to do" 1 "remove its marker"
 
 echo "parent: not RED"
 
@@ -326,6 +362,10 @@ echo "gate does not apply"
 scenario; run_gate tests-only
 check "tests-only change" 0 "PASS (trivially): no production code changed"
 [ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "tests-only change ran swift"; }
+
+scenario; run_gate moved
+check "a test file renamed without a change" 0 "PASS (trivially): no test files changed."
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "a pure rename ran swift"; }
 
 scenario; run_gate exempt
 check "every changed test file is exempt" 0 "PASS (trivially): every changed test file is RED-FIRST-EXEMPT."

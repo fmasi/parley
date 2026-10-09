@@ -1126,11 +1126,9 @@ public final class TranscriptionRunner {
 
         switch id {
         case .speechAnalyzer:
-            #if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 return SpeechAnalyzerEngine()
             }
-            #endif
             throw RunnerError.engineUnavailable("SpeechAnalyzer requires macOS 26")
 
         case .fluidAudio:

@@ -72,8 +72,9 @@ a release (see `docs/release-checklist.md`).
   `red-first` check runs the changed tests at the merge base and requires them RED there.
   `RED-FIRST-EXEMPT: <reason>` in a test file is only for characterization tests of existing
   behaviour and for the documented diarization-fixture gap. The marker exempts the whole file for
-  as long as it stays in it, in every later PR too: remove it when its reason expires. RED means
-  the tests ran and failed, or a changed test file did not compile. A merge base that cannot be
+  as long as it stays in it, in every later PR too: remove it when its reason expires. A test file
+  renamed and changed in the PR is gated under its new name. RED means the tests ran and failed, or
+  a gated (not exempt) changed test file did not compile. A merge base that cannot be
   resolved, built or run fails the check as "could not build the parent — not RED"; when SwiftPM
   cannot check out a dependency locally, `swift package purge-cache` rebuilds its cache.
 - **Testable seams.** The test target links only `TranscriberCore` and `VerifyEdSignatureCore`.
