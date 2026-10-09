@@ -507,11 +507,9 @@ Test path: `SwiftTests/TranscriberTests/`.
 # Build everything
 swift build
 
-# Run tests (serially: --no-parallel is load-bearing, see AGENTS.md; `just test` runs this with the fixture guard)
-swift test --no-parallel --filter TranscriberTests \
-  -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+# Run tests: serially (--no-parallel is load-bearing, see AGENTS.md) in a throwaway home (#313).
+# `just test` runs this with the fixture guard and a canary; `bash scripts/swift-test.sh <Suite>` runs one suite.
+bash scripts/swift-test.sh
 ```
 
 ### scripts/dev.py
