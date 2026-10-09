@@ -99,6 +99,12 @@ BUILD_FLAGS="-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Fr
 # can wedge a shared media daemon on a headless runner and hang the run. This gate invokes
 # swift test TWICE per run (merge base, then HEAD), so it is doubly exposed.
 TEST_FLAGS="--no-parallel"
+# Both trees' tests run with a throwaway home: the parent's tests are the old ones, and an old test
+# may still resolve the user's real folders (#313).
+if [ -z "${CFFIXED_USER_HOME:-}" ]; then
+  CFFIXED_USER_HOME=$(bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh")
+  export CFFIXED_USER_HOME
+fi
 
 echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
 

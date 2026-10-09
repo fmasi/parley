@@ -338,6 +338,10 @@ struct Harness {
             .appendingPathComponent("coordinator-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: self.tmp, withIntermediateDirectories: true)
         config = ConfigManager(configDir: self.tmp)  // empty dir -> Config.default
+        // Config.default records into the user's real ~/Documents/Recordings with a 15 h storage limit: a test that
+        // reached a real finalize wrote there and ran the limit over the user's archives (#313). Never the real folder.
+        let sandbox = self.tmp.appendingPathComponent("rec").path
+        config.update { $0.recordingDirectory = sandbox; $0.audioArchiveLimitHours = 100_000 }
         let notified = notified
         let criticals = criticals
         let presented = presented, onPresent = onPresent

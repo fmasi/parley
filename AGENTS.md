@@ -48,7 +48,10 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 - `just workflows`: actionlint + zizmor on `.github/workflows`, as the `test` job runs them.
 - `just toolchain`: this Mac's Swift and macOS, and "N tests not run on this toolchain" (the tests
   an older Swift doesn't compile or an older macOS skips). CI prints the same in each job summary.
-- `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
+- `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed,
+  in a throwaway home and under a canary over the real recordings (#313). Run a single suite with
+  `CFFIXED_USER_HOME="$(bash scripts/test-home.sh)" swift test --filter <Suite> …`, never bare: a
+  test that falls back to `Config.default` otherwise writes into, and deletes from, the real recordings.
 - `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier)
   and of the red-first gate's own classifier.
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.

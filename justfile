@@ -24,9 +24,16 @@ toolchain:
 
 # --no-parallel is load-bearing: the shared media-daemon wedge (see test.yml).
 # test.yml `test`: fetch the AMI fixture, then the whole suite serially with the guard armed
+# The suite runs with a throwaway home (scripts/test-home.sh), and the canary fails the recipe if the
+# user's recordings or config changed anyway (#313: a test once ran the storage limit over them).
 test:
+    #!/usr/bin/env bash
+    set -euo pipefail
     bash scripts/fetch-diarization-fixtures.sh
-    PARLEY_FETCH_MODELS=1 PARLEY_REQUIRE_AMI_FIXTURE=1 \
+    snap=$(mktemp)
+    bash scripts/test-canary.sh snapshot "$snap"
+    trap 'bash scripts/test-canary.sh verify "$snap"' EXIT
+    CFFIXED_USER_HOME="$(bash scripts/test-home.sh)" PARLEY_FETCH_MODELS=1 PARLEY_REQUIRE_AMI_FIXTURE=1 \
     swift test --no-parallel --filter TranscriberTests \
       -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
       -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
