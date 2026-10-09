@@ -14,6 +14,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 | Silence detection enabled | `silence_detection_enabled` | `true` | When `true`, recording auto-stops after the silence timeout elapses without speech. |
 | Silence timeout | `silence_timeout_minutes` | `5` | Minutes of silence before auto-stop (requires `silence_detection_enabled`). |
 | Last microphone device ID | `last_microphone_device_id` | `null` | `AVCaptureDevice` unique ID of the microphone last selected in the session dialog. Restored automatically on next launch. |
+| Recent microphone device IDs | `recent_microphone_device_ids` | `null` | Written by the app: the inputs the user chose by hand (a start or a switch on a specific mic), newest first, at most 3. If the mic must follow away from a removed input while the lid is closed, it moves to the most recent one present instead of the silent built-in mic (#315). |
 
 ---
 

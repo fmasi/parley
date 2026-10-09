@@ -582,6 +582,9 @@ public final class RecordingCoordinator {
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
+            // A start on a specific mic is the user's choice: remembered for later recordings (#315). This
+            // start passes the EARLIER choices (its own snapshot); the helper adds the mic it starts on itself.
+            rememberMicrophoneChoice(microphoneDeviceId)
             let source = config.systemAudioSource, options = CaptureOptions(config: config)
             // Bounded by what is left of the start's deadline; a start that answers later changes nothing.
             try await bounded("start", seconds: Self.seconds(until: startBy)) {
@@ -759,6 +762,7 @@ public final class RecordingCoordinator {
             }
             throw error
         }
+        rememberMicrophoneChoice(deviceId)
         // The recording ended normally while the helper was switching (Stop during the switch): there
         // is no recovery file to update any more, and nothing to warn about. Stop deletes the sentinel
         // and leaves the recording phase in one synchronous step, so this check can't fall between.
@@ -778,6 +782,14 @@ public final class RecordingCoordinator {
             Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .private)")
             warnRecoveryNotUpdated()
         }
+    }
+
+    /// Remember an input the user chose by hand (#315). Written only when it changes the list.
+    private func rememberMicrophoneChoice(_ deviceId: String?) {
+        let recent = configManager.config.recentMicrophoneDeviceIds ?? []
+        let updated = MicTargeting.rememberingUserChoice(deviceId, in: recent)
+        guard updated != recent else { return }
+        configManager.update { $0.recentMicrophoneDeviceIds = updated }
     }
 
     private func warnRecoveryNotUpdated() {

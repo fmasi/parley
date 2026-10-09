@@ -54,6 +54,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     var onGenerationChanged: (() -> Void)?
     /// Records a diagnostic event (route change, recovery, error) into the helper's anomaly ring.
     var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
+    /// Invoked (off the audio queue) after a follow or recovery landed on an input that delivers silence —
+    /// the built-in mic with the lid closed — because nothing the user chose was to hand (#315). The service
+    /// raises the silence alarm at once instead of waiting for the exact-zero run.
+    var onLandedOnSilentInput: (() -> Void)?
 
     /// Stamped on every delivered sample buffer, before it is forwarded: a heartbeat means "the OS
     /// called us" (§4.2). Lock-only, read from the watchdog's queue.
@@ -85,6 +89,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     private var currentConcreteDeviceId: String?
     /// The running session's device name, for the failed-follow notice (A-I5). Guarded by `stateLock`.
     private var currentDeviceName: String?
+    /// The inputs the user chose by hand, newest first: the app's remembered list at start, plus every
+    /// switch the user makes during the recording. The follow lands on one of them rather than on the
+    /// lid-closed built-in mic (#315). Guarded by `stateLock`.
+    private var userChoices: [String] = []
     private var isStopping = false
     private var isRecovering = false
     private var restartAttempts = 0
@@ -118,11 +126,12 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     /// Build and start the session for `deviceId` (`nil` = system default). Throws if the mic is
     /// unavailable or unauthorized, so `startCapture` can surface a clear, actionable error.
-    func start(deviceId: String?) throws {
+    func start(deviceId: String?, userChoices: [String] = []) throws {
         stateLock.sync {
             isStopping = false
             isRecovering = false
             restartAttempts = 0
+            self.userChoices = userChoices
         }
         // `userInitiated` sets the pin atomically with the session swap (inside buildAndStart's stateLock
         // block), so a concurrent HAL reevaluation can never observe a fresh concrete device against a
@@ -213,7 +222,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             currentDeviceName = device.localizedName
             // Pin (the user's REQUESTED id, even on a fallback, so we re-pin when it returns) moves in the
             // SAME critical section as the concrete device — never observable half-applied.
-            if userInitiated { pinnedDeviceId = deviceId }
+            if userInitiated {
+                pinnedDeviceId = deviceId
+                userChoices = MicTargeting.rememberingUserChoice(deviceId, in: userChoices)
+            }
             return o
         }
         old?.stopRunning()
@@ -354,11 +366,16 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         }
 
         // "Be on the pinned device if available, else follow the system default" — the pure rule, so it's
-        // unit-tested without hardware (see MicTargeting + MicTargetingTests).
+        // unit-tested without hardware (see MicTargeting + MicTargetingTests). While the lid is closed the
+        // built-in mic is not followed to when an input the user chose is to hand (#315); the lid is read
+        // here, on monitorQueue, once per re-evaluation.
         let available = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
         let systemDefault = AVCaptureDevice.default(for: .audio)?.uniqueID
+        let (lidClosed, unusable) = Self.unusableInputs(available: available, systemDefault: systemDefault)
+        let choices = stateLock.sync { userChoices }
         let decision = MicTargeting.decide(
-            pinned: pinned, current: concrete, available: available, systemDefault: systemDefault
+            pinned: pinned, current: concrete, available: available, systemDefault: systemDefault,
+            unusable: unusable, userChoices: choices
         )
         guard decision.needsSwitch else { return }  // already on the right device
 
@@ -368,8 +385,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         // .restartInPlace the recovery records on success — not an anomaly.
         if decision.leavingDeviceGone {
             Logger.audio.warning("Mic input removed — was \(concrete ?? "none", privacy: .private), following to \(decision.target ?? "default", privacy: .private)")
-            onEvent?(.streamStopError, .anomaly, ["source": "mic", "reason": "input device removed",
-                                                  "from": concrete ?? "none", "to": decision.target ?? "default"])
+            var detail = ["source": "mic", "reason": "input device removed",
+                          "from": concrete ?? "none", "to": decision.target ?? "default"]
+            if lidClosed { detail["lid"] = "closed" }
+            onEvent?(.streamStopError, .anomaly, detail)
         } else {
             Logger.audio.info("Mic following device change — \(concrete ?? "none", privacy: .private) → \(decision.target ?? "default", privacy: .private)")
         }
@@ -379,6 +398,17 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         // recoverLoop recomputes its target from fresh state each iteration (so a mid-recovery user pin is
         // honored) — no frozen decision is passed across the async hop (council MIC-FOLLOW-PIN-OVERRIDE).
         attemptRecover()
+    }
+
+    /// Whether the lid is closed, and the inputs not to follow to while it is: the built-in ones (#315).
+    /// IOKit + HAL reads: called on monitorQueue or the recovery queue, never on the audio queue.
+    private static func unusableInputs(available: Set<String>, systemDefault: String?) -> (lidClosed: Bool, unusable: Set<String>) {
+        let lidClosed = ClamshellMicGuard.isLidClosed()
+        let candidates = available.union(systemDefault.map { [$0] } ?? [])
+        let unusable = MicTargeting.unusableInputs(lidClosed: lidClosed, candidates: candidates) {
+            ClamshellMicGuard.isBuiltInMicSelected(deviceId: $0)
+        }
+        return (lidClosed, unusable)
     }
 
     @objc private func handleRuntimeError(_ note: Notification) {
@@ -443,8 +473,15 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             // available, else the system default (nil). Never a frozen forceDefault — so a pin the user
             // applies mid-recovery, or a device that comes/goes during the loop, is honored on the next
             // pass (council MIC-FOLLOW-PIN-OVERRIDE / mic-switch-clobbered-by-autofollow-recovery).
+            // While the lid is closed, an input the user chose is preferred over the built-in default (#315).
             let available = Set(AudioDeviceEnumerator.availableDevices().compactMap { $0.id })
-            let deviceId = MicTargeting.recoveryTarget(pinned: pinned, available: available)
+            let systemDefault = AVCaptureDevice.default(for: .audio)?.uniqueID
+            let (_, unusable) = Self.unusableInputs(available: available, systemDefault: systemDefault)
+            let choices = stateLock.sync { userChoices }
+            let deviceId = MicTargeting.recoveryTarget(
+                pinned: pinned, available: available, systemDefault: systemDefault,
+                unusable: unusable, userChoices: choices
+            )
             lastAttempt = .some(deviceId)
             do {
                 try configQueue.sync { try buildAndStart(deviceId: deviceId) }
@@ -465,6 +502,12 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 onEvent?(.restartInPlace, .warning, ["source": "mic", "mic": resolved ?? "default",
                                                      "device": concrete ?? "unknown"])
                 onRecovered?(resolved)
+                // Landed on the lid-closed built-in mic with nothing the user chose to hand (and not because
+                // the user pinned it): say so now, not after 12 s of zeros (#315).
+                if let concrete, unusable.contains(concrete), concrete != pinned {
+                    Logger.audio.warning("Mic followed to a built-in input while the lid is closed — raising the silence alarm now")
+                    onLandedOnSilentInput?()
+                }
                 return
             } catch MicCaptureError.stopped {
                 // A stop raced in; buildAndStart already retired the new session. Nothing to recover.
