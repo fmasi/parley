@@ -4145,6 +4145,22 @@ final class HungStep: @unchecked Sendable {
         #expect(h.notified.value.last?.title == "Transcription Complete — no speech was transcribed")
     }
 
+    /// #321: a caller that does not own the phase — a launch salvage while a Stop of the user's is still finishing — still
+    /// gets the notice, but never the rename dialog over that Stop, and the phase stays the Stop's.
+    @Test func aPresenterThatDoesNotOwnThePhaseNotifiesButNeverPresents() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("clean.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "Finishing…")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url), ours: false)
+        #expect(h.notified.value.last?.title == "Transcription Complete")
+        #expect(h.presented.value.isEmpty, "no rename dialog over a session that is not ours")
+        #expect(h.appState.isTranscribing, "the phase is left as it was")
+    }
+
     @Test func aCleanTranscriptSaysTranscriptionComplete() async throws {
         let h = try Harness()
         let url = h.tmp.appendingPathComponent("clean.json")
@@ -4740,6 +4756,70 @@ final class HungStep: @unchecked Sendable {
         #expect(await h.coordinator.prepareForQuit(confirm: { Issue.record("no question while finishing"); return true }))
         #expect(h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil, "the transcript was finished before the quit")
         await stopping.value
+    }
+
+    /// #321: a Stop goes idle only once its transcript is presented and its recovery file is gone. The recovery file's
+    /// delete — the Stop's last step — hangs until released, and the order is asserted while it hangs: never a stopwatch.
+    /// Idle earlier let a Quit return with the recovery file on disk, and a Start open the finished recording's rename
+    /// panel over a live one.
+    @Test func aStopIsIdleOnlyOnceItsTranscriptIsPresentedAndItsRecoveryFileIsGone() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let delete = HungStep("stop: delete")
+        defer { delete.release() }
+        h.coordinator.sentinelIO = SentinelIO(label: "rc-321-stop-\(UUID().uuidString)", beforeEach: { delete.hangIfNamed($0) })
+        h.coordinator.sentinelDeadline = .seconds(60)   // only the release ends the hang, never the delete's bound
+        let appState = h.appState
+        let idleWhenPresented = Harness.Box<Bool?>(nil)
+        h.onPresent.value = { _ in idleWhenPresented.value = appState.isIdle }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until(within: 20) { delete.reached }
+        #expect(delete.isHanging, "the Stop reached its recovery file's delete")
+        #expect(idleWhenPresented.value == false, "the transcript was presented while the Stop was still finishing")
+        #expect(!h.appState.isIdle, "not idle while the recovery file is still on disk")
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+        // A Start now is refused: the Stop is still finishing.
+        await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.count == 1 && !h.appState.isRecording, "no Start while the Stop is still finishing")
+        delete.release()
+        await stopping.value
+        #expect(h.appState.isIdle && h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// #321, the crash paths' shape: a capture that crashed past its retries, or whose restart failed, goes idle only once
+    /// its recovery file is settled.
+    @Test(arguments: [true, false])
+    func aCrashThatGivesUpIsIdleOnlyOnceItsRecoveryFileIsGone(atTheRetryCap: Bool) async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let delete = HungStep("finish: delete")
+        defer { delete.release() }
+        h.coordinator.sentinelIO = SentinelIO(label: "rc-321-crash-\(UUID().uuidString)", beforeEach: { delete.hangIfNamed($0) })
+        h.coordinator.sentinelDeadline = .seconds(60)   // only the release ends the hang, never the delete's bound
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        if atTheRetryCap {
+            h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries   // the next crash in the window gives up
+            h.coordinator.lastCrashAt = Date()
+        } else {
+            h.client.startError = FakeCaptureError()   // the restart fails
+        }
+        let coordinator = h.coordinator
+        let crashing = Task { await coordinator.handleXPCCrash() }
+        await Harness.until(within: 20) { delete.reached }
+        #expect(delete.isHanging, "the give-up reached its recovery file's delete")
+        #expect(!h.appState.isIdle, "not idle while the recovery file is still on disk")
+        delete.release()
+        await crashing.value
+        #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
     }
 
     /// 42: the next launch words it as a quit, never a crash.
