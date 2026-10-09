@@ -48,9 +48,15 @@ let package = Package(
             dependencies: ["VerifyEdSignatureCore"],
             path: "Sources/VerifyEdSignature"
         ),
+        // Test support, linked only into the test bundle: it exits the test process before any
+        // test runs unless the process runs in a throwaway home (#313; see TestHomeGuard.c).
+        .target(
+            name: "TestHomeGuard",
+            path: "SwiftTests/TestHomeGuard"
+        ),
         .testTarget(
             name: "TranscriberTests",
-            dependencies: ["TranscriberCore", "VerifyEdSignatureCore"],
+            dependencies: ["TranscriberCore", "VerifyEdSignatureCore", "TestHomeGuard"],
             path: "SwiftTests/TranscriberTests",
             // The golden-config snapshot is read via #filePath (and rewritten by UPDATE_GOLDEN=1),
             // not through Bundle.module — excluded so SwiftPM doesn't warn about it.

@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round F (items 219–234). The fake client and the harness are RecordingCoordinatorTests.swift's; `HungRead` is
-// RecordingCoordinatorRoundCTests.swift's; `NotReadyEngine` is RecordingCoordinatorRoundDTests.swift's.
+// Stream L, round F (items 219–234). The fake client and the harness are RecordingCoordinatorTests.swift's, and
+// `HungStep` too; `NotReadyEngine` is RecordingCoordinatorRoundDTests.swift's.
 
 /// A pending session `name` in `folder` of `h`: chunk 0 transcribed in its session.json and — `orphan` — a chunk 1 on disk
 /// that is not (it needs the engine).
@@ -188,7 +188,7 @@ struct SlowRead: Sendable {
         config.mergeChunkedAudio = true
         config.preserveSourceWAV = false
         let state = SessionState(sessionId: "m", meetingStart: t0, engine: "fluid_audio", chunkDurationMinutes: 1, chunks: chunks)
-        let hung = HungRead("merge: sources loads")   // L review 252: the loads, their own step
+        let hung = HungStep("merge: sources loads")   // L review 252: the loads, their own step
         defer { hung.release() }
         let runner = TranscriptionRunner()
         runner.folderReads = FolderReads(label: "merge-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
@@ -223,7 +223,7 @@ struct SlowRead: Sendable {
         defer { roundFTearDown(h) }
         let p = try roundFPendingSession(h, "p", orphan: true)
         try RecordingSentinel.writePending([p], directory: h.tmp)
-        let hung = HungRead("transcript: write")
+        let hung = HungStep("transcript: write")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-f-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderWriteDeadline = .milliseconds(300)
@@ -409,13 +409,16 @@ struct NotReadyDiarizer: DiarizationProvider {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(300)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go
+        let helper = HungStep()   // the helper will not let go until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         let coordinator = h.coordinator
         let launch = Task { await coordinator.recoverAtLaunch() }
         await Harness.until { coordinator.relaunchFoundCapture }
         #expect(coordinator.relaunchFoundCapture)
         let quit = await coordinator.prepareForQuit(confirm: { true })
         await launch.value
+        #expect(helper.isHanging, "by order: held while the helper's stop was still unanswered")
         #expect(quit, "Parley quits")
         #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason != nil, "held")
         #expect(coordinator.keepsLaunchAgentOnQuit, "the LaunchAgent stays, so the next launch finishes it")
@@ -449,6 +452,7 @@ struct NotReadyDiarizer: DiarizationProvider {
         try RecordingSentinel.write(s, directory: h.tmp)
         try RecordingSentinel.writePending([older], directory: h.tmp)
         h.coordinator.powerOffMarkWindow = .milliseconds(150)
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         h.coordinator.markPowerOffDuringFinalize()
         // Its session moves from the slot to the pending list, the mark with it.
         var marked = try #require(RecordingSentinel.read(directory: h.tmp))
@@ -504,7 +508,7 @@ private final class IdleRotationClient: ChunkRotationClient {
     /// recorded as `sessionWriteFailed` — the existing alarm — and the pipeline goes on.
     @Test func aProgressFileWriteThatDoesNotAnswerIsAFailedWriteWithinItsBound() async throws {
         let d = try folder(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("chunk: session file")
+        let hung = HungStep("chunk: session file")
         defer { hung.release() }
         let state = SessionState(sessionId: "m", meetingStart: Date(), engine: "fluid_audio", chunkDurationMinutes: 10)
         let processor = ChunkProcessor(config: .default, outputDirectory: d, sessionState: state, transcriber: FakeEngine(), diarizer: nil,

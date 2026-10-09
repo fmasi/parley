@@ -29,7 +29,7 @@ tmp=$(cd "$tmp" && pwd -P)
 repo="$tmp/repo"
 fake="$tmp/fake"       # the scenario: <side>.<step>.log and <side>.<step>.rc, plus `calls`
 bin="$tmp/bin"
-mkdir -p "$repo" "$fake" "$bin"
+mkdir -p "$repo" "$fake" "$bin" "$tmp/home"
 
 # --- the fake swift ------------------------------------------------------------------------------
 
@@ -45,6 +45,7 @@ case "$1 ${2:-}" in
   *) echo "fake swift: unexpected arguments: $*" >&2; exit 97 ;;
 esac
 echo "$side.$step" >>"$FAKE_DIR/calls"
+echo "$side.$step ${CFFIXED_USER_HOME:-}" >>"$FAKE_DIR/homes"
 # What the tree under test actually contains when the test target is compiled.
 if [ "$step" = testbuild ]; then
   cat SwiftTests/TranscriberTests/CalcTests.swift >"$FAKE_DIR/$side.seen-test" 2>/dev/null || :
@@ -108,6 +109,22 @@ g mv SwiftTests/TranscriberTests/MovedTests.swift SwiftTests/TranscriberTests/Mo
 sed 's|// four|// four: asserts add(2, 2) == 4|' "$repo/SwiftTests/TranscriberTests/MovedAgainTests.swift" >"$tmp/moved"
 cat "$tmp/moved" >"$repo/SwiftTests/TranscriberTests/MovedAgainTests.swift"
 g commit -qam renamed
+
+# rewritten: a production change, and a test file renamed AND rewritten past git's rename detection
+# (under 50 % similar): the diff shows it deleted and a new file added, which declares the same type.
+g checkout -q -b rewritten base
+echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
+g rm -q SwiftTests/TranscriberTests/MovedTests.swift
+printf '%s\n' 'struct MovedTests {' '  // asserts add(2, 2) == 4' '  // and add(0, 0) == 0' '}' \
+  >"$repo/SwiftTests/TranscriberTests/RewrittenTests.swift"
+g add -A
+g commit -qm rewritten
+
+# moved-and-fixed: a production change, a changed test file, and another test file renamed WITHOUT
+# a change (a helper moved): the parent tree must hold the moved file under its new name.
+g checkout -q -b moved-and-fixed fix
+g mv SwiftTests/TranscriberTests/MovedTests.swift SwiftTests/TranscriberTests/MovedAgainTests.swift
+g commit -qm moved-and-fixed
 
 # moved: a production change, and a test file renamed WITHOUT a change — nothing new to gate.
 g checkout -q -b moved base
@@ -199,7 +216,9 @@ parent_red() { given parent run 1 "$LOG_RUN_FAILED"; }
 run_gate() { # BRANCH
   g checkout -q "$1"
   status=0
-  out=$(cd "$repo" && PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+  # A home of its own: without one the gate would make a real throwaway home, with a clone of the
+  # model cache, for every scenario.
+  out=$(cd "$repo" && CFFIXED_USER_HOME="$tmp/home" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
 }
 
 fail() { failures=$((failures + 1)); echo "  FAIL: $1"; echo "----- gate output -----"; echo "$out"; echo "-----------------------"; }
@@ -312,6 +331,31 @@ else
   out="parent tree: $seen"; fail "the parent tree does not hold the renamed file under its new name only"
 fi
 
+# The same, below git's rename threshold: the diff shows a delete and an add. The parent tree must
+# not keep the deleted file either, or the type it declares is declared twice.
+scenario; parent_red; head_green; run_gate rewritten
+check "a test file renamed and rewritten (delete + add) is gated" 0 "$PASSED" "" "$ALL_PARENT $ALL_HEAD"
+check "  ... under its new name" 0 "gated files: SwiftTests/TranscriberTests/RewrittenTests.swift"
+seen=$(paste -s -d ' ' - 2>/dev/null <"$fake/parent.seen-files" || echo "(the parent's test target was never built)")
+if grep -qx 'RewrittenTests.swift' "$fake/parent.seen-files" 2>/dev/null \
+  && ! grep -qx 'MovedTests.swift' "$fake/parent.seen-files"; then
+  echo "  ok:   ... and the parent tree does not keep the file the PR deleted"
+else
+  out="parent tree: $seen"; fail "the parent tree keeps the test file the PR deleted"
+fi
+
+# A file renamed without a change is not gated, but the parent tree still holds it, under its new
+# name: dropping it would leave whatever uses it unable to compile (a false RED, or BROKEN).
+scenario; parent_red; head_green; run_gate moved-and-fixed
+check "a test file renamed without a change, next to a gated one" 0 "$PASSED" "MovedAgainTests" "$ALL_PARENT $ALL_HEAD"
+seen=$(paste -s -d ' ' - 2>/dev/null <"$fake/parent.seen-files" || echo "(the parent's test target was never built)")
+if grep -qx 'MovedAgainTests.swift' "$fake/parent.seen-files" 2>/dev/null \
+  && ! grep -qx 'MovedTests.swift' "$fake/parent.seen-files"; then
+  echo "  ok:   ... and the parent tree holds the moved file under its new name"
+else
+  out="parent tree: $seen"; fail "the parent tree does not hold the moved file under its new name"
+fi
+
 echo "parent: RED only from a gated file (#297)"
 
 # OtherTests is changed and exempt on this branch; the gated CalcTests has no error. The gated
@@ -356,6 +400,59 @@ check "the tests run and fail" 1 "FAIL: the gated suites do not pass at HEAD" "$
 
 scenario; parent_red; given head run 0 "$LOG_RUN_ZERO"; run_gate fix
 check "0 tests executed" 1 "FAIL: the gated suites executed 0 tests at HEAD" "$BROKEN_HEAD"
+
+echo "the throwaway home (#313)"
+
+# A home the caller set is checked: the user's real one, or one that does not exist, runs nothing.
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && CFFIXED_USER_HOME="$HOME" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+check "CFFIXED_USER_HOME is the real home" 1 "is the user's real home" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift in the real home"; }
+scenario; parent_red; head_green
+status=0
+out=$(cd "$repo" && CFFIXED_USER_HOME="$tmp/no-such-home" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+check "CFFIXED_USER_HOME does not exist" 1 "is not an existing folder" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift with a missing home"; }
+
+# With no home from the caller the gate makes one per side; when it cannot, nothing runs. A copy of
+# the gate next to a test-home.sh that fails, as one does on a full disk.
+mkdir -p "$tmp/gate-copy"
+cp "$GATE" "$tmp/gate-copy/verify-regression-tests.sh"
+printf '%s\n' '#!/bin/bash' 'echo "cp: Library/Application Support/FluidAudio: No space left on device" >&2' 'exit 1' \
+  >"$tmp/gate-copy/test-home.sh"
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && env -u CFFIXED_USER_HOME PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" \
+  bash "$tmp/gate-copy/verify-regression-tests.sh" base 2>&1) || status=$?
+check "the throwaway home cannot be made" 1 "could not make a throwaway home for the parent run" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift without a throwaway home"; }
+
+# With no home from the caller: each side's tests get a fresh home of their own, nothing else gets
+# one (SwiftPM would move its caches into it), and the gate removes both homes when it ends.
+mkdir -p "$tmp/t"
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && env -u CFFIXED_USER_HOME TMPDIR="$tmp/t" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" \
+  bash "$GATE" base 2>&1) || status=$?
+check "a home of its own per side" 0 "$PASSED"
+parent_home=$(awk '$1 == "parent.run" { print $2 }' "$fake/homes")
+head_home=$(awk '$1 == "head.run" { print $2 }' "$fake/homes")
+others=$(awk '$1 !~ /\.run$/ && NF > 1' "$fake/homes")
+case "$parent_home|$head_home" in
+  "$tmp"/t/parley-test-home.*"|$tmp"/t/parley-test-home.*)
+    if [ "$parent_home" != "$head_home" ] && [ -z "$others" ]; then
+      echo "  ok:   ... given to swift test only, a different one per side"
+    else
+      out=$(cat "$fake/homes"); fail "the homes are shared, or given to more than swift test"
+    fi ;;
+  *) out=$(cat "$fake/homes"); fail "swift test did not run in the gate's throwaway homes" ;;
+esac
+left=$(find "$tmp/t" -maxdepth 1 -name 'parley-test-home.*' | wc -l | tr -d ' ')
+if [ "$left" = 0 ]; then echo "  ok:   ... and removes them when it ends"; else out="$left left"; fail "the gate left its homes behind"; fi
 
 echo "gate does not apply"
 

@@ -706,7 +706,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                     // loudly so the user fixes permissions before the meeting — mid-session mic loss
                     // degrades to system-only instead, which is handled separately.
                     let (micSession, resolvedMic) = try self.startMicSession(
-                        handler: outputHandler, microphoneDeviceId: microphoneDeviceId, token: token
+                        handler: outputHandler, microphoneDeviceId: microphoneDeviceId,
+                        userChoices: options.userMicrophoneChoices, token: token
                     )
                     // Record capture-start provenance with the mic that ACTUALLY resolved — not the
                     // requested id, which may have silently fallen back to the system default if the
@@ -1000,7 +1001,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             return
         }
         stateLock.sync { pendingOptions = options }
-        Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public) debug_skip_sync=\(options.debugSkipWavSync, privacy: .public)")
+        Logger.audio.info("Capture options: tap_auto_start=\(options.tapAutoStart, privacy: .public) soft_alarm=\(options.remoteExactZeroSoftAlarmSeconds.map(String.init) ?? "off", privacy: .public) debug_drop=\(options.debugDropTapFrames, privacy: .public) debug_skip_sync=\(options.debugSkipWavSync, privacy: .public) mic_choices=\(options.userMicrophoneChoices.count, privacy: .public)")
         reply(true)
     }
 
@@ -1414,7 +1415,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     /// Returns the session and the device the mic ACTUALLY resolved to (`nil` = system default), so the
     /// caller can record honest `.captureStart` provenance even when the requested device fell back
     /// (council CONV-1), and wire the session's heartbeat into the liveness watchdog.
-    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?, token: Int) throws -> (session: MicCaptureSession, deviceId: String?) {
+    private func startMicSession(handler: AudioOutputHandler, microphoneDeviceId: String?, userChoices: [String],
+                                 token: Int) throws -> (session: MicCaptureSession, deviceId: String?) {
         let mic = MicCaptureSession(deliveryQueue: audioQueue) { [weak handler] buffer in
             handler?.appendMicSampleBuffer(buffer)
         }
@@ -1428,6 +1430,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             // No "Recording Resumed" banner (routine switch); just update the label via onMicDeviceChanged.
             self?.onMicDeviceChanged?(deviceId)
             self?.clearAlarm(.micFollowFailed)   // a later successful follow (round 2 item 12)
+        }
+        mic.onLandedOnSilentInput = { [weak self, weak handler] in
+            // The follow had no input the user chose to go to, and the default is the built-in mic with the
+            // lid closed (#315): the user is told now. Raised first, then the handler is told on its own
+            // queue, so the first real audio after that clears it; the exact-zero run still confirms it.
+            guard let self else { return }
+            self.raiseAlarm(.micDigitalSilence, "The lid is closed and the microphone moved to the built-in mic, which records silence while the lid is closed. Open the lid or choose another microphone from the menu.")
+            self.audioQueue.async { handler?.expectMicSilence() }
         }
         mic.onUnavailable = { [weak self, weak mic] info in
             // Judged on the watchdog queue, with the mic's heartbeat at that moment (A-I5).
@@ -1469,7 +1479,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             startingMic = mic
             return true
         }) else { throw CancellationError() }
-        try mic.start(deviceId: microphoneDeviceId)
+        try mic.start(deviceId: microphoneDeviceId, userChoices: userChoices)
         // Commit-or-abort against a stop, a disconnect or the deadline that raced in during start
         // (mirrors buildAndStartStream's council-F1 guard): tear the mic down rather than leak a running
         // session past them.

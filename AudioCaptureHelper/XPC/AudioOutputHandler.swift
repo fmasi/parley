@@ -733,6 +733,12 @@ final class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
             writeEndTicks: writeEndTicks)
     }
 
+    /// The mic moved onto an input known to deliver silence and `micDigitalSilence` was raised at once
+    /// (#315): the first real audio must clear it even though no run was reported. Audio-queue only.
+    func expectMicSilence() {
+        micExactZeroMonitor.expectSilence()
+    }
+
     /// Surface a sustained run of exact-zero mic samples (#193) — a mic that is delivering but
     /// hardware-muted (canonical case: MacBook lid closed, built-in mic stays the default input).
     /// Fires live (via `onLiveAnomaly`), unlike most anomalies here, because this is exactly the

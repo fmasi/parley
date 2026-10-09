@@ -767,6 +767,35 @@ public struct SessionState: Codable {
         }
     }
 
+    /// Delete `sessionId`'s session state only when it holds no chunk (#323 follow-up): `session.json` when it is this
+    /// session's, and every moved-aside copy of it — each read whole and empty, or nothing is deleted. Fail-closed: a copy that
+    /// does not decode (a newer build's, a damaged one) or holds a chunk keeps them all, and that is logged. Another session's
+    /// `session.json` is never touched. True when none of this session's state is left. Under the lock: no write lands
+    /// between the look and the delete.
+    @discardableResult
+    public static func deleteIfEmpty(directory: URL, sessionId: String) -> Bool {
+        ioLock.lock(); defer { ioLock.unlock() }
+        let current = fileURL(directory: directory)
+        let mine = (storedSessionId(at: current) == .some(sessionId) ? [current] : []) + asideURLs(directory: directory, sessionId: sessionId)
+        for url in mine {
+            guard let state = read(url: url), state.sessionId == sessionId, state.chunks.isEmpty else {
+                Logger.state.error("\(url.lastPathComponent, privacy: .sensitive) holds a chunk or cannot be read — this session's state is kept")
+                return false
+            }
+        }
+        var left = false
+        for url in mine {
+            do {
+                try FileManager.default.removeItem(at: url)
+                Logger.state.info("Removed the empty session state \(url.lastPathComponent, privacy: .sensitive): its session ended with no chunk")
+            } catch {
+                Logger.state.error("Could not remove the empty session state \(url.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
+                left = true
+            }
+        }
+        return !left
+    }
+
     // MARK: - Finalized marker (R2a item 12)
 
     /// Record, durably, that `sessionId` was finalized into `transcript`. The caller writes the
