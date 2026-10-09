@@ -949,8 +949,15 @@ public final class RecordingCoordinator {
                 let result: TranscriptionResult?
                 // Off the main actor, bounded (L review 122): a folder that does not answer is said so, and kept.
                 guard let look = await readOffMain("stop: session folder", folder: sessionOutputDir, {
-                    (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
-                     toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    let look = (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
+                                toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    // No chunk and no chunk file: the chunked session ends here with nothing to salvage, and leaves no state
+                    // (#323 follow-up) — the empty session.json its pipeline wrote at the start (#294), in an earlier process.
+                    // The capture is stopped and no pipeline runs here. Fail-closed (`removeEmptySessionState`).
+                    if !look.recoverable, look.toRecognise == 0 {
+                        CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: sessionOutputDir, sessionId: sessionId)
+                    }
+                    return look
                 }) else { throw FolderNotAnswering() }
                 if look.recoverable {
                     let config = configManager.config
@@ -3595,7 +3602,13 @@ public final class RecordingCoordinator {
     private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) async -> SalvageOutcome {
         guard let location else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
         guard let count = await readOffMain("salvage: chunks on disk", folder: location.outputDir, {
-            Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            let count = Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            // Nothing on disk: the session ends here, and leaves no state (#323 follow-up) — its session.json was written
+            // empty at its start (#294). In this read, on the folder's queue: ordered before the next recording's first write
+            // there. Every caller has waited for the session's chunk tasks (or had none). Fail-closed: state that holds a
+            // chunk, cannot be read, or another session's, is kept.
+            if count == 0 { CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: location.outputDir, sessionId: location.sessionId) }
+            return count
         }) else { return SalvageOutcome(kind: .folderNotAnswering, chunkCount: 0) }
         return count > 0
             ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: count)
