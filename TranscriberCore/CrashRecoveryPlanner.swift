@@ -11,7 +11,12 @@ public enum CrashRecoveryPlanner {
     /// extension) and whether a WAV exists for it. Shared by `orphanChunks` and `nextFreeChunkIndex`
     /// so both use identical name parsing.
     private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        listedChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId) ?? []
+    }
+
+    /// `onDiskChunkIndices`, nil when the folder does not list: unknown, never "none".
+    private static func listedChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path) else { return nil }
         let prefix = "\(sessionId)-"
         var found: [Int: (baseName: String, hasWav: Bool)] = [:]
         for name in names where name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") {
@@ -97,11 +102,10 @@ public enum CrashRecoveryPlanner {
             return false
         }
         // A folder that does not list says nothing about its chunk files: never "none" (fail-closed).
-        guard (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) != nil else {
+        guard let onDisk = listedChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId) else {
             Logger.state.error("An ended session's folder could not be listed — its state is kept")
             return false
         }
-        let onDisk = onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
         guard onDisk.isEmpty else {
             // Its own chunk files — or another session's whose id starts with this one's (gotcha 85 (c)): kept either way.
             Logger.state.error("An ended session with no chunk in its state has \(onDisk.count, privacy: .public) file(s) named as its chunks on disk (its own, or a session whose id starts with its id) — its state is kept")
