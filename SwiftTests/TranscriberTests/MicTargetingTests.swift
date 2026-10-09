@@ -141,4 +141,168 @@ struct MicTargetingTests {
     func recoveryNoDevices() {
         #expect(MicTargeting.recoveryTarget(pinned: "airpods", available: []) == nil)
     }
+
+    // MARK: - Lid closed: the follow never lands on the built-in mic when another choice exists (#315)
+
+    @Test("lid closed: pin gone, default is the built-in, a mic the user chose before is present → that mic, no alarm")
+    func lidClosedFollowsToTheUsersEarlierChoice() {
+        let d = MicTargeting.decide(
+            pinned: "airpods", current: "airpods", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["airpods", "usb-cam"]
+        )
+        #expect(d.target == "usb-cam")
+        #expect(d.needsSwitch == true)
+        #expect(d.forceDefault == false, "not the system default")
+        #expect(d.leavingDeviceGone == true)
+        #expect(d.raiseSilenceAlarmNow == false)
+    }
+
+    @Test("lid closed: pin gone, nothing else the user chose is present → the default anyway, alarm at once")
+    func lidClosedNoOtherChoiceAlarmsNow() {
+        let d = MicTargeting.decide(
+            pinned: "airpods", current: "airpods", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["airpods"]
+        )
+        #expect(d.target == "builtin")
+        #expect(d.forceDefault == true)
+        #expect(d.needsSwitch == true)
+        #expect(d.raiseSilenceAlarmNow == true)
+    }
+
+    @Test("lid closed, auto-follow (no pin): AirPods removed → the user's earlier choice, never an unchosen input")
+    func lidClosedAutoFollowUsesOnlyChosenInputs() {
+        let d = MicTargeting.decide(
+            pinned: nil, current: "airpods", available: ["builtin", "usb-cam", "phone-mic"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]
+        )
+        #expect(d.target == "usb-cam")
+        #expect(d.raiseSilenceAlarmNow == false)
+        let none = MicTargeting.decide(
+            pinned: nil, current: "airpods", available: ["builtin", "phone-mic"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]
+        )
+        #expect(none.target == "builtin", "phone-mic was never chosen by the user: not picked")
+        #expect(none.raiseSilenceAlarmNow == true)
+    }
+
+    @Test("lid closed: an earlier choice that is itself unusable is skipped")
+    func lidClosedSkipsUnusableChoices() {
+        let d = MicTargeting.decide(
+            pinned: nil, current: "airpods", available: ["builtin", "builtin-2", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin", "builtin-2"], userChoices: ["builtin-2", "usb-cam"]
+        )
+        #expect(d.target == "usb-cam")
+    }
+
+    @Test("lid closed: already on the dead default, nothing chosen appears → no switch (no rebuild loop)")
+    func lidClosedAlreadyOnDefaultNoSwitch() {
+        let d = MicTargeting.decide(
+            pinned: "airpods", current: "builtin", available: ["builtin"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["airpods", "usb-cam"]
+        )
+        #expect(d.needsSwitch == false)
+    }
+
+    @Test("lid closed: on the dead default and an earlier choice is plugged in → move to it")
+    func lidClosedChosenMicAppearsMovesOffDeadDefault() {
+        let d = MicTargeting.decide(
+            pinned: "airpods", current: "builtin", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]
+        )
+        #expect(d.target == "usb-cam")
+        #expect(d.needsSwitch == true)
+        #expect(d.leavingDeviceGone == false)
+    }
+
+    @Test("lid open: the earlier choices change nothing — today's result exactly")
+    func lidOpenIsTodaysRule() {
+        let inputs: [(String?, String?, Set<String>, String?)] = [
+            ("airpods", "airpods", ["builtin", "usb-cam"], "builtin"),
+            (nil, "airpods", ["builtin", "usb-cam"], "builtin"),
+            ("airpods", "builtin", ["builtin", "airpods", "usb-cam"], "builtin"),
+            (nil, "builtin", ["builtin", "airpods"], "airpods"),
+            (nil, "builtin", [], nil),
+        ]
+        for (pinned, current, available, systemDefault) in inputs {
+            let today = MicTargeting.decide(pinned: pinned, current: current, available: available, systemDefault: systemDefault)
+            let withChoices = MicTargeting.decide(
+                pinned: pinned, current: current, available: available, systemDefault: systemDefault,
+                unusable: [], userChoices: ["usb-cam", "airpods"]
+            )
+            #expect(withChoices == today)
+            #expect(withChoices.raiseSilenceAlarmNow == false)
+        }
+    }
+
+    @Test("pinned present → the pin, whatever the lid")
+    func pinnedPresentWinsRegardlessOfLid() {
+        for unusable: Set<String> in [[], ["builtin"]] {
+            let d = MicTargeting.decide(
+                pinned: "usb-cam", current: "builtin", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+                unusable: unusable, userChoices: ["airpods"]
+            )
+            #expect(d.target == "usb-cam")
+            #expect(d.forceDefault == false)
+            #expect(d.raiseSilenceAlarmNow == false)
+        }
+    }
+
+    @Test("recoveryTarget: lid closed, pin gone → the user's earlier choice; none → nil (default)")
+    func recoveryTargetLidClosed() {
+        #expect(MicTargeting.recoveryTarget(
+            pinned: "airpods", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]) == "usb-cam")
+        #expect(MicTargeting.recoveryTarget(
+            pinned: "airpods", available: ["builtin"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]) == nil)
+        #expect(MicTargeting.recoveryTarget(
+            pinned: "airpods", available: ["builtin", "usb-cam"], systemDefault: "builtin",
+            unusable: [], userChoices: ["usb-cam"]) == nil, "lid open: the default, as today")
+        #expect(MicTargeting.recoveryTarget(
+            pinned: "airpods", available: ["builtin", "airpods", "usb-cam"], systemDefault: "builtin",
+            unusable: ["builtin"], userChoices: ["usb-cam"]) == "airpods", "the pin first")
+    }
+
+    @Test("unusableInputs: only built-in inputs, and only while the lid is closed")
+    func unusableInputsRule() {
+        var asked: [String] = []
+        let open = MicTargeting.unusableInputs(lidClosed: false, available: ["builtin", "usb-cam"], systemDefault: "builtin") {
+            asked.append($0); return $0 == "builtin"
+        }
+        #expect(open.isEmpty)
+        #expect(asked.isEmpty, "lid open: no device lookups at all")
+        let closed = MicTargeting.unusableInputs(lidClosed: true, available: ["builtin", "usb-cam"], systemDefault: "builtin") {
+            $0 == "builtin"
+        }
+        #expect(closed == ["builtin"])
+    }
+
+    @Test("unusableInputs: a default missing from the device list is still judged")
+    func unusableInputsIncludesTheDefault() {
+        let u = MicTargeting.unusableInputs(lidClosed: true, available: ["usb-cam"], systemDefault: "builtin") { $0 == "builtin" }
+        #expect(u == ["builtin"])
+    }
+
+    @Test("raisesSilenceAlarm: only on an unusable input the user did not pin")
+    func raisesSilenceAlarmRule() {
+        #expect(MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: "airpods", unusable: ["builtin"]))
+        #expect(MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: nil, unusable: ["builtin"]))
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: "builtin", unusable: ["builtin"]), "the user's own pin")
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "usb-cam", pinned: nil, unusable: ["builtin"]))
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: nil, unusable: []), "lid open")
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: nil, pinned: nil, unusable: ["builtin"]))
+    }
+
+    // MARK: - The inputs the user chose by hand (persisted app-side, passed to the helper)
+
+    @Test("rememberingUserChoice: newest first, no duplicates, capped, nil (system default) changes nothing")
+    func rememberingUserChoice() {
+        #expect(MicTargeting.rememberingUserChoice("usb-cam", in: []) == ["usb-cam"])
+        #expect(MicTargeting.rememberingUserChoice("airpods", in: ["usb-cam"]) == ["airpods", "usb-cam"])
+        #expect(MicTargeting.rememberingUserChoice("usb-cam", in: ["airpods", "usb-cam"]) == ["usb-cam", "airpods"])
+        #expect(MicTargeting.rememberingUserChoice(nil, in: ["airpods"]) == ["airpods"])
+        let full = MicTargeting.rememberingUserChoice("d", in: ["a", "b", "c"])
+        #expect(full == Array(["d", "a", "b", "c"].prefix(MicTargeting.userChoiceLimit)))
+        #expect(full.count == MicTargeting.userChoiceLimit)
+    }
 }

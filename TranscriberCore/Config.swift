@@ -96,6 +96,10 @@ public struct Config: Codable, Equatable, Sendable {
     public var launchOnStartup: Bool
     public var suppressCaptureWarning: Bool
     public var lastMicrophoneDeviceId: String?
+    /// The inputs the user chose by hand (a start or a switch on a specific mic), newest first, at most
+    /// `MicTargeting.userChoiceLimit`. Passed to the helper so a follow away from a removed mic while the
+    /// lid is closed lands on one of them, not on the silent built-in mic (#315). `nil` = none yet.
+    public var recentMicrophoneDeviceIds: [String]?
     public var engine: EngineID
     public var systemAudioSource: SystemAudioSource
     public var vadSpeechThreshold: Double?
@@ -231,6 +235,7 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
+        recentMicrophoneDeviceIds: [String]? = nil,
         engine: EngineID = .resolvedDefault,
         systemAudioSource: SystemAudioSource = .screenCaptureKit,
         vadSpeechThreshold: Double? = nil,
@@ -262,6 +267,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.launchOnStartup = launchOnStartup
         self.suppressCaptureWarning = suppressCaptureWarning
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
+        self.recentMicrophoneDeviceIds = recentMicrophoneDeviceIds
         self.engine = engine
         self.systemAudioSource = systemAudioSource
         self.vadSpeechThreshold = vadSpeechThreshold
@@ -295,6 +301,7 @@ public struct Config: Codable, Equatable, Sendable {
         case launchOnStartup = "launch_on_startup"
         case suppressCaptureWarning = "suppress_capture_warning"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
+        case recentMicrophoneDeviceIds = "recent_microphone_device_ids"
         case engine
         case systemAudioSource = "system_audio_source"
         case vadSpeechThreshold = "vad_speech_threshold"
@@ -329,6 +336,7 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
+        recentMicrophoneDeviceIds = try c.decodeIfPresent([String].self, forKey: .recentMicrophoneDeviceIds)
         // Unlike system_audio_source below, a missing key here follows the CURRENT default: on
         // macOS 26+ the old default (SpeechAnalyzer) produces blank transcripts (#223), so pinning
         // a legacy config to it would pin a total-loss bug rather than a live setup.

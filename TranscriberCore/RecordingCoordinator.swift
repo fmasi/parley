@@ -595,6 +595,7 @@ public final class RecordingCoordinator {
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
+            // The EARLIER hand-picked mics go with the start (#315); the helper adds the mic it starts on itself.
             let source = config.systemAudioSource, options = CaptureOptions(config: config)
             // Bounded by what is left of the start's deadline; a start that answers later changes nothing.
             try await bounded("start", seconds: Self.seconds(until: startBy)) {
@@ -602,6 +603,9 @@ public final class RecordingCoordinator {
                                            systemAudioSource: source, options: options, sessionId: sessionId)
             }
             captureStarted = true
+            // The helper is capturing on the mic the user picked: remember it for later recordings (#315). After the
+            // start, not within its deadline, and not for a start the helper refused (as for a refused switch).
+            rememberMicrophoneChoice(microphoneDeviceId)
             recordClamshellPreflight(preflightRecord)
 
             useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
@@ -773,6 +777,7 @@ public final class RecordingCoordinator {
             }
             throw error
         }
+        rememberMicrophoneChoice(deviceId)
         // The recording ended normally while the helper was switching (Stop during the switch): there
         // is no recovery file to update any more, and nothing to warn about. Stop deletes the sentinel
         // and leaves the recording phase in one synchronous step, so this check can't fall between.
@@ -793,6 +798,14 @@ public final class RecordingCoordinator {
             Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .private)")
             warnRecoveryNotUpdated()
         }
+    }
+
+    /// Remember an input the user chose by hand (#315). Written only when it changes the list.
+    private func rememberMicrophoneChoice(_ deviceId: String?) {
+        let recent = configManager.config.recentMicrophoneDeviceIds ?? []
+        let updated = MicTargeting.rememberingUserChoice(deviceId, in: recent)
+        guard updated != recent else { return }
+        configManager.update { $0.recentMicrophoneDeviceIds = updated }
     }
 
     /// The lid-closed banner is about one microphone (#314): once the recording moved to another — the user's switch or the
