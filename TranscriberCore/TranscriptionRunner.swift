@@ -785,9 +785,9 @@ public final class TranscriptionRunner {
             )
             delivered(report.removedRecordings)
             guard report.finished else { return nil }
-            if report.protectedOverrunBytes > 0 {
-                // Not necessarily this session's (#294): another session in flight, or a file that is not Parley's archive.
-                Logger.files.error("Audio the quota may not delete keeps the recordings \(report.protectedOverrunBytes, privacy: .public) bytes over the storage quota")
+            if let overrun = report.overrunDescription {
+                // Not necessarily this session's (#294): the description says whose.
+                Logger.files.error("The recordings are \(overrun, privacy: .public)")
             }
             return report.protectedOverrunBytes
         } catch {
@@ -987,6 +987,9 @@ public final class TranscriptionRunner {
             writeSeconds: folderWriteSeconds
         )
         self.chunkProcessor = processor
+        // The session has state on disk from its start, not from its first chunk (#294): no quota pass deletes the first
+        // chunk's archive while it is being saved.
+        processor.writeInitialState()
 
         let rotator = ChunkRotator(
             captureClient: captureClient,
