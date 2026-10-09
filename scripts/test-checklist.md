@@ -442,6 +442,7 @@ notification. The "muted" cells are also M-A census cells: fill the matrix row b
 - [ ] **N-08 Stop 5 min after hanging up.** PASS: the completion notice is "Transcription Complete", not "Transcription Complete — capture anomalies" (`CaptureQualityNotice.swift`; the frame check counts only expected time).
 - [ ] **N-09 Nothing playing for 60 s,** with the permission on. PASS: no repair window, and `capture.remote.status` is `idle` (the summary says nothing was playing, not a fault).
 - [ ] **N-10 True alarms still fire.** Close the lid on the built-in mic in clamshell mode (or use a USB mic's hardware mute) during a recording. PASS: the row "Your microphone isn’t being recorded" appears within ~15 s (12 s of exact-zero samples plus presentation). Its message is the static "The microphone has delivered Ns of pure digital silence — it may be hardware-muted (e.g. the lid is closed on the built-in mic)." — it does NOT name the actual mic device, even for the USB-mute case; that clause is only an example.
+- [ ] **N-10b The follow skips the lid-closed built-in mic** (#315, device check D-4). Lid closed, external display, a USB webcam mic plugged in. Choose the webcam once for a short recording (so it is remembered), stop. Start a new recording on Bluetooth headphones (AirPods), speak, then take the headphones away (case closed). PASS: within ~1 s the mic is on the webcam (menu label), your voice is in the recording after the switch, no "isn’t being recorded" row; `.diag.jsonl` has `streamStopError {reason: input device removed, to: <webcam id>, lid: closed}` then `restartInPlace {device: <webcam id>}`. Then unplug the webcam too, start on the headphones and take them away: PASS: the row appears AT ONCE (not ~15 s later) and names the lid; open the lid and speak — the row clears on the first real audio.
 - [ ] **N-11 Grant System Audio Recording while nothing is playing** (final review, helper HF-1). Start a recording with no call and nothing playing, with the permission denied (`tccutil reset AudioCapture eu.fmasi.parley`, **Don't Allow**); then grant it in System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only. PASS: no new row and no notification while nothing plays. Join the call: the remote is captured. If the tap is dead, ONE tap rung, then `remoteNotDelivering` within ~10 s of audio starting. (D-07 grants with audio playing and cannot see this.)
 
 ## Measurement runs (they feed X3; the decisions are in the measurements file)
@@ -832,3 +833,18 @@ scratch folder holding a few synthetic recordings in older day folders (copy the
       and `reason: "storage_limit"`; its segments are unchanged.
 - [ ] Settings' usage is now within the limit (or over only by the meeting just recorded).
 - [ ] With usage under the limit, Stop gives the usual notice with no storage line.
+
+## Lid-closed banner and the record (#314 / #317) — added 2026-10-09
+
+- [ ] **K-01 No banner over a headset.** Lid closed (clamshell mode), Bluetooth headset selected; Record.
+  PASS: no "The lid is closed…" banner. The live log (`log stream … --level debug`) has
+  `Mic pre-flight (start): lid closed, transport bluetooth, built-in false, verdict none`.
+- [ ] **K-02 A start clears an old banner.** Lid closed, built-in mic selected; Record: the banner shows. Stop
+  WITHOUT dismissing it. Select the headset; Record again. PASS: the banner is gone at the start.
+- [ ] **K-03 A switch clears it.** Lid closed, built-in mic; Record (banner). Change Microphone → the headset.
+  PASS: the banner goes within ~2 s; the log has `Mic pre-flight (micSwitch): … verdict none`. Another banner
+  (e.g. "Recording restarted — waiting for audio…") is never cleared by a switch.
+- [ ] **K-04 Why a rung ran.** Tap recording on a call whose other side stays silent for 20 s. PASS: the
+  `.diag.jsonl` (force an anomaly if none, e.g. unplug a USB mic) has `tapRecoveryRung` with
+  `trigger: permissionInsurance` about 12 s after the system `firstFrames`; the unified log keeps
+  "rebuilding for the System Audio Recording permission (insurance)" (`log show`, not only `log stream`).

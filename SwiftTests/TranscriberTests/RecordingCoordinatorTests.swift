@@ -387,6 +387,17 @@ struct Harness {
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 
+    /// The recovery file as it stands IN ORDER behind every write already queued on its queue (#298). For a termination with
+    /// a short bound: its marks are waited for only within what is left of that bound, so a mark still queued when it returns
+    /// is correct, and lands before anything queued after it — the test reads it here, by order, never by the bound, which a
+    /// loaded machine outlasts. An exit whose mark is waited for within `exitMarkBound` (a Quit, a long termination) is read
+    /// directly with that bound set long instead: this read would also pass a mark that was only queued, never waited for.
+    /// Blocks the main thread until the queue gets to it: never while the test hangs that queue, or hops to main from it.
+    func readSlotInOrder() -> RecordingSentinel? {
+        let directory = tmp
+        return coordinator.sentinelIO.sync("test: read in order") { RecordingSentinel.read(directory: directory) }
+    }
+
     /// A WAV with a header and no audio: processing it never loads a model (`streamEmpty`).
     static func headerOnlyWAV() -> Data {
         var d = Data()
@@ -3751,7 +3762,7 @@ final class HungStep: @unchecked Sendable {
         #expect(h.coordinator.hasWorkInFlight)
         await h.coordinator.prepareForTermination(bound: .seconds(1))
         #expect(h.client.stopCalls == 1, "the helper sealed its files")
-        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        let sentinel = try #require(h.readSlotInOrder())
         #expect(sentinel.stopping && sentinel.quitDuringFinalize, "the next launch salvages it, worded as a quit")
         #expect(h.client.finalizeCalls.isEmpty && h.presented.value.isEmpty, "the long finalize is skipped")
     }
@@ -3767,7 +3778,7 @@ final class HungStep: @unchecked Sendable {
         h.client.onStop = { await helper.hangAwaited() }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
         #expect(helper.isHanging, "ended by its bound, never by the helper: its stop was still unanswered")
-        let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
+        let sentinel = try #require(h.readSlotInOrder())
         #expect(sentinel.quitDuringFinalize && sentinel.stopping, "salvage-only, worded as a quit (L review 109)")
         #expect(h.client.droppedConnections == 1, "the hung helper's connection is dropped: its invalidation handler stops it")
     }
@@ -3789,7 +3800,7 @@ final class HungStep: @unchecked Sendable {
         #expect(helper.isHanging, "ended by its bound, never by the helper: the Stop's ask was still unanswered")
         #expect(h.client.stopCalls == 1, "the Stop in flight asks the helper — never a second stop")
         #expect(h.client.droppedConnections == 1, "dropped at the bound, once")
-        #expect(RecordingSentinel.read(directory: h.tmp).map { $0.stopping && $0.quitDuringFinalize } == true)
+        #expect(h.readSlotInOrder().map { $0.stopping && $0.quitDuringFinalize } == true)
         helper.release()
         await stopping.value
     }
@@ -3808,7 +3819,7 @@ final class HungStep: @unchecked Sendable {
         await Harness.until { h.client.startCalls.count == 2 }
         await h.coordinator.prepareForTermination(bound: .milliseconds(200))
         #expect(h.coordinator.stopRequestedDuringRecovery, "the restart will honour the stop")
-        #expect(RecordingSentinel.read(directory: h.tmp).map { $0.stopping && $0.quitDuringFinalize } == true)
+        #expect(h.readSlotInOrder().map { $0.stopping && $0.quitDuringFinalize } == true)
         released.value = true
         await recovering.value
     }
@@ -3834,6 +3845,8 @@ final class HungStep: @unchecked Sendable {
         await terminating.value
         #expect(h.client.stopCalls == 1)
         // CI-safe (L review 173): well under the bound a poll would have to wait out, never a tight 100 ms.
+        // A stopwatch on purpose (#298): it is the only check that would notice a slow poll. Asserting it by order needs a
+        // clock seam in production, left to a production PR of its own.
         #expect(ContinuousClock.now - releasedAt < .milliseconds(500), "awaited, not polled (L review 109)")
     }
 
@@ -3856,6 +3869,7 @@ final class HungStep: @unchecked Sendable {
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until(within: 20) { finalize.reached }
         #expect(h.appState.isTranscribing && h.coordinator.hasWorkInFlight, "a finalize is busy")
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         await h.coordinator.prepareForTermination(bound: .seconds(60))
         #expect(finalize.isHanging, "at once: it returned with the transcript still being finished")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
@@ -3871,6 +3885,7 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         h.coordinator.markForTermination()   // no await: this is all the process may get
         let sentinel = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(sentinel.stopping && sentinel.quitDuringFinalize)
@@ -3883,6 +3898,7 @@ final class HungStep: @unchecked Sendable {
         h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
         defer { tearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         h.coordinator.markExitDuringFinalize()
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == false, "a live recording is not a finishing one")
         try stopReturnsTheFirstChunk(h)
@@ -4040,6 +4056,7 @@ final class HungStep: @unchecked Sendable {
         let helper = HungStep()   // the helper's stop hangs until released
         defer { helper.release() }
         h.client.onStop = { await helper.hangAwaited() }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
         #expect(helper.isHanging, "quit at its bound, never held by the helper: its stop was still unanswered")
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
@@ -4067,6 +4084,8 @@ final class HungStep: @unchecked Sendable {
         await stopping.value
         await quitting.value
         #expect(quit.value == true && h.presented.value.count == 1 && h.client.stopCalls == 1)
+        // A stopwatch on purpose (#298): it is the only check that would notice a slow poll. Asserting it by order needs a
+        // clock seam in production, left to a production PR of its own.
         #expect(ContinuousClock.now - releasedAt < .milliseconds(500), "awaited, not polled (L review 109)")
     }
 
@@ -4694,6 +4713,7 @@ final class HungStep: @unchecked Sendable {
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until { h.appState.isTranscribing }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await h.coordinator.prepareForQuit(confirm: { Issue.record("no question while finishing"); return true }))
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
         // Awaited, never cancelled (L review, RCT:3329): a cancelled Task keeps running into the next test.

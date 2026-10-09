@@ -272,9 +272,11 @@ public final class TapHealer {
                 // The ladder may have been reset during the backoff (heartbeat, gate close, srst,
                 // wake): a rung whose token is no longer in flight must not run (C4 note).
                 guard !self.suspended, self.ladder.inFlightToken == token else { return }
-                // Recorded when it runs, not when it was scheduled: a cancelled rung is no rebuild.
+                // Recorded when it runs, not when it was scheduled: a cancelled rung is no rebuild. `trigger`: what ordered
+                // it (#317) — without it, the permission guard's insurance rebuild read as an unexplained rung.
                 self.onEvent?(.tapRecoveryRung, .warning, [
                     "rung": rung.rawValue, "token": "\(token)", "delay": "\(delay)", "total": "\(self.ladder.totalRebuilds)",
+                    "trigger": self.ladder.inFlightCause?.recordValue ?? "unknown",
                 ])
                 self.cancel(&self.stuckWatchdog)
                 self.stuckToken = token
