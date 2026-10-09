@@ -3538,7 +3538,13 @@ public final class RecordingCoordinator {
     private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) async -> SalvageOutcome {
         guard let location else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
         guard let count = await readOffMain("salvage: chunks on disk", folder: location.outputDir, {
-            Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            let count = Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            // Nothing on disk: the session ends here, and leaves no state (#323 follow-up) — its session.json was written
+            // empty at its start (#294). In this read, on the folder's queue: ordered before the next recording's first write
+            // there. Every caller has waited for the session's chunk tasks (or had none). Fail-closed: state that holds a
+            // chunk, cannot be read, or another session's, is kept.
+            if count == 0 { CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: location.outputDir, sessionId: location.sessionId) }
+            return count
         }) else { return SalvageOutcome(kind: .folderNotAnswering, chunkCount: 0) }
         return count > 0
             ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: count)

@@ -63,11 +63,13 @@ public enum ChunkedSessionRecovery {
             // deletes the sentinel regardless, so recovery is never re-attempted — but without
             // this, a stale session.json lingers on disk forever (#158).
             //
-            // Safe only under the invariant that processLastChunk writes session.json to disk
-            // if and only if it appends to state.chunks. If a future change adds an error path
-            // that writes session.json (e.g. a partial flush) without appending, this delete
-            // would silently erase data that was just persisted — check this guard first if
-            // ChunkProcessor's write/append coupling ever changes. Off the main actor, bounded.
+            // session.json does NOT exist only once a chunk is appended: the live pipeline writes it
+            // empty at its start (#294), and a capture gap writes it too. What makes this delete safe
+            // is that the state it removes holds no chunk: `baseState` is this session's on-disk
+            // state, and nothing was appended to it here. This processor writes session.json only when
+            // it appends (no `writeInitialState` here); if a future change makes it write without
+            // appending, this delete could erase what was just persisted — check here first.
+            // Off the main actor, bounded.
             _ = await reads.read("recovery: progress file", folder: outputDirectory.path, key: outputDirectory.path + "#recovery-delete:" + sessionId,
                                  seconds: seconds) { SessionState.delete(directory: outputDirectory, sessionId: sessionId) }
             return nil
@@ -120,7 +122,14 @@ public enum ChunkedSessionRecovery {
             return SessionState(sessionId: sessionId, meetingStart: earliestOrphanCreation ?? Date(),
                                 engine: engine, chunkDurationMinutes: chunkMinutes, chunks: [])
         }()
-        guard !baseState.chunks.isEmpty || !orphans.isEmpty else { return .nothing }
+        guard !baseState.chunks.isEmpty || !orphans.isEmpty else {
+            // Nothing to salvage, yet this session's state may be there: written empty when its pipeline was set up (#294),
+            // before any chunk. Left, it would be moved aside by the next recording in the folder and keep this id's archives
+            // from the storage limit for good (#323 follow-up). Removed only when it holds no chunk and no chunk file is on
+            // disk — else kept, and logged.
+            if existingState != nil { CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: outputDirectory, sessionId: sessionId) }
+            return .nothing
+        }
         let starts = orphans.map { orphan in
             estimatedStart(of: orphan, in: outputDirectory)
                 ?? baseState.meetingStart.addingTimeInterval(Double(orphan.index) * Double(baseState.chunkDurationMinutes) * 60)
