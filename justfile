@@ -22,22 +22,18 @@ toolchain:
     bash scripts/test-toolchain-report.sh
     bash scripts/toolchain-report.sh
 
-# --no-parallel is load-bearing: the shared media-daemon wedge (see test.yml).
+# --no-parallel is load-bearing: the shared media-daemon wedge (see test.yml); scripts/swift-test.sh sets it.
+# The suite runs in a throwaway home that scripts/swift-test.sh creates and checks on lines of their
+# own (an empty or failed home must never fall back to the real one), and the canary fails the
+# recipe if the user's recordings, Parley's app data or its LaunchAgent changed anyway (#313: a test
+# once ran the storage limit over the real recordings).
 # test.yml `test`: fetch the AMI fixture, then the whole suite serially with the guard armed
-# The suite runs with a throwaway home (scripts/test-home.sh), and the canary fails the recipe if the
-# user's recordings or config changed anyway (#313: a test once ran the storage limit over them).
 test:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/fetch-diarization-fixtures.sh
-    snap=$(mktemp)
-    bash scripts/test-canary.sh snapshot "$snap"
-    trap 'bash scripts/test-canary.sh verify "$snap"' EXIT
-    CFFIXED_USER_HOME="$(bash scripts/test-home.sh)" PARLEY_FETCH_MODELS=1 PARLEY_REQUIRE_AMI_FIXTURE=1 \
-    swift test --no-parallel --filter TranscriberTests \
-      -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-      -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-      -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+    PARLEY_FETCH_MODELS=1 PARLEY_REQUIRE_AMI_FIXTURE=1 \
+      bash scripts/test-canary.sh run bash scripts/swift-test.sh
 
 # Stdlib only (system python3 + bash 3.2); the feed test builds verify-ed-signature itself.
 # The last line tests the red-first gate's own classifier against a fake `swift` (a few seconds).
@@ -49,9 +45,13 @@ release-tools:
     bash scripts/test-verify-regression-tests.sh
 
 # CI passes the merge base with the PR's base branch, so this does too (not the raw base ref).
+# It runs the merge base's OLD tests too, so it runs under the canary as `test` does (#313).
 # test.yml `red-first`: changed tests must be RED at the merge base, GREEN at HEAD
 red-first base="origin/main":
-    PARLEY_FETCH_MODELS=1 bash scripts/verify-regression-tests.sh "$(git merge-base {{base}} HEAD)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mb=$(git merge-base {{base}} HEAD)
+    PARLEY_FETCH_MODELS=1 bash scripts/test-canary.sh run bash scripts/verify-regression-tests.sh "$mb"
 
 # Build ONLY: plain `dev.py` would also kill the running app and install to /Applications.
 # A DEBUG build, unlike plain `dev.py` (release, #271): this step proves the app and the helper
