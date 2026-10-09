@@ -19,6 +19,12 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case xpcInvalidation
     case retry
     case launchRecovery
+    /// The lid-closed microphone pre-flight (#314): what it read and what it decided — detail `lid` (`closed`/`open`),
+    /// `device` (the UID, or `default`), `transport` (`ClamshellMicGuard.transportName`), `builtIn`, `verdict`
+    /// (`warn`/`none`) and `reason` (`start`, `micSwitch`, `micFollow`). Recorded at a start, and at a switch or a
+    /// follow while the lid-closed banner shows. `.info`: routine, so it reaches `.diag.jsonl` only in a session that
+    /// has an anomaly; the unified log has it otherwise.
+    case clamshellPreflight
     /// launchd idle-exited the helper while nothing was being captured (L-N1). Recorded into the
     /// app ring while idle — the next `resetSession()` wipes it, so it lives in the unified log and
     /// the live log, never in a later session's `.diag.jsonl`. Severity `.info`.
@@ -37,7 +43,9 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case alarmCleared
     /// An aggregate-device listener fired (`goin`→0, `stpd`, `diff`, `agrp`); detail `selector`. `.warning`.
     case aggregateIOStopped
-    /// The healing ladder ran a rung; detail `rung`, `delay`, `total`. `.warning`.
+    /// The healing ladder ran a rung; detail `rung`, `token`, `delay`, `total`, and `trigger` (#317): what ordered it — a
+    /// `TapRecoveryLadder.Trigger` (`stalled`, `neverDelivered`, `permissionInsurance`, `permissionGrant`, …),
+    /// `heartbeatMissed` or `slowRetry`. `.warning`.
     case tapRecoveryRung
     /// The ladder's fast budget is spent; the slow retry owns it now. `.anomaly`.
     case tapRecoveryGivenUp

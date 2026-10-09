@@ -85,6 +85,9 @@ public final class RecordingCoordinator {
     var preflight: @Sendable (String?) -> (lidClosed: Bool, builtInMic: Bool) = { deviceId in
         (ClamshellMicGuard.isLidClosed(), ClamshellMicGuard.isBuiltInMicSelected(deviceId: deviceId))
     }
+    /// The transport the pre-flight's device resolves to, for the record only (#314): read in the same detached task.
+    /// A seam so tests name it.
+    var preflightTransport: @Sendable (String?) -> String = { ClamshellMicGuard.inputTransport(deviceId: $0) }
 
     // MARK: - Sleep, wake, power-off, quit (§8.10)
 
@@ -472,7 +475,8 @@ public final class RecordingCoordinator {
         // The recording folder is read in its OWN detached task with its own short bound, concurrently (L
         // review 74): a hung network share must not freeze the UI (L follow-up 33), and must be named as the
         // folder's problem, never the audio system's.
-        let preflight = self.preflight, freeBytesProvider = self.freeBytesProvider, probe = folderProbe
+        let preflight = self.preflight, transportOf = self.preflightTransport
+        let freeBytesProvider = self.freeBytesProvider, probe = folderProbe
         let config = configManager.config
         noteRecordingRoot()
         let recordingDirectory = URL(fileURLWithPath: config.recordingDirectory)
@@ -481,10 +485,13 @@ public final class RecordingCoordinator {
             let status = Self.folderStatus(recordingDirectory, probe: probe)
             return (status, status == .reachable ? freeBytesProvider(Self.nearestExistingDirectory(recordingDirectory, probe: probe)) : nil)
         }
-        let devices: (lidClosed: Bool, builtInMic: Bool)?
+        let devices: (lidClosed: Bool, builtInMic: Bool, transport: String)?
         do {
             devices = try await withDeadline(seconds: Self.seconds(until: startBy), label: "start: pre-flight") {
-                await Task.detached { preflight(microphoneDeviceId) }.value
+                await Task.detached {
+                    let seen = preflight(microphoneDeviceId)
+                    return (seen.lidClosed, seen.builtInMic, transportOf(microphoneDeviceId))
+                }.value
             }
         } catch {
             devices = nil
@@ -498,6 +505,9 @@ public final class RecordingCoordinator {
         // BEFORE the warning is set, so a call that loses the race never shows a banner for a
         // recording it isn't the one driving.
         guard appState.isIdle else { return }
+        // A banner is about the recording that raised it (#314): one left from an earlier start — dismissed or not — must
+        // not outlive it, nor the mic it was about. Only after the guard above: a start that loses the race clears nothing.
+        appState.interruptionWarning = nil
         // Before the sentinel and the helper, and before any banner: nothing of this recording exists yet.
         // The recording folder is named as the cause first, before any disk verdict (L follow-up 32) — the
         // user copy names the folder, never a meeting.
@@ -521,7 +531,7 @@ public final class RecordingCoordinator {
             refuseStart("Parley can’t write to the recording folder — check its permissions (\(folderName)).")
             return
         }
-        guard let (lidClosed, isBuiltInMic) = devices else {
+        guard let (lidClosed, isBuiltInMic, micTransport) = devices else {
             Logger.state.error("Recording not started: the pre-flight audio-device lookup did not answer")
             reportUnresponsiveStart()
             return
@@ -537,6 +547,9 @@ public final class RecordingCoordinator {
         if ClamshellMicGuard.shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) {
             appState.interruptionWarning = ClamshellMicGuard.warningMessage
         }
+        // What the pre-flight read and decided (#314), recorded once the helper's start has bound the session's evidence.
+        let preflightRecord = ClamshellMicGuard.preflightRecord(
+            lidClosed: lidClosed, isBuiltInMic: isBuiltInMic, device: microphoneDeviceId, transport: micTransport, reason: "start")
 
         let naming = Self.startNaming(sessionName: sessionName, now: Date())
 
@@ -589,6 +602,7 @@ public final class RecordingCoordinator {
                                            systemAudioSource: source, options: options, sessionId: sessionId)
             }
             captureStarted = true
+            recordClamshellPreflight(preflightRecord)
 
             useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
             try transcriptionRunner.setupChunkedPipeline(
@@ -763,6 +777,7 @@ public final class RecordingCoordinator {
         // is no recovery file to update any more, and nothing to warn about. Stop deletes the sentinel
         // and leaves the recording phase in one synchronous step, so this check can't fall between.
         guard appState.isRecording else { return }
+        reconsiderClamshellBanner(for: deviceId, reason: "micSwitch")
         // The switch itself worked. If the recovery file can't record it — unwritable, or missing
         // (deleted mid-recording) — a crash restart would resume on the mic the user left, possibly the
         // dead one they switched away from. Say so rather than stay silent.
@@ -778,6 +793,34 @@ public final class RecordingCoordinator {
             Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .private)")
             warnRecoveryNotUpdated()
         }
+    }
+
+    /// The lid-closed banner is about one microphone (#314): once the recording moved to another — the user's switch or the
+    /// helper's follow — the pre-flight runs again on it, and a verdict of "no warning" takes the banner down. Only that
+    /// banner, never another one; it never raises one either (when the banner shows is unchanged). The lookups are HAL
+    /// and IOKit calls: detached, never on the main actor. The answer counts only if the recording is still on that mic.
+    func reconsiderClamshellBanner(for deviceId: String?, reason: String) {
+        guard appState.interruptionWarning == ClamshellMicGuard.warningMessage else { return }
+        let preflight = self.preflight, transportOf = self.preflightTransport
+        Task { @MainActor [weak self] in
+            let seen = await Task.detached { (preflight(deviceId), transportOf(deviceId)) }.value
+            guard let self, self.appState.isRecording, self.recordingMicrophone.current == .some(deviceId) else { return }
+            let record = ClamshellMicGuard.preflightRecord(
+                lidClosed: seen.0.lidClosed, isBuiltInMic: seen.0.builtInMic, device: deviceId, transport: seen.1, reason: reason)
+            self.recordClamshellPreflight(record)
+            if record["verdict"] == "none", self.appState.interruptionWarning == ClamshellMicGuard.warningMessage {
+                self.appState.interruptionWarning = nil
+            }
+        }
+    }
+
+    /// Into the session's evidence (`.info`) and the persisted unified log: an `.info` event reaches `.diag.jsonl` only in
+    /// a session with an anomaly, so the log line is what keeps it otherwise (#314).
+    private func recordClamshellPreflight(_ detail: [String: String]) {
+        captureClient.record(.clamshellPreflight, .info, detail)
+        let when = detail["reason"] ?? "", lid = detail["lid"] ?? "", transport = detail["transport"] ?? ""
+        let builtIn = detail["builtIn"] ?? "", verdict = detail["verdict"] ?? "", device = detail["device"] ?? ""
+        Logger.state.notice("Mic pre-flight (\(when, privacy: .public)): lid \(lid, privacy: .public), transport \(transport, privacy: .public), built-in \(builtIn, privacy: .public), verdict \(verdict, privacy: .public), device \(device, privacy: .private)")
     }
 
     private func warnRecoveryNotUpdated() {
@@ -1075,6 +1118,7 @@ public final class RecordingCoordinator {
             Task { @MainActor in
                 guard let self, self.appState.isRecording else { return }
                 self.setHelperMic(deviceId)
+                self.reconsiderClamshellBanner(for: deviceId, reason: "micFollow")
             }
         }
         // A transient notice only: the sticky state is the helper's `remoteRecoveryFailed` alarm.
