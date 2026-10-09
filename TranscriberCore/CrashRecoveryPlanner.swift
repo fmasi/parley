@@ -96,9 +96,15 @@ public enum CrashRecoveryPlanner {
             Logger.state.info("An ended session with no chunk is marked finalized — its state is left to its own cleanup")
             return false
         }
+        // A folder that does not list says nothing about its chunk files: never "none" (fail-closed).
+        guard (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) != nil else {
+            Logger.state.error("An ended session's folder could not be listed — its state is kept")
+            return false
+        }
         let onDisk = onDiskChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId)
         guard onDisk.isEmpty else {
-            Logger.state.error("An ended session with no chunk in its state has \(onDisk.count, privacy: .public) chunk file(s) on disk — its state is kept")
+            // Its own chunk files — or another session's whose id starts with this one's (gotcha 85 (c)): kept either way.
+            Logger.state.error("An ended session with no chunk in its state has \(onDisk.count, privacy: .public) file(s) named as its chunks on disk (its own, or a session whose id starts with its id) — its state is kept")
             return false
         }
         return SessionState.deleteIfEmpty(directory: outputDirectory, sessionId: sessionId)

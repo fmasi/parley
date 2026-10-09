@@ -63,7 +63,7 @@ public enum ChunkedSessionRecovery {
             // deletes the sentinel regardless, so recovery is never re-attempted — but without
             // this, a stale session.json lingers on disk forever (#158).
             //
-            // session.json does NOT exist only once a chunk is appended: the live pipeline writes it
+            // session.json can exist before any chunk is appended: the live pipeline writes it
             // empty at its start (#294), and a capture gap writes it too. What makes this delete safe
             // is that the state it removes holds no chunk: `baseState` is this session's on-disk
             // state, and nothing was appended to it here. This processor writes session.json only when

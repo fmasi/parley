@@ -97,4 +97,35 @@ import Foundation
         #expect(!CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: dir, sessionId: "m"))
         #expect(exists(dir, "session.json"))
     }
+
+    /// Gotcha 85 (c): another session whose id starts with this one's. `m-2-0.wav` (chunk 0 of `m-2`) is not `m`'s chunk
+    /// file; `m-2.wav` / `m-2.m4a` read as `m`'s chunk 2 and keep `m`'s state — the safe side.
+    @Test func aChunkOfASessionWhoseIdStartsWithThisOneDoesNotBlock() throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(empty("m"), directory: dir)
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2-0.wav"), seconds: 1)
+        #expect(CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: dir, sessionId: "m"))
+        #expect(!exists(dir, "session.json"))
+    }
+
+    @Test func aFileNamedAsThisSessionsChunkKeepsTheStateWhoeverItIs() throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(empty("m"), directory: dir)
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-2.m4a"))   // `m-2`'s merge, or `m`'s chunk 2
+        #expect(!CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: dir, sessionId: "m"))
+        #expect(exists(dir, "session.json"))
+    }
+
+    /// A folder that cannot be listed (no read permission) while its files can still be opened: its chunk files are unknown,
+    /// never "none" — the state is kept.
+    @Test func aFolderThatDoesNotListKeepsTheState() throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try SessionState.write(empty("m"), directory: dir)
+        try FileManager.default.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) == nil, "precondition: it does not list")
+        #expect(!CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: dir, sessionId: "m"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        #expect(exists(dir, "session.json"))
+    }
 }

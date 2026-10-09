@@ -109,6 +109,7 @@ import Foundation
         await h.coordinator.stopRecording()
 
         #expect(h.client.stopCalls == 1)
+        #expect(h.appState.errorMessage == nil, "the Stop's own path, not its failure catch: \(h.appState.errorMessage ?? "")")
         #expect(try sessionFiles(outDir).isEmpty, "no session.json left behind")
     }
 
