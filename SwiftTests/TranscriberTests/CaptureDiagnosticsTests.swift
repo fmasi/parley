@@ -407,8 +407,8 @@ struct CaptureDiagnosticsTests {
         #expect(provenance(d).build == nil, "the next session's stamp is its own")
     }
 
-    /// Helper sessions of different builds (an update between a crash and its recovery) are both named, never one of
-    /// them alone; a start from a helper that predates the stamp claims nothing.
+    /// Starts of different builds in one record are both named, never one of them alone; a start from a helper that
+    /// predates the stamp claims nothing.
     @Test func helperSessionsOfDifferentBuildsAreBothNamed() {
         var d = CaptureDiagnostics()
         d.record(captureStart(build: nil, at: 0))

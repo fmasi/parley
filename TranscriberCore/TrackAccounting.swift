@@ -19,8 +19,9 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     /// a lower bound, and the record says so (R2b item 8).
     public var exactZeroIsLowerBound = false
     public var heartbeatCallbacksIsLowerBound = false
-    /// The helper's stop timed out sealing the capture: its counts are the last tick's (≤ 1 s stale), so every
-    /// value is a lower bound (final review R-M1) — never stamped as exact. A sum with one such session is one too.
+    /// Every value is a lower bound, never stamped as exact: the helper's stop timed out sealing the capture (its
+    /// counts are the last tick's, final review R-M1), the counts are a crashed helper's last status pull standing in
+    /// for its stop (#295), or the record was built without its folder (#229). A sum with one such session is one too.
     public var coverageIncomplete = false
 
     public static let minimumDeficitSeconds: Double = 15

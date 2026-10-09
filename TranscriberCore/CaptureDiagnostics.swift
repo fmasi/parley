@@ -297,8 +297,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// item 7).
     public var reconstructed = false
     /// Which kind of build captured it (#295, from `captureStart`'s `build`, #271): `debug` or `release`, both
-    /// comma-joined when helper sessions disagree. In the transcript of every recording, a clean one included (it
-    /// keeps no `.diag.jsonl`). nil when no start carried it.
+    /// comma-joined when the record's starts disagree. Only the starts the record holds: a crashed helper's undrained
+    /// start is not among them. In the transcript of every recording, a clean one included (it keeps no
+    /// `.diag.jsonl`). nil when no start in the record carried it.
     public let build: String?
 
     static let reconstructedNote = "Capture facts come from the recovery run that rebuilt this transcript, not from the recording itself; they may be incomplete."

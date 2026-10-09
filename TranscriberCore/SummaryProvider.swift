@@ -37,7 +37,8 @@ public struct CaptureSideNote: Equatable, Sendable {
     public let anomalyCount: Int?
     /// `exactZeroSeconds` sums measured and unmeasured sessions: at least that much (round 3 item 5).
     public let exactZeroIsLowerBound: Bool
-    /// A stop's seal timed out (`coverage_incomplete`): the seconds are lower bounds (final review R-M1).
+    /// `coverage_incomplete`: the seconds are lower bounds — a stop's seal timed out (final review R-M1), a crashed
+    /// helper's last status pull stands in for its stop (#295), or the record was built without its folder (#229).
     public let coverageIncomplete: Bool
 
     public init(status: String, deliveredSeconds: Double, expectedSeconds: Double,
