@@ -38,6 +38,17 @@ import Testing
         await h.coordinator.stopRecording()
     }
 
+    @Test func aStartTheHelperRefusedIsNotRemembered() async throws {
+        let h = try Harness()
+        defer { roundFTearDown(h) }
+        h.client.startError = FakeCaptureError()
+
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "airpods")
+
+        #expect(h.appState.isIdle)
+        #expect((h.config.config.recentMicrophoneDeviceIds ?? []).isEmpty)
+    }
+
     @Test func aMidRecordingSwitchIsRememberedForTheNextStart() async throws {
         let h = try Harness()
         _ = try h.writeSentinel(micDeviceUID: "mic-1")

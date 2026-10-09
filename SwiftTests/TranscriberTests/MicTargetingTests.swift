@@ -266,13 +266,31 @@ struct MicTargetingTests {
     @Test("unusableInputs: only built-in inputs, and only while the lid is closed")
     func unusableInputsRule() {
         var asked: [String] = []
-        let open = MicTargeting.unusableInputs(lidClosed: false, candidates: ["builtin", "usb-cam"]) {
+        let open = MicTargeting.unusableInputs(lidClosed: false, available: ["builtin", "usb-cam"], systemDefault: "builtin") {
             asked.append($0); return $0 == "builtin"
         }
         #expect(open.isEmpty)
         #expect(asked.isEmpty, "lid open: no device lookups at all")
-        let closed = MicTargeting.unusableInputs(lidClosed: true, candidates: ["builtin", "usb-cam"]) { $0 == "builtin" }
+        let closed = MicTargeting.unusableInputs(lidClosed: true, available: ["builtin", "usb-cam"], systemDefault: "builtin") {
+            $0 == "builtin"
+        }
         #expect(closed == ["builtin"])
+    }
+
+    @Test("unusableInputs: a default missing from the device list is still judged")
+    func unusableInputsIncludesTheDefault() {
+        let u = MicTargeting.unusableInputs(lidClosed: true, available: ["usb-cam"], systemDefault: "builtin") { $0 == "builtin" }
+        #expect(u == ["builtin"])
+    }
+
+    @Test("raisesSilenceAlarm: only on an unusable input the user did not pin")
+    func raisesSilenceAlarmRule() {
+        #expect(MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: "airpods", unusable: ["builtin"]))
+        #expect(MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: nil, unusable: ["builtin"]))
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: "builtin", unusable: ["builtin"]), "the user's own pin")
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "usb-cam", pinned: nil, unusable: ["builtin"]))
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: "builtin", pinned: nil, unusable: []), "lid open")
+        #expect(!MicTargeting.raisesSilenceAlarm(landedOn: nil, pinned: nil, unusable: ["builtin"]))
     }
 
     // MARK: - The inputs the user chose by hand (persisted app-side, passed to the helper)

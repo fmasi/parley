@@ -582,9 +582,7 @@ public final class RecordingCoordinator {
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
-            // A start on a specific mic is the user's choice: remembered for later recordings (#315). This
-            // start passes the EARLIER choices (its own snapshot); the helper adds the mic it starts on itself.
-            rememberMicrophoneChoice(microphoneDeviceId)
+            // The EARLIER hand-picked mics go with the start (#315); the helper adds the mic it starts on itself.
             let source = config.systemAudioSource, options = CaptureOptions(config: config)
             // Bounded by what is left of the start's deadline; a start that answers later changes nothing.
             try await bounded("start", seconds: Self.seconds(until: startBy)) {
@@ -592,6 +590,9 @@ public final class RecordingCoordinator {
                                            systemAudioSource: source, options: options, sessionId: sessionId)
             }
             captureStarted = true
+            // The helper is capturing on the mic the user picked: remember it for later recordings (#315). After the
+            // start, not within its deadline, and not for a start the helper refused (as for a refused switch).
+            rememberMicrophoneChoice(microphoneDeviceId)
 
             useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
             try transcriptionRunner.setupChunkedPipeline(

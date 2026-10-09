@@ -392,6 +392,10 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         } else {
             Logger.audio.info("Mic following device change — \(concrete ?? "none", privacy: .private) → \(decision.target ?? "default", privacy: .private)")
         }
+        if decision.raiseSilenceAlarmNow {
+            // The recovery re-decides from fresh state and raises the alarm once it has landed there.
+            Logger.audio.warning("Mic follow: the lid is closed and no microphone the user chose is present — following to the built-in mic")
+        }
         // A device change is fresh information: refresh the recovery budget so a prior exhaustion can't
         // block following the new device (council F3).
         stateLock.sync { restartAttempts = 0 }
@@ -404,8 +408,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// IOKit + HAL reads: called on monitorQueue or the recovery queue, never on the audio queue.
     private static func unusableInputs(available: Set<String>, systemDefault: String?) -> (lidClosed: Bool, unusable: Set<String>) {
         let lidClosed = ClamshellMicGuard.isLidClosed()
-        let candidates = available.union(systemDefault.map { [$0] } ?? [])
-        let unusable = MicTargeting.unusableInputs(lidClosed: lidClosed, candidates: candidates) {
+        let unusable = MicTargeting.unusableInputs(lidClosed: lidClosed, available: available, systemDefault: systemDefault) {
             ClamshellMicGuard.isBuiltInMicSelected(deviceId: $0)
         }
         return (lidClosed, unusable)
@@ -504,7 +507,7 @@ final class MicCaptureSession: NSObject, AVCaptureAudioDataOutputSampleBufferDel
                 onRecovered?(resolved)
                 // Landed on the lid-closed built-in mic with nothing the user chose to hand (and not because
                 // the user pinned it): say so now, not after 12 s of zeros (#315).
-                if let concrete, unusable.contains(concrete), concrete != pinned {
+                if MicTargeting.raisesSilenceAlarm(landedOn: concrete, pinned: pinned, unusable: unusable) {
                     Logger.audio.warning("Mic followed to a built-in input while the lid is closed — raising the silence alarm now")
                     onLandedOnSilentInput?()
                 }

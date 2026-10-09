@@ -52,12 +52,21 @@ public enum MicTargeting {
         return Array(([choice] + recent.filter { $0 != choice }).prefix(userChoiceLimit))
     }
 
-    /// The inputs the follow must not land on while another is to hand: the built-in ones while the lid is
-    /// closed. `isBuiltIn` is a HAL read: asked only when the lid is closed, and never on the audio queue.
-    public static func unusableInputs(lidClosed: Bool, candidates: Set<String>,
+    /// The inputs the follow must not land on while another is to hand: the built-in ones (among the
+    /// available inputs and the system default) while the lid is closed. `isBuiltIn` is a HAL read: asked
+    /// only when the lid is closed, and never on the audio queue.
+    public static func unusableInputs(lidClosed: Bool, available: Set<String>, systemDefault: String?,
                                       isBuiltIn: (String) -> Bool) -> Set<String> {
         guard lidClosed else { return [] }
-        return candidates.filter(isBuiltIn)
+        return available.union(systemDefault.map { [$0] } ?? []).filter(isBuiltIn)
+    }
+
+    /// Whether landing on `device` should raise the silence alarm at once: it is unusable (the lid-closed
+    /// built-in mic) and the user did not pin it — a pinned built-in mic is the user's explicit choice, and
+    /// the start's pre-flight already warned about it.
+    public static func raisesSilenceAlarm(landedOn device: String?, pinned: String?, unusable: Set<String>) -> Bool {
+        guard let device else { return false }
+        return unusable.contains(device) && device != pinned
     }
 
     /// The pin if present; else the system default, unless it is unusable and an input the user chose by
@@ -93,7 +102,7 @@ public enum MicTargeting {
             forceDefault: p.onDefault,
             needsSwitch: p.target != current,
             leavingDeviceGone: leavingGone,
-            raiseSilenceAlarmNow: !p.onPin && p.target.map { unusable.contains($0) } ?? false
+            raiseSilenceAlarmNow: raisesSilenceAlarm(landedOn: p.target, pinned: pinned, unusable: unusable)
         )
     }
 
