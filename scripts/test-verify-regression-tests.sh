@@ -119,6 +119,12 @@ printf '%s\n' 'struct MovedTests {' '  // asserts add(2, 2) == 4' '  // and add(
 g add -A
 g commit -qm rewritten
 
+# moved-and-fixed: a production change, a changed test file, and another test file renamed WITHOUT
+# a change (a helper moved): the parent tree must hold the moved file under its new name.
+g checkout -q -b moved-and-fixed fix
+g mv SwiftTests/TranscriberTests/MovedTests.swift SwiftTests/TranscriberTests/MovedAgainTests.swift
+g commit -qm moved-and-fixed
+
 # moved: a production change, and a test file renamed WITHOUT a change — nothing new to gate.
 g checkout -q -b moved base
 echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
@@ -333,6 +339,18 @@ if grep -qx 'RewrittenTests.swift' "$fake/parent.seen-files" 2>/dev/null \
   echo "  ok:   ... and the parent tree does not keep the file the PR deleted"
 else
   out="parent tree: $seen"; fail "the parent tree keeps the test file the PR deleted"
+fi
+
+# A file renamed without a change is not gated, but the parent tree still holds it, under its new
+# name: dropping it would leave whatever uses it unable to compile (a false RED, or BROKEN).
+scenario; parent_red; head_green; run_gate moved-and-fixed
+check "a test file renamed without a change, next to a gated one" 0 "$PASSED" "MovedAgainTests" "$ALL_PARENT $ALL_HEAD"
+seen=$(paste -s -d ' ' - 2>/dev/null <"$fake/parent.seen-files" || echo "(the parent's test target was never built)")
+if grep -qx 'MovedAgainTests.swift' "$fake/parent.seen-files" 2>/dev/null \
+  && ! grep -qx 'MovedTests.swift' "$fake/parent.seen-files"; then
+  echo "  ok:   ... and the parent tree holds the moved file under its new name"
+else
+  out="parent tree: $seen"; fail "the parent tree does not hold the moved file under its new name"
 fi
 
 echo "parent: RED only from a gated file (#297)"

@@ -25,8 +25,9 @@
 #        - no production code changed (a tests-only PR adds characterization tests for
 #          EXISTING behaviour — those are green at the parent by definition), or
 #        - every changed test file is explicitly exempted (see below).
-#   3. Create a throwaway git worktree at BASE, overlay ONLY the changed test files from HEAD
-#      onto it, delete from it every test file the PR deletes (a renamed file's old copy, or a file
+#   3. Create a throwaway git worktree at BASE, overlay the changed test files from HEAD
+#      onto it (and the test files renamed without a change, under their new names), delete from
+#      it every test file the PR deletes (a renamed file's old copy, or a file
 #      whose types moved elsewhere, would otherwise declare those types a second time and fail to
 #      compile: a false RED or BROKEN), and run just the test suites declared in the changed files.
 #      The run is four steps, and
@@ -126,6 +127,11 @@ echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
 test_changes=$(git diff --name-status -M --diff-filter=AMR "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR")
 changed_test_files=$(
   printf '%s\n' "$test_changes" | awk -F '\t' '$1 != "R100" && $NF ~ /\.swift$/ { print $NF }'
+)
+# The new paths of the test files renamed WITHOUT a change: not gated, but copied into the parent
+# tree with the changed files, since the old path is removed from it below.
+moved_test_files=$(
+  printf '%s\n' "$test_changes" | awk -F '\t' '$1 == "R100" && $NF ~ /\.swift$/ { print $NF }'
 )
 # Every test file HEAD no longer has: the parent tree must not keep them (step 4), or a type that
 # moved to another file is declared twice and the test target fails to compile — a false RED, or
@@ -342,11 +348,11 @@ if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
   exit 1
 fi
 # Overlay ALL changed test files (exempt ones and helpers too — gated tests may depend on
-# them), but execute only the gated suites.
+# them) and the ones renamed without a change, but execute only the gated suites.
 for f in $removed_test_files; do
   rm -f "$parent_tree/$f"
 done
-for f in $changed_test_files; do
+for f in $changed_test_files $moved_test_files; do
   mkdir -p "$parent_tree/$(dirname "$f")"
   git show "$HEAD_SHA:$f" > "$parent_tree/$f"
 done

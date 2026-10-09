@@ -8,7 +8,8 @@
 #                                    (path, size, mtime), into <file>
 #   test-canary.sh verify <file>     list again. A file removed fails the run. A file added or
 #                                    changed fails it too, unless the Parley app is running — it
-#                                    may be recording — when they are listed as a warning.
+#                                    may be recording — when they are listed as a warning; so is
+#                                    a removed app file then, but never a removed recording.
 # The recording folder is read from the real config.json (`recording_directory`), defaulting to
 # ~/Documents/Recordings. A folder that is a link (to an external disk or a NAS) is followed; links
 # inside it are not. A folder that does not exist (CI) lists as empty.
@@ -44,8 +45,10 @@ verify() {
     echo "TEST CANARY (#313): files under $rec, Parley's Application Support folder or its LaunchAgent changed during the test run."
     [ -z "$removed" ] || { echo "Removed:"; printf '%s\n' "$removed" | sed -n '1,20p'; }
     [ -z "$touched" ] || { echo "Added or changed:"; printf '%s\n' "$touched" | sed -n '1,20p'; }
-    if [ -z "$removed" ] && pgrep -qx Parley; then
-      echo "Parley is running and may have written these itself; check them. Not failing the run."
+    # The running app adds and changes files, and removes its own state (recording.json when a
+    # recording ends): only a removed recording still fails the run then.
+    if pgrep -qx Parley && ! printf '%s\n' "$removed" | grep -qF -- "$rec/"; then
+      echo "Parley is running and may have done this itself; check them. Not failing the run."
       return 0
     fi
     echo "Tests must never touch real recordings, config or app state. Find the test that resolves a real path."
@@ -63,7 +66,11 @@ case "${1:-}" in
     snap=$(mktemp)
     listing > "$snap"
     rc=0
+    # An interrupted run is still checked: it is the one most likely to have stopped half-way
+    # through a test that deletes.
+    trap 'verify "$snap" || :; rm -f "$snap"; exit 130' INT TERM
     "$@" || rc=$?
+    trap - INT TERM
     canary=0
     verify "$snap" || canary=$?
     rm -f "$snap"

@@ -61,7 +61,8 @@ Report only material problems: no praise, no summary of what the code does, no s
 7. **Tests.** New or changed logic has Swift Testing tests in `SwiftTests/TranscriberTests/`
    covering the happy path, edge cases and invalid input; a bug fix has a test that fails without
    it (the `red-first` check enforces this). The test target links only `TranscriberCore` and
-   `VerifyEdSignatureCore`, so decision logic added to `AudioCaptureHelper/` or `TranscriberApp/`
+   `VerifyEdSignatureCore` (plus the test-only `TestHomeGuard`, which stops the test process in
+   the real home), so decision logic added to `AudioCaptureHelper/` or `TranscriberApp/`
    is untested by construction: ask for it in Core behind a seam (as `RecordingCoordinator` and
    `TrackLivenessMonitor` were). Flag a `RED-FIRST-EXEMPT:` marker whose reason isn't a
    characterization test or the documented diarization-fixture gap, a test that can skip silently,
