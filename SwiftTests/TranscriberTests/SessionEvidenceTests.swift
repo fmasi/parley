@@ -603,7 +603,7 @@ import Testing
             p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
         }
         LiveDiagnosticsLog.flushAll()
-        let known = HungRead("evidence: known helpers")
+        let known = HungStep("evidence: known helpers")
         defer { known.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-hung-\(UUID().uuidString)",
                                                                 beforeEachRead: { known.hangIfNamed($0) }))
@@ -753,7 +753,7 @@ import Testing
     /// session updates it, never a misleading `.relaunch` beside it.
     @Test func aTimedOutBuildThatLandsLaterIsThisProcesssOwnRecord() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        let hung = HungStep("evidence: build"), once = Harness.Box(true)
         defer { hung.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", beforeEachRead: { name in
             guard once.value, name == hung.label else { return }

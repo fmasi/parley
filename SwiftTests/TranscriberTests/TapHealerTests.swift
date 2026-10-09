@@ -48,6 +48,8 @@ import Testing
         var giveUps: [Bool] = []
         var recovered = 0, stuck = 0, succeeded = 0
         var rungEvents = 0, givenUpEvents = 0
+        /// Each `tapRecoveryRung` event's `trigger` (#317), in order.
+        var rungTriggers: [String?] = []
     }
 
     /// Keeps the fake tap alive (the healer holds it weakly).
@@ -65,8 +67,8 @@ import Testing
         healer.onRecovered = { calls.recovered += 1 }
         healer.onStuck = { calls.stuck += 1 }
         healer.onRungSucceeded = { calls.succeeded += 1 }
-        healer.onEvent = { kind, _, _ in
-            if kind == .tapRecoveryRung { calls.rungEvents += 1 }
+        healer.onEvent = { kind, _, detail in
+            if kind == .tapRecoveryRung { calls.rungEvents += 1; calls.rungTriggers.append(detail["trigger"]) }
             if kind == .tapRecoveryGivenUp { calls.givenUpEvents += 1 }
         }
         healer.startSession(tap: tap)
@@ -452,5 +454,25 @@ import Testing
         r.clock.advance(by: 10)
         #expect(r.tap.rebuilds.isEmpty)
         #expect(r.clock.pending == 0)
+    }
+
+    // MARK: - #317: the rung's record names its trigger
+
+    /// The insurance rebuild 12 s into a call whose remote had not spoken yet showed as a bare `tapRecoveryRung`.
+    @Test func theRungEventNamesThePermissionInsuranceThatOrderedIt() {
+        let r = rig()
+        r.healer.trigger(.permissionInsurance)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.count == 1)
+        #expect(r.calls.rungTriggers == ["permissionInsurance"])
+    }
+
+    @Test func theRungEventNamesEachTriggerInTurn() {
+        let r = rig()
+        r.healer.trigger(.neverDelivered)
+        answerNextRung(r, succeeded: false)
+        answerNextRung(r, succeeded: true)
+        r.clock.advance(by: TapRecoveryLadder.heartbeatDeadlineSeconds + 1)   // no heartbeat: the next rung
+        #expect(r.calls.rungTriggers.prefix(3) == ["neverDelivered", "rebuildFailed", "heartbeatMissed"])
     }
 }

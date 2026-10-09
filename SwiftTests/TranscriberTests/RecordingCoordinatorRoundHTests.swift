@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TranscriberCore
 
-// Stream L, round H (items 251–262). The fake client and the harness are RecordingCoordinatorTests.swift's; `HungRead` is
-// RecordingCoordinatorRoundCTests.swift's; `SlowRead`, `roundFPendingSession` and `roundFTearDown` are
+// Stream L, round H (items 251–262). The fake client and the harness are RecordingCoordinatorTests.swift's, and
+// `HungStep` too; `SlowRead`, `roundFPendingSession` and `roundFTearDown` are
 // RecordingCoordinatorRoundFTests.swift's.
 
 /// The labels of the folder work a reader ran, in the order it ran them — read once that work has finished.
@@ -187,7 +187,9 @@ final class ReadLog: @unchecked Sendable {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(300)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go
+        let helper = HungStep()   // the helper will not let go until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         let coordinator = h.coordinator, tmp = h.tmp
         let launch = Task { await coordinator.recoverAtLaunch() }
         await Harness.until { coordinator.relaunchFoundCapture }
@@ -197,6 +199,7 @@ final class ReadLog: @unchecked Sendable {
             return true
         })
         await launch.value
+        #expect(helper.isHanging, "by order: held while the helper's stop was still unanswered")
         #expect(quit)
         #expect(held(h), "held while the alert was up")
         #expect(coordinator.keepsLaunchAgentOnQuit, "the LaunchAgent stays, so the next launch finishes it")
@@ -224,11 +227,18 @@ final class ReadLog: @unchecked Sendable {
         defer { roundFTearDown(h) }
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
         h.coordinator.quitStopBound = .milliseconds(200)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }
+        let helper = HungStep()   // the helper's stop hangs until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
+        // The Quit's own mark and its look for a held session are WAITED for, whatever the machine's load (#298). The
+        // `stopping` read below is the Stop's mark, which the Stop awaits before it asks the helper.
+        h.coordinator.exitMarkBound = .seconds(60)
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
+        #expect(helper.isHanging, "by order: the Quit returned with the helper's stop still unanswered")
         #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true)
         #expect(h.coordinator.keepsLaunchAgentOnQuit, "the helper had not let go")
-        await Harness.until(within: 5) { h.appState.isIdle }   // the Stop ends on its own
+        helper.release()   // the helper answers: the Stop ends
+        await Harness.until(within: 5) { h.appState.isIdle }
     }
 
     /// … while a Quit whose recording was stopped and finished within its bound keeps none.
@@ -572,7 +582,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         defer { roundFTearDown(h) }
         let p = try roundFPendingSession(h, "p", orphan: true)
         try RecordingSentinel.writePending([p], directory: h.tmp)
-        let hung = HungRead("transcript: write")
+        let hung = HungStep("transcript: write")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-h-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderWriteDeadline = .milliseconds(300)
@@ -598,6 +608,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         let h = try Harness()
         defer { roundFTearDown(h) }
         h.coordinator.powerOffMarkWindow = .seconds(30)   // withdrawn by hand below
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         var first = try h.writeSentinel(sessionId: "one")
         first.stopping = true
         try RecordingSentinel.write(first, directory: h.tmp)
@@ -631,7 +642,9 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "mic-1")
         h.client.startError = CaptureCallTimeout(call: "start", seconds: 15)
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(2)) }
+        let helper = HungStep()   // the helper will not stop until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         let reads = Harness.Box(0), idleDuringTheHoldsRead = Harness.Box<Bool?>(nil), appState = h.appState
         h.coordinator.sentinelIO = SentinelIO(label: "rc-h-\(UUID().uuidString)", beforeEach: { label in
             guard label == "crash: read" else { return }
@@ -640,6 +653,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
             idleDuringTheHoldsRead.value = DispatchQueue.main.sync { MainActor.assumeIsolated { appState.isIdle } }
         })
         await h.coordinator.handleXPCCrash()
+        #expect(helper.isHanging, "by order: held while the helper's stop was still unanswered")
         #expect(RecordingSentinel.readPending(directory: h.tmp).first?.heldReason == .restartFailed, "held")
         #expect(idleDuringTheHoldsRead.value == false, "read while the recording's phase still refused a Start")
     }
@@ -805,7 +819,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
     /// clears the mark at once and lets that lingering live log go.
     @Test func aLateWriteThatLandsAfterTheCommitLetsTheLiveLogGo() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        let hung = HungStep("evidence: build"), once = Harness.Box(true)
         defer { hung.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-h-\(UUID().uuidString)", beforeEachRead: { name in
             guard once.value, name == hung.label else { return }
@@ -835,7 +849,7 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         p.heldReason = .relaunch
         p.heldBecause = "its stop timed out (stop after relaunch)"
         try RecordingSentinel.writePending([p], directory: h.tmp)
-        let hung = HungRead("transcript: chunk files")
+        let hung = HungStep("transcript: chunk files")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-h-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         h.coordinator.folderReadDeadline = .milliseconds(300)

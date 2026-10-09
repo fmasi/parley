@@ -57,6 +57,19 @@ The HAL listener is precisely the mechanism that realises this ideal:
 
 So "fix the disconnect bug" and "deliver the auto-pick ideal" are the **same** change.
 
+### The one exclusion: the built-in mic while the lid is closed (#315)
+
+In clamshell mode macOS keeps the built-in mic as the default input, and it delivers full-rate exact zeros.
+So the follow (both the HAL re-evaluation and the recovery loop) treats built-in inputs as **unusable while the
+lid is closed** (`MicTargeting.unusableInputs`, one IOKit read of `AppleClamshellState` per re-evaluation, on
+the monitor or recovery queue, never the audio queue). When the default is unusable, the target is the pin if
+present, else the most recent input **the user chose by hand** that is present and usable
+(`Config.recent_microphone_device_ids`, newest first, at most 3, passed to the helper in `CaptureOptions`; the
+helper adds every switch made during the recording), else the default anyway with the `micDigitalSilence` alarm
+raised at once instead of after 12 s of zeros. The first real audio clears it, as before. With the lid open the
+rule is unchanged. Choosing among inputs the user never selected, or probing inputs for content, is a separate
+feature (v0.10).
+
 ## When to revisit: switch the mic path to `AVAudioEngine`
 
 `AVAudioEngine` (audio-graph API) is the other first-party way to capture the mic. Its `inputNode` +

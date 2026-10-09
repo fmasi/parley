@@ -55,6 +55,21 @@ import Testing
         let o = CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 120, debugDropTapFrames: false, debugSkipWavSync: true)
         #expect(CaptureOptions.decodeStrict(o.encoded()) == o)
     }
+    /// #315: the inputs the user chose by hand reach the helper with the start, so a follow away from a
+    /// removed mic while the lid is closed can land on one of them instead of the dead built-in mic.
+    @Test func userMicrophoneChoicesAreBuiltFromConfig() {
+        var c = Config.default
+        #expect(CaptureOptions(config: c).userMicrophoneChoices == [], "none recorded yet")
+        c.recentMicrophoneDeviceIds = ["usb-cam", "airpods"]
+        #expect(CaptureOptions(config: c).userMicrophoneChoices == ["usb-cam", "airpods"])
+        #expect(CaptureOptions(config: c) == CaptureOptions(userMicrophoneChoices: ["usb-cam", "airpods"]), "and nothing else")
+    }
+    @Test func userMicrophoneChoicesRoundTripAndAreOptionalOnTheWire() throws {
+        let o = CaptureOptions(userMicrophoneChoices: ["usb-cam"])
+        #expect(CaptureOptions.decodeStrict(o.encoded()) == o)
+        let without = Data(#"{"tapAutoStart":true,"debugDropTapFrames":false,"debugSkipWavSync":false}"#.utf8)
+        #expect(try #require(CaptureOptions.decodeStrict(without)).userMicrophoneChoices == [])
+    }
     @Test func roundTripsAndFailsSoft() {
         let o = CaptureOptions(tapAutoStart: false, remoteExactZeroSoftAlarmSeconds: 120, debugDropTapFrames: false)
         #expect(CaptureOptions.decode(o.encoded()) == o)

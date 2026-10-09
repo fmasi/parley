@@ -279,6 +279,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `<session>.diag.live.jsonl` — every non-`info` capture event plus the coverage-carrying ones (`captureStop`, `trackCoverage`), appended as it happens, with ms-precision dates (`LiveDiagnosticsLog`). The record's build merges it, deduplicated, into the ring, and so into `<session>.diag.jsonl`. It is deleted only once the session's transcript exists.
 - `<session>.diag.coverage.json` — the latest per-track coverage of each helper session, rewritten on every status pull; stands in for the `captureStop` a crashed helper never wrote.
 - Callback timing in the record (#247): `captureStop` also carries `remote_io_*` (system) and `local_io_*` (mic): `cycles`, `overruns` (callbacks over 11.35 ms), and for each stage that ran `<stage>_n`, `<stage>_p50_ms`, `<stage>_p99_ms`, `<stage>_max_ms`, with `<stage>` one of `queue_wait`, `convert`, `pad`, `write`, `sync`, `check`, `total`. A stage that never ran (or was not measured: the mic's queue wait) is left out. `ioOverrun` events carry `track`, `total_ms` and the stages of that one callback, and `overruns`, the track's count so far. An `ioOverrun` is an anomaly for the record (the session keeps its `.diag.jsonl`) but not a quality anomaly: `quality_anomaly_count` and the per-side status do not move. A session with no anomaly writes no `.diag.jsonl`; its timing is in the unified log.
+- Pre-flight and healing in the record (#314, #317): `clamshellPreflight` (`.info`) holds what the lid-closed microphone pre-flight read and decided — `lid`, `device` (UID or `default`), `transport` (`builtIn`, `bluetooth`, `usb`, `virtual`, `aggregate`, `continuity`, `other`, `unknown`), `builtIn`, `verdict` (`warn`/`none`) and `reason` (`start`; `micSwitch`/`micFollow` when the mic changes while the lid-closed banner shows — a `none` verdict then takes that banner down; every start clears a banner left from before). Being `.info`, it reaches `.diag.jsonl` only in a session with an anomaly; the unified log keeps a `notice` line either way. `tapRecoveryRung` carries `trigger`: what ordered the rung (`stalled`, `neverDelivered`, `listenerStopped`, `rebuildFailed`, `serviceRestarted`, `permissionGrant`, `permissionInsurance`, or the ladder's own `heartbeatMissed` / `slowRetry`).
 - `session.json` — besides `chunks` (each with its `issues`, its `echo_segments_flagged` count and its `echo_clusters` verdicts with the chunk's own speaker labels, so a crash-recovered finalize still writes `metadata.echo_clusters`) and `provenance`: `gaps` (`CaptureGap`, as above) and `issues` (`SessionIssue` `{chunk?, issue}`: issues that could not be stored on a chunk, such as a failed write after the chunk was appended, or a session-level issue).
 
 ### Stage 10 — Summary Generation
@@ -507,11 +508,9 @@ Test path: `SwiftTests/TranscriberTests/`.
 # Build everything
 swift build
 
-# Run tests (serially: --no-parallel is load-bearing, see AGENTS.md; `just test` runs this with the fixture guard)
-swift test --no-parallel --filter TranscriberTests \
-  -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-  -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+# Run tests: serially (--no-parallel is load-bearing, see AGENTS.md) in a throwaway home (#313).
+# `just test` runs this with the fixture guard and a canary; `bash scripts/swift-test.sh <Suite>` runs one suite.
+bash scripts/swift-test.sh
 ```
 
 ### scripts/dev.py
