@@ -363,6 +363,73 @@ struct CaptureDiagnosticsTests {
         #expect(provenance(d).remoteCoverage?.coverageIncomplete == false, "the next session's record is its own")
     }
 
+    /// #295 item 2: a stand-in is the helper's last status pull, which can trail what it captured. Both sides it
+    /// covers are marked as lower bounds (`coverage_incomplete`) with no number changed, and the helper's real stop,
+    /// when it arrives, takes the mark away with the stand-in.
+    @Test func aStandInMarksItsCoverageAsALowerBound() throws {
+        var d = CaptureDiagnostics()
+        d.record(stop(40, helper: "1000-0", at: 0))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false, "a real stop is exact")
+        d.record(stop(60, helper: "2000-0", at: 1, standIn: true))
+        let p = provenance(d)
+        #expect(p.remoteCoverage?.coverageIncomplete == true && p.localCoverage?.coverageIncomplete == true)
+        #expect(p.remoteCoverage?.deliveredSeconds == 100 && p.remoteStatus == "healthy", "the mark changes no number")
+        let remote = try #require(p.asMetadataDictionary()["remote_coverage"] as? [String: Any])
+        #expect(remote["coverage_incomplete"] as? Bool == true)
+        d.record(stop(65, helper: "2000-0", at: 2))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == false && provenance(d).localCoverage?.coverageIncomplete == false,
+                "the real stop replaced the stand-in, and its mark with it")
+    }
+
+    /// … and a stand-in alone (the only helper crashed) is a lower bound too.
+    @Test func aRecordOfStandInsAloneIsALowerBound() {
+        var d = CaptureDiagnostics()
+        d.record(stop(60, helper: "2000-0", at: 1, standIn: true))
+        #expect(provenance(d).remoteCoverage?.coverageIncomplete == true && provenance(d).localCoverage?.coverageIncomplete == true)
+    }
+
+    private func captureStart(build: String?, at offset: TimeInterval) -> CaptureEvent {
+        CaptureEvent(timestamp: base.addingTimeInterval(offset), origin: .helper, kind: .captureStart, severity: .info,
+                     detail: build.map { ["build": $0] } ?? [:])
+    }
+
+    /// #295 item 1: `captureStart`'s build stamp (#271) reaches the provenance, so a clean recording — which keeps no
+    /// `.diag.jsonl` — still says which kind of build made it. Out of ring: an evicted start still counts.
+    @Test func theCaptureStartsBuildIsInTheProvenance() {
+        var d = CaptureDiagnostics(maxEvents: 1)
+        #expect(provenance(d).build == nil, "no start, no claim")
+        d.record(captureStart(build: "release", at: 0))
+        d.record(event(.formatChanged, .anomaly, at: 1))
+        #expect(!d.events.contains { $0.kind == .captureStart }, "evicted")
+        #expect(provenance(d).build == "release")
+        #expect(provenance(d).asMetadataDictionary()["build"] as? String == "release")
+        d.resetSession()
+        #expect(provenance(d).build == nil, "the next session's stamp is its own")
+    }
+
+    /// Helper sessions of different builds (an update between a crash and its recovery) are both named, never one of
+    /// them alone; a start from a helper that predates the stamp claims nothing.
+    @Test func helperSessionsOfDifferentBuildsAreBothNamed() {
+        var d = CaptureDiagnostics()
+        d.record(captureStart(build: nil, at: 0))
+        #expect(provenance(d).build == nil)
+        #expect(provenance(d).asMetadataDictionary()["build"] == nil, "an unknown build is left out, never guessed")
+        d.record(captureStart(build: "release", at: 1))
+        d.record(captureStart(build: "debug", at: 2))
+        d.record(captureStart(build: "release", at: 3))
+        #expect(provenance(d).build == "debug,release")
+    }
+
+    /// The stamp persists in `session.json`: it round-trips, and a stamp written before it existed still decodes.
+    @Test func theBuildRoundTripsAndOlderStampsStillDecode() throws {
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, build: "release")
+        let decoded = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(decoded.build == "release" && decoded == p)
+        let older = #"{"engine":"e","route_changes":0,"retries":0,"recovered":false,"anomaly_count":0}"#
+        #expect(try JSONDecoder().decode(CaptureProvenance.self, from: Data(older.utf8)).build == nil)
+    }
+
     private func provenance(_ d: CaptureDiagnostics) -> CaptureProvenance {
         d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
     }
