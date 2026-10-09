@@ -533,7 +533,6 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
     func install(locale: String) async throws { Issue.record("never an install") }
 }
 
-#if compiler(>=6.2)
 @MainActor
 @Suite struct SpeechAnalyzerLooksRoundHTests {
     /// L review 254: a transcription looks at the INSTALLED locales first — an installed model needs no other look — and a
@@ -570,7 +569,6 @@ final class LookingSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         #expect(row.contains("couldn’t check the speech model yet"), "honestly worded (L review 270): \(row)")
     }
 }
-#endif
 
 // MARK: - Why a session was kept survives a Start that got in (258)
 

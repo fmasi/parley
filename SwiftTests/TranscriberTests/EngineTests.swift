@@ -106,7 +106,6 @@ import FluidAudio
 
     // MARK: - SpeechAnalyzerEngine properties
 
-    #if compiler(>=6.2)
     @Test func speechAnalyzerEngineName() {
         if #available(macOS 26.0, *) {
             let engine = SpeechAnalyzerEngine()
@@ -122,7 +121,6 @@ import FluidAudio
             #expect(await engine.isReady() == false)
         }
     }
-    #endif
 
     // MARK: - Token grouping (FluidAudioEngine pure logic)
 

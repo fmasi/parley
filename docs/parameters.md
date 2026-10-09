@@ -14,6 +14,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 | Silence detection enabled | `silence_detection_enabled` | `true` | When `true`, recording auto-stops after the silence timeout elapses without speech. |
 | Silence timeout | `silence_timeout_minutes` | `5` | Minutes of silence before auto-stop (requires `silence_detection_enabled`). |
 | Last microphone device ID | `last_microphone_device_id` | `null` | `AVCaptureDevice` unique ID of the microphone last selected in the session dialog. Restored automatically on next launch. |
+| Calendar lookahead | `calendar_lookahead_minutes` | `10` | Minutes ahead of now within which a scheduled meeting counts as the current one when the session name is taken from the calendar (recording started just before the meeting). `0` = only a meeting already under way. |
 
 ---
 
@@ -83,6 +84,7 @@ All summary fields are nested under the `"summary"` key in config.json. The enti
 |-----------|-----------|---------|-------------|
 | Launch on startup | `launch_on_startup` | `true` | Settings' "Launch at Login" toggle: registers Parley as a login item (`SMAppService`). Separate from crash protection: the KeepAlive LaunchAgent at `~/Library/LaunchAgents/eu.fmasi.parley.plist` is verified and repaired at every launch whatever this says, and removed on Parley's own Quit only by the instance holding the single-instance lock. |
 | Suppress capture warning | `suppress_capture_warning` | `false` | When `true`, hides the capture interruption warning dialog shown after XPC crash recovery. |
+| Model update check | `model_update_check_enabled` | `false` | Settings' "Check for Model Updates Online" toggle: periodically asks Hugging Face whether a newer Parakeet model has been published. Nothing is downloaded without confirmation. Off by default so the app stays fully offline. |
 | Chunk processing QoS | `chunk_processing_qos` | `"utility"` | `DispatchQoS` class used for background chunk processing (transcription + diarization). Values: `"userInteractive"`, `"userInitiated"`, `"utility"`, `"background"`. Unknown values fall back to `"utility"`. |
 
 ---

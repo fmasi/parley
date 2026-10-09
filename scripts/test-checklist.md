@@ -486,7 +486,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
     - **C, recording with the sync skipped:** Quit, `cfg debug_skip_wav_sync true`, open Parley, Record 10 min, Stop. The log must show "DIAGNOSTIC: debug_skip_wav_sync is on".
   - Measure after each run:
     1. `ovl "$T0"`: all overloads, those reported for the capture helper, and their causes (`ClientHALIODurationExceededBudget` is the one from #247).
-    2. B and C: `iocyc "$T0"` gives two lines, `IO cycles (system): cycles=… overruns=… (over 8.000 ms) | queue_wait n=… p50=… p99=… max=… | convert … | write … | sync … | check … | total … (ms)` and the same for `(mic)` without `queue_wait`. A stage that never ran is absent. `check` is what the callback does after the write (the monitors and the exact-zero scan; on the system line that is the permission guard's pass), and `total` runs to the callback's very end on both lines.
+    2. B and C: `iocyc "$T0"` gives two lines, `IO cycles (system): cycles=… overruns=… (over 11.350 ms) | queue_wait n=… p50=… p99=… max=… | convert … | write … | sync … | check … | total … (ms)` and the same for `(mic)` without `queue_wait`. A stage that never ran is absent. `check` is what the callback does after the write (the monitors and the exact-zero scan; on the system line that is the permission guard's pass), and `total` runs to the callback's very end on both lines.
     3. B and C: `diag <id>.diag.jsonl | grep ioOverrun`, when the file exists (it does once a callback went over 11.35 ms): each line is one callback, with `track`, `total_ms` and its stages.
     4. By ear: every dropout of the call in the headset, with the menu timer's time.
   - Sanity (the instrument, on the first B run, before trusting anything):
@@ -497,7 +497,7 @@ columns in the plan need a helper debug line that does not exist; the columns ab
     - The instrument sees what `coreaudiod` sees: a run where `ovl` reports `ClientHALIODurationExceededBudget` for the capture helper must have system `overruns` ≥ 1 (the threshold is the 11.35 ms budget `coreaudiod` reported in #247 — if `ovl` shows a different budget on this Mac, note it — and the system total runs from the HAL's cycle start to the block's return). An overload of that cause next to `overruns=0` means time is spent where the instrument does not look: stop and report it.
     - `quality_anomaly_count` in `meta` stays 0 on an otherwise clean call even when `diag` lists `ioOverrun` events (they count in `anomaly_count` only), and the completion notice stays "Transcription Complete".
   - Read it:
-    - **The `fsync` is the stall** if, in B, the system `ioOverrun` events are mostly `queue_wait_ms`, the mic's `sync` p99 or max is in the same range (≥ 8 ms), and in C the system `overruns` and the helper's overloads from `ovl` drop clearly in all three runs.
+    - **The `fsync` is the stall** if, in B, the system `ioOverrun` events are mostly `queue_wait_ms`, the mic's `sync` p99 or max is in the same range (≥ 11.35 ms), and in C the system `overruns` and the helper's overloads from `ovl` drop clearly in all three runs.
     - **Recording contributes to the dropouts** if B has more dropouts and more overloads than A in all three pairs. If A drops out as often as B, recording is not the cause.
     - **C ≈ B:** the `fsync` is not it. The `ioOverrun` events say which stage is: `pad_ms` (a rebuild's silence), `write_ms`, `convert_ms`, `check_ms` (the monitors after the write: on the system track the permission guard's pass), or a `queue_wait_ms` with no slow mic stage near it (something else on the queue: a rotation's finalize, the tap-guard tick).
   - Record (nine rows; it feeds #248): run · build · `ovl` all / helper / `ClientHALIODurationExceededBudget` · system `overruns` · system `queue_wait` p50 / p99 / max · system `total` p99 / max · system `check` p99 / max · mic `sync` p50 / p99 / max · mic `total` max · dropouts heard.
@@ -832,3 +832,18 @@ scratch folder holding a few synthetic recordings in older day folders (copy the
       and `reason: "storage_limit"`; its segments are unchanged.
 - [ ] Settings' usage is now within the limit (or over only by the meeting just recorded).
 - [ ] With usage under the limit, Stop gives the usual notice with no storage line.
+
+## Lid-closed banner and the record (#314 / #317) — added 2026-10-09
+
+- [ ] **K-01 No banner over a headset.** Lid closed (clamshell mode), Bluetooth headset selected; Record.
+  PASS: no "The lid is closed…" banner. The live log (`log stream … --level debug`) has
+  `Mic pre-flight (start): lid closed, transport bluetooth, built-in false, verdict none`.
+- [ ] **K-02 A start clears an old banner.** Lid closed, built-in mic selected; Record: the banner shows. Stop
+  WITHOUT dismissing it. Select the headset; Record again. PASS: the banner is gone at the start.
+- [ ] **K-03 A switch clears it.** Lid closed, built-in mic; Record (banner). Change Microphone → the headset.
+  PASS: the banner goes within ~2 s; the log has `Mic pre-flight (micSwitch): … verdict none`. Another banner
+  (e.g. "Recording restarted — waiting for audio…") is never cleared by a switch.
+- [ ] **K-04 Why a rung ran.** Tap recording on a call whose other side stays silent for 20 s. PASS: the
+  `.diag.jsonl` (force an anomaly if none, e.g. unplug a USB mic) has `tapRecoveryRung` with
+  `trigger: permissionInsurance` about 12 s after the system `firstFrames`; the unified log keeps
+  "rebuilding for the System Audio Recording permission (insurance)" (`log show`, not only `log stream`).

@@ -102,6 +102,42 @@ public enum StorageManager {
         /// `<day folder>/<transcript file>` for a transcript that listed them (it now carries an `audio_removed` mark), or
         /// `<day folder>/<archive stem>` when no transcript lists the file. Sorted.
         public var removedRecordings: [String] = []
+        /// Why the files it did not delete were kept (#294), when they keep usage over the quota; empty otherwise.
+        public var kept: Set<QuotaKept> = []
+
+        /// The overrun in words, for the record's `quota_exceeded_by_current_session` issue and the log (#294): by how much,
+        /// and whose audio keeps it — never another session's id (the record may be shared). nil when there is none.
+        public var overrunDescription: String? {
+            guard protectedOverrunBytes > 0 else { return nil }
+            let reasons = QuotaKept.allCases.filter(kept.contains).map(\.wording)
+            return "\(protectedOverrunBytes) bytes over the quota, kept by audio it may not delete: "
+                + (reasons.isEmpty ? "unknown" : reasons.joined(separator: "; "))
+        }
+    }
+
+    /// Why a quota pass kept a file (#294). The order is the order the record names them in.
+    public enum QuotaKept: String, CaseIterable, Sendable {
+        /// One of the files backing the record being written.
+        case thisRecording
+        /// An archive of another session that still has state in its folder (#230).
+        case anotherRecording
+        /// Every archive of a folder whose sessions cannot be told: a `session.json` / `session-*.json` whose id cannot be read
+        /// (#230 (b)), or a folder that did not list.
+        case unreadableSessionFile
+        /// An `.m4a` in the tree that is not a Parley archive in a day folder (#224).
+        case notParleyArchive
+        /// A file the pass tried to delete and could not.
+        case undeletable
+
+        var wording: String {
+            switch self {
+            case .thisRecording: "this recording’s own"
+            case .anotherRecording: "another recording’s, still being recorded or processed"
+            case .unreadableSessionFile: "every archive in a folder whose session state Parley cannot read"
+            case .notParleyArchive: "files that are not Parley recordings"
+            case .undeletable: "files that could not be deleted"
+            }
+        }
     }
 
     /// Enforce storage quota by deleting oldest .m4a files (recursive scan), never `protectedFile`.
@@ -185,6 +221,9 @@ public enum StorageManager {
 
         var deleted: [URL] = []
         var finished = true
+        /// Why what was not deleted was kept (#294), and — for the log only — the other sessions it was kept for.
+        var kept: Set<QuotaKept> = m4aFiles.contains { !$0.candidate } ? [.notParleyArchive] : []
+        var keptFor: Set<String> = []
         /// Per folder, the sessions with state there; nil when that could not be told — nothing there is deleted then.
         var inFlightByFolder: [String: Set<String>?] = [:]
         for (file, candidate) in m4aFiles where candidate {
@@ -194,14 +233,18 @@ public enum StorageManager {
                 finished = false
                 break
             }
-            if resolvedProtected.contains(file.resolvingSymlinksInPath().path) { continue }
+            if resolvedProtected.contains(file.resolvingSymlinksInPath().path) { kept.insert(.thisRecording); continue }
             // Nor another session's audio while that session still has state in the file's folder (#230): for its
             // chunks, the only copy. The folder is read here, once, and only now that a delete is about to happen.
             let folder = file.deletingLastPathComponent()
             let inFlight = inFlightByFolder[folder.path] ?? sessionsWithState(folder)
             inFlightByFolder.updateValue(inFlight, forKey: folder.path)
-            guard let inFlight, !inFlight.contains(where: { CrashRecoveryPlanner.isArchive(file.lastPathComponent, of: $0) })
-            else { continue }
+            guard let inFlight else { kept.insert(.unreadableSessionFile); continue }
+            if let owner = inFlight.first(where: { CrashRecoveryPlanner.isArchive(file.lastPathComponent, of: $0) }) {
+                kept.insert(.anotherRecording)
+                keptFor.insert(owner)
+                continue
+            }
 
             let fileSize = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             do {
@@ -209,6 +252,7 @@ public enum StorageManager {
             } catch {
                 // Skipped, never the end of the pass: what it already deleted must still be marked (#224).
                 Logger.files.error("StorageManager: could not delete \(file.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
+                kept.insert(.undeletable)
                 continue
             }
             totalSize -= fileSize
@@ -224,10 +268,13 @@ public enum StorageManager {
         // Everything deletable is gone and usage is still over: the protected files alone overrun it.
         guard finished else { return QuotaReport(deleted: deleted, protectedOverrunBytes: 0, finished: false, removedRecordings: removed) }
         let overrun = max(0, totalSize - quota)
-        if overrun > 0 {
-            Logger.files.info("StorageManager: audio it may not delete keeps usage \(overrun) bytes over the quota — nothing more may be deleted")
+        guard overrun > 0 else { return QuotaReport(deleted: deleted, protectedOverrunBytes: 0, removedRecordings: removed) }
+        let report = QuotaReport(deleted: deleted, protectedOverrunBytes: overrun, removedRecordings: removed, kept: kept)
+        Logger.files.info("StorageManager: \(report.overrunDescription ?? "", privacy: .public) — nothing more may be deleted")
+        if !keptFor.isEmpty {
+            Logger.files.info("StorageManager: kept for the sessions still in flight: \(keptFor.sorted().joined(separator: ", "), privacy: .sensitive)")
         }
-        return QuotaReport(deleted: deleted, protectedOverrunBytes: overrun, removedRecordings: removed)
+        return report
     }
 }
 

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Locale resolution for the SpeechAnalyzer engine, kept OUTSIDE the `#if compiler(>=6.2)` guard
-/// so it is testable on CI (macOS 15) even though `SpeechAnalyzerEngine` itself is macOS-26-only.
+/// Locale resolution for the SpeechAnalyzer engine, kept apart from `SpeechAnalyzerEngine` (which is
+/// `@available(macOS 26.0, *)`) so it is pure logic, testable without the Speech framework.
 ///
 /// Why this exists: SpeechAnalyzer (unlike FluidAudio/Parakeet) cannot auto-detect the spoken
 /// language — it transcribes in whatever locale it's given. The old engine defaulted a `nil`
