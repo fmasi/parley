@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2625%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2636%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -205,7 +205,7 @@ TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC clien
 TranscriberCore/       recording lifecycle, chunk processing, engines, diarization, echo detection, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2625 tests across 289 suites
+SwiftTests/            2636 tests across 289 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```
