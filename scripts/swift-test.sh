@@ -19,9 +19,12 @@ home=$(bash "$here/test-home.sh")
 bash "$here/test-home.sh" --check "$home"
 export CFFIXED_USER_HOME="$home"
 
+# The home goes once the run ends (rm -rf removes CI's link to the model cache, never the cache).
+trap 'rm -rf "$home"' EXIT
+
 filter="${1:-TranscriberTests}"
 [ "$#" -eq 0 ] || shift
-exec swift test --no-parallel --filter "$filter" "$@" \
+swift test --no-parallel --filter "$filter" "$@" \
   -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
   -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/

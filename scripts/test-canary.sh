@@ -70,7 +70,8 @@ case "${1:-}" in
     rc=0
     # An interrupted run is still checked: it is the one most likely to have stopped half-way
     # through a test that deletes.
-    trap 'verify "$snap" || :; rm -f "$snap"; exit 130' INT TERM
+    trap 'verify "$snap" || :; rm -f "$snap"; exit 130' INT
+    trap 'verify "$snap" || :; rm -f "$snap"; exit 143' TERM
     "$@" || rc=$?
     trap - INT TERM
     canary=0

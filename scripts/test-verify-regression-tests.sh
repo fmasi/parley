@@ -29,7 +29,7 @@ tmp=$(cd "$tmp" && pwd -P)
 repo="$tmp/repo"
 fake="$tmp/fake"       # the scenario: <side>.<step>.log and <side>.<step>.rc, plus `calls`
 bin="$tmp/bin"
-mkdir -p "$repo" "$fake" "$bin"
+mkdir -p "$repo" "$fake" "$bin" "$tmp/home"
 
 # --- the fake swift ------------------------------------------------------------------------------
 
@@ -215,7 +215,9 @@ parent_red() { given parent run 1 "$LOG_RUN_FAILED"; }
 run_gate() { # BRANCH
   g checkout -q "$1"
   status=0
-  out=$(cd "$repo" && PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+  # A home of its own: without one the gate would make a real throwaway home, with a clone of the
+  # model cache, for every scenario.
+  out=$(cd "$repo" && CFFIXED_USER_HOME="$tmp/home" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
 }
 
 fail() { failures=$((failures + 1)); echo "  FAIL: $1"; echo "----- gate output -----"; echo "$out"; echo "-----------------------"; }

@@ -115,13 +115,14 @@ BUILD_FLAGS="-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Fr
 # swift test TWICE per run (merge base, then HEAD), so it is doubly exposed.
 TEST_FLAGS="--no-parallel"
 # Both trees' tests run with a throwaway home: the parent's tests are the old ones, and an old test
-# may still resolve the user's real folders (#313). A home the caller set is checked like a new one:
-# empty, missing or the real home, and nothing runs.
-if [ -z "${CFFIXED_USER_HOME:-}" ]; then
-  CFFIXED_USER_HOME=$(bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh")
+# may still resolve the user's real folders (#313). Each side gets a fresh one (run_suites), so what
+# the parent's tests leave in it cannot change HEAD's result. A home the caller set is used for both
+# and checked like a new one: empty, missing or the real home, and nothing runs.
+TEST_HOME_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-home.sh"
+CALLER_HOME="${CFFIXED_USER_HOME:-}"
+if [ -n "$CALLER_HOME" ]; then
+  bash "$TEST_HOME_SH" --check "$CALLER_HOME"
 fi
-bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh" --check "$CFFIXED_USER_HOME"
-export CFFIXED_USER_HOME
 
 echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
 
@@ -142,8 +143,10 @@ moved_test_files=$(
 # moved to another file is declared twice and the test target fails to compile — a false RED, or
 # BROKEN. `--no-renames` lists a rename's old path as deleted too, whatever git's rename detection
 # makes of it: a file renamed and rewritten past its 50 % threshold shows only as a delete and an add.
+# Swift files only: that is all the duplicate-type problem needs, and a fixture the parent's tests
+# read stays where the parent expects it.
 removed_test_files=$(
-  git diff --name-only --no-renames --diff-filter=D "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR"
+  git diff --name-only --no-renames --diff-filter=D "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR" | grep '\.swift$' || :
 )
 
 # The lists below are split on whitespace (bash 3.2, no arrays of possibly-empty lists). A path with
@@ -253,6 +256,17 @@ run_suites() {
   RUN_STATUS="broken"
   RUN_WHY="not classified"
   log=$(mktemp)
+
+  # A fresh throwaway home for this side, made and checked in statements of their own (#313).
+  if [ -n "$CALLER_HOME" ]; then
+    CFFIXED_USER_HOME="$CALLER_HOME"
+  else
+    if ! CFFIXED_USER_HOME=$(bash "$TEST_HOME_SH") || ! bash "$TEST_HOME_SH" --check "$CFFIXED_USER_HOME"; then
+      echo "FAIL: could not make a throwaway home for the $side run — nothing was run (#313)."
+      exit 1
+    fi
+  fi
+  export CFFIXED_USER_HOME
 
   # a. Resolve and check out the dependencies. Nothing is compiled here, so a failure says
   #    nothing about the tests.
