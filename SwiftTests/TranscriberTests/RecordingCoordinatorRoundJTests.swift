@@ -171,7 +171,9 @@ private enum RoundJ {
         #expect(RoundJ.pending(h).count == 1 && h.presented.value.isEmpty, "the session still waits")
 
         hung.release()   // the folder answers: the chunk ends
-        await Harness.until(within: 10) { RoundJ.pending(h).isEmpty && h.appState.isIdle }
+        // Waited for by its outcome — the transcript presented — never by `.idle` (#298): the completion goes idle before
+        // its last await, and presents only after it, so a wait for idle alone could read `presented` one turn early.
+        await Harness.until(within: 10) { RoundJ.pending(h).isEmpty && !h.presented.value.isEmpty && h.appState.isIdle }
         #expect(RoundJ.pending(h).isEmpty, "finished without another event")
         #expect(h.presented.value.count == 1, "its transcript is written and presented")
         #expect(engine.transcribed.map(\.file) == [chunk0.lastPathComponent], "chunk 0 was transcribed once…")
