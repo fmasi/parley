@@ -832,3 +832,18 @@ scratch folder holding a few synthetic recordings in older day folders (copy the
       and `reason: "storage_limit"`; its segments are unchanged.
 - [ ] Settings' usage is now within the limit (or over only by the meeting just recorded).
 - [ ] With usage under the limit, Stop gives the usual notice with no storage line.
+
+## Lid-closed banner and the record (#314 / #317) — added 2026-10-09
+
+- [ ] **K-01 No banner over a headset.** Lid closed (clamshell mode), Bluetooth headset selected; Record.
+  PASS: no "The lid is closed…" banner. The live log (`log stream … --level debug`) has
+  `Mic pre-flight (start): lid closed, transport bluetooth, built-in false, verdict none`.
+- [ ] **K-02 A start clears an old banner.** Lid closed, built-in mic selected; Record: the banner shows. Stop
+  WITHOUT dismissing it. Select the headset; Record again. PASS: the banner is gone at the start.
+- [ ] **K-03 A switch clears it.** Lid closed, built-in mic; Record (banner). Change Microphone → the headset.
+  PASS: the banner goes within ~2 s; the log has `Mic pre-flight (micSwitch): … verdict none`. Another banner
+  (e.g. "Recording restarted — waiting for audio…") is never cleared by a switch.
+- [ ] **K-04 Why a rung ran.** Tap recording on a call whose other side stays silent for 20 s. PASS: the
+  `.diag.jsonl` (force an anomaly if none, e.g. unplug a USB mic) has `tapRecoveryRung` with
+  `trigger: permissionInsurance` about 12 s after the system `firstFrames`; the unified log keeps
+  "rebuilding for the System Audio Recording permission (insurance)" (`log show`, not only `log stream`).

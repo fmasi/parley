@@ -98,4 +98,18 @@ import Testing
         #expect(h.appState.interruptionWarning == "Recording restarted — waiting for audio…")
         #expect(preflights(h).count == 1, "only the start's pre-flight: no re-check without the lid-closed banner")
     }
+
+    /// A switch the helper refused leaves the recording on the built-in mic: the banner stays, nothing is re-checked.
+    @Test func aFailedSwitchKeepsTheBanner() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        lidClosed(h)
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: "builtin")
+        h.client.updateMicError = FakeCaptureError()
+        await #expect(throws: (any Error).self) { try await h.coordinator.switchMicrophone(to: "headset-1") }
+        await Harness.until(within: 0.3) { preflights(h).count > 1 }   // a re-check, had one been started, lands here
+        #expect(h.recordingMic.current == .some("builtin"))
+        #expect(h.appState.interruptionWarning == ClamshellMicGuard.warningMessage)
+        #expect(preflights(h).count == 1, "only the start's pre-flight")
+    }
 }

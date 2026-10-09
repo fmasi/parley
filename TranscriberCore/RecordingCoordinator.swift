@@ -799,7 +799,7 @@ public final class RecordingCoordinator {
     /// helper's follow — the pre-flight runs again on it, and a verdict of "no warning" takes the banner down. Only that
     /// banner, never another one; it never raises one either (when the banner shows is unchanged). The lookups are HAL
     /// and IOKit calls: detached, never on the main actor. The answer counts only if the recording is still on that mic.
-    func reconsiderClamshellBanner(for deviceId: String?, reason: String) {
+    private func reconsiderClamshellBanner(for deviceId: String?, reason: String) {
         guard appState.interruptionWarning == ClamshellMicGuard.warningMessage else { return }
         let preflight = self.preflight, transportOf = self.preflightTransport
         Task { @MainActor [weak self] in
