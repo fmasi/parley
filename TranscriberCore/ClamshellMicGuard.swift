@@ -25,6 +25,41 @@ public enum ClamshellMicGuard {
     public static let warningMessage =
         "The lid is closed and the built-in microphone is selected — it may deliver silence while closed. Consider switching microphones or opening the lid."
 
+    /// The record's name for a Core Audio transport type (`kAudioDevicePropertyTransportType`, a FourCC); `nil` = the
+    /// device did not resolve or did not answer. Pure, for the `clamshellPreflight` event (#314): the event must show
+    /// what the guard saw, so a banner over a Bluetooth headset can be told from a misread one.
+    public static func transportName(_ transport: UInt32?) -> String {
+        guard let transport else { return "unknown" }
+        switch transport {
+        case fourCC("bltn"): return "builtIn"
+        case fourCC("blue"), fourCC("blea"): return "bluetooth"
+        case fourCC("usb "): return "usb"
+        case fourCC("virt"): return "virtual"
+        case fourCC("grup"), fourCC("fgrp"): return "aggregate"
+        case fourCC("ccwd"), fourCC("ccwl"): return "continuity"
+        default: return "other"
+        }
+    }
+
+    /// The `clamshellPreflight` event's detail (#314): the pre-flight's inputs and its verdict. Pure.
+    /// `device`: the requested UID, `nil` = the system default. `reason`: `start`, `micSwitch` or `micFollow`.
+    public static func preflightRecord(
+        lidClosed: Bool, isBuiltInMic: Bool, device: String?, transport: String, reason: String
+    ) -> [String: String] {
+        [
+            "lid": lidClosed ? "closed" : "open",
+            "device": device ?? "default",
+            "transport": transport,
+            "builtIn": isBuiltInMic ? "true" : "false",
+            "verdict": shouldWarn(lidClosed: lidClosed, isBuiltInMic: isBuiltInMic) ? "warn" : "none",
+            "reason": reason,
+        ]
+    }
+
+    private static func fourCC(_ code: String) -> UInt32 {
+        code.utf8.reduce(0) { $0 << 8 | UInt32($1) }
+    }
+
     // MARK: - Device queries (NOT unit-testable — require real hardware / IOKit; device-test only)
 
     /// Whether the lid is currently closed, via the same undocumented-but-stable `IOPMrootDomain`
@@ -66,6 +101,18 @@ public enum ClamshellMicGuard {
         #endif
     }
 
+    /// The transport of the input the selection resolves to, by `transportName(_:)`: `unknown` when it does not
+    /// resolve (the same lookups as `isBuiltInMicSelected(deviceId:)`). For the record only — never a decision.
+    public static func inputTransport(deviceId: String?) -> String {
+        #if canImport(CoreAudio)
+        let device: AudioObjectID? = deviceId.map { Self.audioObjectID(forUID: $0) } ?? Self.defaultInputDevice()
+        guard let device, device != kAudioObjectUnknown else { return transportName(nil) }
+        return transportName(Self.transportType(device))
+        #else
+        return transportName(nil)
+        #endif
+    }
+
     #if canImport(CoreAudio)
     private static func defaultInputDevice() -> AudioObjectID {
         var id = AudioObjectID(kAudioObjectUnknown)
@@ -97,6 +144,10 @@ public enum ClamshellMicGuard {
     }
 
     private static func isBuiltIn(_ device: AudioObjectID) -> Bool {
+        transportType(device) == kAudioDeviceTransportTypeBuiltIn
+    }
+
+    private static func transportType(_ device: AudioObjectID) -> UInt32? {
         var transport = UInt32(0)
         var size = UInt32(MemoryLayout<UInt32>.size)
         var addr = AudioObjectPropertyAddress(
@@ -104,8 +155,8 @@ public enum ClamshellMicGuard {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &transport) == noErr
-        else { return false }
-        return transport == kAudioDeviceTransportTypeBuiltIn
+        else { return nil }
+        return transport
     }
     #endif
 }
