@@ -87,7 +87,8 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     public private(set) var inFlightToken: Int?
     /// What ordered the rung in flight (#317); `nil` = nothing in flight.
     public private(set) var inFlightCause: Cause?
-    /// The cause the next launched rung is recorded under: set by each entry point that can order one.
+    /// The cause the next launched rung is recorded under: set by every entry point that can order one, before it does
+    /// (`trigger`, `heartbeatDeadlineMissed`, `slowRetryDue`), so the initial value is never what a rung records.
     private var cause: Cause = .slowRetry
     public var awaitingHeartbeat: Bool { awaitedToken != nil }
     public private(set) var exhausted = false

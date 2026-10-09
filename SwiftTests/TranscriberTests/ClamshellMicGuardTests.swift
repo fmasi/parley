@@ -2,9 +2,9 @@ import CoreAudio
 import Testing
 @testable import TranscriberCore
 
-/// #193's pre-flight check. Only `shouldWarn` (pure boolean logic) is unit-testable — `isLidClosed()`
-/// and `isBuiltInMicSelected(deviceId:)` call IOKit/CoreAudio and require real hardware; they are
-/// exercised only by a device test (see the worktree's final report).
+/// #193's pre-flight check, and its record (#314). The pure parts are unit-tested here (`shouldWarn`, `transportName`,
+/// `preflightRecord`); `isLidClosed()`, `isBuiltInMicSelected(deviceId:)` and `inputTransport(deviceId:)` call
+/// IOKit/CoreAudio and need real hardware — they are exercised only by a device test (checklist K-01..K-03).
 @Suite struct ClamshellMicGuardTests {
 
     @Test func warnsOnlyWhenBothLidClosedAndBuiltInMicSelected() {
