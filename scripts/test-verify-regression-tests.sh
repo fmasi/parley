@@ -415,6 +415,20 @@ out=$(cd "$repo" && CFFIXED_USER_HOME="$tmp/no-such-home" PATH="$bin:$PATH" FAKE
 check "CFFIXED_USER_HOME does not exist" 1 "is not an existing folder" "$PASSED"
 [ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift with a missing home"; }
 
+# With no home from the caller the gate makes one per side; when it cannot, nothing runs. A copy of
+# the gate next to a test-home.sh that fails, as one does on a full disk.
+mkdir -p "$tmp/gate-copy"
+cp "$GATE" "$tmp/gate-copy/verify-regression-tests.sh"
+printf '%s\n' '#!/bin/bash' 'echo "cp: Library/Application Support/FluidAudio: No space left on device" >&2' 'exit 1' \
+  >"$tmp/gate-copy/test-home.sh"
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && env -u CFFIXED_USER_HOME PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" \
+  bash "$tmp/gate-copy/verify-regression-tests.sh" base 2>&1) || status=$?
+check "the throwaway home cannot be made" 1 "could not make a throwaway home for the parent run" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift without a throwaway home"; }
+
 echo "gate does not apply"
 
 scenario; run_gate tests-only

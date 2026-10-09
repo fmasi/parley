@@ -120,6 +120,7 @@ TEST_FLAGS="--no-parallel"
 # and checked like a new one: empty, missing or the real home, and nothing runs.
 TEST_HOME_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-home.sh"
 CALLER_HOME="${CFFIXED_USER_HOME:-}"
+MADE_HOMES=""   # the homes this gate made, removed on exit (a home holds a CLONE or a link of the model cache)
 if [ -n "$CALLER_HOME" ]; then
   bash "$TEST_HOME_SH" --check "$CALLER_HOME"
 fi
@@ -265,6 +266,7 @@ run_suites() {
       echo "FAIL: could not make a throwaway home for the $side run — nothing was run (#313)."
       exit 1
     fi
+    MADE_HOMES="$MADE_HOMES $CFFIXED_USER_HOME"
   fi
   export CFFIXED_USER_HOME
 
@@ -368,7 +370,11 @@ run_suites() {
 # --- 4. RED at the parent -------------------------------------------------------------------------
 
 parent_tree=$(mktemp -d)
-cleanup() { git worktree remove --force "$parent_tree" 2>/dev/null || rm -rf "$parent_tree"; }
+cleanup() {
+  local h
+  git worktree remove --force "$parent_tree" 2>/dev/null || rm -rf "$parent_tree"
+  for h in $MADE_HOMES; do rm -rf "$h"; done
+}
 trap cleanup EXIT
 
 if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
