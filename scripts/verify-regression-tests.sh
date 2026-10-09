@@ -26,8 +26,10 @@
 #          EXISTING behaviour — those are green at the parent by definition), or
 #        - every changed test file is explicitly exempted (see below).
 #   3. Create a throwaway git worktree at BASE, overlay ONLY the changed test files from HEAD
-#      onto it (deleting a renamed file's old copy, which would otherwise declare its types a
-#      second time and fail to compile: a false RED), and run just the test suites declared in those files. The run is four steps, and
+#      onto it, delete from it every test file the PR deletes (a renamed file's old copy, or a file
+#      whose types moved elsewhere, would otherwise declare those types a second time and fail to
+#      compile: a false RED or BROKEN), and run just the test suites declared in the changed files.
+#      The run is four steps, and
 #      each outcome is classified — a non-zero exit is NOT RED by itself:
 #        a. `swift package resolve` fails            -> BROKEN. Nothing was compiled, so nothing
 #           was learned about the tests.
@@ -107,11 +109,13 @@ BUILD_FLAGS="-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Fr
 # swift test TWICE per run (merge base, then HEAD), so it is doubly exposed.
 TEST_FLAGS="--no-parallel"
 # Both trees' tests run with a throwaway home: the parent's tests are the old ones, and an old test
-# may still resolve the user's real folders (#313).
+# may still resolve the user's real folders (#313). A home the caller set is checked like a new one:
+# empty, missing or the real home, and nothing runs.
 if [ -z "${CFFIXED_USER_HOME:-}" ]; then
   CFFIXED_USER_HOME=$(bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh")
-  export CFFIXED_USER_HOME
 fi
+bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh" --check "$CFFIXED_USER_HOME"
+export CFFIXED_USER_HOME
 
 echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
 
@@ -123,9 +127,12 @@ test_changes=$(git diff --name-status -M --diff-filter=AMR "$BASE_SHA...$HEAD_SH
 changed_test_files=$(
   printf '%s\n' "$test_changes" | awk -F '\t' '$1 != "R100" && $NF ~ /\.swift$/ { print $NF }'
 )
-# The old paths of the renamed-and-modified files: the parent tree must not keep them (step 4).
-renamed_from=$(
-  printf '%s\n' "$test_changes" | awk -F '\t' '$1 ~ /^R/ && $1 != "R100" && $NF ~ /\.swift$/ { print $2 }'
+# Every test file HEAD no longer has: the parent tree must not keep them (step 4), or a type that
+# moved to another file is declared twice and the test target fails to compile — a false RED, or
+# BROKEN. `--no-renames` lists a rename's old path as deleted too, whatever git's rename detection
+# makes of it: a file renamed and rewritten past its 50 % threshold shows only as a delete and an add.
+removed_test_files=$(
+  git diff --name-only --no-renames --diff-filter=D "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR"
 )
 
 if [ -z "$changed_test_files" ]; then
@@ -336,7 +343,7 @@ if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
 fi
 # Overlay ALL changed test files (exempt ones and helpers too — gated tests may depend on
 # them), but execute only the gated suites.
-for f in $renamed_from; do
+for f in $removed_test_files; do
   rm -f "$parent_tree/$f"
 done
 for f in $changed_test_files; do

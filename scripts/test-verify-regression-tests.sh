@@ -109,6 +109,16 @@ sed 's|// four|// four: asserts add(2, 2) == 4|' "$repo/SwiftTests/TranscriberTe
 cat "$tmp/moved" >"$repo/SwiftTests/TranscriberTests/MovedAgainTests.swift"
 g commit -qam renamed
 
+# rewritten: a production change, and a test file renamed AND rewritten past git's rename detection
+# (under 50 % similar): the diff shows it deleted and a new file added, which declares the same type.
+g checkout -q -b rewritten base
+echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
+g rm -q SwiftTests/TranscriberTests/MovedTests.swift
+printf '%s\n' 'struct MovedTests {' '  // asserts add(2, 2) == 4' '  // and add(0, 0) == 0' '}' \
+  >"$repo/SwiftTests/TranscriberTests/RewrittenTests.swift"
+g add -A
+g commit -qm rewritten
+
 # moved: a production change, and a test file renamed WITHOUT a change — nothing new to gate.
 g checkout -q -b moved base
 echo 'enum Calc { static func add(_ a: Int, _ b: Int) -> Int { a + b } }' >"$repo/TranscriberCore/Calc.swift"
@@ -312,6 +322,19 @@ else
   out="parent tree: $seen"; fail "the parent tree does not hold the renamed file under its new name only"
 fi
 
+# The same, below git's rename threshold: the diff shows a delete and an add. The parent tree must
+# not keep the deleted file either, or the type it declares is declared twice.
+scenario; parent_red; head_green; run_gate rewritten
+check "a test file renamed and rewritten (delete + add) is gated" 0 "$PASSED" "" "$ALL_PARENT $ALL_HEAD"
+check "  ... under its new name" 0 "gated files: SwiftTests/TranscriberTests/RewrittenTests.swift"
+seen=$(paste -s -d ' ' - 2>/dev/null <"$fake/parent.seen-files" || echo "(the parent's test target was never built)")
+if grep -qx 'RewrittenTests.swift' "$fake/parent.seen-files" 2>/dev/null \
+  && ! grep -qx 'MovedTests.swift' "$fake/parent.seen-files"; then
+  echo "  ok:   ... and the parent tree does not keep the file the PR deleted"
+else
+  out="parent tree: $seen"; fail "the parent tree keeps the test file the PR deleted"
+fi
+
 echo "parent: RED only from a gated file (#297)"
 
 # OtherTests is changed and exempt on this branch; the gated CalcTests has no error. The gated
@@ -356,6 +379,21 @@ check "the tests run and fail" 1 "FAIL: the gated suites do not pass at HEAD" "$
 
 scenario; parent_red; given head run 0 "$LOG_RUN_ZERO"; run_gate fix
 check "0 tests executed" 1 "FAIL: the gated suites executed 0 tests at HEAD" "$BROKEN_HEAD"
+
+echo "the throwaway home (#313)"
+
+# A home the caller set is checked: the user's real one, or one that does not exist, runs nothing.
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && CFFIXED_USER_HOME="$HOME" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+check "CFFIXED_USER_HOME is the real home" 1 "is the user's real home" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift in the real home"; }
+scenario; parent_red; head_green
+status=0
+out=$(cd "$repo" && CFFIXED_USER_HOME="$tmp/no-such-home" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" bash "$GATE" base 2>&1) || status=$?
+check "CFFIXED_USER_HOME does not exist" 1 "is not an existing folder" "$PASSED"
+[ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift with a missing home"; }
 
 echo "gate does not apply"
 
