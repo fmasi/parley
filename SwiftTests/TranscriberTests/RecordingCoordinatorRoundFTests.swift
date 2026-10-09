@@ -47,7 +47,6 @@ final class FakeSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
     }
 }
 
-#if compiler(>=6.2)
 @MainActor
 @Suite struct SpeechAnalyzerAirgapRoundFTests {
     /// L review 229: ready only when its language's model is INSTALLED — a look at the installed locales. Without a
@@ -101,7 +100,6 @@ final class FakeSpeechInventory: SpeechAssetInventory, @unchecked Sendable {
         #expect(row.contains("transcription engine isn’t ready") && row.contains("not installed"), "\(row)")
     }
 }
-#endif
 
 // MARK: - A slow quota pass or lengths read is never fatal (227)
 

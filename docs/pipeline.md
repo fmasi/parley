@@ -133,7 +133,7 @@ Notes:
 **Key code path:**
 - `TranscriberCore/FluidAudioEngine.swift` — `transcribe(audioPath:language:audioSource:)` → `mgr.transcribe()` → `groupTokensIntoSegments()` → ITN via `TextNormalizer`
 - `SpeakerAssignment.deduplicate()` runs after the engine, in `ChunkProcessor` / `TranscriptionRunner`'s `transcribeStream`, so its counts land in the chunk's `issues`: an abutting repeat (same text, starting ≤ 0.25 s after the previous segment ends) is kept and flagged `duplicate: true` (`duplicates_flagged`); a zero-duration segment is dropped (`zero_length_dropped`)
-- `TranscriberCore/SpeechAnalyzerEngine.swift` — `transcribe()` (wrapped in `#if compiler(>=6.2)`)
+- `TranscriberCore/SpeechAnalyzerEngine.swift` — `transcribe()` (`@available(macOS 26.0, *)`)
 
 Notes:
 - `ensureLoaded()` is load-only; throws `FluidAudioEngineError.modelNotDownloaded` if cache is absent (never downloads at runtime).

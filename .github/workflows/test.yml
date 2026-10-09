@@ -33,10 +33,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # The image decides the toolchain (#272). `macos-26` (arm64, GA) runs macOS 26 with Xcode 26.6
     # as its default, i.e. Swift 6.3 (actions/runner-images README and macos-26-arm64-Readme.md,
-    # read 2026-10-02). That is new enough for everything this repo gates: the code behind
-    # `#if compiler(>=6.2)` (the SpeechAnalyzer engine and its tests) is built, and the tests
-    # behind `#available(macOS 26.0, *)` assert instead of returning early. On `macos-15`
-    # (Xcode 16.4, Swift 6.1, macOS 15) ten tests never ran, one of them an airgap test.
+    # read 2026-10-02). That is new enough for everything this repo gates: the SpeechAnalyzer
+    # engine and its tests are built, and the tests behind `#available(macOS 26.0, *)` assert
+    # instead of returning early. On `macos-15` (Xcode 16.4, Swift 6.1, macOS 15) ten tests never
+    # ran, one of them an airgap test.
     #
     # Named, not `macos-latest`: that label moves to the next macOS on GitHub's schedule, and the
     # toolchain under a required check must change in a reviewed commit. Development is on Xcode 27
@@ -45,8 +45,10 @@ jobs:
     # move there when it is GA. Until then CI's Swift is one minor behind development's, and the
     # report step below says what, if anything, that leaves unrun.
     #
-    # To go back: set `runs-on: macos-15` on both jobs. Nothing else here depends on the image
-    # (the SwiftPM cache key follows the Swift version by itself).
+    # There is no going back to `macos-15`: since #297 the sources need the macOS 26 SDK and
+    # Swift 6.2+ (`isolated deinit`, the Speech framework's SpeechAnalyzer) with no compile-time
+    # fallback. Nothing else here depends on the image (the SwiftPM cache key follows the Swift
+    # version by itself).
     runs-on: macos-26
     # Bound it, as `red-first` already is. Twice on 2026-09-03/04 this job sat 80+ minutes inside
     # its test step while the other jobs — running the same swift test binary against the same
