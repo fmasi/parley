@@ -22,6 +22,23 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         case serviceRestarted, permissionGrant, permissionInsurance
     }
 
+    /// Why a rung was ordered, for the record (#317): the trigger that started it, or the ladder's own next step
+    /// after a rung's heartbeat window passed in silence, or the slow retry. `tapRecoveryRung` carries it as `trigger`.
+    public enum Cause: Equatable, Sendable {
+        case trigger(Trigger)
+        case heartbeatMissed
+        case slowRetry
+
+        /// The `trigger` value in the record.
+        public var recordValue: String {
+            switch self {
+            case .trigger(let t): return "\(t)"
+            case .heartbeatMissed: return "heartbeatMissed"
+            case .slowRetry: return "slowRetry"
+            }
+        }
+    }
+
     public enum Action: Equatable, Sendable {
         case none
         case run(Rung, token: Int, afterSeconds: Double)
@@ -68,6 +85,10 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     private var nextToken = 1
     public private(set) var inFlight: Rung?
     public private(set) var inFlightToken: Int?
+    /// What ordered the rung in flight (#317); `nil` = nothing in flight.
+    public private(set) var inFlightCause: Cause?
+    /// The cause the next launched rung is recorded under: set by each entry point that can order one.
+    private var cause: Cause = .slowRetry
     public var awaitingHeartbeat: Bool { awaitedToken != nil }
     public private(set) var exhausted = false
     public private(set) var totalRebuilds = 0
@@ -75,6 +96,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     public init() {}
 
     public mutating func trigger(_ t: Trigger, now: Double) -> Action {
+        cause = .trigger(t)
         switch t {
         case .wake:
             // §5, §8.8: wake is "re-arm + heartbeat check", and the re-armed liveness monitor IS the
@@ -123,6 +145,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         }
         inFlight = nil
         inFlightToken = nil
+        inFlightCause = nil
         if grantPending { return trigger(.permissionGrant, now: now) }
         if succeeded {
             awaitedToken = token
@@ -159,6 +182,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         guard awaitedToken == token else { return .none }
         awaitedToken = nil
         guard gateOpen else { return gateClosed() }
+        cause = .heartbeatMissed
         return nextRung(now: now)
     }
 
@@ -167,6 +191,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     /// rung's deadline decides, and its miss hands back the next slow retry.
     public mutating func slowRetryDue(now: Double) -> Action {
         guard exhausted, inFlight == nil, awaitedToken == nil else { return .none }
+        cause = .slowRetry
         return .run(.rebuildTap, token: launch(.rebuildTap), afterSeconds: 0)
     }
 
@@ -220,6 +245,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
         nextToken += 1
         inFlight = rung
         inFlightToken = token
+        inFlightCause = cause
         healedAt = nil
         onReopen = .fresh
         totalRebuilds += 1
@@ -235,6 +261,7 @@ public struct TapRecoveryLadder: Equatable, Sendable {
     private mutating func cancelWork() {
         inFlight = nil
         inFlightToken = nil
+        inFlightCause = nil
         awaitedToken = nil
     }
 
