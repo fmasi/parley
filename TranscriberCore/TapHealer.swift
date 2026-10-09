@@ -59,8 +59,9 @@ extension DispatchWorkItem: HealerTimer {}
 /// during sleep and only armed monitors give verdicts, so a verdict proves the machine is awake and
 /// the wake message was lost — dropping it would silence the tap for the rest of the session (round 2).
 /// A coreaudiod restart or a permission grant that arrives while asleep — or a grant still waiting on a
-/// rung in flight when sleep came (#235) — is kept and runs at the wake (H2 council, B-M1): dropped, it left the tap's objects and listeners dead until a liveness episode
-/// escalated to a tap rung.
+/// rung in flight when sleep came (#235), or either one's rebuild not yet dispatched when sleep came
+/// (#295) — is kept and runs at the wake (H2 council, B-M1): dropped, it left the tap's objects and
+/// listeners dead until a liveness episode escalated to a tap rung.
 public final class TapHealer {
     public static let stuckSeconds: Double = 5
 
@@ -78,8 +79,9 @@ public final class TapHealer {
     /// A rebuild threw since the tap last delivered: a give-up then also means "could not restart".
     private var rebuildFailedSinceHeartbeat = false
     /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep, a grant still parked in
-    /// the ladder when sleep came, or either one's rebuild not yet dispatched when sleep came: run at the wake. A restart wins over a grant (its new tap starts with
-    /// the new permission). Forgotten by a stop or a new session.
+    /// the ladder when sleep came, or either one's rebuild not yet dispatched when sleep came: run at
+    /// the wake. A restart wins over a grant (its new tap starts with the new permission). Forgotten by
+    /// a stop or a new session.
     private var pendingWhileAsleep: TapRecoveryLadder.Trigger?
 
     public var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
