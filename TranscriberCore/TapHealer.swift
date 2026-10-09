@@ -77,8 +77,8 @@ public final class TapHealer {
     private var slowRetry: HealerTimer?
     /// A rebuild threw since the tap last delivered: a give-up then also means "could not restart".
     private var rebuildFailedSinceHeartbeat = false
-    /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep, or a grant still parked in
-    /// the ladder when sleep came: run at the wake. A restart wins over a grant (its new tap starts with
+    /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep, a grant still parked in
+    /// the ladder when sleep came, or either one's rebuild not yet dispatched when sleep came: run at the wake. A restart wins over a grant (its new tap starts with
     /// the new permission). Forgotten by a stop or a new session.
     private var pendingWhileAsleep: TapRecoveryLadder.Trigger?
 
@@ -200,10 +200,13 @@ public final class TapHealer {
     /// Sleep: every timer goes, the ladder forgets its episode (so no token in flight or awaited
     /// survives), and the healer is suspended until `trigger(.wake)` or the next liveness verdict.
     /// A grant the ladder had parked behind a rung in flight is kept for the wake as one that arrived
-    /// while asleep (#235): the reset forgets it, and nothing else would rebuild the tap for it.
+    /// while asleep (#235): the reset forgets it, and nothing else would rebuild the tap for it. So is a
+    /// grant or a restart whose rebuild is scheduled but not yet dispatched (#295) — the one a wake has
+    /// just queued, when sleep follows at once: it is owed until it runs.
     public func cancelAll() {
         scheduler.async {
             if self.ladder.grantPending { self.keepForTheWake(.permissionGrant) }
+            if self.pendingRun != nil, case .trigger(let t)? = self.ladder.inFlightCause { self.keepForTheWake(t) }
             self.reset()
             self.suspended = true
         }

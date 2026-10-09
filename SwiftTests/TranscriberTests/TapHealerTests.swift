@@ -394,6 +394,73 @@ import Testing
         #expect(r.tap.rebuilds.count == 1, "the wake never rebuilds blind")
     }
 
+    // MARK: - #295 item 3: a grant is owed until its rebuild is dispatched
+
+    /// The grant that arrived while asleep is queued by the wake, and the Mac sleeps again before that rebuild is
+    /// dispatched. The second sleep must not drop it: it runs at the next wake.
+    @Test func aGrantQueuedAtWakeSurvivesAnImmediateResleep() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.permissionGrant)
+        r.healer.trigger(.wake)               // queues the grant's rebuild …
+        r.healer.cancelAll()                  // … and sleep lands before it is dispatched
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.isEmpty, "nothing runs while asleep")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate], "the grant's rebuild runs at the next wake")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.count == 1, "once, however many wakes")
+    }
+
+    /// The same while awake: the grant's rebuild is scheduled, and sleep comes before it runs.
+    @Test func aGrantNotYetDispatchedWhenSleepComesRunsAtTheWake() {
+        let r = rig()
+        r.healer.trigger(.permissionGrant)
+        r.healer.cancelAll()
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate])
+    }
+
+    /// A coreaudiod restart is kept for the wake on the same terms: its listeners are dead until the tap is rebuilt.
+    @Test func aRestartQueuedAtWakeSurvivesAnImmediateResleep() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.trigger(.wake)
+        r.healer.cancelAll()
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildTap])
+    }
+
+    /// Once dispatched, the grant is paid: a sleep after it owes nothing, and the wake rebuilds nothing blind.
+    @Test func aDispatchedGrantIsNotRunAgainAfterSleep() {
+        let r = rig()
+        r.healer.trigger(.permissionGrant)
+        r.clock.advance(by: 0)                // dispatched
+        r.healer.cancelAll()
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate])
+    }
+
+    /// A pending stall rung (not a grant or a restart) is not carried across a sleep: the wake never rebuilds blind.
+    @Test func aPendingStallRungIsNotCarriedAcrossSleep() {
+        let r = rig()
+        r.healer.trigger(.stalled)
+        r.healer.cancelAll()                  // before the rung is dispatched
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.isEmpty)
+    }
+
     // MARK: - Final review H-I1: nothing expected at the deadline
 
     /// Recording started before the call; the grant rebuilds the tap while nothing plays. The rung's
