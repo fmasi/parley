@@ -59,8 +59,9 @@ extension DispatchWorkItem: HealerTimer {}
 /// during sleep and only armed monitors give verdicts, so a verdict proves the machine is awake and
 /// the wake message was lost — dropping it would silence the tap for the rest of the session (round 2).
 /// A coreaudiod restart or a permission grant that arrives while asleep — or a grant still waiting on a
-/// rung in flight when sleep came (#235) — is kept and runs at the wake (H2 council, B-M1): dropped, it left the tap's objects and listeners dead until a liveness episode
-/// escalated to a tap rung.
+/// rung in flight when sleep came (#235), or either one's rebuild not yet dispatched when sleep came
+/// (#295) — is kept and runs at the wake (H2 council, B-M1): dropped, it left the tap's objects and
+/// listeners dead until a liveness episode escalated to a tap rung.
 public final class TapHealer {
     public static let stuckSeconds: Double = 5
 
@@ -77,9 +78,10 @@ public final class TapHealer {
     private var slowRetry: HealerTimer?
     /// A rebuild threw since the tap last delivered: a give-up then also means "could not restart".
     private var rebuildFailedSinceHeartbeat = false
-    /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep, or a grant still parked in
-    /// the ladder when sleep came: run at the wake. A restart wins over a grant (its new tap starts with
-    /// the new permission). Forgotten by a stop or a new session.
+    /// A `.serviceRestarted` / `.permissionGrant` that arrived while asleep, a grant still parked in
+    /// the ladder when sleep came, or either one's rebuild not yet dispatched when sleep came: run at
+    /// the wake. A restart wins over a grant (its new tap starts with the new permission). Forgotten by
+    /// a stop or a new session.
     private var pendingWhileAsleep: TapRecoveryLadder.Trigger?
 
     public var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
@@ -200,10 +202,13 @@ public final class TapHealer {
     /// Sleep: every timer goes, the ladder forgets its episode (so no token in flight or awaited
     /// survives), and the healer is suspended until `trigger(.wake)` or the next liveness verdict.
     /// A grant the ladder had parked behind a rung in flight is kept for the wake as one that arrived
-    /// while asleep (#235): the reset forgets it, and nothing else would rebuild the tap for it.
+    /// while asleep (#235): the reset forgets it, and nothing else would rebuild the tap for it. So is a
+    /// grant or a restart whose rebuild is scheduled but not yet dispatched (#295) — the one a wake has
+    /// just queued, when sleep follows at once: it is owed until it runs.
     public func cancelAll() {
         scheduler.async {
             if self.ladder.grantPending { self.keepForTheWake(.permissionGrant) }
+            if self.pendingRun != nil, case .trigger(let t)? = self.ladder.inFlightCause { self.keepForTheWake(t) }
             self.reset()
             self.suspended = true
         }

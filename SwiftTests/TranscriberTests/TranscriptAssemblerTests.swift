@@ -190,6 +190,20 @@ struct TranscriptAssemblerTests {
         #expect(capture["local"] == nil)
     }
 
+    /// #295 item 1: the build stamp reaches the transcript of every recording, a clean one included (it keeps no
+    /// `.diag.jsonl`); an unknown build is left out.
+    @Test func theBuildLandsInCaptureProvenance() throws {
+        func stamped(_ build: String?) throws -> [String: Any] {
+            let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                      recovered: false, anomalyCount: 0, build: build)
+            let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                    diarization: false, dualStream: true, provenance: p)
+            return try #require((json["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any])
+        }
+        #expect(try stamped("release")["build"] as? String == "release")
+        #expect(try stamped(nil)["build"] == nil)
+    }
+
     /// Review round 1 item 7: a tracked session with no issues says so; an untracked path says nothing.
     @Test func trackedCleanSessionWritesEmptyProcessingIssues() throws {
         let tracked = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,

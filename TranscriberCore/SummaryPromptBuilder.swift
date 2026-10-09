@@ -156,7 +156,8 @@ enum SummaryPromptBuilder {
 
     private static func sideLine(_ label: String, _ note: CaptureSideNote, isRemote: Bool) -> CaptureHeaderLine? {
         let delivered = seconds(note.deliveredSeconds), expected = seconds(note.expectedSeconds)
-        // A stop whose seal timed out counted to its last tick: both figures are lower bounds (final review R-M1).
+        // `coverage_incomplete` (a timed-out seal, a crashed helper's stand-in, a partial record): both figures are
+        // lower bounds (final review R-M1, #295).
         let atLeast = note.coverageIncomplete ? "at least " : ""
         let amounts = "(\(atLeast)\(delivered) s delivered of \(atLeast)\(expected) s expected)"
         let zeros = clampedZeros(note)
