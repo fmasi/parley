@@ -1311,7 +1311,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
                 }
             case .rebuildTap(let reason):
                 guard stateLock.sync(execute: { tapSession != nil && !isUserStopping }) else { continue }
-                Logger.audio.info("System tap: rebuilding for the System Audio Recording permission (\(reason == .grant ? "grant" : "insurance", privacy: .public))")
+                // `.warning`, not `.info` (#317): info lines are not persisted, so this rebuild went unexplained in the log.
+                Logger.audio.warning("System tap: rebuilding for the System Audio Recording permission (\(reason == .grant ? "grant" : "insurance", privacy: .public))")
                 // Through the ladder, so it counts against the episode's budget (§5).
                 tapHealer.trigger(reason == .grant ? .permissionGrant : .permissionInsurance)
             case .reportDenied(let status):

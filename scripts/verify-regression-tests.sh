@@ -16,14 +16,18 @@
 #   is guarding dead code, asserting nothing, or silently skipping.
 #
 # HOW IT WORKS
-#   1. Diff BASE...HEAD for added/modified files under SwiftTests/TranscriberTests/.
+#   1. Diff BASE...HEAD for added, modified, and renamed-and-modified files under
+#      SwiftTests/TranscriberTests/ (#297: with only added/modified, a test file renamed and
+#      changed in the same PR was not gated at all). A rename with no change brings no new test,
+#      so it is not gated. A renamed file is gated under its new name.
 #   2. Trivially pass when the gate does not apply:
 #        - no test files changed, or
 #        - no production code changed (a tests-only PR adds characterization tests for
 #          EXISTING behaviour — those are green at the parent by definition), or
 #        - every changed test file is explicitly exempted (see below).
 #   3. Create a throwaway git worktree at BASE, overlay ONLY the changed test files from HEAD
-#      onto it, and run just the test suites declared in those files. The run is four steps, and
+#      onto it (deleting a renamed file's old copy, which would otherwise declare its types a
+#      second time and fail to compile: a false RED), and run just the test suites declared in those files. The run is four steps, and
 #      each outcome is classified — a non-zero exit is NOT RED by itself:
 #        a. `swift package resolve` fails            -> BROKEN. Nothing was compiled, so nothing
 #           was learned about the tests.
@@ -31,10 +35,13 @@
 #           and its dependencies built when that commit merged; if they do not build now, the
 #           machine is at fault, not the tests.
 #        c. `swift build --build-tests` fails        -> RED only if the compiler reports an error
-#           IN ONE OF THE OVERLAID TEST FILES (a new test referencing a symbol the fix introduces
+#           IN ONE OF THE GATED TEST FILES (a new test referencing a symbol the fix introduces
 #           cannot compile at the parent — it cannot pass there, which is the property this gate
-#           needs). A failure with no such error (linker, toolchain, an error somewhere else) is
-#           BROKEN.
+#           needs). Errors only in RED-FIRST-EXEMPT changed files are NOT RED (#297): the gated
+#           suites never ran, so nothing shows they fail without the fix, and an exempt file that
+#           does not compile at the parent is not the characterization its marker claims. A
+#           failure with no error in a changed file (linker, toolchain, an error somewhere else)
+#           is BROKEN.
 #        d. `swift test` exits non-zero              -> RED only if Swift Testing printed its
 #           summary "Test run with N tests ... failed" with N >= 1. No summary (a crash, a kill, a
 #           runner that never started) is BROKEN.
@@ -110,8 +117,15 @@ echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
 
 # --- 1. Collect changed test files ---------------------------------------------------------------
 
+# Added (A), modified (M) and renamed (R, with rename detection forced on: `-M`). A rename's line is
+# "R<similarity>\told\tnew"; R100 is a rename with no change, which adds no test and is skipped.
+test_changes=$(git diff --name-status -M --diff-filter=AMR "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR")
 changed_test_files=$(
-  git diff --name-only --diff-filter=AM "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR" | grep '\.swift$' || true
+  printf '%s\n' "$test_changes" | awk -F '\t' '$1 != "R100" && $NF ~ /\.swift$/ { print $NF }'
+)
+# The old paths of the renamed-and-modified files: the parent tree must not keep them (step 4).
+renamed_from=$(
+  printf '%s\n' "$test_changes" | awk -F '\t' '$1 ~ /^R/ && $1 != "R100" && $NF ~ /\.swift$/ { print $2 }'
 )
 
 if [ -z "$changed_test_files" ]; then
@@ -268,10 +282,9 @@ run_suites() {
         echo "compile errors in the changed test files:"
         printf '%s\n' "$hits" | sed -n '1,10p'   # not head: under pipefail its early exit fails the gate (broken pipe)
         if [ -z "$gated_hits" ]; then
-          echo "NOTE: none of these is in a GATED file — they are all in RED-FIRST-EXEMPT files. The"
-          echo "gated suites could not be run at the parent, so this RED rests on the exempt files"
-          echo "alone. An exempt file that does not compile at the parent is not characterizing"
-          echo "existing behaviour: check its marker."
+          # #297: not RED. The gated suites never ran at the parent.
+          RUN_STATUS="exempt-only"
+          RUN_WHY="every compile error is in a RED-FIRST-EXEMPT file"
         fi
       fi
     elif [ -n "$others" ]; then
@@ -323,6 +336,9 @@ if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
 fi
 # Overlay ALL changed test files (exempt ones and helpers too — gated tests may depend on
 # them), but execute only the gated suites.
+for f in $renamed_from; do
+  rm -f "$parent_tree/$f"
+done
 for f in $changed_test_files; do
   mkdir -p "$parent_tree/$(dirname "$f")"
   git show "$HEAD_SHA:$f" > "$parent_tree/$f"
@@ -349,6 +365,14 @@ case "$RUN_STATUS" in
     ;;
   red)
     echo "OK: RED at parent ($RUN_WHY)."
+    ;;
+  exempt-only)
+    echo
+    echo "FAIL: not RED — the compile errors at the parent are only in RED-FIRST-EXEMPT files."
+    echo "The gated suites could not be run there, so nothing shows they fail without the fix."
+    echo "An exempt file that does not compile at the parent is not characterizing existing"
+    echo "behaviour: remove its marker (it is then gated) or make it compile at the parent."
+    exit 1
     ;;
   *)
     # "broken", and anything this script failed to classify: never RED.

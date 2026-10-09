@@ -593,7 +593,11 @@ public struct SessionState: Codable {
         var ids: Set<String> = []
         for name in names where name == fileName || (name.hasPrefix("session-") && name.hasSuffix(".json")) {
             guard let stored = storedSessionId(at: directory.appendingPathComponent(name)) else { continue }
-            guard let id = stored else { return nil }
+            guard let id = stored else {
+                // Says which file holds the whole folder (#294): a stray `session-*.json` that is not session state does.
+                Logger.files.error("\(name, privacy: .sensitive) has no session id Parley can read — every archive in its folder is kept from the storage limit")
+                return nil
+            }
             ids.insert(id)
         }
         return ids
