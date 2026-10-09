@@ -16,11 +16,11 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 home=$(bash "$here/test-home.sh")
+# The home goes once the run ends (rm -rf removes CI's link to the model cache, never the cache).
+# Only a path test-home.sh makes, set before the check so a refused home goes too.
+trap 'case "$home" in */parley-test-home.*) rm -rf "$home" ;; esac' EXIT
 bash "$here/test-home.sh" --check "$home"
 export CFFIXED_USER_HOME="$home"
-
-# The home goes once the run ends (rm -rf removes CI's link to the model cache, never the cache).
-trap 'rm -rf "$home"' EXIT
 
 filter="${1:-TranscriberTests}"
 [ "$#" -eq 0 ] || shift

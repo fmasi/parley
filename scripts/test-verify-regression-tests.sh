@@ -45,6 +45,7 @@ case "$1 ${2:-}" in
   *) echo "fake swift: unexpected arguments: $*" >&2; exit 97 ;;
 esac
 echo "$side.$step" >>"$FAKE_DIR/calls"
+echo "$side.$step ${CFFIXED_USER_HOME:-}" >>"$FAKE_DIR/homes"
 # What the tree under test actually contains when the test target is compiled.
 if [ "$step" = testbuild ]; then
   cat SwiftTests/TranscriberTests/CalcTests.swift >"$FAKE_DIR/$side.seen-test" 2>/dev/null || :
@@ -428,6 +429,30 @@ out=$(cd "$repo" && env -u CFFIXED_USER_HOME PATH="$bin:$PATH" FAKE_DIR="$fake" 
   bash "$tmp/gate-copy/verify-regression-tests.sh" base 2>&1) || status=$?
 check "the throwaway home cannot be made" 1 "could not make a throwaway home for the parent run" "$PASSED"
 [ -s "$fake/calls" ] && { out=$(cat "$fake/calls"); fail "the gate ran swift without a throwaway home"; }
+
+# With no home from the caller: each side's tests get a fresh home of their own, nothing else gets
+# one (SwiftPM would move its caches into it), and the gate removes both homes when it ends.
+mkdir -p "$tmp/t"
+scenario; parent_red; head_green
+g checkout -q fix
+status=0
+out=$(cd "$repo" && env -u CFFIXED_USER_HOME TMPDIR="$tmp/t" PATH="$bin:$PATH" FAKE_DIR="$fake" FAKE_HEAD="$repo" \
+  bash "$GATE" base 2>&1) || status=$?
+check "a home of its own per side" 0 "$PASSED"
+parent_home=$(awk '$1 == "parent.run" { print $2 }' "$fake/homes")
+head_home=$(awk '$1 == "head.run" { print $2 }' "$fake/homes")
+others=$(awk '$1 !~ /\.run$/ && NF > 1' "$fake/homes")
+case "$parent_home|$head_home" in
+  "$tmp"/t/parley-test-home.*"|$tmp"/t/parley-test-home.*)
+    if [ "$parent_home" != "$head_home" ] && [ -z "$others" ]; then
+      echo "  ok:   ... given to swift test only, a different one per side"
+    else
+      out=$(cat "$fake/homes"); fail "the homes are shared, or given to more than swift test"
+    fi ;;
+  *) out=$(cat "$fake/homes"); fail "swift test did not run in the gate's throwaway homes" ;;
+esac
+left=$(find "$tmp/t" -maxdepth 1 -name 'parley-test-home.*' | wc -l | tr -d ' ')
+if [ "$left" = 0 ]; then echo "  ok:   ... and removes them when it ends"; else out="$left left"; fail "the gate left its homes behind"; fi
 
 echo "gate does not apply"
 

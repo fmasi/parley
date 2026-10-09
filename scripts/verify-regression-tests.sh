@@ -118,9 +118,16 @@ TEST_FLAGS="--no-parallel"
 # may still resolve the user's real folders (#313). Each side gets a fresh one (run_suites), so what
 # the parent's tests leave in it cannot change HEAD's result. A home the caller set is used for both
 # and checked like a new one: empty, missing or the real home, and nothing runs.
+# The home is given to `swift test` only. SwiftPM honours it too: exported to `swift package resolve`
+# and `swift build`, it would put SwiftPM's cache, mirrors and fingerprints in the empty home, and
+# every run would clone each dependency from the network again.
 TEST_HOME_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-home.sh"
 CALLER_HOME="${CFFIXED_USER_HOME:-}"
-MADE_HOMES=""   # the homes this gate made, removed on exit (a home holds a CLONE or a link of the model cache)
+unset CFFIXED_USER_HOME
+# The homes this gate made, one per side, removed on exit (each holds a clone of, or on CI a link to,
+# the model cache; rm -rf removes a link, never what it points at).
+PARENT_HOME=""
+HEAD_HOME=""
 if [ -n "$CALLER_HOME" ]; then
   bash "$TEST_HOME_SH" --check "$CALLER_HOME"
 fi
@@ -253,22 +260,26 @@ compile_errors_in() {
 }
 
 run_suites() {
-  local tree="$1" side="$2" log ec tests_run hits others gated_hits
+  local tree="$1" side="$2" log ec tests_run hits others gated_hits home
   RUN_STATUS="broken"
   RUN_WHY="not classified"
-  log=$(mktemp)
 
-  # A fresh throwaway home for this side, made and checked in statements of their own (#313).
+  # A fresh throwaway home for this side, made and checked in statements of their own (#313). It is
+  # recorded before the check, so cleanup() removes it even when the check refuses it.
   if [ -n "$CALLER_HOME" ]; then
-    CFFIXED_USER_HOME="$CALLER_HOME"
+    home="$CALLER_HOME"
   else
-    if ! CFFIXED_USER_HOME=$(bash "$TEST_HOME_SH") || ! bash "$TEST_HOME_SH" --check "$CFFIXED_USER_HOME"; then
+    if ! home=$(bash "$TEST_HOME_SH"); then
       echo "FAIL: could not make a throwaway home for the $side run — nothing was run (#313)."
       exit 1
     fi
-    MADE_HOMES="$MADE_HOMES $CFFIXED_USER_HOME"
+    if [ "$side" = parent ]; then PARENT_HOME="$home"; else HEAD_HOME="$home"; fi
+    if ! bash "$TEST_HOME_SH" --check "$home"; then
+      echo "FAIL: the throwaway home for the $side run is not usable — nothing was run (#313)."
+      exit 1
+    fi
   fi
-  export CFFIXED_USER_HOME
+  log=$(mktemp)
 
   # a. Resolve and check out the dependencies. Nothing is compiled here, so a failure says
   #    nothing about the tests.
@@ -344,7 +355,7 @@ run_suites() {
   # d. Run the gated suites.
   ec=0
   # shellcheck disable=SC2086  # the flag variables are intentionally word-split
-  (cd "$tree" && swift test --filter "($suites)" $TEST_FLAGS $BUILD_FLAGS) >"$log" 2>&1 || ec=$?
+  (cd "$tree" && CFFIXED_USER_HOME="$home" swift test --filter "($suites)" $TEST_FLAGS $BUILD_FLAGS) >"$log" 2>&1 || ec=$?
   strip_ansi "$log"
   # swift-testing summary line: "Test run with N tests in M suites passed/failed after ..."
   tests_run=$(grep -oE 'Test run with [0-9]+ test' "$log" | grep -oE '[0-9]+' | tail -1 || true)
@@ -373,7 +384,10 @@ parent_tree=$(mktemp -d)
 cleanup() {
   local h
   git worktree remove --force "$parent_tree" 2>/dev/null || rm -rf "$parent_tree"
-  for h in $MADE_HOMES; do rm -rf "$h"; done
+  # Quoted, and only a path test-home.sh makes: never the caller's home, never a split path.
+  for h in "$PARENT_HOME" "$HEAD_HOME"; do
+    case "$h" in */parley-test-home.*) rm -rf "$h" ;; esac
+  done
 }
 trap cleanup EXIT
 
