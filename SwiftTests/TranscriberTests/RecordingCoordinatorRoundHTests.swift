@@ -230,9 +230,10 @@ final class ReadLog: @unchecked Sendable {
         let helper = HungStep()   // the helper's stop hangs until released
         defer { helper.release() }
         h.client.onStop = { await helper.hangAwaited() }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
         #expect(helper.isHanging, "by order: the Quit returned with the helper's stop still unanswered")
-        #expect(h.readSlotInOrder()?.stopping == true)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true)
         #expect(h.coordinator.keepsLaunchAgentOnQuit, "the helper had not let go")
         helper.release()   // the helper answers: the Stop ends
         await Harness.until(within: 5) { h.appState.isIdle }

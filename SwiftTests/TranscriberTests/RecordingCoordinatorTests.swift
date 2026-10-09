@@ -387,10 +387,12 @@ struct Harness {
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 
-    /// The recovery file as it stands IN ORDER behind every write already queued on its queue (#298). An exit waits for its
-    /// own mark only within a bound (`exitMarkBound`, or what is left of a termination's): a mark still queued when the exit
-    /// returns is correct, and lands before anything queued after it. So a test reads the mark an exit made here — by
-    /// order — never by that bound, which a loaded machine outlasts. Never while the test hangs that queue.
+    /// The recovery file as it stands IN ORDER behind every write already queued on its queue (#298). For a termination with
+    /// a short bound: its marks are waited for only within what is left of that bound, so a mark still queued when it returns
+    /// is correct, and lands before anything queued after it — the test reads it here, by order, never by the bound, which a
+    /// loaded machine outlasts. An exit whose mark is waited for within `exitMarkBound` (a Quit, a long termination) is read
+    /// directly with that bound set long instead: this read would also pass a mark that was only queued, never waited for.
+    /// Blocks the main thread until the queue gets to it: never while the test hangs that queue, or hops to main from it.
     func readSlotInOrder() -> RecordingSentinel? {
         let directory = tmp
         return coordinator.sentinelIO.sync("test: read in order") { RecordingSentinel.read(directory: directory) }
@@ -3867,9 +3869,10 @@ final class HungStep: @unchecked Sendable {
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until(within: 20) { finalize.reached }
         #expect(h.appState.isTranscribing && h.coordinator.hasWorkInFlight, "a finalize is busy")
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         await h.coordinator.prepareForTermination(bound: .seconds(60))
         #expect(finalize.isHanging, "at once: it returned with the transcript still being finished")
-        #expect(h.readSlotInOrder()?.quitDuringFinalize == true && h.client.stopCalls == 1)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true && h.client.stopCalls == 1)
         finalize.release()
         await stopping.value   // awaited, never cancelled into the next test
     }
@@ -4053,9 +4056,10 @@ final class HungStep: @unchecked Sendable {
         let helper = HungStep()   // the helper's stop hangs until released
         defer { helper.release() }
         h.client.onStop = { await helper.hangAwaited() }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
         #expect(helper.isHanging, "quit at its bound, never held by the helper: its stop was still unanswered")
-        #expect(h.readSlotInOrder()?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "the next launch finishes it, as a quit")
     }
 
     /// L10 review 60: a Quit while a Stop is already in flight waits for THAT stop (it used to return at once,
@@ -4709,8 +4713,9 @@ final class HungStep: @unchecked Sendable {
         let coordinator = h.coordinator
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until { h.appState.isTranscribing }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await h.coordinator.prepareForQuit(confirm: { Issue.record("no question while finishing"); return true }))
-        #expect(h.readSlotInOrder()?.quitDuringFinalize == true)
+        #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true)
         // Awaited, never cancelled (L review, RCT:3329): a cancelled Task keeps running into the next test.
         await stopping.value
         #expect(h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil, "the finalize still finished")
