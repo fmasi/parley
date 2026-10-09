@@ -126,16 +126,21 @@ import Foundation
         #expect(try sessionFiles(outDir).isEmpty, "no session.json left behind")
     }
 
-    /// Fail-closed: a recovery that finds nothing to salvage for THIS session never touches another session's state.
-    @Test func anotherSessionsStateIsNeverRemoved() async throws {
+    /// A recovery that finds nothing to salvage removes only THIS session's empty state — here a moved-aside copy — and never
+    /// the other session's `session.json` beside it, still in flight.
+    @Test func onlyThisSessionsStateIsRemoved() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        try await startedThenGone("110000-other", in: dir)   // another recording, still in flight
+        let empty = { (id: String) in SessionState(sessionId: id, meetingStart: Date(), engine: "fluidAudio", chunkDurationMinutes: 1, chunks: []) }
+        try SessionState.write(empty("100000-mine"), directory: dir)
+        try SessionState.write(empty("110000-other"), directory: dir)   // moves mine aside
+        #expect(try sessionFiles(dir) == ["session-100000-mine.json", "session.json"], "precondition")
 
         let result = try await ChunkedSessionRecovery.recover(
             outputDirectory: dir, sessionId: "100000-mine", config: sandboxed(dir),
             transcriber: FakeEngine(), diarizer: FakeDiarizer(), runner: TranscriptionRunner())
 
         #expect(result == nil)
+        #expect(try sessionFiles(dir) == ["session.json"], "mine's copy goes")
         #expect(SessionState.sessionIdsWithState(in: dir) == ["110000-other"], "the other session's state is kept")
     }
 }
