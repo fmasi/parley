@@ -73,7 +73,7 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
   scores, and local/remote tags.
 - **Optional local LLM summaries** — point it at any OpenAI-compatible or LM Studio endpoint (including
   a fully local model) for a meeting summary, still without touching the cloud.
-- **CLI included** — transcribe, rename speakers, summarize, and benchmark from the terminal.
+- **CLI included** — transcribe, rename speakers, summarize and download models from the terminal.
 
 ## Screenshots
 
