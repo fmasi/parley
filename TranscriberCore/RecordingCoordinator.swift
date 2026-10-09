@@ -3207,10 +3207,12 @@ public final class RecordingCoordinator {
                 } ?? nil
                 let outcome = SalvageOutcome(kind: .transcriptWritten(transcript), chunkCount: kept.chunkCount,
                                              recognitionFailures: failures ?? .init(), recognitionChecked: failures != nil)
-                // The rename panel opens only over a session still ours — never over a Start that got in meanwhile.
-                if appState.isIdle, !userStartInFlight { appState.phase = .transcribing(progress: "Recovering…") }
-                await presentCompletedTranscription(TranscriptionResult(jsonPath: transcript))
-                if case .transcribing = appState.phase { appState.phase = .idle }   // the presenter leaves it to us (#321)
+                // The rename panel opens only over a session still ours — never over a Start that got in meanwhile, nor over
+                // a Stop of it still finishing: the phase is then that Stop's, never ours to present over or to end (#321).
+                let ours = appState.isIdle && !userStartInFlight
+                if ours { appState.phase = .transcribing(progress: "Recovering…") }
+                await presentCompletedTranscription(TranscriptionResult(jsonPath: transcript), ours: ours)
+                if ours, case .transcribing = appState.phase { appState.phase = .idle }   // the presenter leaves it to us (#321)
                 reportStopped(salvageMessage(sentinel, stoppedAt: kept.stoppedAt, outcome: outcome, scan: nil, outputDir: outputDir),
                               recovered: true, session: sentinel.sessionKey)
             // Kept because its folder stopped answering — its transcript's write landed once it answered (L review 185):
@@ -3472,7 +3474,7 @@ public final class RecordingCoordinator {
     private func finishSentinel(after outcome: SalvageOutcome, sentinel: RecordingSentinel?, location: (outputDir: URL, sessionId: String)? = nil) async {
         guard outcome.kind == .folderNotAnswering else {
             // Settled: the stop kept apart for it goes with its recovery file (L review 267).
-            if await slotDeleteOffMain("delete"), let key = sentinel?.sessionKey ?? location.map(Self.sessionKey(of:)) ?? currentSessionKey {
+            if await slotDeleteOffMain("finish: delete"), let key = sentinel?.sessionKey ?? location.map(Self.sessionKey(of:)) ?? currentSessionKey {
                 dropStopKeptApart(for: key)
             }
             return
@@ -3779,7 +3781,8 @@ public final class RecordingCoordinator {
     /// the rename dialog + auto-summary. It leaves the phase `.transcribing` (#321): the caller sets
     /// `.idle` once its recovery file is gone too — never before the transcript is presented, so a Quit
     /// never returns, nor a Start get in, while the session is still being finished. Internal for tests.
-    func presentCompletedTranscription(_ result: TranscriptionResult) async {
+    /// `ours`: false when the caller does not own the phase — the notice is still posted, the rename dialog never opened.
+    func presentCompletedTranscription(_ result: TranscriptionResult, ours: Bool = true) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         // Say so when the capture layer flagged something. This used to be an unconditional
@@ -3840,7 +3843,7 @@ public final class RecordingCoordinator {
         // phase is never set `.idle` in here: the caller does that once its recovery file is gone too, so no Start gets in
         // while the Stop is still finishing. A crash handler may still have moved the phase on meanwhile, and the intrusive
         // part is `presentTranscript`: it would open the rename dialog on top of a live recording.
-        guard case .transcribing = appState.phase else {
+        guard ours, case .transcribing = appState.phase else {
             // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is
             // only the modal presentation that is skipped.
             Logger.state.warning(

@@ -4126,6 +4126,22 @@ final class HungStep: @unchecked Sendable {
         #expect(h.notified.value.last?.title == "Transcription Complete — no speech was transcribed")
     }
 
+    /// #321: a caller that does not own the phase — a launch salvage while a Stop of the user's is still finishing — still
+    /// gets the notice, but never the rename dialog over that Stop, and the phase stays the Stop's.
+    @Test func aPresenterThatDoesNotOwnThePhaseNotifiesButNeverPresents() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("clean.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "Finishing…")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url), ours: false)
+        #expect(h.notified.value.last?.title == "Transcription Complete")
+        #expect(h.presented.value.isEmpty, "no rename dialog over a session that is not ours")
+        #expect(h.appState.isTranscribing, "the phase is left as it was")
+    }
+
     @Test func aCleanTranscriptSaysTranscriptionComplete() async throws {
         let h = try Harness()
         let url = h.tmp.appendingPathComponent("clean.json")
@@ -4757,18 +4773,24 @@ final class HungStep: @unchecked Sendable {
         #expect(h.appState.isIdle && h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil)
     }
 
-    /// #321, the crash paths' shape: a capture that crashed past its retries goes idle only once its recovery file is settled.
-    @Test func aCrashThatGivesUpIsIdleOnlyOnceItsRecoveryFileIsGone() async throws {
+    /// #321, the crash paths' shape: a capture that crashed past its retries, or whose restart failed, goes idle only once
+    /// its recovery file is settled.
+    @Test(arguments: [true, false])
+    func aCrashThatGivesUpIsIdleOnlyOnceItsRecoveryFileIsGone(atTheRetryCap: Bool) async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        let delete = HungStep("delete")
+        let delete = HungStep("finish: delete")
         defer { delete.release() }
         h.coordinator.sentinelIO = SentinelIO(label: "rc-321-crash-\(UUID().uuidString)", beforeEach: { delete.hangIfNamed($0) })
         h.coordinator.sentinelDeadline = .seconds(60)   // only the release ends the hang, never the delete's bound
         _ = try h.writeSentinel()
         h.appState.phase = .recording(since: Date())
-        h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries   // the next crash in the window gives up
-        h.coordinator.lastCrashAt = Date()
+        if atTheRetryCap {
+            h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries   // the next crash in the window gives up
+            h.coordinator.lastCrashAt = Date()
+        } else {
+            h.client.startError = FakeCaptureError()   // the restart fails
+        }
         let coordinator = h.coordinator
         let crashing = Task { await coordinator.handleXPCCrash() }
         await Harness.until(within: 20) { delete.reached }

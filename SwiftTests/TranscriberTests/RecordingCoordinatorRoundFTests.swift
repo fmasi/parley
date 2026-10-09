@@ -241,6 +241,7 @@ struct SlowRead: Sendable {
         let row = try #require(h.appState.activeAlarms[.recordingStopped]?.message)
         #expect(row.contains("Recording STOPPED") && row.contains("p.json") && row.contains("2 chunks"), "the salvage's own row: \(row)")
         #expect(h.presented.value.map(\.lastPathComponent) == ["p.json"], "the rename panel is offered")
+        #expect(h.appState.isIdle, "idle once presented (#321): the presenter leaves the phase to the salvage")
     }
 }
 
