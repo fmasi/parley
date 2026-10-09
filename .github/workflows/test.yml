@@ -248,14 +248,10 @@ jobs:
           # tests instead of disabling them, and `guardJobCannotSkip` proves their preconditions
           # held (see DiarizationRegressionTests).
           PARLEY_REQUIRE_AMI_FIXTURE: "1"
-        # A throwaway home, as `just test` uses (#313): no test may resolve the real one.
-        run: |
-          CFFIXED_USER_HOME="$(bash scripts/test-home.sh)"
-          export CFFIXED_USER_HOME
-          swift test --no-parallel --filter TranscriberTests \
-            -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
-            -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/usr/lib/
+        # In a throwaway home, as `just test` runs it (#313): no test may resolve the real one.
+        # scripts/swift-test.sh creates and checks the home, then runs
+        # `swift test --no-parallel --filter TranscriberTests` with the standard -X flags.
+        run: bash scripts/swift-test.sh
 
       # The release tooling (appcast, release notes, publish.sh, the Sparkle feed verifier). A break
       # here ships a broken auto-update feed, which every installed client fails silently. Stdlib

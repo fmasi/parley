@@ -25,9 +25,12 @@
 #        - no production code changed (a tests-only PR adds characterization tests for
 #          EXISTING behaviour — those are green at the parent by definition), or
 #        - every changed test file is explicitly exempted (see below).
-#   3. Create a throwaway git worktree at BASE, overlay ONLY the changed test files from HEAD
-#      onto it (deleting a renamed file's old copy, which would otherwise declare its types a
-#      second time and fail to compile: a false RED), and run just the test suites declared in those files. The run is four steps, and
+#   3. Create a throwaway git worktree at BASE, overlay the changed test files from HEAD
+#      onto it (and the test files renamed without a change, under their new names), delete from
+#      it every test file the PR deletes (a renamed file's old copy, or a file
+#      whose types moved elsewhere, would otherwise declare those types a second time and fail to
+#      compile: a false RED or BROKEN), and run just the test suites declared in the changed files.
+#      The run is four steps, and
 #      each outcome is classified — a non-zero exit is NOT RED by itself:
 #        a. `swift package resolve` fails            -> BROKEN. Nothing was compiled, so nothing
 #           was learned about the tests.
@@ -55,6 +58,11 @@
 #   4. Run the same four steps at HEAD and require exit 0 with >= 1 test executed (GREEN). The
 #      same classification applies, so a resolution, linker or runner failure at HEAD is reported
 #      as BROKEN ("could not build or run HEAD"), not as "the tests do not pass".
+#
+#   Known limit: a test file the PR deletes is removed from the parent tree. If the PR moves a type
+#   from a deleted test file into production code (behind a seam in TranscriberCore), unchanged tests
+#   that use it no longer compile at the parent: BROKEN, never a false RED. Keep the type in a test
+#   file in that PR, or move it in a PR of its own.
 #
 #   Known limit: a test that CRASHES the test process at the parent (a trap the fix removes) ends
 #   the run without a summary and is therefore BROKEN, not RED. Make it fail with an assertion.
@@ -107,10 +115,21 @@ BUILD_FLAGS="-Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Fr
 # swift test TWICE per run (merge base, then HEAD), so it is doubly exposed.
 TEST_FLAGS="--no-parallel"
 # Both trees' tests run with a throwaway home: the parent's tests are the old ones, and an old test
-# may still resolve the user's real folders (#313).
-if [ -z "${CFFIXED_USER_HOME:-}" ]; then
-  CFFIXED_USER_HOME=$(bash "$(dirname "${BASH_SOURCE[0]}")/test-home.sh")
-  export CFFIXED_USER_HOME
+# may still resolve the user's real folders (#313). Each side gets a fresh one (run_suites), so what
+# the parent's tests leave in it cannot change HEAD's result. A home the caller set is used for both
+# and checked like a new one: empty, missing or the real home, and nothing runs.
+# The home is given to `swift test` only. SwiftPM honours it too: exported to `swift package resolve`
+# and `swift build`, it would put SwiftPM's cache, mirrors and fingerprints in the empty home, and
+# every run would clone each dependency from the network again.
+TEST_HOME_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-home.sh"
+CALLER_HOME="${CFFIXED_USER_HOME:-}"
+unset CFFIXED_USER_HOME
+# The homes this gate made, one per side, removed on exit (each holds a clone of, or on CI a link to,
+# the model cache; rm -rf removes a link, never what it points at).
+PARENT_HOME=""
+HEAD_HOME=""
+if [ -n "$CALLER_HOME" ]; then
+  bash "$TEST_HOME_SH" --check "$CALLER_HOME"
 fi
 
 echo "Red-first gate: BASE=$BASE_SHA HEAD=$HEAD_SHA"
@@ -123,10 +142,29 @@ test_changes=$(git diff --name-status -M --diff-filter=AMR "$BASE_SHA...$HEAD_SH
 changed_test_files=$(
   printf '%s\n' "$test_changes" | awk -F '\t' '$1 != "R100" && $NF ~ /\.swift$/ { print $NF }'
 )
-# The old paths of the renamed-and-modified files: the parent tree must not keep them (step 4).
-renamed_from=$(
-  printf '%s\n' "$test_changes" | awk -F '\t' '$1 ~ /^R/ && $1 != "R100" && $NF ~ /\.swift$/ { print $2 }'
+# The new paths of the test files renamed WITHOUT a change: not gated, but copied into the parent
+# tree with the changed files, since the old path is removed from it below.
+moved_test_files=$(
+  printf '%s\n' "$test_changes" | awk -F '\t' '$1 == "R100" && $NF ~ /\.swift$/ { print $NF }'
 )
+# Every test file HEAD no longer has: the parent tree must not keep them (step 4), or a type that
+# moved to another file is declared twice and the test target fails to compile — a false RED, or
+# BROKEN. `--no-renames` lists a rename's old path as deleted too, whatever git's rename detection
+# makes of it: a file renamed and rewritten past its 50 % threshold shows only as a delete and an add.
+# Swift files only: that is all the duplicate-type problem needs, and a fixture the parent's tests
+# read stays where the parent expects it.
+removed_test_files=$(
+  git diff --name-only --no-renames --diff-filter=D "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR" | grep '\.swift$' || :
+)
+
+# The lists below are split on whitespace (bash 3.2, no arrays of possibly-empty lists). A path with
+# a space would be split into fragments: an `rm -f` of a deleted file would then miss it and leave
+# its types declared twice. No test file has one; refuse rather than misclassify.
+if printf '%s\n' "$changed_test_files" "$moved_test_files" "$removed_test_files" | grep -c '[[:space:]]' >/dev/null; then
+  echo "FAIL: a changed, renamed or deleted test file has whitespace in its path, which this gate cannot handle:"
+  printf '%s\n' "$changed_test_files" "$moved_test_files" "$removed_test_files" | grep '[[:space:]]' || :
+  exit 1
+fi
 
 if [ -z "$changed_test_files" ]; then
   echo "PASS (trivially): no test files changed."
@@ -222,9 +260,25 @@ compile_errors_in() {
 }
 
 run_suites() {
-  local tree="$1" side="$2" log ec tests_run hits others gated_hits
+  local tree="$1" side="$2" log ec tests_run hits others gated_hits home
   RUN_STATUS="broken"
   RUN_WHY="not classified"
+
+  # A fresh throwaway home for this side, made and checked in statements of their own (#313). It is
+  # recorded before the check, so cleanup() removes it even when the check refuses it.
+  if [ -n "$CALLER_HOME" ]; then
+    home="$CALLER_HOME"
+  else
+    if ! home=$(bash "$TEST_HOME_SH"); then
+      echo "FAIL: could not make a throwaway home for the $side run — nothing was run (#313)."
+      exit 1
+    fi
+    if [ "$side" = parent ]; then PARENT_HOME="$home"; else HEAD_HOME="$home"; fi
+    if ! bash "$TEST_HOME_SH" --check "$home"; then
+      echo "FAIL: the throwaway home for the $side run is not usable — nothing was run (#313)."
+      exit 1
+    fi
+  fi
   log=$(mktemp)
 
   # a. Resolve and check out the dependencies. Nothing is compiled here, so a failure says
@@ -301,7 +355,7 @@ run_suites() {
   # d. Run the gated suites.
   ec=0
   # shellcheck disable=SC2086  # the flag variables are intentionally word-split
-  (cd "$tree" && swift test --filter "($suites)" $TEST_FLAGS $BUILD_FLAGS) >"$log" 2>&1 || ec=$?
+  (cd "$tree" && CFFIXED_USER_HOME="$home" swift test --filter "($suites)" $TEST_FLAGS $BUILD_FLAGS) >"$log" 2>&1 || ec=$?
   strip_ansi "$log"
   # swift-testing summary line: "Test run with N tests in M suites passed/failed after ..."
   tests_run=$(grep -oE 'Test run with [0-9]+ test' "$log" | grep -oE '[0-9]+' | tail -1 || true)
@@ -327,7 +381,14 @@ run_suites() {
 # --- 4. RED at the parent -------------------------------------------------------------------------
 
 parent_tree=$(mktemp -d)
-cleanup() { git worktree remove --force "$parent_tree" 2>/dev/null || rm -rf "$parent_tree"; }
+cleanup() {
+  local h
+  git worktree remove --force "$parent_tree" 2>/dev/null || rm -rf "$parent_tree"
+  # Quoted, and only a path test-home.sh makes: never the caller's home, never a split path.
+  for h in "$PARENT_HOME" "$HEAD_HOME"; do
+    case "$h" in */parley-test-home.*) rm -rf "$h" ;; esac
+  done
+}
 trap cleanup EXIT
 
 if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
@@ -335,11 +396,11 @@ if ! git worktree add --detach "$parent_tree" "$BASE_SHA" >/dev/null 2>&1; then
   exit 1
 fi
 # Overlay ALL changed test files (exempt ones and helpers too — gated tests may depend on
-# them), but execute only the gated suites.
-for f in $renamed_from; do
+# them) and the ones renamed without a change, but execute only the gated suites.
+for f in $removed_test_files; do
   rm -f "$parent_tree/$f"
 done
-for f in $changed_test_files; do
+for f in $changed_test_files $moved_test_files; do
   mkdir -p "$parent_tree/$(dirname "$f")"
   git show "$HEAD_SHA:$f" > "$parent_tree/$f"
 done

@@ -530,8 +530,12 @@ private func removedMark(_ url: URL) throws -> [String: Any]? {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let runner = TranscriptionRunner()
+        // Never Config.default: it records into the real ~/Documents/Recordings with a 15 h limit (#313).
+        var config = Config.default
+        config.recordingDirectory = dir.path
+        config.audioArchiveLimitHours = 100_000
         try runner.setupChunkedPipeline(captureClient: NoRotationClient(), outputDirectory: dir, sessionBaseName: "110851-standup",
-                                        config: .default)
+                                        config: config)
         defer { runner.teardownChunkedPipeline() }
         let processor = try #require(runner.chunkProcessor)
         await processor.awaitAllProcessed()   // no chunk yet: only the state written at the start

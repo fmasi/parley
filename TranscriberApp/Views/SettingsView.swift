@@ -568,6 +568,8 @@ struct SettingsView: View {
             SummaryAPIKeyStore.save(apiKeyToPersist)
         }
         config.lastMicrophoneDeviceId = settingsMicId
+        // Remembered by recordings since Settings opened (#315): never rolled back by this older copy.
+        config.recentMicrophoneDeviceIds = configManager.config.recentMicrophoneDeviceIds
         let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }
         permissionManager.systemAudioSource = config.systemAudioSource

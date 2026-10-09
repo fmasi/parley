@@ -66,6 +66,31 @@ import Testing
         #expect(fired == 2, "a second, later silent run must be reported independently")
     }
 
+    /// #315: the follow onto a lid-closed built-in mic raises `micDigitalSilence` at once, before any
+    /// run is reported. The first real audio must still clear it, as for a reported run.
+    @Test func expectedSilenceIsClearedByTheFirstRealAudio() {
+        var m = ExactZeroRunMonitor(thresholdSeconds: 12)
+        var speech = [Int16](repeating: 0, count: 4800)
+        speech[100] = 500
+        m.expectSilence()
+        #expect(m.record(samples: speech, rate: rate) == .resumed)
+        #expect(m.record(samples: speech, rate: rate) == .notYet, "once")
+    }
+
+    /// The early alarm does not stop the monitor confirming the run, nor clearing it afterwards.
+    @Test func expectedSilenceStillConfirmsThenResumesOnce() {
+        var m = ExactZeroRunMonitor(thresholdSeconds: 12)
+        let silence = [Int16](repeating: 0, count: 4800)
+        var speech = [Int16](repeating: 0, count: 4800)
+        speech[100] = 500
+        m.expectSilence()
+        var fired = 0
+        for _ in 0..<130 { if case .silentRun = m.record(samples: silence, rate: rate) { fired += 1 } }
+        #expect(fired == 1)
+        #expect(m.record(samples: speech, rate: rate) == .resumed)
+        #expect(m.record(samples: speech, rate: rate) == .notYet)
+    }
+
     /// An empty batch (no samples delivered this call) must not itself count as a zero run — there
     /// is nothing to judge, and `allSatisfy` on an empty array is vacuously true, which would be a
     /// bug if not guarded against explicitly.

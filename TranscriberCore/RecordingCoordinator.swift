@@ -595,6 +595,7 @@ public final class RecordingCoordinator {
             setHelperMic(microphoneDeviceId)
             helperStartIssued = true
             let baseName = naming.baseName, sessionId = naming.chunkBaseName
+            // The EARLIER hand-picked mics go with the start (#315); the helper adds the mic it starts on itself.
             let source = config.systemAudioSource, options = CaptureOptions(config: config)
             // Bounded by what is left of the start's deadline; a start that answers later changes nothing.
             try await bounded("start", seconds: Self.seconds(until: startBy)) {
@@ -602,6 +603,9 @@ public final class RecordingCoordinator {
                                            systemAudioSource: source, options: options, sessionId: sessionId)
             }
             captureStarted = true
+            // The helper is capturing on the mic the user picked: remember it for later recordings (#315). After the
+            // start, not within its deadline, and not for a start the helper refused (as for a refused switch).
+            rememberMicrophoneChoice(microphoneDeviceId)
             recordClamshellPreflight(preflightRecord)
 
             useFolderReadsForTheTranscript()   // the pipeline's session.json writes: this reader, its bound (L review 234)
@@ -773,6 +777,7 @@ public final class RecordingCoordinator {
             }
             throw error
         }
+        rememberMicrophoneChoice(deviceId)
         // The recording ended normally while the helper was switching (Stop during the switch): there
         // is no recovery file to update any more, and nothing to warn about. Stop deletes the sentinel
         // and leaves the recording phase in one synchronous step, so this check can't fall between.
@@ -793,6 +798,14 @@ public final class RecordingCoordinator {
             Logger.state.error("Could not record the switched mic in the sentinel: \(error, privacy: .private)")
             warnRecoveryNotUpdated()
         }
+    }
+
+    /// Remember an input the user chose by hand (#315). Written only when it changes the list.
+    private func rememberMicrophoneChoice(_ deviceId: String?) {
+        let recent = configManager.config.recentMicrophoneDeviceIds ?? []
+        let updated = MicTargeting.rememberingUserChoice(deviceId, in: recent)
+        guard updated != recent else { return }
+        configManager.update { $0.recentMicrophoneDeviceIds = updated }
     }
 
     /// The lid-closed banner is about one microphone (#314): once the recording moved to another — the user's switch or the
@@ -936,8 +949,15 @@ public final class RecordingCoordinator {
                 let result: TranscriptionResult?
                 // Off the main actor, bounded (L review 122): a folder that does not answer is said so, and kept.
                 guard let look = await readOffMain("stop: session folder", folder: sessionOutputDir, {
-                    (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
-                     toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    let look = (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
+                                toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    // No chunk and no chunk file: the chunked session ends here with nothing to salvage, and leaves no state
+                    // (#323 follow-up) — the empty session.json its pipeline wrote at the start (#294), in an earlier process.
+                    // The capture is stopped and no pipeline runs here. Fail-closed (`removeEmptySessionState`).
+                    if !look.recoverable, look.toRecognise == 0 {
+                        CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: sessionOutputDir, sessionId: sessionId)
+                    }
+                    return look
                 }) else { throw FolderNotAnswering() }
                 if look.recoverable {
                     let config = configManager.config
@@ -1000,7 +1020,6 @@ public final class RecordingCoordinator {
                     // Chunked recovery found nothing to salvage (e.g. session.json existed but had
                     // no chunks and no orphan WAVs) — nothing to notify or rename.
                     Logger.state.info("Chunked session recovery found nothing to salvage")
-                    appState.phase = .idle
                 }
             }
 
@@ -1011,6 +1030,11 @@ public final class RecordingCoordinator {
                 dropStopKeptApart(for: key)
             }
             transcriptionRunner.teardownChunkedPipeline()
+            // Idle LAST (#321): after the transcript was presented and the recovery file's delete answered, with no await
+            // after it. Idle earlier let a Quit return with the recovery file still on disk (the next launch then called a
+            // finished recording interrupted), a Start open this recording's rename panel over a live one, and a pending
+            // retry find this session's recovery file in the slot.
+            if case .transcribing = appState.phase { appState.phase = .idle }
         } catch {
             // Either the helper's stop failed, or (stop succeeded) finishing the transcript did.
             let stopSucceeded = stoppedPaths != nil
@@ -1749,9 +1773,9 @@ public final class RecordingCoordinator {
             // transcribed aren't discarded with the session.
             let outcome = await finalizeAbandonedSession(at: Self.location(of: sentinel), reingestOrphan: true)
             appState.criticalError = "Recording failed — capture crashed repeatedly. " + RecoveryMessages.outcomeSentence(outcome)
-            appState.phase = .idle
             stopStatusPoll()
             await finishSentinel(after: outcome, sentinel: sentinel)
+            appState.phase = .idle   // only once the recovery file is settled (#321): never a Quit or a Start before it
             // §7.4 P6: says what the salvage actually wrote — never "has been transcribed" when nothing was.
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
             return
@@ -1924,9 +1948,9 @@ public final class RecordingCoordinator {
             let outcome = await finalizeAbandonedSession(at: Self.location(of: sentinel), reingestOrphan: reingest)
             // The helper's replies in words, never its wire text (L review 189).
             appState.criticalError = "Recording failed — could not restart capture: \(Self.describe(error)). " + RecoveryMessages.outcomeSentence(outcome)
-            appState.phase = .idle
             stopStatusPoll()
             await finishSentinel(after: outcome, sentinel: sentinel)
+            appState.phase = .idle   // only once the recovery file is settled (#321): never a Quit or a Start before it
             notifyCritical("Recording Failed", RecoveryMessages.recordingFailed(after: outcome))
         }
     }
@@ -3203,9 +3227,12 @@ public final class RecordingCoordinator {
                 } ?? nil
                 let outcome = SalvageOutcome(kind: .transcriptWritten(transcript), chunkCount: kept.chunkCount,
                                              recognitionFailures: failures ?? .init(), recognitionChecked: failures != nil)
-                // The rename panel opens only over a session still ours — never over a Start that got in meanwhile.
-                if appState.isIdle, !userStartInFlight { appState.phase = .transcribing(progress: "Recovering…") }
-                await presentCompletedTranscription(TranscriptionResult(jsonPath: transcript))
+                // The rename panel opens only over a session still ours — never over a Start that got in meanwhile, nor over
+                // a Stop of it still finishing: the phase is then that Stop's, never ours to present over or to end (#321).
+                let ours = appState.isIdle && !userStartInFlight
+                if ours { appState.phase = .transcribing(progress: "Recovering…") }
+                await presentCompletedTranscription(TranscriptionResult(jsonPath: transcript), ours: ours)
+                if ours, case .transcribing = appState.phase { appState.phase = .idle }   // the presenter leaves it to us (#321)
                 reportStopped(salvageMessage(sentinel, stoppedAt: kept.stoppedAt, outcome: outcome, scan: nil, outputDir: outputDir),
                               recovered: true, session: sentinel.sessionKey)
             // Kept because its folder stopped answering — its transcript's write landed once it answered (L review 185):
@@ -3467,7 +3494,7 @@ public final class RecordingCoordinator {
     private func finishSentinel(after outcome: SalvageOutcome, sentinel: RecordingSentinel?, location: (outputDir: URL, sessionId: String)? = nil) async {
         guard outcome.kind == .folderNotAnswering else {
             // Settled: the stop kept apart for it goes with its recovery file (L review 267).
-            if await slotDeleteOffMain("delete"), let key = sentinel?.sessionKey ?? location.map(Self.sessionKey(of:)) ?? currentSessionKey {
+            if await slotDeleteOffMain("finish: delete"), let key = sentinel?.sessionKey ?? location.map(Self.sessionKey(of:)) ?? currentSessionKey {
                 dropStopKeptApart(for: key)
             }
             return
@@ -3582,7 +3609,13 @@ public final class RecordingCoordinator {
     private func unsalvagedOutcome(at location: (outputDir: URL, sessionId: String)?, why: String) async -> SalvageOutcome {
         guard let location else { return SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0) }
         guard let count = await readOffMain("salvage: chunks on disk", folder: location.outputDir, {
-            Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            let count = Self.chunksOnDisk(outputDir: location.outputDir, sessionId: location.sessionId, finalized: false)
+            // Nothing on disk: the session ends here, and leaves no state (#323 follow-up) — its session.json was written
+            // empty at its start (#294). In this read, on the folder's queue: ordered before the next recording's first write
+            // there. Every caller has waited for the session's chunk tasks (or had none). Fail-closed: state that holds a
+            // chunk, cannot be read, or another session's, is kept.
+            if count == 0 { CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: location.outputDir, sessionId: location.sessionId) }
+            return count
         }) else { return SalvageOutcome(kind: .folderNotAnswering, chunkCount: 0) }
         return count > 0
             ? SalvageOutcome(kind: .finalizeFailed(why), chunkCount: count)
@@ -3770,9 +3803,12 @@ public final class RecordingCoordinator {
     // MARK: - Shared steps (deduplicated from MenuView)
 
     /// The post-transcription success sequence, previously duplicated verbatim in both the chunked
-    /// and fallback branches of `stopRecording`: publish the transcript paths, return to idle,
-    /// notify, then hand off to the rename dialog + auto-summary. Internal for tests.
-    func presentCompletedTranscription(_ result: TranscriptionResult) async {
+    /// and fallback branches of `stopRecording`: publish the transcript paths, notify, then hand off to
+    /// the rename dialog + auto-summary. It leaves the phase `.transcribing` (#321): the caller sets
+    /// `.idle` once its recovery file is gone too — never before the transcript is presented, so a Quit
+    /// never returns, nor a Start get in, while the session is still being finished. Internal for tests.
+    /// `ours`: false when the caller does not own the phase — the notice is still posted, the rename dialog never opened.
+    func presentCompletedTranscription(_ result: TranscriptionResult, ours: Bool = true) async {
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         // Say so when the capture layer flagged something. This used to be an unconditional
@@ -3808,17 +3844,6 @@ public final class RecordingCoordinator {
         let echoLines = read?.4 ?? 0
         var (anomalies, problemChunks, segments) = (unreadable, unreadable, unreadable)
         if let read, sides != nil { (anomalies, problemChunks, segments) = (read.0, read.1, read.2) }
-        // Whether the session is still ours to finish. `.idle` was deliberately deferred past the
-        // async read (setting it first let a new recording start mid-read), but deferring opens the
-        // mirror-image risk: the main actor is free during the suspension, so a crash handler or a
-        // newly started session may legitimately have moved the phase on. Guarding only the `.idle`
-        // assignment protects the wrong thing — the intrusive part is `presentTranscript`, which
-        // would open the rename dialog on top of a live recording.
-        var sessionStillOurs = false
-        if case .transcribing = appState.phase {
-            appState.phase = .idle
-            sessionStillOurs = true
-        }
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
@@ -3840,7 +3865,11 @@ public final class RecordingCoordinator {
                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
                 removedRecordings: removedRecordings)
         )
-        guard sessionStillOurs else {
+        // Whether the session is still ours to finish — looked at here, after the last await, never before it (#321). The
+        // phase is never set `.idle` in here: the caller does that once its recovery file is gone too, so no Start gets in
+        // while the Stop is still finishing. A crash handler may still have moved the phase on meanwhile, and the intrusive
+        // part is `presentTranscript`: it would open the rename dialog on top of a live recording.
+        guard ours, case .transcribing = appState.phase else {
             // `lastJsonPath` is already set, so the transcript stays reachable from the menu — it is
             // only the modal presentation that is skipped.
             Logger.state.warning(
