@@ -59,6 +59,11 @@
 #      same classification applies, so a resolution, linker or runner failure at HEAD is reported
 #      as BROKEN ("could not build or run HEAD"), not as "the tests do not pass".
 #
+#   Known limit: a test file the PR deletes is removed from the parent tree. If the PR moves a type
+#   from a deleted test file into production code (behind a seam in TranscriberCore), unchanged tests
+#   that use it no longer compile at the parent: BROKEN, never a false RED. Keep the type in a test
+#   file in that PR, or move it in a PR of its own.
+#
 #   Known limit: a test that CRASHES the test process at the parent (a trap the fix removes) ends
 #   the run without a summary and is therefore BROKEN, not RED. Make it fail with an assertion.
 #
@@ -140,6 +145,15 @@ moved_test_files=$(
 removed_test_files=$(
   git diff --name-only --no-renames --diff-filter=D "$BASE_SHA...$HEAD_SHA" -- "$TEST_DIR"
 )
+
+# The lists below are split on whitespace (bash 3.2, no arrays of possibly-empty lists). A path with
+# a space would be split into fragments: an `rm -f` of a deleted file would then miss it and leave
+# its types declared twice. No test file has one; refuse rather than misclassify.
+if printf '%s\n' "$changed_test_files" "$moved_test_files" "$removed_test_files" | grep -c '[[:space:]]' >/dev/null; then
+  echo "FAIL: a changed, renamed or deleted test file has whitespace in its path, which this gate cannot handle:"
+  printf '%s\n' "$changed_test_files" "$moved_test_files" "$removed_test_files" | grep '[[:space:]]' || :
+  exit 1
+fi
 
 if [ -z "$changed_test_files" ]; then
   echo "PASS (trivially): no test files changed."

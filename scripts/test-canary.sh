@@ -47,7 +47,9 @@ verify() {
     [ -z "$touched" ] || { echo "Added or changed:"; printf '%s\n' "$touched" | sed -n '1,20p'; }
     # The running app adds and changes files, and removes its own state (recording.json when a
     # recording ends): only a removed recording still fails the run then.
-    if pgrep -qx Parley && ! printf '%s\n' "$removed" | grep -qF -- "$rec/"; then
+    # A here-string, not `printf | grep -q`: grep -q stops at the first match, a long list then
+    # SIGPIPEs printf, and pipefail would turn that into "no recording removed".
+    if pgrep -qx Parley && ! grep -qF -- "$rec/" <<<"$removed"; then
       echo "Parley is running and may have done this itself; check them. Not failing the run."
       return 0
     fi
