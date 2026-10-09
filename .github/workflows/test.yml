@@ -246,7 +246,10 @@ jobs:
           # tests instead of disabling them, and `guardJobCannotSkip` proves their preconditions
           # held (see DiarizationRegressionTests).
           PARLEY_REQUIRE_AMI_FIXTURE: "1"
+        # A throwaway home, as `just test` uses (#313): no test may resolve the real one.
         run: |
+          CFFIXED_USER_HOME="$(bash scripts/test-home.sh)"
+          export CFFIXED_USER_HOME
           swift test --no-parallel --filter TranscriberTests \
             -Xswiftc -F/Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
             -Xlinker -rpath -Xlinker /Library/Developer/CommandLineTools/Library/Developer/Frameworks/ \
