@@ -4722,6 +4722,64 @@ final class HungStep: @unchecked Sendable {
         await stopping.value
     }
 
+    /// #321: a Stop goes idle only once its transcript is presented and its recovery file is gone. The recovery file's
+    /// delete — the Stop's last step — hangs until released, and the order is asserted while it hangs: never a stopwatch.
+    /// Idle earlier let a Quit return with the recovery file on disk, and a Start open the finished recording's rename
+    /// panel over a live one.
+    @Test func aStopIsIdleOnlyOnceItsTranscriptIsPresentedAndItsRecoveryFileIsGone() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let delete = HungStep("stop: delete")
+        defer { delete.release() }
+        h.coordinator.sentinelIO = SentinelIO(label: "rc-321-stop-\(UUID().uuidString)", beforeEach: { delete.hangIfNamed($0) })
+        h.coordinator.sentinelDeadline = .seconds(60)   // only the release ends the hang, never the delete's bound
+        let appState = h.appState
+        let idleWhenPresented = Harness.Box<Bool?>(nil)
+        h.onPresent.value = { _ in idleWhenPresented.value = appState.isIdle }
+        await h.coordinator.startRecording(sessionName: "a", microphoneDeviceId: nil)
+        let call = try #require(h.client.startCalls.first)
+        try FileManager.default.createDirectory(at: call.outputDirectory, withIntermediateDirectories: true)
+        let sys = call.outputDirectory.appendingPathComponent(call.baseName + ".wav")
+        try Harness.headerOnlyWAV().write(to: sys)
+        h.client.stopResult = AudioPaths(systemAudio: sys, micAudio: call.outputDirectory.appendingPathComponent(call.baseName + "_mic.wav"))
+        let coordinator = h.coordinator
+        let stopping = Task { await coordinator.stopRecording() }
+        await Harness.until(within: 20) { delete.reached }
+        #expect(delete.isHanging, "the Stop reached its recovery file's delete")
+        #expect(idleWhenPresented.value == false, "the transcript was presented while the Stop was still finishing")
+        #expect(!h.appState.isIdle, "not idle while the recovery file is still on disk")
+        #expect(RecordingSentinel.read(directory: h.tmp) != nil)
+        // A Start now is refused: the Stop is still finishing.
+        await h.coordinator.startRecording(sessionName: "b", microphoneDeviceId: nil)
+        #expect(h.client.startCalls.count == 1 && !h.appState.isRecording, "no Start while the Stop is still finishing")
+        delete.release()
+        await stopping.value
+        #expect(h.appState.isIdle && h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil)
+    }
+
+    /// #321, the crash paths' shape: a capture that crashed past its retries goes idle only once its recovery file is settled.
+    @Test func aCrashThatGivesUpIsIdleOnlyOnceItsRecoveryFileIsGone() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let delete = HungStep("delete")
+        defer { delete.release() }
+        h.coordinator.sentinelIO = SentinelIO(label: "rc-321-crash-\(UUID().uuidString)", beforeEach: { delete.hangIfNamed($0) })
+        h.coordinator.sentinelDeadline = .seconds(60)   // only the release ends the hang, never the delete's bound
+        _ = try h.writeSentinel()
+        h.appState.phase = .recording(since: Date())
+        h.coordinator.xpcRetryCount = XPCRetryPolicy.defaultMaxRetries   // the next crash in the window gives up
+        h.coordinator.lastCrashAt = Date()
+        let coordinator = h.coordinator
+        let crashing = Task { await coordinator.handleXPCCrash() }
+        await Harness.until(within: 20) { delete.reached }
+        #expect(delete.isHanging, "the give-up reached its recovery file's delete")
+        #expect(!h.appState.isIdle, "not idle while the recovery file is still on disk")
+        delete.release()
+        await crashing.value
+        #expect(h.appState.isIdle && RecordingSentinel.read(directory: h.tmp) == nil)
+        #expect(h.criticals.value.map(\.title) == ["Recording Failed"])
+    }
+
     /// 42: the next launch words it as a quit, never a crash.
     @Test func aRelaunchAfterAQuitDuringFinalizeSaysSo() async throws {
         let h = try Harness()
