@@ -95,11 +95,11 @@ public final class ChunkProcessor {
         }
 
         /// Audio the quota may not delete — this session's, or another still in flight (#230, #294) — keeps usage over the
-        /// quota: recorded once (round 8 item 2).
-        func noteQuotaOverrun(_ bytes: Int) {
+        /// quota: recorded once (round 8 item 2), the detail saying whose (`QuotaReport.overrunDescription`).
+        func noteQuotaOverrun(_ description: String) {
             guard !sessionState.issues.contains(where: { $0.issue.code == .quotaExceededByCurrentSession }) else { return }
             sessionState.issues.append(SessionIssue(chunk: nil, issue: ChunkIssue(
-                code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: "\(bytes) bytes over the quota")))
+                code: .quotaExceededByCurrentSession, track: nil, count: nil, detail: description)))
         }
 
         /// Older recordings whose audio a chunk's quota pass deleted (#224): once each, for the completion notice.
@@ -332,6 +332,19 @@ public final class ChunkProcessor {
         return base
     }
 
+    /// Write session.json now, before any chunk (#294): from then on another session's quota pass sees this one in flight
+    /// and keeps its archives — the first chunk's included, archived before its own write. Off the main actor, on the
+    /// folder's queue within the write bound, like every write; `awaitAllProcessed` waits for it. A failure is only logged:
+    /// no audio is at risk yet, and the first chunk's write — which raises the alarm — follows.
+    public func writeInitialState() {
+        let store = stateStore
+        bookkeepingTasks.append(Task {
+            if let error = await store.persist().error {
+                Logger.state.error("session.json could not be written at the start (\(error, privacy: .private)) — it is written with the first chunk")
+            }
+        })
+    }
+
     /// Actor-isolated access to current session state.
     public func getSessionState() async -> SessionState {
         await stateStore.getSessionState()
@@ -544,7 +557,7 @@ public final class ChunkProcessor {
                     // there — nothing deleted that it had not weighed — and the next chunk's pass takes over.
                     deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
                 )
-                if report.protectedOverrunBytes > 0 { await stateStore.noteQuotaOverrun(report.protectedOverrunBytes) }
+                if let overrun = report.overrunDescription { await stateStore.noteQuotaOverrun(overrun) }
                 if !report.removedRecordings.isEmpty { await stateStore.noteQuotaRemovals(report.removedRecordings) }
             } catch {
                 Logger.files.error("Chunk \(chunk.index, privacy: .public) quota enforcement failed: \(error, privacy: .private)")

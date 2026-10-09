@@ -512,3 +512,106 @@ private func removedMark(_ url: URL) throws -> [String: Any]? {
         #expect(StorageManager.treeArchives(in: t.root, stop: { false })?.count == 2, "walked whole when not told to stop")
     }
 }
+
+// MARK: - #294: the first chunk, and whose audio keeps the folder over
+
+/// #294 item 1: a recording's first `session.json` is written when its pipeline is set up — not when its first chunk is
+/// saved — so another session's quota pass already sees it in flight while that first chunk is being archived.
+@MainActor
+@Suite struct QuotaFirstChunkTests {
+    private final class NoRotationClient: ChunkRotationClient {
+        func rotateChunk(outputDirectory: String, newBaseName: String) async throws -> (systemPath: String, micPath: String) {
+            throw CancellationError()
+        }
+    }
+
+    @Test func aSessionIsInFlightFromItsStartBeforeItsFirstChunkIsArchived() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("storage-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let runner = TranscriptionRunner()
+        try runner.setupChunkedPipeline(captureClient: NoRotationClient(), outputDirectory: dir, sessionBaseName: "110851-standup",
+                                        config: .default)
+        defer { runner.teardownChunkedPipeline() }
+        let processor = try #require(runner.chunkProcessor)
+        await processor.awaitAllProcessed()   // no chunk yet: only the state written at the start
+
+        #expect(SessionState.sessionIdsWithState(in: dir) == ["110851-standup"])
+        #expect(try #require(SessionState.read(directory: dir)).chunks.isEmpty)
+
+        // Its first chunk's archive lands, older than another recording's finished archive; that recording's pass runs.
+        for (name, age) in [("110851-standup-0.m4a", 0.0), ("093000-review-0.m4a", 1.0)] {
+            let url = dir.appendingPathComponent(name)
+            try Data(count: 4096).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: age)], ofItemAtPath: url.path)
+        }
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+
+        #expect(report.deleted.map(\.lastPathComponent) == ["093000-review-0.m4a"])
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("110851-standup-0.m4a").path),
+                "the first chunk's archive — its only copy once the WAVs go — is kept")
+    }
+}
+
+/// #294 item 2–3: the overrun names whose audio keeps the folder over the quota — this recording's, another one's still in
+/// flight, or every archive of a folder a session file that cannot be read holds — never "this session's" for all of them.
+@Suite struct QuotaOverrunWordingTests {
+    private func folder(_ archives: [String]) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("storage-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for name in archives { try Data(count: 4096).write(to: dir.appendingPathComponent(name)) }
+        return dir
+    }
+
+    @Test func thisRecordingsOwnAudio() throws {
+        let dir = try folder(["110851-standup-0.m4a"]); defer { try? FileManager.default.removeItem(at: dir) }
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64,
+                                                           protectedFiles: [dir.appendingPathComponent("110851-standup-0.m4a")])
+        #expect(report.kept == [.thisRecording])
+        #expect(report.overrunDescription == "4096 bytes over the quota, kept by audio it may not delete: this recording’s own")
+    }
+
+    @Test func anotherRecordingStillInFlight() throws {
+        let dir = try folder(["093000-review-0.m4a"]); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "093000-review", meetingStart: Date(), chunkIndices: [0])
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+        #expect(report.kept == [.anotherRecording])
+        #expect(report.overrunDescription
+                == "4096 bytes over the quota, kept by audio it may not delete: another recording’s, still being recorded or processed")
+    }
+
+    /// Item 3: a stray `session-*.json` whose recording cannot be read keeps every archive in its folder — and says so.
+    @Test func aSessionFileThatCannotBeRead() throws {
+        let dir = try folder(["093000-review-0.m4a"]); defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("session-notes.json"))
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+        #expect(report.deleted.isEmpty, "unchanged: the folder is still held")
+        #expect(report.kept == [.unreadableSessionFile])
+        #expect(report.overrunDescription
+                == "4096 bytes over the quota, kept by audio it may not delete: every archive in a folder whose session state Parley cannot read")
+    }
+
+    @Test func severalReasonsAreAllNamedInAFixedOrder() throws {
+        let dir = try folder(["093000-review-0.m4a", "110851-standup-0.m4a"]); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "093000-review", meetingStart: Date(), chunkIndices: [0])
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 0, bitrateKbps: 64,
+                                                           protectedFiles: [dir.appendingPathComponent("110851-standup-0.m4a")])
+        #expect(report.overrunDescription == "8192 bytes over the quota, kept by audio it may not delete: this recording’s own; "
+                + "another recording’s, still being recorded or processed")
+    }
+
+    @Test func filesThatAreNotParleysArchives() throws {
+        let t = try RecordingsTree(); defer { t.remove() }
+        try Data(count: 1000).write(to: t.root.appendingPathComponent("notes.m4a"))
+        let report = try StorageManager.enforceQuotaReport(scope: .tree(t.root), limitHours: 0, bitrateKbps: 64, protectedFiles: [])
+        #expect(report.kept == [.notParleyArchive])
+        #expect(report.overrunDescription == "1000 bytes over the quota, kept by audio it may not delete: files that are not Parley recordings")
+    }
+
+    @Test func nothingIsKeptUnderTheQuota() throws {
+        let dir = try folder(["093000-review-0.m4a"]); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "093000-review", meetingStart: Date(), chunkIndices: [0])
+        let report = try StorageManager.enforceQuotaReport(in: dir, limitHours: 1, bitrateKbps: 64, protectedFiles: [])
+        #expect(report.kept.isEmpty && report.overrunDescription == nil)
+    }
+}
