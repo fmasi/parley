@@ -90,23 +90,9 @@ public final class ChunkRotator {
 
     /// A rotator torn down without `stop()` (the pipeline's teardown drops it) takes its timer with it (L10
     /// review 54). On the main actor, where the timer was added to the run loop.
-    #if compiler(>=6.2)
     isolated deinit {
         timer?.invalidate()
     }
-    #else
-    // `isolated deinit` needs Swift 6.2; CI's runner toolchain is older and rejects it outright. A
-    // timer must be invalidated on the thread that scheduled it, so off the main thread the
-    // invalidation is handed to the main queue rather than done in place.
-    deinit {
-        let timer = self.timer
-        if Thread.isMainThread {
-            timer?.invalidate()
-        } else {
-            DispatchQueue.main.async { timer?.invalidate() }
-        }
-    }
-    #endif
 
     /// Test seam (`@testable import`): the active rotation timer, so tests can confirm it was
     /// added to the run loop in `.common` mode (#197) without waiting on a real firing.
