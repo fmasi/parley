@@ -893,8 +893,15 @@ public final class RecordingCoordinator {
                 let result: TranscriptionResult?
                 // Off the main actor, bounded (L review 122): a folder that does not answer is said so, and kept.
                 guard let look = await readOffMain("stop: session folder", folder: sessionOutputDir, {
-                    (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
-                     toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    let look = (recoverable: CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: sessionOutputDir, sessionId: sessionId),
+                                toRecognise: Self.chunkCounts(outputDir: sessionOutputDir, sessionId: sessionId, finalized: false).onDisk)
+                    // No chunk and no chunk file: the chunked session ends here with nothing to salvage, and leaves no state
+                    // (#323 follow-up) — the empty session.json its pipeline wrote at the start (#294), in an earlier process.
+                    // The capture is stopped and no pipeline runs here. Fail-closed (`removeEmptySessionState`).
+                    if !look.recoverable, look.toRecognise == 0 {
+                        CrashRecoveryPlanner.removeEmptySessionState(outputDirectory: sessionOutputDir, sessionId: sessionId)
+                    }
+                    return look
                 }) else { throw FolderNotAnswering() }
                 if look.recoverable {
                     let config = configManager.config

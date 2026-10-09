@@ -43,7 +43,7 @@ import Foundation
         #expect(try sessionFiles(dir) == ["session.json"], "precondition: the empty state written at the start (#294)")
     }
 
-    /// The recovery of a session that ended with no chunk and no audio (a relaunch's salvage, or a Stop with no live pipeline)
+    /// The recovery of a session that ended with no chunk and no audio (a relaunch's salvage, or a pending session's retry)
     /// removes its state; the next recording there displaces nothing; the storage limit is not held by a leftover.
     @Test func aSessionThatEndsWithNoChunkLeavesNoSessionFile() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
@@ -90,6 +90,25 @@ import Foundation
 
         #expect(h.appState.criticalError == "Recording failed — could not restart capture: fake capture failure. "
                 + RecoveryMessages.outcomeSentence(SalvageOutcome(kind: .nothingToSalvage, chunkCount: 0)))
+        #expect(try sessionFiles(outDir).isEmpty, "no session.json left behind")
+    }
+
+    /// A Stop with no live pipeline (a recording re-attached after a relaunch) whose session has no chunk and no chunk file:
+    /// the empty state the earlier process wrote at the start goes with it.
+    @Test func aStopWithNoPipelineAndNothingOnDiskLeavesNoSessionFile() async throws {
+        let h = try Harness()
+        let sentinel = try h.writeSentinel(sessionId: "sess")
+        let outDir = URL(fileURLWithPath: sentinel.systemAudioPath).deletingLastPathComponent()
+        try SessionState.write(SessionState(sessionId: "sess", meetingStart: Date(), engine: h.config.config.engine.rawValue,
+                                            chunkDurationMinutes: 10, chunks: []), directory: outDir)
+        h.client.stopResult = AudioPaths(systemAudio: URL(fileURLWithPath: sentinel.systemAudioPath),
+                                         micAudio: URL(fileURLWithPath: sentinel.micAudioPath))
+        h.appState.phase = .recording(since: Date())
+        #expect(h.runner.chunkProcessor == nil, "precondition: no live pipeline in this process")
+
+        await h.coordinator.stopRecording()
+
+        #expect(h.client.stopCalls == 1)
         #expect(try sessionFiles(outDir).isEmpty, "no session.json left behind")
     }
 
