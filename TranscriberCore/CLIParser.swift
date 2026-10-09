@@ -41,6 +41,13 @@ public enum CLICommand {
 
 public enum CLIParser {
 
+    /// Every subcommand `parse` accepts. The app enters CLI mode only for these, so this is the one
+    /// list: a name the app routed here but the parser rejected (`benchmark`, #299) printed
+    /// "Unknown subcommand" instead of launching the GUI.
+    public static let subcommands: [String] = [
+        "transcribe", "rename", "rename-gui", "summarize", "download-models",
+    ]
+
     public enum ParseError: LocalizedError {
         case missingSubcommand
         case unknownSubcommand(String)
