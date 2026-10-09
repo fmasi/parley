@@ -230,7 +230,9 @@ final class ReadLog: @unchecked Sendable {
         let helper = HungStep()   // the helper's stop hangs until released
         defer { helper.release() }
         h.client.onStop = { await helper.hangAwaited() }
-        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
+        // The Quit's own mark and its look for a held session are WAITED for, whatever the machine's load (#298). The
+        // `stopping` read below is the Stop's mark, which the Stop awaits before it asks the helper.
+        h.coordinator.exitMarkBound = .seconds(60)
         #expect(await h.coordinator.prepareForQuit(confirm: { true }))
         #expect(helper.isHanging, "by order: the Quit returned with the helper's stop still unanswered")
         #expect(RecordingSentinel.read(directory: h.tmp)?.stopping == true)
