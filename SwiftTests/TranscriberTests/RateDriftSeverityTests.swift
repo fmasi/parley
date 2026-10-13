@@ -328,6 +328,19 @@ import Testing
         #expect(two.helperSessions == 2 && two.captureStarts == 1)
     }
 
+    /// #229: a helper's stand-in stop is replaced by its real stop when that arrives, never added to it — one helper
+    /// session, whichever of the two the record saw first.
+    @Test func aStandInReplacedByItsRealStopIsOneHelperSession() {
+        let real = CaptureEvent(timestamp: at(10), origin: .helper, kind: .captureStop, severity: .info,
+                                detail: coverage().asDetail(prefix: "remote").merging(["helper_session": "h1"]) { $1 })
+        let standIn = stop(5, remote: coverage(expected: 5, delivered: 5), standIn: true)   // also "h1"
+        for events in [[start(), standIn, real], [start(), real, standIn]] {
+            let p = provenance(events)
+            #expect(p.helperSessions == 1 && p.captureStarts == 1)
+            #expect(p.remoteCoverage?.deliveredSeconds == 3657, "the real stop's coverage, not the sum")
+        }
+    }
+
     // MARK: - The helper's onset bound
 
     private func nanos(_ s: Double) -> UInt64 { UInt64(s * 1_000_000_000) }

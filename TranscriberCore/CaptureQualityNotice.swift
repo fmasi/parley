@@ -74,10 +74,11 @@ public enum CaptureQualityNotice {
     /// `removedRecordings` (#224): how many older recordings lost their audio to the storage limit — a line of its own.
     public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
                                       remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
-                                      removedRecordings: Int = 0, remoteUncertainSeconds: Double? = nil) -> String {
+                                      removedRecordings: Int = 0, remoteUncertainSeconds: Double? = nil,
+                                      remoteUncertainIsLowerBound: Bool = false) -> String {
         let body = recordBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: problemChunkCount, segmentCount: segmentCount,
                               remoteStatus: remoteStatus, localStatus: localStatus, echoLines: echoLines,
-                              remoteUncertainSeconds: remoteUncertainSeconds)
+                              remoteUncertainSeconds: remoteUncertainSeconds, remoteUncertainIsLowerBound: remoteUncertainIsLowerBound)
         guard let line = storageLimitLine(removedRecordings: removedRecordings) else { return body }
         return body + "\n" + line
     }
@@ -90,7 +91,8 @@ public enum CaptureQualityNotice {
     }
 
     private static func recordBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
-                                   remoteStatus: String?, localStatus: String?, echoLines: Int, remoteUncertainSeconds: Double?) -> String {
+                                   remoteStatus: String?, localStatus: String?, echoLines: Int, remoteUncertainSeconds: Double?,
+                                   remoteUncertainIsLowerBound: Bool) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }
@@ -102,7 +104,10 @@ public enum CaptureQualityNotice {
             default: break
             }
             // In the title's order: the silence nobody can vouch for (#333 R3), then the brief glitch.
-            if let silence { parts.append("\(name): \(silence) s of silence could not be confirmed") }
+            // "at least": zeros summed over a measured and an unmeasured helper session, as the summary words it.
+            if let silence {
+                parts.append("\(name): \(remoteUncertainIsLowerBound ? "at least " : "")\(silence) s of silence could not be confirmed")
+            }
             if status == .degraded { parts.append("\(name) briefly affected") }
         }
         if anomalyCount > 0 {
@@ -200,13 +205,17 @@ public enum CaptureQualityNotice {
     ///
     /// `remoteUncertainSeconds`: `TrackAccounting.uncertainSilenceSeconds` of the remote side (#333 R3), from the same
     /// read; nil when the rule does not hold, and always for a record without `exact_zero_unproven_seconds`.
-    public static func sideStatuses(inTranscriptAt url: URL) -> (remote: String?, local: String?, remoteUncertainSeconds: Double?)? {
+    /// `remoteUncertainIsLowerBound`: the side's `exact_zero_seconds_is_lower_bound`, which covers the unproven
+    /// seconds too — the body then says "at least".
+    public static func sideStatuses(inTranscriptAt url: URL)
+        -> (remote: String?, local: String?, remoteUncertainSeconds: Double?, remoteUncertainIsLowerBound: Bool)? {
         guard let root = readRoot(url) else { return nil }
         let provenance = (root["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any]
         func status(_ key: String) -> String? { (provenance?[key] as? [String: Any])?["status"] as? String }
-        let remoteUnannounced = RateDriftWindow.unannounced(inSide: provenance?["remote_coverage"] as? [String: Any]) > 0
+        let remote = provenance?["remote_coverage"] as? [String: Any]
+        let remoteUnannounced = RateDriftWindow.unannounced(inSide: remote) > 0
         return (remoteUnannounced ? nil : status("remote_coverage"), status("local_coverage"),
-                TrackAccounting.uncertainSilenceSeconds(inRemoteSide: provenance?["remote_coverage"] as? [String: Any]))
+                TrackAccounting.uncertainSilenceSeconds(inRemoteSide: remote), remote?["exact_zero_seconds_is_lower_bound"] as? Bool == true)
     }
 
     private static func readRoot(_ url: URL) -> [String: Any]? {

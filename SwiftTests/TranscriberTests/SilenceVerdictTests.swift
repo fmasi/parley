@@ -93,7 +93,8 @@ import Testing
                                                      remoteUncertainSeconds: sides?.remoteUncertainSeconds),
                 CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: anomalies, problemChunkCount: 0, segmentCount: segments,
                                                     remoteStatus: sides?.remote, localStatus: sides?.local,
-                                                    remoteUncertainSeconds: sides?.remoteUncertainSeconds))
+                                                    remoteUncertainSeconds: sides?.remoteUncertainSeconds,
+                                                    remoteUncertainIsLowerBound: sides?.remoteUncertainIsLowerBound ?? false))
     }
 
     /// The notice of a transcript holding just these two sides' coverage.
@@ -216,8 +217,9 @@ import Testing
                 == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence")
     }
 
-    /// A confirmed denial withdraws the proof, so its zeros are the unproven ones: the same verdicts as before, and
-    /// the number said is the one the denial can answer for. Whether real audio remains is still read off the total.
+    /// A confirmed denial withdraws the proof, so its zeros are the unproven ones: the same verdicts as before. A side
+    /// lost part-way says the whole silence the record holds, then how much of it the denial can answer for. Whether
+    /// real audio remains is still read off the total.
     @Test func aConfirmedDenialKeepsItsVerdictsAndSaysTheUnprovenSeconds() {
         let whole = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 2736, expectedSeconds: 2736, exactZeroSeconds: 2736,
                                          permissionDenied: true, exactZeroUnprovenSeconds: 2736))
@@ -227,6 +229,16 @@ import Testing
         let partWay = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120, exactZeroSeconds: 2040,
                                            permissionDenied: true, anomalyCount: 1, exactZeroUnprovenSeconds: 1740))
         #expect(SummaryPromptBuilder.captureLine(partWay)
+                == "Remote audio: partly captured — 2040 s of 3120 s was digital silence, 1740 s of it after the permission was lost; system audio permission was not granted for part of the call")
+        // A sum over measured and unmeasured sessions: the total is a lower bound and says so.
+        let atLeast = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120, exactZeroSeconds: 2040,
+                                           permissionDenied: true, anomalyCount: 1, exactZeroIsLowerBound: true, exactZeroUnprovenSeconds: 1740))
+        #expect(SummaryPromptBuilder.captureLine(atLeast)
+                == "Remote audio: partly captured — at least 2040 s of 3120 s was digital silence, 1740 s of it after the permission was lost; system audio permission was not granted for part of the call")
+        // A record without the field: the sentence it always had.
+        let older = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 3120, expectedSeconds: 3120, exactZeroSeconds: 1740,
+                                         permissionDenied: true, anomalyCount: 1))
+        #expect(SummaryPromptBuilder.captureLine(older)
                 == "Remote audio: partly captured — 1740 s of 3120 s was digital silence; system audio permission was not granted for part of the call")
     }
 
@@ -289,6 +301,18 @@ import Testing
         let n = try notice(remote: side("healthy"))
         #expect(n.title == "Transcription Complete — remote audio uncertain")
         #expect(n.body == "m.json — remote audio: 1700 s of silence could not be confirmed")
+    }
+
+    /// The zeros of a measured and an unmeasured helper session summed: at least that much, as the summary says it.
+    @Test func theNoticeSaysAtLeastForALowerBound() throws {
+        let n = try notice(remote: side("healthy", extra: ["exact_zero_seconds_is_lower_bound": true]))
+        #expect(n.title == "Transcription Complete — remote audio uncertain")
+        #expect(n.body == "m.json — remote audio: at least 1700 s of silence could not be confirmed")
+        let exact = try notice(remote: side("healthy", extra: ["exact_zero_seconds_is_lower_bound": false]))
+        #expect(exact.body == "m.json — remote audio: 1700 s of silence could not be confirmed")
+        // The mark alone, on a side that is not uncertain, says nothing.
+        let quiet = try notice(remote: side("healthy", unproven: 2, extra: ["exact_zero_seconds_is_lower_bound": true]))
+        #expect(quiet.title == "Transcription Complete" && quiet.body == "m.json")
     }
 
     /// A record made before the field: today's notice, exactly.

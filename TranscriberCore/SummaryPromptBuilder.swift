@@ -230,8 +230,11 @@ enum SummaryPromptBuilder {
             text = "\(label): not captured — system audio permission was not granted; \(silence) s of digital silence were recorded instead"
         case .permissionDeniedPartialSilence:
             // Not every silent second is attributed to the denial (R2b item 7, owner-level wording):
-            // some may be the other side being quiet.
-            text = "\(label): partly captured — \(silence) s of \(delivered) s was digital silence; system audio permission was not granted for part of the call"
+            // some may be the other side being quiet. When the record separates them (#333), the line says the whole
+            // silence it holds, then the part the denial can answer for — the unproven number alone understated it.
+            let afterLoss = note.exactZeroUnprovenSeconds != nil ? ", \(zeros.map(seconds) ?? "?") s of it after the permission was lost" : ""
+            let all = atLeastZeros + ((total ?? zeros).map(seconds) ?? "?")
+            text = "\(label): partly captured — \(all) s of \(delivered) s was digital silence\(afterLoss); system audio permission was not granted for part of the call"
         case .onlyDigitalSilence:
             return CaptureHeaderLine(text: "\(label): only digital silence was received (the other side may have been muted)", warrantsBanner: false)
         case .uncertainSilence:
