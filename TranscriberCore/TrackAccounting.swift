@@ -11,10 +11,12 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     public var deliveredSeconds: Double = 0
     /// nil = not measured (SCK has no exact-zero guard) — never a claimed 0.
     public var exactZeroSeconds: Double?
-    /// The part of `exactZeroSeconds` the tap delivered while its grant was not proven (`TapPermissionGuard`,
-    /// #333): before the session's first real audio, and after a denial or an unconfirmed rebuild. The
-    /// rest is silence on a tap that had delivered real audio. nil = not measured (SCK, the mic, a record made
-    /// before the field existed), never a claimed 0: a reader then judges the total, as before.
+    /// The part of `exactZeroSeconds` nobody can vouch for (`TapPermissionGuard.unprovenZeroFrames`, #333): the
+    /// zeros before the session's first real audio, and every zero run during which a denial or an unconfirmed
+    /// rebuild withdrew the proof, from the run's first frame until real audio returned. The rest is silence
+    /// on a tap that had delivered real audio, with its grant never in question during it. nil = not measured
+    /// (SCK, the mic, a record made before the field existed), never a claimed 0: a reader then judges the
+    /// total, as before.
     public var exactZeroUnprovenSeconds: Double?
     public var paddedSeconds: Double = 0
     public var longestGapSeconds: Double = 0

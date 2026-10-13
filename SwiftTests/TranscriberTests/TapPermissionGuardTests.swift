@@ -148,7 +148,9 @@ struct TapPermissionGuardTests {
         _ = g.samples(audio, rate: 48_000, now: 27)
         _ = feedZeros(&g, seconds: 12.5, from: 28)
         #expect(g.permissionChecked(.authorized, evidence: .exactZeroRun, now: 41) == [])
-        // …and it still re-arms the insurance, for a tap rebuilt later without a confirmed grant.
+        // …and it still re-arms the insurance, for a tap rebuilt later without a confirmed grant. This leg
+        // only pins that rule: the helper never sees an unverifiable build followed by an `authorized`
+        // answer, since the private SPI either resolves for the whole life of the process or never does.
         _ = g.tapBuilt(status: nil, now: 42)
         _ = feedZeros(&g, seconds: 12.5, from: 42.1)
         #expect(g.permissionChecked(.authorized, evidence: .exactZeroRun, now: 55) == [.rebuildTap(reason: .insurance)])
@@ -330,13 +332,57 @@ struct TapPermissionGuardTests {
         _ = g.samples(audio, rate: 48_000, now: 0.2)
         for i in 0..<3 { _ = g.samples(zeros, rate: 48_000, now: 0.3 + Double(i) / 10) }
         #expect(g.unprovenZeroFrames == 9_600 && g.exactZeroFrames == 24_000, "silence on a proven tap")
+        _ = g.samples(audio, rate: 48_000, now: 0.6)
         _ = g.permissionChecked(.denied, evidence: .none, now: 1)
         _ = g.samples(zeros, rate: 48_000, now: 1.1)
-        #expect(g.unprovenZeroFrames == 14_400 && g.exactZeroFrames == 28_800, "after a denial zeros are unproven again")
+        #expect(g.unprovenZeroFrames == 14_400 && g.exactZeroFrames == 28_800,
+                "after a denial zeros are unproven again; a silence that ended in real audio stays proven")
         _ = g.samples(audio, rate: 48_000, now: 1.2)
         _ = g.tapBuilt(status: nil, now: 2)
         _ = g.samples(zeros, rate: 48_000, now: 2.1)
         #expect(g.unprovenZeroFrames == 19_200 && g.exactZeroFrames == 33_600, "and after a rebuild nobody could verify")
-        #expect(g.deliveredFrames == 43_200)
+        #expect(g.deliveredFrames == 48_000)
+    }
+
+    /// Review round 1 (#333): the zeros that made the guard ask are the ones the answer is about. The
+    /// proof is withdrawn only when the answer (or the rebuild) arrives, 12 s or more into the run, so
+    /// that run moves to the unproven count with it, once, whichever way the proof goes. A silence
+    /// that had already ended in real audio is not touched: the tap proved itself after it.
+    @Test func theZeroRunThatLedToAWithdrawnProofIsUnprovenToo() {
+        let withdrawals: [(String, (inout TapPermissionGuard) -> Void)] = [
+            ("a denied answer", { _ = $0.permissionChecked(.denied, evidence: .exactZeroRun, now: 14) }),
+            ("an undetermined answer", { _ = $0.permissionChecked(.notDetermined, evidence: .exactZeroRun, now: 14) }),
+            ("an unverifiable answer", { _ = $0.permissionChecked(nil, evidence: .exactZeroRun, now: 14) }),
+            ("a rebuild while denied", { _ = $0.tapBuilt(status: .denied, now: 14) }),
+            ("a rebuild nobody could verify", { _ = $0.tapBuilt(status: nil, now: 14) }),
+        ]
+        for (name, withdraw) in withdrawals {
+            var g = TapPermissionGuard()
+            _ = g.tapBuilt(status: .authorized, now: 0)
+            _ = g.samples(audio, rate: 48_000, now: 0)
+            _ = g.samples(zeros, rate: 48_000, now: 0.1)   // a silence that ends in real audio: proven for good
+            _ = g.samples(audio, rate: 48_000, now: 0.2)
+            _ = feedZeros(&g, seconds: 12.5, from: 1)      // the run in question: 125 batches, 600 000 frames
+            #expect(g.unprovenZeroFrames == 0 && g.exactZeroFrames == 604_800, "\(name): proven until someone says otherwise")
+            withdraw(&g)
+            #expect(g.unprovenZeroFrames == 600_000 && g.exactZeroFrames == 604_800, "\(name): the run goes with the proof")
+            _ = g.samples(zeros, rate: 48_000, now: 15)
+            withdraw(&g)
+            #expect(g.unprovenZeroFrames == 604_800 && g.exactZeroFrames == 609_600, "\(name): each frame is counted once")
+        }
+    }
+
+    /// A rebuild with the grant confirmed keeps the proof, and the silence runs on across it (the
+    /// window is "since real audio", however many aggregates that spans): withdrawn later, all of it goes.
+    @Test func aRunAcrossAConfirmedRebuildIsWithdrawnWhole() {
+        var g = TapPermissionGuard()
+        _ = g.tapBuilt(status: .authorized, now: 0)
+        _ = g.samples(audio, rate: 48_000, now: 0)
+        _ = g.samples(zeros, rate: 48_000, now: 0.1)
+        _ = g.tapBuilt(status: .authorized, now: 0.2)
+        _ = g.samples(zeros, rate: 48_000, now: 0.3)
+        #expect(g.grantProven && g.unprovenZeroFrames == 0)
+        _ = g.permissionChecked(.denied, evidence: .none, now: 1)
+        #expect(g.unprovenZeroFrames == 9_600 && g.exactZeroFrames == 9_600)
     }
 }

@@ -30,7 +30,7 @@ import Foundation
 ///   second or two (2026-10-09), and it ran every time the remote went quiet for 12 s;
 /// - the soft "can't confirm" alarm stays quiet;
 /// - its zeros are not counted as `unprovenZeroFrames`, so the record can tell a quiet remote from
-///   zeros nobody can vouch for.
+///   zeros nobody can vouch for (a run during which the proof is withdrawn goes with it, whole).
 /// Zeros from the first frame (#220's shape) keep every path they had. So does a session whose
 /// remote has not spoken yet: by content it is the same thing.
 public struct TapPermissionGuard {
@@ -101,15 +101,28 @@ public struct TapPermissionGuard {
     /// keeps it. Accepted risk: that answer being stale while coreaudiod refuses the new tap, after
     /// real audio earlier, would read as proven silence; never observed, and before this the guard
     /// also went quiet there, after one insurance rebuild.
+    ///
+    /// Known ordering race, harmless as it stands: `tapBuilt` reaches the audio queue after a TCC
+    /// read, so the new tap's first samples can get there before it. A late non-authorized
+    /// `tapBuilt` then clears a proof the new tap has just earned. It heals on the next non-zero
+    /// batch, and `builtWithoutGrant` is stale in the same way. Changing the order of the two is a
+    /// change to both.
     public private(set) var grantProven = false
 
     /// Measured, permission-independent facts for provenance: how much of what the tap delivered was
     /// exact digital zero.
     public private(set) var deliveredFrames: Int64 = 0
     public private(set) var exactZeroFrames: Int64 = 0
-    /// The part of `exactZeroFrames` delivered while the grant was not proven: before the session's
-    /// first real audio, and after a denial or an unconfirmed rebuild until real audio returns.
+    /// The part of `exactZeroFrames` nobody can vouch for: the zeros before the session's first real
+    /// audio, and every zero run during which the proof was withdrawn (a denial, an unconfirmed
+    /// rebuild), from the run's first frame until real audio returns. The rest is silence that
+    /// began and ended, or is still going on, with the grant proven.
     public private(set) var unprovenZeroFrames: Int64 = 0
+    /// Zeros of the CURRENT run counted as proven so far. The proof is withdrawn only when the answer
+    /// arrives, 12 s or more into the run that made the guard ask: those zeros are what the answer
+    /// is about, so `withdrawProof` moves them to `unprovenZeroFrames`. Real audio ends the run and
+    /// settles them as silence. Like `zeroRunStartedAt`, it runs on across a confirmed rebuild.
+    private var provenRunZeroFrames: Int64 = 0
 
     public init(zeroThresholdSeconds: Double = ExactZeroRunMonitor.defaultThresholdSeconds, softAlarmSeconds: Double? = nil) {
         self.zeroThresholdSeconds = zeroThresholdSeconds
@@ -129,7 +142,7 @@ public struct TapPermissionGuard {
         // Unverifiable is not "without grant": polling a check that can't answer helps nobody.
         builtWithoutGrant = status == .denied || status == .notDetermined
         // It is not a proven grant either: only a confirmed one carries the proof to the new tap.
-        if status != .authorized { grantProven = false }
+        if status != .authorized { withdrawProof() }
         // No immediate report: the first `tick` checks within a second, by which time the recording
         // is up and the app is listening.
         return []
@@ -143,11 +156,12 @@ public struct TapPermissionGuard {
         var actions: [Action] = []
         if allZero {
             exactZeroFrames += Int64(samples.count)
-            if !grantProven { unprovenZeroFrames += Int64(samples.count) }
+            if grantProven { provenRunZeroFrames += Int64(samples.count) } else { unprovenZeroFrames += Int64(samples.count) }
             if zeroRunStartedAt == nil { zeroRunStartedAt = now }
         } else {
             // Real audio: whatever the TCC cache says, the tap is being fed.
             grantProven = true
+            provenRunZeroFrames = 0
             zeroRunStartedAt = nil
             builtWithoutGrant = false
             insuranceRebuildUsed = false
@@ -190,7 +204,7 @@ public struct TapPermissionGuard {
     public mutating func permissionChecked(_ status: PermissionStatus?, evidence: Evidence, now: Double) -> [Action] {
         checkInFlight = false
         // Before anything else: after any answer but `authorized`, zeros are unproven again.
-        if status != .authorized { grantProven = false }
+        if status != .authorized { withdrawProof() }
         switch status {
         case .authorized?:
             if builtWithoutGrant || (problemReported && !problemUnverifiable) {
@@ -228,6 +242,13 @@ public struct TapPermissionGuard {
             guard evidence != .none else { return [] }
             return report(nil, now: now)
         }
+    }
+
+    /// The grant is no longer proven, and neither was the silence this tap is in the middle of.
+    private mutating func withdrawProof() {
+        grantProven = false
+        unprovenZeroFrames += provenRunZeroFrames
+        provenRunZeroFrames = 0
     }
 
     private mutating func report(_ status: PermissionStatus?, now: Double) -> [Action] {

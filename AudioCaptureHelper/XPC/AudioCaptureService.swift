@@ -236,7 +236,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// The audio-queue half of per-track coverage: the handler's frame totals and the tap guard's
-    /// exact-zero counts (all of them, and those delivered while its grant was not proven, #333).
+    /// exact-zero counts (all of them, and those nobody can vouch for: `unprovenZeroFrames`, #333).
     /// Read ON the audio queue only, inside a block that is already there (the bounded
     /// seal, a rotation's swap, the tick's async refresh) — never with an `audioQueue.sync` of its own,
     /// which a stalled audio queue would turn into a hung Stop (round 4 N2).
