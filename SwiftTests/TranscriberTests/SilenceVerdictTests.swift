@@ -62,12 +62,14 @@ import Testing
     }
 
     /// Through the transcript file: assembled, written, and read back by the summary and by the completion notice.
-    private func read(_ events: [CaptureEvent], segments: [LabeledSegment], gaps: [CaptureGap] = []) throws -> Reading {
+    private func read(_ events: [CaptureEvent], segments: [LabeledSegment], gaps: [CaptureGap] = [],
+                      reconstructed: Bool = false) throws -> Reading {
         var d = CaptureDiagnostics()
         for e in events { d.record(e) }
+        let made = d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
         let json = TranscriptAssembler.assemble(
             segments: segments, audioPaths: [], outputFormat: "json", language: "en", numSpeakers: nil, diarization: false,
-            dualStream: true, provenance: d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil),
+            dualStream: true, provenance: reconstructed ? made.markedReconstructed() : made,
             captureGaps: gaps)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: json).write(to: url)
@@ -441,7 +443,9 @@ import Testing
         let crashedFirst = try read(
             incident(extra: [event(-5, .captureStop, .info, ["helper_session": "h0", "from": CaptureDiagnostics.standInSource])]),
             segments: speech)
-        for r in [secondStart, gap, recovered, crashedFirst] {
+        // #335 review: a transcript a recovery run rebuilt carries that run's capture facts, not the recording's.
+        let reconstructed = try read(incident(), segments: speech, reconstructed: true)
+        for r in [secondStart, gap, recovered, crashedFirst, reconstructed] {
             #expect(r.drift?["ended_by"] as? String == "stop" && r.drift?["after_last_speech"] == nil)
             #expect(r.line?.contains("recorded at the wrong rate") == true)
             #expect(r.title == "Transcription Complete — brief capture glitch" && r.noticeAnomalies == 1)
