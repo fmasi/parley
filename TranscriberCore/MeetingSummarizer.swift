@@ -334,10 +334,7 @@ public enum MeetingSummarizer {
     }
 
     /// A seconds value a recording could have: finite, ≥ 0, under a century. nil otherwise.
-    private static func validSeconds(_ raw: Any?) -> Double? {
-        guard let value = raw as? Double, value.isFinite, value >= 0, value < 3_153_600_000 else { return nil }
-        return value
-    }
+    private static func validSeconds(_ raw: Any?) -> Double? { TrackAccounting.validSeconds(raw) }
 
     /// Determine the canonical recording-start date for the summary (#49).
     ///

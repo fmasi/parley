@@ -177,22 +177,32 @@ public enum TranscriptAssembler {
     /// summary header, its banner and the completion notice then read one answer and cannot disagree, and the record
     /// itself says why a `degraded` side was not announced.
     ///
+    /// The two clocks: a drift's offset is wall-clock from the first `captureStart`; a segment's time counts from the
+    /// recording's sample 0, which is the first buffer of either track — later than the start by the first-frame
+    /// latency (up to ~5 s before any alarm fires). So a transcript time reads EARLY by that latency, and a last word
+    /// that really ended inside the window can read as before it (review round 1). The window is therefore judged in
+    /// the record's own clock: it must start more than `afterSpeechMarginSeconds` + that latency after the last word.
+    ///
     /// Fail closed — a window is left unanswered, and so announced as #311 does, unless all of this holds:
     /// - it ended at the Stop (R4). A drift a rebuild healed is mid-call: audio at the right rate followed it.
-    /// - the two timelines agree. Drift offsets are wall-clock from the first `captureStart`; segment times are the
-    ///   audio timeline. One helper session, no recovery and no gap is the only case where they are the same clock.
+    /// - the record is one helper session: one `captureStart`, one tallied helper (a helper that crashed before its
+    ///   start was drained leaves a stand-in stop and no start), no recovery and no gap. Past any of those the two
+    ///   clocks are apart by more than one latency.
+    /// - the record holds a `firstFrames`, so the latency is known. Unknown is never taken for 0.
     /// - the remote side has a last segment with a known end. EVERY remote segment counts, a `filtered` one too: the
     ///   wrong rate may be why it was filtered. A segment with no usable time could be anywhere.
     static func answeringAfterLastSpeech(_ provenance: CaptureProvenance, segments: [LabeledSegment],
                                          captureGaps: [CaptureGap]) -> CaptureProvenance {
         guard var windows = provenance.remoteRateDrift, windows.contains(where: { $0.stoppedAfterSeconds != nil }),
-              provenance.captureStarts == 1, !provenance.recovered, captureGaps.isEmpty
+              provenance.captureStarts == 1, provenance.helperSessions == 1, !provenance.recovered, captureGaps.isEmpty,
+              let latency = provenance.firstFramesAfterStartSeconds, latency.isFinite, latency >= 0
         else { return provenance }
         let ends = segments.filter { $0.source != "local" }.map(\.end)
         guard ends.allSatisfy(\.isFinite), let lastSpeech = ends.max() else { return provenance }
+        let margin = RateDriftWindow.afterSpeechMarginSeconds + latency
         for i in windows.indices where windows[i].stoppedAfterSeconds != nil {
             guard let start = windows[i].startOffsetSeconds else { continue }
-            windows[i].afterLastSpeech = start > lastSpeech + RateDriftWindow.afterSpeechMarginSeconds
+            windows[i].afterLastSpeech = start > lastSpeech + margin
         }
         var answered = provenance
         answered.remoteRateDrift = windows

@@ -28,10 +28,15 @@ import Testing
          event(t + 0.01, .restartInPlace, .warning, ["source": "system-tap", "reason": "rate drift remediation", "attempt": "1"])]
     }
 
-    /// One helper session: start, the drift and its remediation at 3955 s, then the helper's own stop 0.3 s later — no
-    /// system `firstFrames` after the rebuild.
-    private func incident(coverage: TrackAccounting? = nil, extra: [CaptureEvent] = []) -> [CaptureEvent] {
-        [event(0, .captureStart, .info, ["system_source": "coreAudioTap"])] + drift(3955) + extra
+    private func firstFrames(_ t: TimeInterval, _ track: String) -> CaptureEvent { event(t, .firstFrames, .info, ["track": track]) }
+
+    /// One helper session: start, each track's first frames (`firstFramesAt`: mic, system; the earlier one is sample 0
+    /// of the recording), the drift and its remediation at 3955 s, then the helper's own stop 0.3 s later — no system
+    /// `firstFrames` after the rebuild.
+    private func incident(coverage: TrackAccounting? = nil, firstFramesAt: (mic: TimeInterval, system: TimeInterval)? = (0.5, 0.6),
+                          extra: [CaptureEvent] = []) -> [CaptureEvent] {
+        let first = firstFramesAt.map { [firstFrames($0.mic, "mic"), firstFrames($0.system, "system")] } ?? []
+        return [event(0, .captureStart, .info, ["system_source": "coreAudioTap"])] + first + drift(3955) + extra
             + [event(3955.3, .captureStop, .info, (coverage ?? self.coverage()).asDetail(prefix: "remote"))]
     }
 
@@ -75,12 +80,38 @@ import Testing
         r.line = SummaryPromptBuilder.captureLine(summary)
         r.banner = SummaryPromptBuilder.captureBanner(summary)
         r.noticeAnomalies = CaptureQualityNotice.anomalyCount(inTranscriptAt: url)
-        let sides = CaptureQualityNotice.sideStatuses(inTranscriptAt: url)
-        r.title = CaptureQualityNotice.completionTitle(anomalyCount: r.noticeAnomalies, problemChunkCount: 0, segmentCount: segments.count,
-                                                       remoteStatus: sides?.remote, localStatus: sides?.local)
-        r.body = CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: r.noticeAnomalies, problemChunkCount: 0,
-                                                     segmentCount: segments.count, remoteStatus: sides?.remote, localStatus: sides?.local)
+        (r.title, r.body) = notice(at: url, segments: segments.count)
         return r
+    }
+
+    /// The completion notice as `RecordingCoordinator` builds it: every reader on the same file.
+    private func notice(at url: URL, segments: Int = 10) -> (title: String, body: String) {
+        let anomalies = CaptureQualityNotice.anomalyCount(inTranscriptAt: url)
+        let sides = CaptureQualityNotice.sideStatuses(inTranscriptAt: url)
+        return (CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: 0, segmentCount: segments,
+                                                     remoteStatus: sides?.remote, localStatus: sides?.local,
+                                                     remoteUncertainSeconds: sides?.remoteUncertainSeconds),
+                CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: anomalies, problemChunkCount: 0, segmentCount: segments,
+                                                    remoteStatus: sides?.remote, localStatus: sides?.local,
+                                                    remoteUncertainSeconds: sides?.remoteUncertainSeconds))
+    }
+
+    /// The notice of a transcript holding just these two sides' coverage.
+    private func notice(remote: [String: Any], local: [String: Any]? = nil, anomalies: Int = 0) throws -> (title: String, body: String) {
+        var provenance: [String: Any] = ["quality_anomaly_count": anomalies, "remote_coverage": remote]
+        provenance["local_coverage"] = local
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("uncertain-\(UUID().uuidString).json")
+        try JSONSerialization.data(withJSONObject: ["metadata": ["capture_provenance": provenance], "segments": [] as [Any]]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        return notice(at: url)
+    }
+
+    private func side(_ status: String, delivered: Double = 3000, zeros: Double? = 1900, unproven: Double? = 1700,
+                      extra: [String: Any] = [:]) -> [String: Any] {
+        var d: [String: Any] = ["status": status, "expected_seconds": delivered, "delivered_seconds": delivered]
+        d["exact_zero_seconds"] = zeros
+        d["exact_zero_unproven_seconds"] = unproven
+        return d.merging(extra) { $1 }
     }
 
     private func meta(_ note: CaptureSideNote, local: CaptureSideNote? = nil) -> SummaryMetadata {
@@ -164,16 +195,25 @@ import Testing
         let proven = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 3952, expectedSeconds: 3952, exactZeroSeconds: 571,
                                           anomalyCount: 1, exactZeroUnprovenSeconds: 2))
         #expect(SummaryPromptBuilder.captureLine(proven)
-                == "Remote audio: captured, but compromised (1 capture anomaly recorded); 2 s of it was digital silence")
+                == "Remote audio: captured, but compromised (1 capture anomaly recorded); 571 s of it was digital silence, 2 s of which could not be confirmed")
         let unproven = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 3952, expectedSeconds: 3952, exactZeroSeconds: 900,
                                             anomalyCount: 1, exactZeroUnprovenSeconds: 600))
         #expect(SummaryPromptBuilder.captureLine(unproven)
                 == "Remote audio: uncertain — 600 s were exact digital silence and Parley could not confirm the permission; the other side may have been muted, or not captured")
-        // A shortfall still leads, and its silence figure is the judged one too.
+        // A shortfall still leads. What was delivered is said whole, and how much of it nobody can vouch for.
         let shortfall = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400,
                                              exactZeroUnprovenSeconds: 30))
         #expect(SummaryPromptBuilder.captureLine(shortfall)
-                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 30 s of it was digital silence")
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence, 30 s of which could not be confirmed")
+        // A sum over measured and unmeasured sessions: the total is a lower bound and says so.
+        let atLeast = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400,
+                                           exactZeroIsLowerBound: true, exactZeroUnprovenSeconds: 30))
+        #expect(SummaryPromptBuilder.captureLine(atLeast)
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); at least 400 s of it was digital silence, 30 s of which could not be confirmed")
+        // A record without the field: the sentence it always had.
+        let older = meta(CaptureSideNote(status: "compromised", deliveredSeconds: 1000, expectedSeconds: 2736, exactZeroSeconds: 400))
+        #expect(SummaryPromptBuilder.captureLine(older)
+                == "Remote audio: partly captured (1000 s delivered of 2736 s expected); 400 s of it was digital silence")
     }
 
     /// A confirmed denial withdraws the proof, so its zeros are the unproven ones: the same verdicts as before, and
@@ -220,6 +260,9 @@ import Testing
         let r = try read(incident(coverage: coverage(zeros: 1900, unproven: 1700)), segments: [remote(endingAt: 3940)])
         #expect(r.line?.hasPrefix("Remote audio: uncertain — 1700 s were exact digital silence") == true)
         #expect(r.banner != nil)
+        // The notice too, though the drift itself is quiet and left the count.
+        #expect(r.title == "Transcription Complete — remote audio uncertain")
+        #expect(r.body == "m.json — remote audio: 1700 s of silence could not be confirmed")
     }
 
     /// The transcript carries the field to the summary; a transcript without it reads nil, never 0.
@@ -239,6 +282,87 @@ import Testing
         #expect(try note(side.merging(["exact_zero_unproven_seconds": -1.0]) { $1 })?.exactZeroUnprovenSeconds == nil)
     }
 
+    // MARK: - R3 in the completion notice (review round 1): one rule, two readers
+
+    /// The summary banner is not the only place: the notification says it, and a recording with no summary says it there.
+    @Test func theNoticeSaysAHealthySideWithSignificantUnprovenSilenceIsUncertain() throws {
+        let n = try notice(remote: side("healthy"))
+        #expect(n.title == "Transcription Complete — remote audio uncertain")
+        #expect(n.body == "m.json — remote audio: 1700 s of silence could not be confirmed")
+    }
+
+    /// A record made before the field: today's notice, exactly.
+    @Test func anOlderRecordKeepsTodaysNotice() throws {
+        let healthy = try notice(remote: side("healthy", unproven: nil))
+        #expect(healthy.title == "Transcription Complete" && healthy.body == "m.json")
+        let degraded = try notice(remote: side("degraded", unproven: nil), anomalies: 1)
+        #expect(degraded.title == "Transcription Complete — brief capture glitch")
+        #expect(degraded.body == "m.json — remote audio briefly affected; 1 capture anomaly recorded; audio may be affected")
+        let compromised = try notice(remote: side("compromised", unproven: nil), anomalies: 1)
+        #expect(compromised.title == "Transcription Complete — capture compromised")
+        #expect(compromised.body == "m.json — remote audio partly captured; 1 capture anomaly recorded; audio may be affected")
+    }
+
+    /// Where it sits: below a side not or partly captured, above the brief glitch and the bare anomaly count.
+    @Test func uncertainSitsBelowCompromisedAndAboveTheGlitch() throws {
+        // A worse verdict of the remote side itself: its own words, not "uncertain".
+        let compromised = try notice(remote: side("compromised"), anomalies: 1)
+        #expect(compromised.title == "Transcription Complete — capture compromised")
+        #expect(compromised.body == "m.json — remote audio partly captured; 1 capture anomaly recorded; audio may be affected")
+        let never = try notice(remote: side("neverDelivered", delivered: 0, zeros: 0, unproven: 0))
+        #expect(never.title == "Transcription Complete — the other side was not captured")
+        // The microphone's worse verdict leads; the body still says both.
+        let micLost = try notice(remote: side("healthy"), local: ["status": "compromised"])
+        #expect(micLost.title == "Transcription Complete — capture compromised")
+        #expect(micLost.body == "m.json — remote audio: 1700 s of silence could not be confirmed; microphone partly captured")
+        // An announced drift on the same side: uncertain leads, the glitch stays in the body.
+        let drifted = try notice(remote: side("degraded", extra: ["rate_drift": [["healed": true, "affected_seconds": 5.0]]]), anomalies: 1)
+        #expect(drifted.title == "Transcription Complete — remote audio uncertain")
+        #expect(drifted.body == "m.json — remote audio: 1700 s of silence could not be confirmed; remote audio briefly affected; 1 capture anomaly recorded; audio may be affected")
+        // Above a bare anomaly count.
+        let anomalies = try notice(remote: side("healthy"), anomalies: 2)
+        #expect(anomalies.title == "Transcription Complete — remote audio uncertain")
+        #expect(anomalies.body.contains("could not be confirmed; 2 capture anomalies recorded"))
+    }
+
+    /// The same bar, and the same exceptions, as the summary: the two readers share `TrackAccounting.uncertainSilenceSeconds`.
+    @Test func theNoticeAndTheSummaryReadOneRule() throws {
+        func both(_ status: String, delivered: Double = 3000, zeros: Double?, unproven: Double?) throws -> (notice: Bool, summary: Bool) {
+            let n = try notice(remote: side(status, delivered: delivered, zeros: zeros, unproven: unproven))
+            let line = SummaryPromptBuilder.captureLine(meta(CaptureSideNote(
+                status: status, deliveredSeconds: delivered, expectedSeconds: delivered, exactZeroSeconds: zeros, anomalyCount: 1,
+                exactZeroUnprovenSeconds: unproven)))
+            return (n.title == "Transcription Complete — remote audio uncertain", line?.contains("uncertain") == true)
+        }
+        for status in ["healthy", "degraded"] {
+            #expect(try both(status, zeros: 1900, unproven: 300) == (true, true))
+            #expect(try both(status, zeros: 1900, unproven: 299) == (false, false), "under 10 %")
+            #expect(try both(status, delivered: 100, zeros: 50, unproven: 14) == (false, false), "under 15 s")
+            #expect(try both(status, zeros: 1900, unproven: nil) == (false, false), "no field: the total is not judged on such a side")
+        }
+        // The owner's muted-remote ruling stands: a healthy side that was ALL silence keeps its neutral line, and no notice.
+        #expect(try both("healthy", zeros: 3000, unproven: 3000) == (false, false))
+        #expect(TrackAccounting.uncertainSilenceSeconds(status: .healthy, deliveredSeconds: 3000, exactZeroSeconds: 1900, unprovenSeconds: 1700) == 1700)
+        #expect(TrackAccounting.uncertainSilenceSeconds(status: .healthy, deliveredSeconds: 3000, exactZeroSeconds: 1000, unprovenSeconds: 1700) == 1000,
+                "never more than the total")
+        for status in [TrackAccounting.Status.idle, .neverDelivered, .compromised, nil] {
+            #expect(TrackAccounting.uncertainSilenceSeconds(status: status, deliveredSeconds: 3000, exactZeroSeconds: 1900, unprovenSeconds: 1700) == nil)
+        }
+        // The microphone's dictionary is never read for it.
+        let mic = try notice(remote: side("healthy", unproven: 0), local: side("healthy"))
+        #expect(mic.title == "Transcription Complete" && mic.body == "m.json")
+    }
+
+    /// Corrupt numbers never make, or trap, a notice.
+    @Test func corruptSecondsAreNotAnUncertainNotice() throws {
+        for bad in [-1.0, 1e300] {
+            let n = try notice(remote: side("healthy", unproven: bad))
+            #expect(n.title == "Transcription Complete" && n.body == "m.json", "read as absent, as the summary reads it")
+        }
+        let text = try notice(remote: side("healthy", extra: ["exact_zero_unproven_seconds": "1700"]))
+        #expect(text.title == "Transcription Complete")
+    }
+
     // MARK: - R5: when a drift is quiet, and when it is not
 
     /// Every segment of the remote side counts — one hidden from the transcript's readers too: the wrong rate may be
@@ -249,10 +373,34 @@ import Testing
         #expect(r.line == driftLine && r.noticeAnomalies == 1)
     }
 
-    /// One second of margin: the window starts at 3952 s.
-    @Test func theWindowMustStartMoreThanASecondAfterTheLastSpeech() throws {
-        #expect(try read(incident(), segments: [remote(endingAt: 3950.9)]).drift?["after_last_speech"] as? Bool == true)
-        #expect(try read(incident(), segments: [remote(endingAt: 3951)]).drift?["after_last_speech"] as? Bool == false)
+    /// The window starts at 3952 s on the record's clock. The margin is one second plus the first-frame latency
+    /// (0.5 s here): a segment's time counts from the recording's first buffer, the drift's from `captureStart`.
+    @Test func theWindowMustStartMoreThanTheMarginAfterTheLastSpeech() throws {
+        #expect(try read(incident(), segments: [remote(endingAt: 3950.4)]).drift?["after_last_speech"] as? Bool == true)
+        #expect(try read(incident(), segments: [remote(endingAt: 3950.5)]).drift?["after_last_speech"] as? Bool == false)
+    }
+
+    /// Review round 1: the first buffer arrived 3 s after `captureStart`, so every transcript time is 3 s early. A last
+    /// word that really ended at 3953.5 s — inside the window — reads 3950.5 s. It must not be quieted.
+    @Test func aLastWordInsideTheWindowThatReadsEarlierByTheFirstFrameLatencyIsNotQuieted() throws {
+        let late = incident(firstFramesAt: (mic: 3.2, system: 3))
+        let inside = try read(late, segments: [remote(endingAt: 3950.5)])
+        #expect(inside.drift?["after_last_speech"] as? Bool == false)
+        #expect(inside.line == driftLine && inside.title == "Transcription Complete — brief capture glitch" && inside.noticeAnomalies == 1)
+        // The margin is 1 s + 3 s: quiet only when the word reads more than 4 s before the window.
+        #expect(try read(late, segments: [remote(endingAt: 3948)]).drift?["after_last_speech"] as? Bool == false)
+        #expect(try read(late, segments: [remote(endingAt: 3947.9)]).drift?["after_last_speech"] as? Bool == true)
+        // Sample 0 is the first buffer of EITHER track: the microphone's, when it came first.
+        let micFirst = incident(firstFramesAt: (mic: 1, system: 3))
+        #expect(try read(micFirst, segments: [remote(endingAt: 3949.9)]).drift?["after_last_speech"] as? Bool == true)
+        #expect(try read(micFirst, segments: [remote(endingAt: 3950)]).drift?["after_last_speech"] as? Bool == false)
+    }
+
+    /// A record with no `firstFrames` cannot say how far apart the two clocks are: nothing is judged.
+    @Test func withoutFirstFramesInTheRecordNothingIsJudged() throws {
+        let r = try read(incident(firstFramesAt: nil), segments: [remote(endingAt: 3940)])
+        #expect(r.drift?["ended_by"] as? String == "stop" && r.drift?["after_last_speech"] == nil)
+        #expect(r.line == driftLine && r.title == "Transcription Complete — brief capture glitch" && r.noticeAnomalies == 1)
     }
 
     /// Drift offsets are wall-clock from the first capture start; transcript times are the audio timeline. They agree
@@ -264,7 +412,12 @@ import Testing
         let gap = try read(incident(), segments: speech,
                            gaps: [CaptureGap(start: base.addingTimeInterval(100), end: base.addingTimeInterval(130), reason: "sleep")])
         let recovered = try read(incident(extra: [event(10, .launchRecovery, .warning)]), segments: speech)
-        for r in [secondStart, gap, recovered] {
+        // Review round 1: a helper that crashed before its `captureStart` was drained leaves a stand-in stop and no
+        // start — one `captureStart` in the record, two helper sessions.
+        let crashedFirst = try read(
+            incident(extra: [event(-5, .captureStop, .info, ["helper_session": "h0", "from": CaptureDiagnostics.standInSource])]),
+            segments: speech)
+        for r in [secondStart, gap, recovered, crashedFirst] {
             #expect(r.drift?["ended_by"] as? String == "stop" && r.drift?["after_last_speech"] == nil)
             #expect(r.line?.contains("recorded at the wrong rate") == true)
             #expect(r.title == "Transcription Complete — brief capture glitch" && r.noticeAnomalies == 1)
@@ -294,7 +447,7 @@ import Testing
 
         // An earlier drift healed in 2 s (5 s with its onset), then the incident's: 8.3 s in all, still degraded.
         let both = try read(
-            [event(0, .captureStart)] + drift(100) + [event(102, .firstFrames, .info, ["track": "system"])] + drift(3955)
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")] + drift(100) + [firstFrames(102, "system")] + drift(3955)
                 + [event(3955.3, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
             segments: [remote(endingAt: 3940)])
         let windows = both.remote["rate_drift"] as? [[String: Any]] ?? []

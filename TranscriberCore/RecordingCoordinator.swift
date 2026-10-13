@@ -3858,12 +3858,13 @@ public final class RecordingCoordinator {
         // silent about it would be the bigger failure.
         notify(
             CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: problemChunks, segmentCount: segments,
-                                                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines),
+                                                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
+                                                 remoteUncertainSeconds: sides?.remoteUncertainSeconds),
             CaptureQualityNotice.completionBody(
                 fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies,
                 problemChunkCount: problemChunks, segmentCount: segments,
                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
-                removedRecordings: removedRecordings)
+                removedRecordings: removedRecordings, remoteUncertainSeconds: sides?.remoteUncertainSeconds)
         )
         // Whether the session is still ours to finish — looked at here, after the last await, never before it (#321). The
         // phase is never set `.idle` in here: the caller does that once its recovery file is gone too, so no Start gets in

@@ -129,10 +129,12 @@ enum SummaryPromptBuilder {
 
     /// The verdict of a `healthy` or `degraded` remote side whose record separates unproven zeros and holds a
     /// significant amount of them (#333 R3); nil otherwise — and always for a record without the field, where such a
-    /// side says what it said before.
+    /// side says what it said before. The rule is `TrackAccounting.uncertainSilenceSeconds`, which the completion
+    /// notice reads too.
     private static func unprovenSilence(_ note: CaptureSideNote, isRemote: Bool) -> SideVerdict? {
-        guard isRemote, note.exactZeroUnprovenSeconds != nil, let zeros = judgedZeros(note, isRemote: true),
-              isSignificant(zeros, of: note.deliveredSeconds)
+        guard isRemote, TrackAccounting.uncertainSilenceSeconds(
+            status: TrackAccounting.Status(rawValue: note.status), deliveredSeconds: note.deliveredSeconds,
+            exactZeroSeconds: note.exactZeroSeconds, unprovenSeconds: note.exactZeroUnprovenSeconds) != nil
         else { return nil }
         return remoteSilence(note)
     }
@@ -154,8 +156,7 @@ enum SummaryPromptBuilder {
 
     /// The same bar `TrackAccounting` uses for a coverage deficit: ≥ 15 s AND ≥ 10 % of the whole.
     private static func isSignificant(_ part: Double, of whole: Double) -> Bool {
-        part.isFinite && whole.isFinite && whole > 0
-            && part >= TrackAccounting.minimumDeficitSeconds && part / whole >= TrackAccounting.deficitRatio
+        TrackAccounting.isSignificant(part, of: whole)
     }
 
     private struct CaptureHeaderLine {
@@ -198,14 +199,20 @@ enum SummaryPromptBuilder {
         // lower bounds (final review R-M1, #295).
         let atLeast = note.coverageIncomplete ? "at least " : ""
         let amounts = "(\(atLeast)\(delivered) s delivered of \(atLeast)\(expected) s expected)"
-        // The number a line states is the one its verdict was judged on (#333 R3).
+        // A line that IS a verdict on silence (uncertain, the denial's, the microphone's) states the number it was
+        // judged on (#333 R3).
         let zeros = judgedZeros(note, isRemote: isRemote)
         // A figure summed over measured and unmeasured sessions is only a lower bound (round 3 item 5).
-        let silence = (note.exactZeroIsLowerBound ? "at least " : "") + (zeros.map(seconds) ?? "?")
+        let atLeastZeros = note.exactZeroIsLowerBound ? "at least " : ""
+        let silence = atLeastZeros + (zeros.map(seconds) ?? "?")
         // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
-        // not hide how much.
-        let silenceSuffix = (zeros ?? 0).rounded() >= 1 && (zeros ?? 0).isFinite
-            ? "; \(silence) s of it was digital silence" : ""
+        // not hide how much. This is a fact about the record, so it is the TOTAL — and, when the record separates
+        // them, how much of it nobody can vouch for (review round 1: the unproven figure alone understated it).
+        let total = clampedZeros(note)
+        let unconfirmed = isRemote && note.exactZeroUnprovenSeconds != nil
+            ? ", \(zeros.map(seconds) ?? "?") s of which could not be confirmed" : ""
+        let silenceSuffix = (total ?? 0).rounded() >= 1 && (total ?? 0).isFinite
+            ? "; \(atLeastZeros)\(total.map(seconds) ?? "?") s of it was digital silence\(unconfirmed)" : ""
         // A confirmed denial on a side that was still (partly) captured is part of why.
         let permission = isRemote && note.permissionDenied == true
             ? "; system audio permission was not granted for part of the call" : ""

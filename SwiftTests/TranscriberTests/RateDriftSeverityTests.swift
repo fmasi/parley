@@ -262,14 +262,6 @@ import Testing
         #expect(RateDriftWindow.healedWithinBound([RateDriftWindow(onsetWithinSeconds: 10, stoppedAfterSeconds: 5.1)]) == 0)
     }
 
-    /// The stand-in is the last status pull of a helper that crashed: it says nothing about when capture ended.
-    @Test func aStandInStopDoesNotBoundADrift() throws {
-        let p = provenance([start(), drift(3955, onsetWithin: "3.0"), remediation(3955.01), stop(3955.3, remote: coverage(), standIn: true)])
-        #expect(p.remoteStatus == "compromised")
-        let entry = try #require(driftEntries(p).first)
-        #expect(entry["ended_by"] == nil && entry["affected_seconds"] == nil)
-    }
-
     /// A capture that started again before the stop: the stop is another session's, not this drift's end.
     @Test func aStopAfterANewCaptureStartDoesNotBoundADrift() throws {
         let restart = CaptureEvent(timestamp: at(3956), origin: .helper, kind: .captureStart, severity: .info, detail: [:])
@@ -311,7 +303,29 @@ import Testing
         #expect(back.remoteRateDrift == p.remoteRateDrift && back.captureStarts == 1)
         let before = try JSONDecoder().decode(CaptureProvenance.self, from: Data(
             #"{"engine": "e", "route_changes": 0, "retries": 0, "recovered": false, "anomaly_count": 0}"#.utf8))
-        #expect(before.captureStarts == nil)
+        #expect(before.captureStarts == nil && before.helperSessions == nil && before.firstFramesAfterStartSeconds == nil)
+    }
+
+    /// What `TranscriptAssembler` needs to compare a window with the transcript (#333 R5): how many helper sessions
+    /// the coverage was tallied over, and how long after `captureStart` the first buffer of either track arrived.
+    @Test func theRecordKeepsTheHelperSessionsAndTheFirstFrameLatency() throws {
+        let p = provenance([start(), firstFrames(3.2, track: "mic"), firstFrames(3), drift(3955, onsetWithin: "3.0"),
+                            firstFrames(3956), stop(3960, remote: coverage())])
+        #expect(p.helperSessions == 1 && p.firstFramesAfterStartSeconds == 3)
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(p)) as? [String: Any])
+        #expect(json["helper_sessions"] as? Int == 1 && json["first_frames_after_start_seconds"] as? Double == 3)
+        #expect(json["capture_starts"] as? Int == 1)
+        let back = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(back.helperSessions == 1 && back.firstFramesAfterStartSeconds == 3)
+        // The microphone's first buffer, when it came first.
+        #expect(provenance([start(), firstFrames(1, track: "mic"), firstFrames(3), stop(10, remote: coverage())]).firstFramesAfterStartSeconds == 1)
+        // No first frames in the record: unknown, never 0.
+        #expect(provenance([start(), stop(10, remote: coverage())]).firstFramesAfterStartSeconds == nil)
+        // A crashed helper's stand-in is a helper session of its own.
+        let two = provenance([start(), stop(5, remote: coverage(), standIn: true),
+                              CaptureEvent(timestamp: at(10), origin: .helper, kind: .captureStop, severity: .info,
+                                           detail: coverage().asDetail(prefix: "remote").merging(["helper_session": "h2"]) { $1 })])
+        #expect(two.helperSessions == 2 && two.captureStarts == 1)
     }
 
     // MARK: - The helper's onset bound

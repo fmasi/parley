@@ -213,6 +213,52 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     }
 }
 
+extension TrackAccounting {
+    /// The bar for "a significant part" of a side: at least `minimumDeficitSeconds` AND `deficitRatio` of the whole —
+    /// the coverage deficit's, also used for digital silence.
+    public static func isSignificant(_ part: Double, of whole: Double) -> Bool {
+        part.isFinite && whole.isFinite && whole > 0 && part >= minimumDeficitSeconds && part / whole >= deficitRatio
+    }
+
+    /// The seconds of silence that make a REMOTE side "uncertain" although its status is `healthy` or `degraded`
+    /// (#333 R3): the zeros nobody can vouch for, when the record separates them and they are a significant part of
+    /// what was delivered. nil otherwise. The one rule the summary (`SummaryPromptBuilder.verdict`) and the completion
+    /// notice (`CaptureQualityNotice`) both read, so a recording cannot be "uncertain" in one and clean in the other
+    /// (review round 1) — in the same spirit as `RateDriftWindow.unannounced`.
+    ///
+    /// Never for:
+    /// - a record without the field (an older one, SCK): such a side says what it said before;
+    /// - a worse status (`neverDelivered`, `compromised`): the side has its own words, and the summary judges a
+    ///   compromised side's silence itself; nor `idle`;
+    /// - a `healthy` side that was ALL silence: the owner's muted-remote ruling (A-I2) stands, one neutral line.
+    /// The value is never more than the total zeros, or than what was delivered (corrupt counts can say otherwise).
+    public static func uncertainSilenceSeconds(status: Status?, deliveredSeconds: Double, exactZeroSeconds: Double?,
+                                               unprovenSeconds: Double?) -> Double? {
+        guard status == .healthy || status == .degraded, let unprovenSeconds, deliveredSeconds.isFinite else { return nil }
+        let total = exactZeroSeconds.map { min($0, deliveredSeconds) }
+        if status == .healthy, let total, total >= 1, deliveredSeconds - total < 1 { return nil }
+        let judged = min(unprovenSeconds, total ?? deliveredSeconds)
+        return isSignificant(judged, of: deliveredSeconds) ? judged : nil
+    }
+
+    /// `uncertainSilenceSeconds`, read from the remote side's stamped dictionary (`capture_provenance.remote_coverage`,
+    /// `metadata.capture.remote`). A value no recording could have reads as absent, as the summary reads it.
+    public static func uncertainSilenceSeconds(inRemoteSide side: [String: Any]?) -> Double? {
+        guard let side else { return nil }
+        return uncertainSilenceSeconds(status: (side["status"] as? String).flatMap(Status.init(rawValue:)),
+                                       deliveredSeconds: validSeconds(side["delivered_seconds"]) ?? .nan,
+                                       exactZeroSeconds: validSeconds(side["exact_zero_seconds"]),
+                                       unprovenSeconds: validSeconds(side["exact_zero_unproven_seconds"]))
+    }
+
+    /// A seconds value a recording could have, as a transcript's JSON holds it: finite, ≥ 0, under a century. nil
+    /// otherwise.
+    static func validSeconds(_ raw: Any?) -> Double? {
+        guard let value = raw as? Double, value.isFinite, value >= 0, value < 3_153_600_000 else { return nil }
+        return value
+    }
+}
+
 /// One rate drift on the tap (#308): the output device changed rate under it, so audio was captured at the wrong
 /// rate from the drift's onset until the helper's rebuild delivered its first frames. Built by
 /// `CaptureDiagnostics.makeProvenance` from the `rateDrift`, its `restartInPlace` ("rate drift remediation") and the
