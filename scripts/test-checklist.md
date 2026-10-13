@@ -220,7 +220,7 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Record for X3: whether `srst` reached the helper (`serviceRestarted` present), and the gap until frames returned.
 
 - [ ] **D-14 The insurance rebuild's dead window, during a muted remote (M-G).**
-  - Do: this is done inside N-01 and N-02 (a remote muted ≥ 60 s under both `tap_auto_start` settings).
+  - Do: this is done inside N-01 and N-02 (a remote muted ≥ 60 s under both `tap_auto_start` settings). The remote must be muted FROM THE START: once it has been heard, no insurance rebuild runs (G-01).
   - PASS: `remote_coverage.rebuilds ≤ 1`. If the log shows "System tap: rebuilding for the System Audio Recording permission (insurance)", the next system `firstFrames` in `diag` comes < 1 s after that rebuild's `tapRecoveryRung`. 1–3 s: note it. > 3 s, or no `firstFrames` at all followed by `neverDelivered` and more rungs: FAIL, and see X3 M-G.
 
 - [ ] **D-15 First-frame latency (M-J).**
@@ -844,7 +844,28 @@ scratch folder holding a few synthetic recordings in older day folders (copy the
 - [ ] **K-03 A switch clears it.** Lid closed, built-in mic; Record (banner). Change Microphone → the headset.
   PASS: the banner goes within ~2 s; the log has `Mic pre-flight (micSwitch): … verdict none`. Another banner
   (e.g. "Recording restarted — waiting for audio…") is never cleared by a switch.
-- [ ] **K-04 Why a rung ran.** Tap recording on a call whose other side stays silent for 20 s. PASS: the
+- [ ] **K-04 Why a rung ran.** Tap recording on a call whose other side stays silent for the first 20 s
+  (nothing heard from it yet: after real audio there is no insurance rebuild, G-01). PASS: the
   `.diag.jsonl` (force an anomaly if none, e.g. unplug a USB mic) has `tapRecoveryRung` with
   `trigger: permissionInsurance` about 12 s after the system `firstFrames`; the unified log keeps
   "rebuilding for the System Audio Recording permission (insurance)" (`log show`, not only `log stream`).
+
+## Judging silence by evidence (#333) — added 2026-10-13
+
+A tap that has delivered real audio was granted access, so its later zeros are silence. Tap recordings on a
+real call (WhatsApp, Meet or Zoom), on AirPods: a rebuild is what drops Bluetooth output.
+
+- [ ] **G-01 Muted after they have spoken: no rebuild.** Let the other side talk for ~30 s, then have them
+  mute for > 12 s (30 s is better), then talk again. Do it three times in the call. PASS: no
+  `tapRecoveryRung` with `trigger: permissionInsurance` in the `.diag.jsonl` (force an anomaly if none, e.g.
+  unplug a USB mic), no "rebuilding for the System Audio Recording permission (insurance)" in `log show`,
+  no dropout in the AirPods, `remote_coverage.rebuilds` counts no rebuild for it, and no alarm.
+- [ ] **G-02 Silent from the start: one insurance rebuild, as before.** Record on a call whose other side
+  says nothing for the first 20 s. PASS: one `tapRecoveryRung` with `trigger: permissionInsurance` about 12 s
+  after the system `firstFrames` (K-04), and none after the other side has spoken, however long they mute.
+- [ ] **G-03 The record tells the two apart.** After G-01 and G-02, in each transcript JSON
+  `capture_provenance.remote_coverage` has `exact_zero_unproven_seconds` beside `exact_zero_seconds`: about
+  the silence before the other side's first word (G-01: a few seconds; G-02: ~20 s), far below the total.
+- [ ] **G-04 A revocation is still caught.** Run P-06 (revoked mid-call) after the other side has spoken.
+  PASS: P-06's own conditions, unchanged: the audio keeps coming or the row appears within ~15 s, the alarm
+  is up after the output switch, and switching the permission back on restores the audio by itself.

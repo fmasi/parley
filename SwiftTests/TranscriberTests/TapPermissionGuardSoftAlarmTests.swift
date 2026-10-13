@@ -6,6 +6,7 @@ import Testing
 /// shows no call app renders zeros when muted. Time is continuous across feeds (scan B P1.3).
 @Suite struct TapPermissionGuardSoftAlarmTests {
     private let zeros = [Int16](repeating: 0, count: 4_800)
+    private let audio = [Int16](repeating: 0, count: 4_799) + [1]
 
     /// Feeds 0.1 s batches of zeros from `from` for `seconds`; returns the actions and the end time.
     private func feed(_ g: inout TapPermissionGuard, seconds: Double, from: Double) -> (actions: [TapPermissionGuard.Action], end: Double) {
@@ -48,5 +49,25 @@ import Testing
         _ = g.samples([Int16](repeating: 0, count: 4_799) + [1], rate: 48_000, now: first.end)
         let second = feed(&g, seconds: 200, from: first.end + 0.1)
         #expect(!second.actions.contains(.reportDenied(nil)), "400 s of zeros in total, but only 200 s since real audio")
+    }
+
+    /// #333 R1: a tap that has delivered real audio was granted access, so a long silence on
+    /// it is a quiet remote, not something Parley "can't confirm".
+    @Test func aProvenTapNeverSaysCantConfirm() {
+        var g = TapPermissionGuard(softAlarmSeconds: 300)
+        _ = g.tapBuilt(status: .authorized, now: 0)
+        _ = g.samples(audio, rate: 48_000, now: 0)
+        let silence = feed(&g, seconds: 600, from: 0.1)
+        #expect(!silence.actions.contains(.reportDenied(nil)))
+    }
+
+    /// …until the proof is withdrawn: a tap rebuilt without a confirmed grant is judged like a new session.
+    @Test func theSoftWindowIsBackOnceTheProofIsWithdrawn() {
+        var g = TapPermissionGuard(softAlarmSeconds: 300)
+        _ = g.tapBuilt(status: .authorized, now: 0)
+        _ = g.samples(audio, rate: 48_000, now: 0)
+        _ = g.tapBuilt(status: nil, now: 0.1)
+        let silence = feed(&g, seconds: 302, from: 0.2)
+        #expect(silence.actions.filter { $0 == .reportDenied(nil) }.count == 1)
     }
 }

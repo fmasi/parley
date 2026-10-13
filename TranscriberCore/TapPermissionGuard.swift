@@ -19,6 +19,20 @@ import Foundation
 /// - Evidence of silence with the permission granted gets at most ONE insurance rebuild per episode,
 ///   and an unverifiable permission (private SPI gone) is reported but never triggers a rebuild, so
 ///   neither can loop.
+///
+/// Judging silence by evidence (#333). coreaudiod decides a tap's access when its IO context
+/// starts (gotcha #70): a tap started without the grant delivers exact zeros until it is rebuilt.
+/// So a tap that has delivered non-zero audio WAS granted access, and later zeros on it are silence.
+/// A call app renders exact zeros whenever the other side is quiet: 571 s of a 66-minute call on
+/// 2026-10-13, of which nothing was lost. While the grant is proven (`grantProven`):
+/// - a zero run still gets its permission check, the only mid-call revocation detector, but no
+///   insurance rebuild. A rebuild recreates the process tap, which can drop Bluetooth output for a
+///   second or two (2026-10-09), and it ran every time the remote went quiet for 12 s;
+/// - the soft "can't confirm" alarm stays quiet;
+/// - its zeros are not counted as `unprovenZeroFrames`, so the record can tell a quiet remote from
+///   zeros nobody can vouch for.
+/// Zeros from the first frame (#220's shape) keep every path they had. So does a session whose
+/// remote has not spoken yet: by content it is the same thing.
 public struct TapPermissionGuard {
 
     /// Why a check was asked for.
@@ -80,10 +94,22 @@ public struct TapPermissionGuard {
     /// Survives rebuilds: the window is "since real audio", however many aggregates that spans.
     private var zeroRunStartedAt: Double?
 
+    /// The current tap has delivered non-zero audio, so it was granted access (#333): zeros
+    /// on it are silence. Withdrawn by any permission answer but `authorized`, and by a (re)build
+    /// whose status is not `authorized`. That includes `nil`: a new tap nobody could verify is not
+    /// vouched for by the audio of the one it replaced. A rebuild with a fresh `authorized` answer
+    /// keeps it. Accepted risk: that answer being stale while coreaudiod refuses the new tap, after
+    /// real audio earlier, would read as proven silence; never observed, and before this the guard
+    /// also went quiet there, after one insurance rebuild.
+    public private(set) var grantProven = false
+
     /// Measured, permission-independent facts for provenance: how much of what the tap delivered was
     /// exact digital zero.
     public private(set) var deliveredFrames: Int64 = 0
     public private(set) var exactZeroFrames: Int64 = 0
+    /// The part of `exactZeroFrames` delivered while the grant was not proven: before the session's
+    /// first real audio, and after a denial or an unconfirmed rebuild until real audio returns.
+    public private(set) var unprovenZeroFrames: Int64 = 0
 
     public init(zeroThresholdSeconds: Double = ExactZeroRunMonitor.defaultThresholdSeconds, softAlarmSeconds: Double? = nil) {
         self.zeroThresholdSeconds = zeroThresholdSeconds
@@ -102,6 +128,8 @@ public struct TapPermissionGuard {
         zeroMonitor = ExactZeroRunMonitor(thresholdSeconds: zeroThresholdSeconds)
         // Unverifiable is not "without grant": polling a check that can't answer helps nobody.
         builtWithoutGrant = status == .denied || status == .notDetermined
+        // It is not a proven grant either: only a confirmed one carries the proof to the new tap.
+        if status != .authorized { grantProven = false }
         // No immediate report: the first `tick` checks within a second, by which time the recording
         // is up and the app is listening.
         return []
@@ -115,9 +143,11 @@ public struct TapPermissionGuard {
         var actions: [Action] = []
         if allZero {
             exactZeroFrames += Int64(samples.count)
+            if !grantProven { unprovenZeroFrames += Int64(samples.count) }
             if zeroRunStartedAt == nil { zeroRunStartedAt = now }
         } else {
             // Real audio: whatever the TCC cache says, the tap is being fed.
+            grantProven = true
             zeroRunStartedAt = nil
             builtWithoutGrant = false
             insuranceRebuildUsed = false
@@ -136,10 +166,11 @@ public struct TapPermissionGuard {
     }
 
     /// Called about once a second while the tap is capturing. Only does anything while a problem
-    /// is suspected or reported, or (when enabled) once the soft "can't confirm" window has elapsed.
+    /// is suspected or reported, or (when enabled) once the soft "can't confirm" window has elapsed
+    /// on a tap whose grant is not proven: a long silence after real audio is a quiet remote.
     /// Delivery gaps are not the guard's business: the liveness monitor and the healing ladder own them.
     public mutating func tick(now: Double) -> [Action] {
-        if let soft = softAlarmSeconds, let since = zeroRunStartedAt, now - since >= soft, !problemReported {
+        if let soft = softAlarmSeconds, let since = zeroRunStartedAt, now - since >= soft, !problemReported, !grantProven {
             return report(nil, now: now)
         }
         guard builtWithoutGrant || (problemReported && !problemUnverifiable) else { return [] }
@@ -158,6 +189,8 @@ public struct TapPermissionGuard {
     /// to restart after the user fixed the permission).
     public mutating func permissionChecked(_ status: PermissionStatus?, evidence: Evidence, now: Double) -> [Action] {
         checkInFlight = false
+        // Before anything else: after any answer but `authorized`, zeros are unproven again.
+        if status != .authorized { grantProven = false }
         switch status {
         case .authorized?:
             if builtWithoutGrant || (problemReported && !problemUnverifiable) {
@@ -168,9 +201,14 @@ public struct TapPermissionGuard {
                 return [.rebuildTap(reason: .grant)]
             }
             guard evidence != .none else { return [] }
+            // This tap has delivered real audio and the permission is still granted: a silent
+            // stretch, nothing to repair (#333). `awaitingAudio` is never set here, since
+            // the real audio that proved the grant cleared it.
+            if grantProven { return [] }
             if !insuranceRebuildUsed {
-                // Granted, yet silent: most likely a genuinely silent call, but TCC's answer can be
-                // stale, and a rebuild during silence costs nothing. Once per episode, so it can't loop.
+                // Granted, yet silent, and nothing real from this tap to prove the grant: most likely a
+                // remote that has not spoken yet, but TCC's answer can be stale (#220), and by content
+                // the two are the same. Once per episode, so it can't loop.
                 insuranceRebuildUsed = true
                 return [.rebuildTap(reason: .insurance)]
             }
