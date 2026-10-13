@@ -236,12 +236,14 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
     }
 
     /// The audio-queue half of per-track coverage: the handler's frame totals and the tap guard's
-    /// exact-zero count. Read ON the audio queue only, inside a block that is already there (the bounded
+    /// exact-zero counts (all of them, and those nobody can vouch for: `unprovenZeroFrames`, #333).
+    /// Read ON the audio queue only, inside a block that is already there (the bounded
     /// seal, a rotation's swap, the tick's async refresh) — never with an `audioQueue.sync` of its own,
     /// which a stalled audio queue would turn into a hung Stop (round 4 N2).
     private struct CoverageCounts: Sendable {
         let micDelivered, micPad, micZero, sysDelivered, sysPad: Int64
         let tapZeros: Int64?
+        let tapUnprovenZeros: Int64?
         /// Each track's callback timing (#247): plain copies of fixed-size value types, summarised off
         /// the audio queue at stop.
         let micIO, systemIO: IOCycleStats
@@ -254,6 +256,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         return CoverageCounts(micDelivered: t.micDelivered, micPad: t.micPad, micZero: t.micZero,
                               sysDelivered: t.sysDelivered, sysPad: t.sysPad,
                               tapZeros: tapActive ? tapGuard.exactZeroFrames : nil,
+                              tapUnprovenZeros: tapActive ? tapGuard.unprovenZeroFrames : nil,
                               micIO: io.mic, systemIO: io.system)
     }
 
@@ -286,6 +289,8 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
             remote.deliveredSeconds = Double(counts.sysDelivered) / rate
             remote.paddedSeconds = Double(counts.sysPad) / rate
             remote.exactZeroSeconds = Double(counts.tapZeros ?? 0) / rate
+            // The tap's alone: the mic's zero count is the handler's, and has no grant to prove.
+            remote.exactZeroUnprovenSeconds = Double(counts.tapUnprovenZeros ?? 0) / rate
         }
         local.heartbeatCallbacks = mic?.heartbeatCount() ?? 0
         remote.heartbeatCallbacks = tap?.heartbeatCount() ?? 0
@@ -293,6 +298,7 @@ final class AudioCaptureService: NSObject, AudioCaptureProtocol {
         if tap == nil {
             // SCK: neither is measured (no tap guard, no callback count) — say nothing rather than 0.
             remoteDetail["remote_exact_zero_seconds"] = nil
+            remoteDetail["remote_exact_zero_unproven_seconds"] = nil
             remoteDetail["remote_heartbeat_callbacks"] = nil
         }
         var facts = remoteDetail.merging(local.asDetail(prefix: "local")) { a, _ in a }

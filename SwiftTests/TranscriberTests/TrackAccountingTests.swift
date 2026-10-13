@@ -211,4 +211,89 @@ import Testing
         let p = diagnostics.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
         #expect((p.asMetadataDictionary()["remote_coverage"] as? [String: Any])?["coverage_incomplete"] as? Bool == true)
     }
+
+    // MARK: - Unproven zeros (#333 R3)
+
+    /// The 2026-10-13 call: 571 s of exact zeros on a tap that had delivered real audio (a call app
+    /// renders digital silence while the other side is quiet), about 2 s of them before its first
+    /// real audio. The record carries both numbers, on the wire, in session.json and in the transcript.
+    @Test func unprovenZerosTravelBesideTheTotal() throws {
+        var a = TrackAccounting()
+        a.expectedSeconds = 3952; a.deliveredSeconds = 3952; a.exactZeroSeconds = 571; a.exactZeroUnprovenSeconds = 2
+        let detail = a.asDetail(prefix: "remote")
+        #expect(detail["remote_exact_zero_unproven_seconds"] == "2.0" && detail["remote_exact_zero_seconds"] == "571.0")
+        #expect(try #require(TrackAccounting(detail: detail, prefix: "remote")) == a, "the helper-to-app wire")
+        #expect(try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(a)) == a, "session.json")
+        let metadata = a.asMetadataDictionary(status: .healthy)
+        #expect(metadata["exact_zero_unproven_seconds"] as? Double == 2 && metadata["exact_zero_seconds"] as? Double == 571)
+        var sum = a; sum += a
+        #expect(sum.exactZeroUnprovenSeconds == 4 && sum.exactZeroSeconds == 1142 && !sum.exactZeroIsLowerBound)
+        #expect(a.status(isTap: true, contentAnomalies: 0) == .healthy, "the status never reads it")
+    }
+
+    /// Same rules as the total: absent = not measured (SCK has no guard; an older helper or an older
+    /// session.json never wrote it), never a claimed 0, and a measured 0 stays a 0.
+    @Test func unmeasuredUnprovenZerosStayUnmeasured() throws {
+        let older = try #require(TrackAccounting(detail: ["remote_expected_seconds": "600", "remote_delivered_seconds": "600",
+                                                          "remote_exact_zero_seconds": "42.0"], prefix: "remote"))
+        #expect(older.exactZeroSeconds == 42 && older.exactZeroUnprovenSeconds == nil)
+        #expect(older.asDetail(prefix: "remote")["remote_exact_zero_unproven_seconds"] == nil)
+        #expect(older.asMetadataDictionary(status: .healthy)["exact_zero_unproven_seconds"] == nil)
+        var twice = older; twice += older
+        #expect(twice.exactZeroUnprovenSeconds == nil && twice.exactZeroSeconds == 84 && !twice.exactZeroIsLowerBound)
+        #expect(TrackAccounting().exactZeroUnprovenSeconds == nil, "a fresh counter has measured nothing")
+        let legacy = try JSONDecoder().decode(TrackAccounting.self, from: Data(#"{"expectedSeconds":10,"deliveredSeconds":9,"exactZeroSeconds":1}"#.utf8))
+        #expect(legacy.exactZeroSeconds == 1 && legacy.exactZeroUnprovenSeconds == nil, "an older session.json still decodes")
+
+        var zero = TrackAccounting(); zero.expectedSeconds = 1; zero.exactZeroSeconds = 5; zero.exactZeroUnprovenSeconds = 0
+        let back = try #require(TrackAccounting(detail: zero.asDetail(prefix: "remote"), prefix: "remote"))
+        #expect(back.exactZeroUnprovenSeconds == 0)
+        #expect(back.asMetadataDictionary(status: .healthy)["exact_zero_unproven_seconds"] as? Double == 0)
+        #expect(try JSONDecoder().decode(TrackAccounting.self, from: JSONEncoder().encode(zero)).exactZeroUnprovenSeconds == 0)
+    }
+
+    /// A non-finite value is rejected at the parse boundary, like every other Double of the record
+    /// (`JSONSerialization` raises an uncatchable exception on one).
+    @Test func aNonFiniteUnprovenValueIsRejected() {
+        for bad in ["nan", "inf", "-inf"] {
+            #expect(TrackAccounting(detail: ["remote_expected_seconds": "10", "remote_exact_zero_seconds": "1.0",
+                                             "remote_exact_zero_unproven_seconds": bad], prefix: "remote") == nil)
+        }
+    }
+
+    /// The unproven seconds share the total's lower-bound mark: summed with a session that did not
+    /// measure them (an SCK session, or a tap session recorded before the field existed), the sum is
+    /// at least that much, and the record says so with the mark it already has.
+    @Test func aMixedSumOfUnprovenZerosIsMarkedAsALowerBound() throws {
+        var tap = TrackAccounting(); tap.expectedSeconds = 600; tap.deliveredSeconds = 600
+        tap.exactZeroSeconds = 42; tap.exactZeroUnprovenSeconds = 30; tap.heartbeatCallbacks = 6
+        let sck = try #require(TrackAccounting(detail: ["remote_expected_seconds": "300", "remote_delivered_seconds": "300"], prefix: "remote"))
+        for sum in [{ var s = tap; s += sck; return s }(), { var s = sck; s += tap; return s }()] as [TrackAccounting] {
+            #expect(sum.exactZeroUnprovenSeconds == 30 && sum.exactZeroSeconds == 42 && sum.exactZeroIsLowerBound)
+        }
+        var older = tap; older.exactZeroUnprovenSeconds = nil
+        var mixed = tap; mixed += older
+        #expect(mixed.exactZeroUnprovenSeconds == 30 && mixed.exactZeroSeconds == 84)
+        #expect(mixed.exactZeroIsLowerBound, "one session never said how much of its silence was unproven")
+        let wire = try #require(TrackAccounting(detail: mixed.asDetail(prefix: "remote"), prefix: "remote"))
+        #expect(wire == mixed)
+    }
+
+    /// Through the record: a `captureStop`, and a crashed helper's stand-in (its last status pull,
+    /// #295), both put the unproven seconds into `capture_provenance.remote_coverage`. Without the
+    /// stand-in carrying it, a crash-recovered record would fall back to judging the total.
+    @Test func unprovenZerosReachTheRecordFromAStopAndFromAStandIn() throws {
+        var stopped = TrackAccounting(); stopped.expectedSeconds = 600; stopped.deliveredSeconds = 600
+        stopped.exactZeroSeconds = 90; stopped.exactZeroUnprovenSeconds = 2
+        var crashed = stopped; crashed.exactZeroSeconds = 300; crashed.exactZeroUnprovenSeconds = 25
+        var diagnostics = CaptureDiagnostics()
+        diagnostics.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 0), origin: .helper, kind: .captureStop, severity: .info,
+                                        detail: stopped.asDetail(prefix: "remote").merging(["helper_session": "1000-0"]) { $1 }))
+        diagnostics.record(CaptureEvent(timestamp: Date(timeIntervalSince1970: 1), origin: .helper, kind: .captureStop, severity: .info,
+                                        detail: crashed.asDetail(prefix: "remote").merging(["helper_session": "2000-0", "from": CaptureDiagnostics.standInSource]) { $1 }))
+        let p = diagnostics.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil)
+        #expect(p.remoteCoverage?.exactZeroUnprovenSeconds == 27 && p.remoteCoverage?.exactZeroSeconds == 390)
+        let remote = try #require(p.asMetadataDictionary()["remote_coverage"] as? [String: Any])
+        #expect(remote["exact_zero_unproven_seconds"] as? Double == 27)
+    }
 }

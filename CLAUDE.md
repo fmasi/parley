@@ -111,7 +111,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/FilenameUtils.swift` -- sanitizeFilename (removes /, :, \0)
 - `TranscriberCore/PermissionManager.swift` -- @Observable permission status tracker with PermissionChecking protocol — source-aware: the tap needs System Audio Recording, ScreenCaptureKit needs Screen Recording (#220)
 - `TranscriberCore/CaptureReadiness.swift` -- pure readiness decisions: required permissions per system-audio source, launch routing (after onboarding a missing permission goes to REPAIR, never the Setup lockout), fix action per status (#174, #220)
-- `TranscriberCore/TapPermissionGuard.swift` -- pure state machine keeping the tap honest about its permission: rebuild after a grant, re-check/re-report only while a problem exists, "restored" only on real audio, no rebuild loops; counts exact-zero frames for provenance (#220)
+- `TranscriberCore/TapPermissionGuard.swift` -- pure state machine keeping the tap honest about its permission: rebuild after a grant, re-check/re-report only while a problem exists, "restored" only on real audio, no rebuild loops; counts exact-zero frames for provenance (#220); `grantProven` (the tap has delivered real audio, so later zeros are silence: no insurance rebuild, no soft alarm) and the zeros nobody can vouch for, counted apart (#333)
 - `TranscriberCore/BootSession.swift` -- `kern.bootsessionuuid` reader: the sentinel's stale-boot check, immune to sleep and wall-clock changes (gotcha #76)
 - `TranscriberCore/CaptureAlarm.swift` -- capture-alarm vocabulary and state (§6): `CaptureTrack`, the ordered `HelperSessionId`, `AlarmKind` (owner, track, the evidence that disproves a stale one, acknowledgeable), `CaptureAlarmRegistry` (stale-until-disproved, per-kind notify floor), `CaptureStatusSnapshot` (tolerant of unknown kinds only), `AlarmRealarmPolicy` (2 min notify, idle backoff, presentation)
 - `TranscriberCore/CaptureLifecycle.swift` -- the helper's capture-session claim (pure): tokened start reservation, a stop or disconnect aborts a start, 20 s start deadline, per-connection ownership, rotation gate; `AbandonableStep` bounds a rotation's writer swap
@@ -143,7 +143,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/TapHealer.swift` -- runs `TapRecoveryLadder`'s actions: rungs with tokens, heartbeat deadline, 5 s stuck watchdog, 60 s slow retry; suspended across sleep and after stop; injectable `HealerScheduler` for tests
 - `TranscriberCore/TapRecoveryLadder.swift` -- the tap's pure healing ladder (§5): aggregate rebuild then new tap, backoff 0.25/0.5/1/2 s, 2 attempts per rung in a 15 s fast window, 3 s tokened heartbeat deadline, 30 s sustained health before a refund, dead state remembered across a gate close
 - `TranscriberCore/TerminationPolicy.swift` -- pure answer to `applicationShouldTerminate`: Parley's own Quit ends at once (its stop already ran, ≤ 30 s), a power-off or outside quit with work in flight stops within 5 s and leaves the sentinel for the next launch
-- `TranscriberCore/TrackAccounting.swift` -- per-track coverage (§7.1): expected / delivered / exact-zero / padded seconds, gaps, rebuilds; status `healthy / idle / neverDelivered / compromised`; `capture_provenance` and `metadata.capture` dictionaries
+- `TranscriberCore/TrackAccounting.swift` -- per-track coverage (§7.1): expected / delivered / exact-zero (and its unproven part) / padded seconds, gaps, rebuilds; status `healthy / idle / neverDelivered / compromised`; `capture_provenance` and `metadata.capture` dictionaries
 - `TranscriberCore/WriteProgressMonitor.swift` -- per-track write progress next to the heartbeat: called but nothing written for 5 s raises the track's not-delivering alarm (`DeliveryAlarmGate` decides what may clear it)
 - `TranscriberCore/XPCInterruptionPolicy.swift` -- what an XPC interruption/invalidation means, armed per capture generation: an idle-exit is ignored (no ping, no latch), a crash fires at most once per generation (gotcha #74)
 - `TranscriberCore/SystemAudioRecordingPermission.swift` -- private TCC SPI wrapper (`dlsym`) for `kTCCServiceAudioCapture`; preflight is cached per process, so live checks go through the helper (gotcha #70, docs/app-store-blockers.md)
@@ -218,7 +218,7 @@ bash scripts/swift-test.sh            # one suite: bash scripts/swift-test.sh <S
 # CommandLineTools -X flags. `just test` adds a canary. Never `CFFIXED_USER_HOME="$(…)" swift test` on one line: a
 # failed command leaves it empty, which means the REAL home, where a test with Config.default records into, and runs
 # the storage limit over, ~/Documents/Recordings (#313). The test bundle refuses to start there (SwiftTests/TestHomeGuard).
-# 2658 tests across 290 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2674 tests across 290 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
 # Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
@@ -259,13 +259,13 @@ record of its build, and the live log does not carry it either.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 91 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 92 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 91 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 92 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

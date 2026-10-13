@@ -13,12 +13,20 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     public var deliveredSeconds: Double = 0
     /// nil = not measured (SCK has no exact-zero guard) — never a claimed 0.
     public var exactZeroSeconds: Double?
+    /// The part of `exactZeroSeconds` nobody can vouch for (`TapPermissionGuard.unprovenZeroFrames`, #333): the
+    /// zeros before the session's first real audio, and every zero run during which a denial or an unconfirmed
+    /// rebuild withdrew the proof, from the run's first frame until real audio returned. The rest is silence
+    /// on a tap that had delivered real audio, with its grant never in question during it. nil = not measured
+    /// (SCK, the mic, a record made before the field existed), never a claimed 0: a reader then judges the
+    /// total, as before.
+    public var exactZeroUnprovenSeconds: Double?
     public var paddedSeconds: Double = 0
     public var longestGapSeconds: Double = 0
     public var gapCount: Int = 0
     public var rebuilds: Int = 0
     /// The value sums measured sessions with unmeasured ones (a tap session and an SCK one): it is
-    /// a lower bound, and the record says so (R2b item 8).
+    /// a lower bound, and the record says so (R2b item 8). One mark for both exact-zero values: it is also
+    /// set when only the unproven seconds were unmeasured in one of the sessions.
     public var exactZeroIsLowerBound = false
     public var heartbeatCallbacksIsLowerBound = false
     /// Every value is a lower bound, never stamped as exact: the helper's stop timed out sealing the capture (its
@@ -32,7 +40,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case expectedSeconds, heartbeatCallbacks, deliveredSeconds, exactZeroSeconds, paddedSeconds,
+        case expectedSeconds, heartbeatCallbacks, deliveredSeconds, exactZeroSeconds, exactZeroUnprovenSeconds, paddedSeconds,
              longestGapSeconds, gapCount, rebuilds, exactZeroIsLowerBound, heartbeatCallbacksIsLowerBound, coverageIncomplete
     }
 
@@ -42,6 +50,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         try c.encodeIfPresent(heartbeatCallbacks, forKey: .heartbeatCallbacks)
         try c.encode(deliveredSeconds, forKey: .deliveredSeconds)
         try c.encodeIfPresent(exactZeroSeconds, forKey: .exactZeroSeconds)
+        try c.encodeIfPresent(exactZeroUnprovenSeconds, forKey: .exactZeroUnprovenSeconds)
         try c.encode(paddedSeconds, forKey: .paddedSeconds)
         try c.encode(longestGapSeconds, forKey: .longestGapSeconds)
         try c.encode(gapCount, forKey: .gapCount)
@@ -60,6 +69,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         heartbeatCallbacks = try c.decodeIfPresent(Int.self, forKey: .heartbeatCallbacks)
         deliveredSeconds = try c.decodeIfPresent(Double.self, forKey: .deliveredSeconds) ?? 0
         exactZeroSeconds = try c.decodeIfPresent(Double.self, forKey: .exactZeroSeconds)
+        exactZeroUnprovenSeconds = try c.decodeIfPresent(Double.self, forKey: .exactZeroUnprovenSeconds)
         paddedSeconds = try c.decodeIfPresent(Double.self, forKey: .paddedSeconds) ?? 0
         longestGapSeconds = try c.decodeIfPresent(Double.self, forKey: .longestGapSeconds) ?? 0
         gapCount = try c.decodeIfPresent(Int.self, forKey: .gapCount) ?? 0
@@ -112,7 +122,9 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
         lhs.deliveredSeconds += rhs.deliveredSeconds
         lhs.exactZeroIsLowerBound = lhs.exactZeroIsLowerBound || rhs.exactZeroIsLowerBound
             || (lhs.exactZeroSeconds == nil) != (rhs.exactZeroSeconds == nil)
+            || (lhs.exactZeroUnprovenSeconds == nil) != (rhs.exactZeroUnprovenSeconds == nil)
         lhs.exactZeroSeconds = sum(lhs.exactZeroSeconds, rhs.exactZeroSeconds)
+        lhs.exactZeroUnprovenSeconds = sum(lhs.exactZeroUnprovenSeconds, rhs.exactZeroUnprovenSeconds)
         lhs.paddedSeconds += rhs.paddedSeconds
         lhs.longestGapSeconds = max(lhs.longestGapSeconds, rhs.longestGapSeconds)
         lhs.gapCount += rhs.gapCount
@@ -136,6 +148,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
             ("heartbeat_callbacks", heartbeatCallbacks.map { "\($0)" }),
             ("delivered_seconds", String(format: "%.1f", deliveredSeconds)),
             ("exact_zero_seconds", exactZeroSeconds.map { String(format: "%.1f", $0) }),
+            ("exact_zero_unproven_seconds", exactZeroUnprovenSeconds.map { String(format: "%.1f", $0) }),
             ("padded_seconds", String(format: "%.1f", paddedSeconds)),
             ("longest_gap_seconds", String(format: "%.1f", longestGapSeconds)),
             ("gap_count", "\(gapCount)"),
@@ -165,6 +178,10 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
             guard let exactZero = finiteOrDefault("exact_zero_seconds", 0) else { return nil }
             exactZeroSeconds = exactZero
         }
+        if detail["\(prefix)_exact_zero_unproven_seconds"] != nil {
+            guard let unproven = finiteOrDefault("exact_zero_unproven_seconds", 0) else { return nil }
+            exactZeroUnprovenSeconds = unproven
+        }
         guard let padded = finiteOrDefault("padded_seconds", 0) else { return nil }
         paddedSeconds = padded
         guard let longestGap = finiteOrDefault("longest_gap_seconds", 0) else { return nil }
@@ -186,6 +203,7 @@ public struct TrackAccounting: Codable, Equatable, Sendable {
             "padded_seconds": paddedSeconds, "longest_gap_seconds": longestGapSeconds, "gap_count": gapCount, "rebuilds": rebuilds,
         ]
         if let exactZeroSeconds { d["exact_zero_seconds"] = exactZeroSeconds }
+        if let exactZeroUnprovenSeconds { d["exact_zero_unproven_seconds"] = exactZeroUnprovenSeconds }
         if let heartbeatCallbacks { d["heartbeat_callbacks"] = heartbeatCallbacks }
         if exactZeroIsLowerBound { d["exact_zero_seconds_is_lower_bound"] = true }
         if heartbeatCallbacksIsLowerBound { d["heartbeat_callbacks_is_lower_bound"] = true }
