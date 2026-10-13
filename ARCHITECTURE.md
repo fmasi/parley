@@ -266,7 +266,7 @@ How the record comes to say what was captured (spec §7, §8.11; the keys are li
    for the stop event a crashed helper never wrote.
 4. At finalize the ring, the live log and the coverage are merged into the record. From it come
    `metadata.capture_provenance` and `metadata.capture` in the transcript: a status per side
-   (`healthy`, `idle`, `neverDelivered`, `compromised`) with the seconds behind it, and the gaps.
+   (`healthy`, `idle`, `neverDelivered`, `degraded`, `compromised`) with the seconds behind it, and the gaps.
 5. **The diagnostics log.** If the session had at least one event of severity `anomaly`, the merged
    events are written to `<session>.diag.jsonl`. A clean recording keeps no diagnostics file: its facts are the
    provenance in the transcript, and its routine events (the `captureStart` event with its
