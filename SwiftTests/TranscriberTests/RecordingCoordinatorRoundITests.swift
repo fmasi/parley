@@ -70,7 +70,6 @@ import Testing
 
 // MARK: - Honest engine wording (270)
 
-#if compiler(>=6.2)
 @MainActor
 @Suite struct SpeechAnalyzerWordingRoundITests {
     /// L review 270: a model that is not installed is said "not installed" — or, when this Mac does not support its locale,
@@ -116,7 +115,6 @@ import Testing
         #expect(!row.contains("choose another engine") && !row.contains("isn’t ready"), "\(row)")
     }
 }
-#endif
 
 // MARK: - Rows never repeat a sentence (271, 272)
 

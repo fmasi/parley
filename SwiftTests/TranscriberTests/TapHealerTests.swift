@@ -48,6 +48,8 @@ import Testing
         var giveUps: [Bool] = []
         var recovered = 0, stuck = 0, succeeded = 0
         var rungEvents = 0, givenUpEvents = 0
+        /// Each `tapRecoveryRung` event's `trigger` (#317), in order.
+        var rungTriggers: [String?] = []
     }
 
     /// Keeps the fake tap alive (the healer holds it weakly).
@@ -65,8 +67,8 @@ import Testing
         healer.onRecovered = { calls.recovered += 1 }
         healer.onStuck = { calls.stuck += 1 }
         healer.onRungSucceeded = { calls.succeeded += 1 }
-        healer.onEvent = { kind, _, _ in
-            if kind == .tapRecoveryRung { calls.rungEvents += 1 }
+        healer.onEvent = { kind, _, detail in
+            if kind == .tapRecoveryRung { calls.rungEvents += 1; calls.rungTriggers.append(detail["trigger"]) }
             if kind == .tapRecoveryGivenUp { calls.givenUpEvents += 1 }
         }
         healer.startSession(tap: tap)
@@ -392,6 +394,73 @@ import Testing
         #expect(r.tap.rebuilds.count == 1, "the wake never rebuilds blind")
     }
 
+    // MARK: - #295 item 3: a grant is owed until its rebuild is dispatched
+
+    /// The grant that arrived while asleep is queued by the wake, and the Mac sleeps again before that rebuild is
+    /// dispatched. The second sleep must not drop it: it runs at the next wake.
+    @Test func aGrantQueuedAtWakeSurvivesAnImmediateResleep() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.permissionGrant)
+        r.healer.trigger(.wake)               // queues the grant's rebuild …
+        r.healer.cancelAll()                  // … and sleep lands before it is dispatched
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.isEmpty, "nothing runs while asleep")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate], "the grant's rebuild runs at the next wake")
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.count == 1, "once, however many wakes")
+    }
+
+    /// The same while awake: the grant's rebuild is scheduled, and sleep comes before it runs.
+    @Test func aGrantNotYetDispatchedWhenSleepComesRunsAtTheWake() {
+        let r = rig()
+        r.healer.trigger(.permissionGrant)
+        r.healer.cancelAll()
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate])
+    }
+
+    /// A coreaudiod restart is kept for the wake on the same terms: its listeners are dead until the tap is rebuilt.
+    @Test func aRestartQueuedAtWakeSurvivesAnImmediateResleep() {
+        let r = rig()
+        r.healer.cancelAll()
+        r.healer.trigger(.serviceRestarted)
+        r.healer.trigger(.wake)
+        r.healer.cancelAll()
+        r.clock.advance(by: 1)
+        #expect(r.tap.rebuilds.isEmpty)
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildTap])
+    }
+
+    /// Once dispatched, the grant is paid: a sleep after it owes nothing, and the wake rebuilds nothing blind.
+    @Test func aDispatchedGrantIsNotRunAgainAfterSleep() {
+        let r = rig()
+        r.healer.trigger(.permissionGrant)
+        r.clock.advance(by: 0)                // dispatched
+        r.healer.cancelAll()
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.map(\.rung) == [.rebuildAggregate])
+    }
+
+    /// A pending stall rung (not a grant or a restart) is not carried across a sleep: the wake never rebuilds blind.
+    @Test func aPendingStallRungIsNotCarriedAcrossSleep() {
+        let r = rig()
+        r.healer.trigger(.stalled)
+        r.healer.cancelAll()                  // before the rung is dispatched
+        r.healer.trigger(.wake)
+        r.clock.advance(by: 120)
+        #expect(r.tap.rebuilds.isEmpty)
+    }
+
     // MARK: - Final review H-I1: nothing expected at the deadline
 
     /// Recording started before the call; the grant rebuilds the tap while nothing plays. The rung's
@@ -452,5 +521,25 @@ import Testing
         r.clock.advance(by: 10)
         #expect(r.tap.rebuilds.isEmpty)
         #expect(r.clock.pending == 0)
+    }
+
+    // MARK: - #317: the rung's record names its trigger
+
+    /// The insurance rebuild 12 s into a call whose remote had not spoken yet showed as a bare `tapRecoveryRung`.
+    @Test func theRungEventNamesThePermissionInsuranceThatOrderedIt() {
+        let r = rig()
+        r.healer.trigger(.permissionInsurance)
+        r.clock.advance(by: 0)
+        #expect(r.tap.rebuilds.count == 1)
+        #expect(r.calls.rungTriggers == ["permissionInsurance"])
+    }
+
+    @Test func theRungEventNamesEachTriggerInTurn() {
+        let r = rig()
+        r.healer.trigger(.neverDelivered)
+        answerNextRung(r, succeeded: false)
+        answerNextRung(r, succeeded: true)
+        r.clock.advance(by: TapRecoveryLadder.heartbeatDeadlineSeconds + 1)   // no heartbeat: the next rung
+        #expect(r.calls.rungTriggers.prefix(3) == ["neverDelivered", "rebuildFailed", "heartbeatMissed"])
     }
 }

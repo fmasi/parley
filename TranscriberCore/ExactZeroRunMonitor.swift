@@ -35,10 +35,19 @@ public struct ExactZeroRunMonitor {
     public let thresholdSeconds: Double
     private var consecutiveZeroFrames: Int64 = 0
     private var reported = false
+    /// Set by `expectSilence()`: the alarm was raised before any run was reported, so the next real
+    /// audio must still clear it.
+    private var silenceExpected = false
 
     public init(thresholdSeconds: Double = ExactZeroRunMonitor.defaultThresholdSeconds) {
         self.thresholdSeconds = thresholdSeconds
     }
+
+    /// The mic just moved onto an input known to deliver silence (the built-in mic with the lid closed,
+    /// #315), and `micDigitalSilence` was raised at once. The next non-zero batch returns `.resumed` as if a
+    /// run had been reported, so the first real audio clears it; a run is still reported (confirmed) at the
+    /// threshold as usual.
+    public mutating func expectSilence() { silenceExpected = true }
 
     /// Feed one batch of REAL (not fabricated/padded) mic samples at `rate` Hz. Returns `.silentRun`
     /// at most once per contiguous run of exact zeros — audio resuming re-arms the detector, so a mic
@@ -49,9 +58,10 @@ public struct ExactZeroRunMonitor {
         if samples.allSatisfy({ $0 == 0 }) {
             consecutiveZeroFrames += Int64(samples.count)
         } else {
-            let wasReported = reported
+            let wasReported = reported || silenceExpected
             consecutiveZeroFrames = 0
             reported = false
+            silenceExpected = false
             return wasReported ? .resumed : .notYet
         }
         guard !reported else { return .notYet }

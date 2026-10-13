@@ -422,6 +422,7 @@ import Testing
         let coordinator = h.coordinator
         let relaunch = Task { await coordinator.recoverAtLaunch() }
         await Harness.until { inBuild.value }
+        h.coordinator.exitMarkBound = .seconds(60)   // the exit's mark is WAITED for, whatever the machine's load (#298)
         #expect(await coordinator.prepareForQuit(confirm: { true }))   // the Quit, during the salvage
         let slot = try #require(RecordingSentinel.read(directory: h.tmp))
         #expect(slot.quitDuringFinalize && slot.stopCause == .appCrash, "the first cause stands beside the quit")

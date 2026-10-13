@@ -54,4 +54,4 @@ fetch "ES2004a.Mix-Headset.wav" \
 
 echo
 echo "==> Done. Fixtures in $DIR"
-echo "    Run: swift test --filter DiarizationRegressionTests"
+echo "    Run: bash scripts/swift-test.sh DiarizationRegressionTests"

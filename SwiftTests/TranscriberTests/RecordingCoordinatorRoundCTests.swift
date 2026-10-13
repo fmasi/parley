@@ -5,10 +5,6 @@ import Testing
 // Stream L, round C (items 139–168): the coordinator's side. The fake client and the harness are
 // RecordingCoordinatorTests.swift's.
 
-/// The older name of `HungStep` (RecordingCoordinatorTests.swift), which took over what this was: a read named by its label,
-/// hung on its queue until released, with a watchdog. Kept for the test files that still spell it so.
-typealias HungRead = HungStep
-
 // MARK: - Folder reads per volume, coalescing (160, 164)
 
 @MainActor

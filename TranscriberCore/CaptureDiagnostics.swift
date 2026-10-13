@@ -19,6 +19,12 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case xpcInvalidation
     case retry
     case launchRecovery
+    /// The lid-closed microphone pre-flight (#314): what it read and what it decided — detail `lid` (`closed`/`open`),
+    /// `device` (the UID, or `default`), `transport` (`ClamshellMicGuard.transportName`), `builtIn`, `verdict`
+    /// (`warn`/`none`) and `reason` (`start`, `micSwitch`, `micFollow`). Recorded at a start, and at a switch or a
+    /// follow while the lid-closed banner shows. `.info`: routine, so it reaches `.diag.jsonl` only in a session that
+    /// has an anomaly; the unified log has it otherwise.
+    case clamshellPreflight
     /// launchd idle-exited the helper while nothing was being captured (L-N1). Recorded into the
     /// app ring while idle — the next `resetSession()` wipes it, so it lives in the unified log and
     /// the live log, never in a later session's `.diag.jsonl`. Severity `.info`.
@@ -37,7 +43,9 @@ public enum CaptureEventKind: String, Codable, Sendable {
     case alarmCleared
     /// An aggregate-device listener fired (`goin`→0, `stpd`, `diff`, `agrp`); detail `selector`. `.warning`.
     case aggregateIOStopped
-    /// The healing ladder ran a rung; detail `rung`, `delay`, `total`. `.warning`.
+    /// The healing ladder ran a rung; detail `rung`, `token`, `delay`, `total`, and `trigger` (#317): what ordered it — a
+    /// `TapRecoveryLadder.Trigger` (`stalled`, `neverDelivered`, `permissionInsurance`, `permissionGrant`, …),
+    /// `heartbeatMissed` or `slowRetry`. `.warning`.
     case tapRecoveryRung
     /// The ladder's fast budget is spent; the slow retry owns it now. `.anomaly`.
     case tapRecoveryGivenUp
@@ -291,6 +299,11 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// facts come from that run's diagnostics, not the recording's: they may be incomplete (round 4
     /// item 7).
     public var reconstructed = false
+    /// Which kind of build captured it (#295, from `captureStart`'s `build`, #271): `debug` or `release`, both
+    /// comma-joined when the record's starts disagree. Only the starts the record holds: a crashed helper's undrained
+    /// start is not among them. In the transcript of every recording, a clean one included (it keeps no
+    /// `.diag.jsonl`). nil when no start in the record carried it.
+    public let build: String?
 
     static let reconstructedNote = "Capture facts come from the recovery run that rebuilt this transcript, not from the recording itself; they may be incomplete."
 
@@ -324,6 +337,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case remoteContentAnomalyCount = "remote_content_anomaly_count"
         case remoteRateDrift = "remote_rate_drift"
         case reconstructed
+        case build
     }
 
     public init(
@@ -347,7 +361,8 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         systemPermissionDeniedConfirmed: Bool = false,
         localContentAnomalyCount: Int? = nil,
         remoteContentAnomalyCount: Int? = nil,
-        remoteRateDrift: [RateDriftWindow]? = nil
+        remoteRateDrift: [RateDriftWindow]? = nil,
+        build: String? = nil
     ) {
         self.engine = engine
         self.systemFormat = systemFormat
@@ -370,6 +385,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.localContentAnomalyCount = localContentAnomalyCount
         self.remoteContentAnomalyCount = remoteContentAnomalyCount
         self.remoteRateDrift = remoteRateDrift
+        self.build = build
     }
 
     /// Decode tolerantly: fields added after a release must NOT make an older `session.json`
@@ -405,6 +421,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
         remoteRateDrift = try c.decodeIfPresent([RateDriftWindow].self, forKey: .remoteRateDrift)
         reconstructed = try c.decodeIfPresent(Bool.self, forKey: .reconstructed) ?? false
+        build = try c.decodeIfPresent(String.self, forKey: .build)
     }
 
     /// Build the snake_case dictionary embedded in transcript metadata under `capture_provenance`.
@@ -427,6 +444,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         if let systemFormat { d["system_format"] = systemFormat }
         if let micFormat { d["mic_format"] = micFormat }
         if let micDevice { d["mic_device"] = micDevice }
+        if let build { d["build"] = build }
         if let systemDeliveredSeconds { d["system_delivered_seconds"] = systemDeliveredSeconds }
         if let systemExactZeroSeconds { d["system_exact_zero_seconds"] = systemExactZeroSeconds }
         // Fail closed (fix round 1 item 3): a missing or unparseable status string must never read
@@ -553,6 +571,9 @@ public struct CaptureDiagnostics: Sendable {
     /// The helper sessions that wrote a `captureStop` (out-of-ring, same lifetime as `coverageTallies`): a
     /// stop evicted from the ring still supersedes its helper session's pulled snapshot (L11 review 67).
     public private(set) var stoppedHelperSessions: Set<String> = []
+    /// Every `captureStart`'s `build` (#295), out of ring like the tallies: an evicted start still says which build
+    /// made the recording.
+    private var builds: Set<String> = []
 
     public mutating func record(_ event: CaptureEvent) {
         store(event)
@@ -598,11 +619,19 @@ public struct CaptureDiagnostics: Sendable {
         if e.kind == .systemAudioPermissionRestored {
             lastPermissionRestore = max(lastPermissionRestore ?? e.timestamp, e.timestamp)
         }
+        if e.kind == .captureStart, let build = e.detail["build"] { builds.insert(build) }
         if e.kind == .captureStop {
             if let helper = e.detail["helper_session"] { stoppedHelperSessions.insert(helper) }
+            // A stand-in is the helper's last status pull, which can trail what it captured: a lower bound (#295).
+            // Its helper's real stop replaces it, mark included.
+            let standIn = e.detail["from"] == Self.standInSource
             var tracks: [String: TrackAccounting] = [:]
-            for prefix in ["local", "remote"] { tracks[prefix] = TrackAccounting(detail: e.detail, prefix: prefix) }
-            tally(HelperCoverage(tracks: tracks, standInAt: e.detail["from"] == Self.standInSource ? e.timestamp : nil),
+            for prefix in ["local", "remote"] {
+                var track = TrackAccounting(detail: e.detail, prefix: prefix)
+                if standIn { track?.coverageIncomplete = true }
+                tracks[prefix] = track
+            }
+            tally(HelperCoverage(tracks: tracks, standInAt: standIn ? e.timestamp : nil),
                   helper: e.detail["helper_session"] ?? "")
         }
     }
@@ -684,6 +713,7 @@ public struct CaptureDiagnostics: Sendable {
         coverageOrder.removeAll()
         coverageIsLowerBound = false
         stoppedHelperSessions.removeAll()
+        builds.removeAll()
         lastConfirmedDenial = nil
         lastPermissionRestore = nil
         qualityAnomalyTally = 0
@@ -861,7 +891,8 @@ public struct CaptureDiagnostics: Sendable {
             systemPermissionDeniedConfirmed: systemPermissionDeniedConfirmed,
             localContentAnomalyCount: local.map { _ in contentAnomalyCount(track: "mic") },
             remoteContentAnomalyCount: remote.map { _ in contentAnomalyCount(track: "system") },
-            remoteRateDrift: remote.map { _ in drifts }
+            remoteRateDrift: remote.map { _ in drifts },
+            build: builds.isEmpty ? nil : builds.sorted().joined(separator: ",")
         )
     }
 

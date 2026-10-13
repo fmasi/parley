@@ -4,6 +4,24 @@ import Foundation
 
 struct CLIParserTests {
 
+    /// The app enters CLI mode for exactly `CLIParser.subcommands` (#299): every listed name must
+    /// parse, and `benchmark` (no parser case) must not be listed.
+    @Test func everyListedSubcommandIsAcceptedByTheParser() {
+        #expect(!CLIParser.subcommands.contains("benchmark"))
+        for name in CLIParser.subcommands {
+            do {
+                _ = try CLIParser.parse(["Parley", name])
+            } catch CLIParser.ParseError.unknownSubcommand(let cmd) {
+                Issue.record("listed subcommand \(cmd) is rejected by the parser")
+            } catch {
+                // Missing arguments are fine: the name itself was recognised.
+            }
+        }
+        #expect(throws: CLIParser.ParseError.self) {
+            try CLIParser.parse(["Parley", "benchmark"])
+        }
+    }
+
     @Test func parsesSummarizeWithInput() throws {
         let cmd = try CLIParser.parse(["Parley", "summarize", "-i", "/tmp/meeting.json"])
         guard case .summarize(let opts) = cmd else {

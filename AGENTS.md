@@ -48,10 +48,16 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
 - `just workflows`: actionlint + zizmor on `.github/workflows`, as the `test` job runs them.
 - `just toolchain`: this Mac's Swift and macOS, and "N tests not run on this toolchain" (the tests
   an older Swift doesn't compile or an older macOS skips). CI prints the same in each job summary.
-- `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed.
+- `just test`: fetch the AMI fixture, then the whole suite serially with the ground-truth guard armed,
+  in a throwaway home and under a canary over the real recordings, Parley's app data and its
+  LaunchAgent (#313). Run a single suite with `bash scripts/swift-test.sh <Suite>`, which creates
+  and checks the throwaway home and passes the standard flags. Never set `CFFIXED_USER_HOME` inline
+  (`CFFIXED_USER_HOME="$(…)" swift test`): when the command fails, the value is empty, which means
+  the real home. The test bundle refuses to start in the real home (`SwiftTests/TestHomeGuard`).
 - `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier)
   and of the red-first gate's own classifier.
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
+  It runs under the same canary, since it runs the merge base's old tests too.
 - `just build`: build the app bundle (app + XPC service) without installing it. A debug build: it
   reuses what the test step compiled.
 - `just secrets`: gitleaks on the staged changes (the pre-commit hook runs it).
@@ -69,11 +75,13 @@ a release (see `docs/release-checklist.md`).
   `red-first` check runs the changed tests at the merge base and requires them RED there.
   `RED-FIRST-EXEMPT: <reason>` in a test file is only for characterization tests of existing
   behaviour and for the documented diarization-fixture gap. The marker exempts the whole file for
-  as long as it stays in it, in every later PR too: remove it when its reason expires. RED means
-  the tests ran and failed, or a changed test file did not compile. A merge base that cannot be
+  as long as it stays in it, in every later PR too: remove it when its reason expires. A test file
+  renamed and changed in the PR is gated under its new name. RED means the tests ran and failed, or
+  a gated (not exempt) changed test file did not compile. A merge base that cannot be
   resolved, built or run fails the check as "could not build the parent — not RED"; when SwiftPM
   cannot check out a dependency locally, `swift package purge-cache` rebuilds its cache.
-- **Testable seams.** The test target links only `TranscriberCore` and `VerifyEdSignatureCore`.
+- **Testable seams.** The test target links only `TranscriberCore` and `VerifyEdSignatureCore`, plus
+  the test-only `TestHomeGuard` (a C constructor that stops the test process in the real home).
   Decision logic (capture health, permission state, recording lifecycle) goes in `TranscriberCore`
   behind a protocol seam and is tested there with fakes; `AudioCaptureHelper/` and `TranscriberApp/`
   stay thin.

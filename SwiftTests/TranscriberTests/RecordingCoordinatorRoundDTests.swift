@@ -3,7 +3,7 @@ import Testing
 @testable import TranscriberCore
 
 // Stream L, round D (items 169–185): the coordinator's side. The fake client and the harness are
-// RecordingCoordinatorTests.swift's; `HungRead` is RecordingCoordinatorRoundCTests.swift's.
+// RecordingCoordinatorTests.swift's, and `HungStep` too.
 
 // MARK: - Quit, power-off (170, 171, 173, 174)
 
@@ -30,7 +30,7 @@ import Testing
         h.client.isCapturingResult = true
         h.client.stopResult = AudioPaths(systemAudio: outDir(s).appendingPathComponent("sess-1.wav"),
                                          micAudio: outDir(s).appendingPathComponent("sess-1_mic.wav"))
-        let hung = HungRead("re-attach: session folder")
+        let hung = HungStep("re-attach: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         let coordinator = h.coordinator
@@ -56,7 +56,7 @@ import Testing
         s.lastAliveAt = Date().addingTimeInterval(-5); s.bootSessionUUID = BootSession.currentUUID()
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
-        let hung = HungRead("re-attach: session folder")
+        let hung = HungStep("re-attach: session folder")
         defer { hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         let coordinator = h.coordinator
@@ -104,6 +104,7 @@ import Testing
         s.stopping = true
         try RecordingSentinel.write(s, directory: h.tmp)
         h.coordinator.powerOffMarkWindow = .milliseconds(100)
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         h.coordinator.markPowerOffDuringFinalize()
         #expect(RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == true, "marked at once, synchronously")
         await Harness.until { RecordingSentinel.read(directory: h.tmp)?.quitDuringFinalize == false }
@@ -123,6 +124,7 @@ import Testing
         s.stopping = true
         try RecordingSentinel.write(s, directory: h.tmp)
         h.coordinator.powerOffMarkWindow = .milliseconds(100)
+        h.coordinator.exitMarkBound = .seconds(60)   // the synchronous mark is WAITED for, whatever the machine's load (#298)
         h.coordinator.markPowerOffDuringFinalize()
         h.coordinator.markForTermination()   // the logout went ahead: the termination marks it too
         try await Task.sleep(for: .milliseconds(300))
@@ -137,7 +139,7 @@ import Testing
     /// L review 184 (item 134's test): the rename panel's parse of a transcript is bounded — a folder that does not answer
     /// gives nil within the deadline, so the panel is skipped and the rename queue never wedges; one that answers parses.
     @Test func theRenameParseIsBounded() async throws {
-        let hung = HungRead("rename: transcript")
+        let hung = HungStep("rename: transcript")
         defer { hung.release() }
         let reads = RenameReads(reads: FolderReads(label: "rename-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) }))
         let url = URL(fileURLWithPath: "/tmp/rename-d/sess.json")
@@ -175,7 +177,7 @@ import Testing
         let a = try pendingSession(h, "a", in: dir), b = try pendingSession(h, "b", in: dir)
         try RecordingSentinel.writePending([a, b], directory: h.tmp)
         // An earlier recording's panel is still parsing its transcript in that folder, slowly.
-        let hung = HungRead("slow panel")
+        let hung = HungStep("slow panel")
         defer { hung.release() }
         try Data("{}".utf8).write(to: dir.appendingPathComponent("earlier.json"))
         let slowPanel = Task { await RenameReads.shared.read(transcript: dir.appendingPathComponent("earlier.json")) { url -> String in
@@ -252,7 +254,7 @@ import Testing
         defer { tearDown(h) }
         h.config.update { $0.recordingDirectory = "/Volumes/Absent-\(UUID().uuidString)/rec" }
         let (_, transcript) = try await finalizedPending(h, late: ("sess-7.wav", 30))
-        let hung = HungRead("salvage: session folder")
+        let hung = HungStep("salvage: session folder")
         defer { hung.release(); hung.release() }
         h.coordinator.folderReads = FolderReads(label: "rc-d-\(UUID().uuidString)", beforeEachRead: { hung.hangIfNamed($0) })
         let coordinator = h.coordinator
@@ -389,10 +391,14 @@ struct NotReadyEngine: TranscriptionEngine {
         try RecordingSentinel.write(s, directory: h.tmp)
         h.client.isCapturingResult = true
         h.coordinator.helperStopDeadline = .milliseconds(100)
-        h.client.onStop = { try? await Task.sleep(for: .seconds(1)) }   // the helper will not let go
+        let helper = HungStep()   // the helper will not let go until released
+        defer { helper.release() }
+        h.client.onStop = { await helper.hangAwaited() }
         await h.coordinator.recoverAtLaunch()
+        #expect(helper.isHanging, "by order: the launch ended with the helper's stop still unanswered")
         #expect(h.presented.value.map(\.lastPathComponent) == ["away.json"], "only the never-held one: \(h.presented.value)")
         #expect(Set(pending(h).map(\.sessionKey)) == [older.sessionKey, s.sessionKey], "the held ones wait")
+        helper.release()   // the helper lets go
         h.client.onStop = nil
         h.client.isCapturingResult = false
         h.coordinator.helperStopDeadline = .seconds(5)

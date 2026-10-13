@@ -512,10 +512,14 @@ import Testing
         hung.release()
         _ = await evidence.folderReads.read("settle", folder: d.path, seconds: 5) { 0 }   // the late build has left its queue
         evidence.folderDeadline = 5
-        let whole = provenance(await evidence.finalize(sessionId: "s", directory: d))
+        let wholeRecord = await evidence.finalize(sessionId: "s", directory: d)
+        let whole = provenance(wholeRecord)
         #expect(whole.remoteCoverage?.deliveredSeconds == 90, "60 s from the crashed helper's last pull + 30 s from the stop")
-        #expect(whole.remoteCoverage?.coverageIncomplete == false && whole.localCoverage?.coverageIncomplete == false,
-                "a record built from everything states its seconds exactly")
+        #expect(!wholeRecord.coverageIsLowerBound, "a record built from everything is no longer partial")
+        // #295: the crashed helper's last pull stands in for the stop it never wrote, and can trail what it captured —
+        // so the sum is still a lower bound, now for that reason alone.
+        #expect(whole.remoteCoverage?.coverageIncomplete == true && whole.localCoverage?.coverageIncomplete == true,
+                "a stand-in's seconds are a lower bound")
     }
 
     /// L11 review 68: a start that never became a recording leaves no orphan `.diag.live.jsonl` behind.
@@ -603,7 +607,7 @@ import Testing
             p.noteCoverage(statusPull(remote: 10, local: 10, helper: "1000-0"))
         }
         LiveDiagnosticsLog.flushAll()
-        let known = HungRead("evidence: known helpers")
+        let known = HungStep("evidence: known helpers")
         defer { known.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-hung-\(UUID().uuidString)",
                                                                 beforeEachRead: { known.hangIfNamed($0) }))
@@ -753,7 +757,7 @@ import Testing
     /// session updates it, never a misleading `.relaunch` beside it.
     @Test func aTimedOutBuildThatLandsLaterIsThisProcesssOwnRecord() async throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
-        let hung = HungRead("evidence: build"), once = Harness.Box(true)
+        let hung = HungStep("evidence: build"), once = Harness.Box(true)
         defer { hung.release() }
         let evidence = SessionEvidence(folderReads: FolderReads(label: "evidence-\(UUID().uuidString)", beforeEachRead: { name in
             guard once.value, name == hung.label else { return }

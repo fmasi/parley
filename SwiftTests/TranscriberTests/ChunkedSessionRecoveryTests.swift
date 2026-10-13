@@ -667,6 +667,9 @@ struct ChunkedSessionRecoveryTests {
         let issues = try #require((json["metadata"] as? [String: Any])?["processing_issues"] as? [[String: Any]])
         #expect(issues.filter { $0["code"] as? String == "quota_exceeded_by_current_session" }.count == 1)
         #expect(!ChunkIssue.Code.quotaExceededByCurrentSession.affectsContent)
+        // #294: and the record says whose audio it is.
+        let detail = issues.first { $0["code"] as? String == "quota_exceeded_by_current_session" }?["detail"] as? String
+        #expect(detail?.hasSuffix("bytes over the quota, kept by audio it may not delete: this recording’s own") == true)
     }
 
     /// Item 3: a tiny final chunk that IS in the merge (it started under a second after the one before,

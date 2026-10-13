@@ -16,7 +16,10 @@ permissions:
 
 jobs:
   verify-feed:
-    runs-on: macos-15
+    # The same image as `test` (#297): one toolchain for every workflow, and the package's sources
+    # no longer build with the macOS 15 SDK (only the verifier product is built here, but a
+    # resolve or a future dependency on the core would otherwise meet a toolchain nothing tests).
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

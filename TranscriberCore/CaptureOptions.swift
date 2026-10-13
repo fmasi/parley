@@ -15,20 +15,40 @@ public struct CaptureOptions: Codable, Equatable, Sendable {
     /// DIAGNOSTIC ONLY (#247): the WAV writers skip their periodic `fsync` (the header is still
     /// rewritten), for the A/B that tells whether that `fsync` is what stalls the IO callback.
     public var debugSkipWavSync: Bool
+    /// The inputs the user chose by hand, newest first (`Config.recentMicrophoneDeviceIds`). When the mic
+    /// must follow away from a removed input while the lid is closed, the helper lands on one of these
+    /// rather than on the built-in mic, which delivers silence then (#315). Optional on the wire: a payload
+    /// without it is still understood, with no choices.
+    public var userMicrophoneChoices: [String]
 
     public init(tapAutoStart: Bool = true, remoteExactZeroSoftAlarmSeconds: Int? = nil, debugDropTapFrames: Bool = false,
-                debugSkipWavSync: Bool = false) {
+                debugSkipWavSync: Bool = false, userMicrophoneChoices: [String] = []) {
         self.tapAutoStart = tapAutoStart
         self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
         self.debugDropTapFrames = debugDropTapFrames
         self.debugSkipWavSync = debugSkipWavSync
+        self.userMicrophoneChoices = userMicrophoneChoices
     }
 
     public init(config: Config) {
         self.init(tapAutoStart: config.tapAutoStart ?? true,
                   remoteExactZeroSoftAlarmSeconds: config.remoteExactZeroSoftAlarmSeconds,
                   debugDropTapFrames: config.debugDropTapFrames ?? false,
-                  debugSkipWavSync: config.debugSkipWavSync ?? false)
+                  debugSkipWavSync: config.debugSkipWavSync ?? false,
+                  userMicrophoneChoices: config.recentMicrophoneDeviceIds ?? [])
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tapAutoStart, remoteExactZeroSoftAlarmSeconds, debugDropTapFrames, debugSkipWavSync, userMicrophoneChoices
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tapAutoStart = try c.decode(Bool.self, forKey: .tapAutoStart)
+        remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
+        debugDropTapFrames = try c.decode(Bool.self, forKey: .debugDropTapFrames)
+        debugSkipWavSync = try c.decode(Bool.self, forKey: .debugSkipWavSync)
+        userMicrophoneChoices = try c.decodeIfPresent([String].self, forKey: .userMicrophoneChoices) ?? []
     }
 
     public func encoded() -> Data { (try? JSONEncoder().encode(self)) ?? Data() }

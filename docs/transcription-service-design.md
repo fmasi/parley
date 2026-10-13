@@ -2,7 +2,11 @@
 
 **Date:** 2026-03-27
 **Project:** audio-transcribe (service extension)
-**Status:** Design phase — awaiting skill invocation for detailed design + implementation plan
+**Status:** Historical. This was the first spec for the Python service (`transcribe.py`, mlx-whisper,
+pyannote, BlackHole), kept as a record of the original goals. None of its technical choices survived:
+Parley is a Swift app that captures system audio and the microphone as two separate streams (no mixing,
+no BlackHole, no ffmpeg) and transcribes them on device in chunks. For the current design read
+[ARCHITECTURE.md](../ARCHITECTURE.md) and [pipeline.md](pipeline.md).
 
 ---
 

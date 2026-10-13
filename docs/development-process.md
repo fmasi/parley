@@ -97,8 +97,11 @@ characterization test next to a production change adds a fresh one with its own 
 
 **RED is a verdict on the tests, not any non-zero exit.** The gate resolves the packages, builds the
 production targets, builds the tests, then runs them, at the merge base and again at HEAD. It is RED
-only when the tests ran and failed, or when a changed test file did not compile against the merge
-base. If the merge base cannot be resolved, built, linked or run, the gate fails with "could not
+only when the tests ran and failed, or when a gated changed test file did not compile against the
+merge base. A compile error only in a `RED-FIRST-EXEMPT` file is not RED (#297): the gated suites
+never ran, so nothing shows they fail without the fix, and an exempt file that cannot compile at the
+merge base is not the characterization its marker claims. A test file renamed and changed in the PR
+is gated under its new name; one renamed without a change is not. If the merge base cannot be resolved, built, linked or run, the gate fails with "could not
 build the parent — not RED" and names the step. It used to pass: on one Mac SwiftPM could not check
 a dependency out of its local cache, nothing compiled, and six pushes went through as "RED at
 parent". When that message appears locally with "Couldn't check out revision" or "unable to read

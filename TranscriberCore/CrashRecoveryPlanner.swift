@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum CrashRecoveryPlanner {
     public struct OrphanChunk: Equatable {
@@ -10,7 +11,12 @@ public enum CrashRecoveryPlanner {
     /// extension) and whether a WAV exists for it. Shared by `orphanChunks` and `nextFreeChunkIndex`
     /// so both use identical name parsing.
     private static func onDiskChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)) ?? []
+        listedChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId) ?? []
+    }
+
+    /// `onDiskChunkIndices`, nil when the folder does not list: unknown, never "none".
+    private static func listedChunkIndices(outputDirectory: URL, sessionId: String) -> [(index: Int, baseName: String, hasWav: Bool)]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: outputDirectory.path) else { return nil }
         let prefix = "\(sessionId)-"
         var found: [Int: (baseName: String, hasWav: Bool)] = [:]
         for name in names where name.hasPrefix(prefix) && !name.hasSuffix("_mic.wav") {
@@ -81,6 +87,31 @@ public enum CrashRecoveryPlanner {
         SessionState.delete(directory: outputDirectory, sessionId: sessionId)
         TranscriptWriter.writeFormatFileIfMissing(fromJSON: transcript)
         return true
+    }
+
+    /// A session that ended with nothing to salvage — no chunk in its state, no chunk file on disk — leaves no state behind
+    /// (#323 follow-up): its `session.json` is written at its start (#294), so without this it would linger, be moved aside by
+    /// the next recording in the folder (a spurious `session_file_displaced` in that unrelated record) and keep that id's
+    /// archives from the storage limit for good. Fail-closed: a finalized session (its own cleanup decides), a chunk file of
+    /// this id on disk, or state that holds a chunk or cannot be read keeps it all, logged (`SessionState.deleteIfEmpty`).
+    /// Call it only once nothing of the session is still being processed. Blocking file work: only through `FolderReads`.
+    @discardableResult
+    public static func removeEmptySessionState(outputDirectory: URL, sessionId: String) -> Bool {
+        if isFinalized(outputDirectory: outputDirectory, sessionId: sessionId) {
+            Logger.state.info("An ended session with no chunk is marked finalized — its state is left to its own cleanup")
+            return false
+        }
+        // A folder that does not list says nothing about its chunk files: never "none" (fail-closed).
+        guard let onDisk = listedChunkIndices(outputDirectory: outputDirectory, sessionId: sessionId) else {
+            Logger.state.error("An ended session's folder could not be listed — its state is kept")
+            return false
+        }
+        guard onDisk.isEmpty else {
+            // Its own chunk files — or another session's whose id starts with this one's (gotcha 85 (c)): kept either way.
+            Logger.state.error("An ended session with no chunk in its state has \(onDisk.count, privacy: .public) file(s) named as its chunks on disk (its own, or a session whose id starts with its id) — its state is kept")
+            return false
+        }
+        return SessionState.deleteIfEmpty(directory: outputDirectory, sessionId: sessionId)
     }
 
     /// Whether recovery has work to do. For a finalized session: its leftovers (session state, a

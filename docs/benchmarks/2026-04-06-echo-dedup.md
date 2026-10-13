@@ -9,7 +9,7 @@
 
 ## Methodology
 
-CLI re-processing of AAC archives via `Parley transcribe -i file.m4a`. Stereo AAC auto-split into dual mono WAVs via `AudioSourceResolver.splitChannels()`. Legacy mode (individual Jaccard only) via `--legacy-dedup` flag for A/B comparison. Human verification of ambiguous segments via `afplay` of extracted mic channel clips.
+CLI re-processing of AAC archives via `Parley transcribe -i file.m4a`. Stereo AAC auto-split into dual mono WAVs via `AudioSourceResolver.splitChannels()`. Legacy mode (individual Jaccard only) via a `--legacy-dedup` flag that existed at the commit above for this A/B comparison; it was removed afterwards (8621203), so this run cannot be repeated as written, and the enhanced algorithm measured here was itself replaced by cluster-level detection in #256. Human verification of ambiguous segments via `afplay` of extracted mic channel clips.
 
 ## Test Matrix
 

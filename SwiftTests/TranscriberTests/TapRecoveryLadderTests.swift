@@ -449,4 +449,51 @@ import Testing
         _ = busy.trigger(.stalled, now: 0)
         #expect(busy.trigger(.permissionInsurance, now: 0.1) == .none)
     }
+
+    // MARK: - #317: the record says what ordered each rung
+
+    /// The permission guard's insurance rebuild (12 s of exact zeros with the grant authorized) read in two real calls'
+    /// records as an unexplained rung: the rung in flight now carries what ordered it.
+    @Test func anInsuranceRungCarriesItsTrigger() {
+        var l = L()
+        #expect(l.trigger(.permissionInsurance, now: 0) == .run(.rebuildAggregate, token: 1, afterSeconds: 0))
+        #expect(l.inFlightCause == .trigger(.permissionInsurance))
+        #expect(l.inFlightCause?.recordValue == "permissionInsurance")
+    }
+
+    @Test func aStallRungCarriesItsTrigger() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)
+        #expect(l.inFlightCause == .trigger(.stalled))
+        #expect(l.inFlightCause?.recordValue == "stalled")
+    }
+
+    /// The ladder's own next steps name themselves: a failed rung's retry, a missed heartbeat, the slow retry.
+    @Test func theLaddersOwnStepsNameTheirCause() {
+        var l = L()
+        _ = l.trigger(.neverDelivered, now: 0)
+        _ = l.rungCompleted(token: 1, succeeded: false, now: 0.1)
+        #expect(l.inFlightCause == .trigger(.rebuildFailed))
+        _ = l.rungCompleted(token: 2, succeeded: true, now: 0.5)
+        #expect(l.inFlightCause == nil, "nothing in flight while the heartbeat is awaited")
+        _ = l.heartbeatDeadlineMissed(token: 2, now: 3.5, gateOpen: true)
+        #expect(l.inFlightCause == .heartbeatMissed)
+        #expect(l.inFlightCause?.recordValue == "heartbeatMissed")
+
+        var spent = L()
+        _ = spent.trigger(.stalled, now: 0)
+        for token in 1...4 { _ = spent.rungCompleted(token: token, succeeded: false, now: Double(token)) }
+        #expect(spent.exhausted)
+        _ = spent.slowRetryDue(now: 60)
+        #expect(spent.inFlightCause == .slowRetry)
+    }
+
+    /// A grant parked behind a rung in flight runs under its own name, not the parked-behind rung's.
+    @Test func aParkedGrantRunsUnderItsOwnTrigger() {
+        var l = L()
+        _ = l.trigger(.stalled, now: 0)
+        #expect(l.trigger(.permissionGrant, now: 0.1) == .none)
+        _ = l.rungCompleted(token: 1, succeeded: true, now: 0.2)
+        #expect(l.inFlightCause == .trigger(.permissionGrant))
+    }
 }

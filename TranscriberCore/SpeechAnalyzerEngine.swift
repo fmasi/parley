@@ -2,10 +2,9 @@ import Foundation
 import os
 import AVFoundation
 
-// SpeechAnalyzer/SpeechTranscriber require the macOS 26 SDK (Swift 6.2+).
-// CI runs on macos-15 (Swift 6.0) where these types don't exist in headers.
-// Remove this guard once GitHub Actions offers a macOS 26 runner.
-#if compiler(>=6.2)
+// SpeechAnalyzer/SpeechTranscriber are in the macOS 26 SDK, which every machine that builds Parley has (CI's
+// macos-26 image and development, #297). The deployment target is still macOS 15, so the engine is
+// `@available(macOS 26.0, *)` and its callers check `#available` at run time; no compile-time guard is needed.
 import Speech
 
 /// Transcription engine backed by Apple's SpeechAnalyzer (macOS 26+).
@@ -186,4 +185,3 @@ struct SystemSpeechAssetInventory: SpeechAssetInventory {
         }
     }
 }
-#endif // compiler(>=6.2)
