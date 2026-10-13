@@ -3,8 +3,9 @@ import Foundation
 /// Per-track coverage (§7.1): what was expected, what arrived, what was fabricated. Kept as plain
 /// counters outside the evicting diagnostic ring; emitted at every rotation and at stop.
 public struct TrackAccounting: Codable, Equatable, Sendable {
-    /// `degraded` (#308): every content anomaly on the side was a rate drift the helper healed within
-    /// `RateDriftWindow.healedBoundSeconds` — a few seconds at the wrong rate, the rest captured correctly.
+    /// `degraded` (#308): every content anomaly on the side was a rate drift the helper healed — or the capture stop
+    /// ended (#333 R4) — within `RateDriftWindow.healedBoundSeconds`: a few seconds at the wrong rate, the rest
+    /// captured correctly.
     public enum Status: String, Codable, Sendable { case healthy, idle, neverDelivered, degraded, compromised }
 
     public var expectedSeconds: Double = 0
@@ -225,6 +226,14 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
     public var onsetWithinSeconds: Double?
     /// Seconds from the detection to the remediation rebuild's first frames; nil = never healed.
     public var healedAfterSeconds: Double?
+    /// Seconds from the detection to the helper's own `captureStop`, when that is what ended the drift (#333 R4): no
+    /// rebuild had delivered first frames by then — the user stopped first, or the remediation budget was spent. The
+    /// wrong-rate audio ends where the recording does. nil = it healed, or nothing in the record ends it.
+    public var stoppedAfterSeconds: Double?
+    /// Whether the window starts after the remote side's last transcript segment, by more than
+    /// `afterSpeechMarginSeconds` (#333 R5). Answered by `TranscriptAssembler` for a stop-bounded window only, and only
+    /// when the record's timeline can be compared with the transcript's; nil = not judged.
+    public var afterLastSpeech: Bool?
 
     /// The most wrong-rate audio, summed over a side's drifts, that still reads `degraded` rather than `compromised`: the same 15 s the record
     /// already tolerates as a coverage shortfall (`TrackAccounting.minimumDeficitSeconds`). A side may lose up to that
@@ -232,21 +241,35 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
     /// distrust. The real 0.9.0 case (#308) measured a ~5 s window, a ~3 s rebuild and at most ~3 s before it: ~11 s.
     public static let healedBoundSeconds: Double = TrackAccounting.minimumDeficitSeconds
 
-    public init(detectedOffsetSeconds: Double? = nil, onsetWithinSeconds: Double? = nil, healedAfterSeconds: Double? = nil) {
+    /// How far past a side's last transcript segment a window must start to have touched no speech (#333 R5).
+    public static let afterSpeechMarginSeconds: Double = 1
+
+    public init(detectedOffsetSeconds: Double? = nil, onsetWithinSeconds: Double? = nil, healedAfterSeconds: Double? = nil,
+                stoppedAfterSeconds: Double? = nil) {
         self.detectedOffsetSeconds = detectedOffsetSeconds
         self.onsetWithinSeconds = onsetWithinSeconds
         self.healedAfterSeconds = healedAfterSeconds
+        self.stoppedAfterSeconds = stoppedAfterSeconds
     }
 
-    /// At most this many seconds were captured at the wrong rate; nil when the onset is unknown or it never healed.
+    /// At most this many seconds were captured at the wrong rate; nil when the onset is unknown, or when nothing in
+    /// the record ends the drift (neither a rebuild's first frames nor the capture stop).
     public var affectedSeconds: Double? {
-        guard let onsetWithinSeconds, let healedAfterSeconds else { return nil }
-        return onsetWithinSeconds + healedAfterSeconds
+        guard let onsetWithinSeconds, let endedAfter = healedAfterSeconds ?? stoppedAfterSeconds else { return nil }
+        return onsetWithinSeconds + endedAfter
+    }
+
+    /// Seconds from capture start to where the wrong-rate window begins, at the earliest; nil when the detection's
+    /// offset or the onset is unknown.
+    public var startOffsetSeconds: Double? {
+        guard let detectedOffsetSeconds, let onsetWithinSeconds else { return nil }
+        return max(0, detectedOffsetSeconds - onsetWithinSeconds)
     }
 
     /// How many of a side's drifts may count as healed for `TrackAccounting.status`: the healed ones with a known
     /// window, and only while their windows SUM to no more than the bound (#311 review) — three 7 s drifts are 21 s
-    /// at the wrong rate, not three blemishes. 0 otherwise, which keeps the side `compromised`.
+    /// at the wrong rate, not three blemishes. 0 otherwise, which keeps the side `compromised`. A drift the capture
+    /// stop ended (#333 R4) counts the same, in the same sum: its wrong-rate audio is bounded too.
     public static func healedWithinBound(_ windows: [RateDriftWindow]) -> Int {
         let healed = windows.compactMap(\.affectedSeconds)
         return healed.reduce(0, +) <= healedBoundSeconds ? healed.count : 0
@@ -256,19 +279,31 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
         case detectedOffsetSeconds = "detected_offset_seconds"
         case onsetWithinSeconds = "onset_within_seconds"
         case healedAfterSeconds = "healed_after_seconds"
+        case stoppedAfterSeconds = "stopped_after_seconds"
+        case afterLastSpeech = "after_last_speech"
     }
 
+    /// `ended_by` of a window the capture stop ended (#333 R4).
+    static let endedByStop = "stop"
+
     /// One entry of `metadata.capture.remote.rate_drift`. `offset_seconds` is where the wrong-rate window starts
-    /// (the earliest onset), `affected_seconds` its length at most; an unknown onset says so instead.
+    /// (the earliest onset), `affected_seconds` its length at most; an unknown onset says so instead. A window the
+    /// capture stop ended says `ended_by: "stop"` and `healed: false` (#333 R4): the recording ended, nothing healed.
     public func asMetadataDictionary() -> [String: Any] {
         var d: [String: Any] = ["healed": healedAfterSeconds != nil]
         if let detectedOffsetSeconds { d["detected_offset_seconds"] = Self.tenths(detectedOffsetSeconds) }
-        if let onsetWithinSeconds {
-            if let detectedOffsetSeconds { d["offset_seconds"] = Self.tenths(max(0, detectedOffsetSeconds - onsetWithinSeconds)) }
+        if onsetWithinSeconds != nil {
+            if let startOffsetSeconds { d["offset_seconds"] = Self.tenths(startOffsetSeconds) }
         } else {
             d["onset"] = "unknown"
         }
-        if let healedAfterSeconds { d["healed_after_seconds"] = Self.tenths(healedAfterSeconds) }
+        if let healedAfterSeconds {
+            d["healed_after_seconds"] = Self.tenths(healedAfterSeconds)
+        } else if let stoppedAfterSeconds {
+            d["ended_by"] = Self.endedByStop
+            d["stopped_after_seconds"] = Self.tenths(stoppedAfterSeconds)
+            if let afterLastSpeech { d["after_last_speech"] = afterLastSpeech }
+        }
         if let affectedSeconds {
             d["affected_seconds"] = Self.tenths(affectedSeconds)
             d["affected_seconds_is_upper_bound"] = true
@@ -277,4 +312,17 @@ public struct RateDriftWindow: Codable, Equatable, Sendable {
     }
 
     private static func tenths(_ value: Double) -> Double { (value * 10).rounded() / 10 }
+
+    /// How many of a side's drifts are recorded but not announced (#333 R5), read from the side's stamped dictionary
+    /// (`metadata.capture.remote`, `capture_provenance.remote_coverage`): all of them when the side is `degraded` and
+    /// EVERY window ended at the Stop after the side's last speech; 0 otherwise. The one rule the summary header and
+    /// banner and the completion notice all read, so they cannot disagree. The status stays `degraded` in the record:
+    /// this decides what is said, never what is written.
+    public static func unannounced(inSide side: [String: Any]?) -> Int {
+        guard let side, side["status"] as? String == TrackAccounting.Status.degraded.rawValue,
+              let windows = side["rate_drift"] as? [[String: Any]], !windows.isEmpty,
+              windows.allSatisfy({ $0["ended_by"] as? String == endedByStop && $0["after_last_speech"] as? Bool == true })
+        else { return 0 }
+        return windows.count
+    }
 }

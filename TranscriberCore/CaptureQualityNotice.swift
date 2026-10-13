@@ -143,7 +143,11 @@ public enum CaptureQualityNotice {
         // Transcripts written before this field existed simply have no quality signal — absent means
         // 0, never a retroactive alarm.
         // `as? Int` already bridges the NSNumber that JSONSerialization produces for JSON integers.
-        return provenance["quality_anomaly_count"] as? Int ?? 0
+        let count = provenance["quality_anomaly_count"] as? Int ?? 0
+        // A drift the Stop ended after the other side's last word (#333 R5) is recorded, not announced: it leaves the
+        // count read here, or the notice would fall through to "1 capture anomaly recorded; audio may be affected"
+        // for a drift that touched nothing anybody said. `quality_anomaly_count` itself stays as recorded.
+        return max(0, count - RateDriftWindow.unannounced(inSide: provenance["remote_coverage"] as? [String: Any]))
     }
 
     /// Distinct chunks with a content-affecting processing issue, computed from
@@ -171,11 +175,16 @@ public enum CaptureQualityNotice {
     /// uses (final review R-I2). nil when the transcript can't be read back (the caller says it could not check); each
     /// side nil when its key is absent (never an invented alarm). Synchronous file I/O — call off the main actor, like
     /// `anomalyCount(inTranscriptAt:)`.
+    ///
+    /// What the notice is to say, not the record: a remote side `degraded` only by drifts the Stop ended after its
+    /// last speech (`RateDriftWindow.unannounced`, #333 R5) answers nil — nothing to say, as the summary banner says
+    /// nothing. The transcript still reads `degraded`.
     public static func sideStatuses(inTranscriptAt url: URL) -> (remote: String?, local: String?)? {
         guard let root = readRoot(url) else { return nil }
         let provenance = (root["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any]
         func status(_ key: String) -> String? { (provenance?[key] as? [String: Any])?["status"] as? String }
-        return (status("remote_coverage"), status("local_coverage"))
+        let remoteUnannounced = RateDriftWindow.unannounced(inSide: provenance?["remote_coverage"] as? [String: Any]) > 0
+        return (remoteUnannounced ? nil : status("remote_coverage"), status("local_coverage"))
     }
 
     private static func readRoot(_ url: URL) -> [String: Any]? {
