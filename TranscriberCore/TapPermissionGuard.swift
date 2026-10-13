@@ -118,9 +118,9 @@ public struct TapPermissionGuard {
     /// rebuild), from the run's first frame until real audio returns. The rest is silence that
     /// began and ended, or is still going on, with the grant proven.
     public private(set) var unprovenZeroFrames: Int64 = 0
-    /// Zeros of the CURRENT run counted as proven so far. The proof is withdrawn only when the answer
-    /// arrives, 12 s or more into the run that made the guard ask: those zeros are what the answer
-    /// is about, so `withdrawProof` moves them to `unprovenZeroFrames`. Real audio ends the run and
+    /// Zeros of the CURRENT run counted as proven so far. The proof is withdrawn by any non-authorized
+    /// answer or build, whenever it arrives (the check a run itself prompts comes 12 s or more into it):
+    /// those zeros are what the answer is about, so `withdrawProof` moves them to `unprovenZeroFrames`. Real audio ends the run and
     /// settles them as silence. Like `zeroRunStartedAt`, it runs on across a confirmed rebuild.
     private var provenRunZeroFrames: Int64 = 0
 

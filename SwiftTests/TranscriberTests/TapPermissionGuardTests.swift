@@ -369,6 +369,7 @@ struct TapPermissionGuardTests {
             _ = g.samples(zeros, rate: 48_000, now: 15)
             withdraw(&g)
             #expect(g.unprovenZeroFrames == 604_800 && g.exactZeroFrames == 609_600, "\(name): each frame is counted once")
+            #expect(g.unprovenZeroFrames <= g.exactZeroFrames, "\(name): never more unproven zeros than zeros")
         }
     }
 
