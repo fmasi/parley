@@ -294,7 +294,21 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     public let remoteContentAnomalyCount: Int?
     /// Each rate drift on the remote side, in order (#308): where it sits, how long audio was at the wrong rate, and
     /// whether it healed. nil exactly when the remote coverage is (and in provenance written before this field).
-    public let remoteRateDrift: [RateDriftWindow]?
+    /// `var`: `TranscriptAssembler` answers each stop-bounded window's `afterLastSpeech` (#333 R5).
+    public var remoteRateDrift: [RateDriftWindow]?
+    /// How many `captureStart` the record holds (#333 R5). Drift offsets (wall-clock from the first start) can be
+    /// compared with transcript times only within one helper session: one start AND one `helperSessions`. nil in
+    /// provenance written before this field, which reads as "not known to be one".
+    public let captureStarts: Int?
+    /// How many helper sessions the coverage was tallied over (#333 R5, review round 1): a helper that crashed before
+    /// its `captureStart` was drained leaves a stand-in stop and no start, so one `captureStart` does not prove one
+    /// session. nil in provenance written before this field.
+    public let helperSessions: Int?
+    /// Seconds from the first `captureStart` to the first buffer of EITHER track (the earliest `firstFrames`), #333 R5.
+    /// A chunk's time zero is its WAV's creation, but its sample 0 is that first buffer: every transcript time is
+    /// early by this much against the record's wall-clock offsets. nil when the record holds no `firstFrames` (or no
+    /// `captureStart`), and in provenance written before this field: unknown, never 0.
+    public let firstFramesAfterStartSeconds: Double?
     /// The transcript was rebuilt by a recovery run (its original was unreadable), and these capture
     /// facts come from that run's diagnostics, not the recording's: they may be incomplete (round 4
     /// item 7).
@@ -336,6 +350,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         case localContentAnomalyCount = "local_content_anomaly_count"
         case remoteContentAnomalyCount = "remote_content_anomaly_count"
         case remoteRateDrift = "remote_rate_drift"
+        case captureStarts = "capture_starts"
+        case helperSessions = "helper_sessions"
+        case firstFramesAfterStartSeconds = "first_frames_after_start_seconds"
         case reconstructed
         case build
     }
@@ -362,6 +379,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         localContentAnomalyCount: Int? = nil,
         remoteContentAnomalyCount: Int? = nil,
         remoteRateDrift: [RateDriftWindow]? = nil,
+        captureStarts: Int? = nil,
+        helperSessions: Int? = nil,
+        firstFramesAfterStartSeconds: Double? = nil,
         build: String? = nil
     ) {
         self.engine = engine
@@ -385,6 +405,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         self.localContentAnomalyCount = localContentAnomalyCount
         self.remoteContentAnomalyCount = remoteContentAnomalyCount
         self.remoteRateDrift = remoteRateDrift
+        self.captureStarts = captureStarts
+        self.helperSessions = helperSessions
+        self.firstFramesAfterStartSeconds = firstFramesAfterStartSeconds
         self.build = build
     }
 
@@ -420,6 +443,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
         localContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .localContentAnomalyCount)
         remoteContentAnomalyCount = try c.decodeIfPresent(Int.self, forKey: .remoteContentAnomalyCount)
         remoteRateDrift = try c.decodeIfPresent([RateDriftWindow].self, forKey: .remoteRateDrift)
+        captureStarts = try c.decodeIfPresent(Int.self, forKey: .captureStarts)
+        helperSessions = try c.decodeIfPresent(Int.self, forKey: .helperSessions)
+        firstFramesAfterStartSeconds = try c.decodeIfPresent(Double.self, forKey: .firstFramesAfterStartSeconds)
         reconstructed = try c.decodeIfPresent(Bool.self, forKey: .reconstructed) ?? false
         build = try c.decodeIfPresent(String.self, forKey: .build)
     }
@@ -558,6 +584,13 @@ public struct CaptureDiagnostics: Sendable {
     private var driftRemediations: [Date] = []
     private var systemFirstFrames: [Date] = []
     private var firstCaptureStart: Date?
+    /// What can end a drift no rebuild healed (#333 R4): every `captureStart`, and every `captureStop` of the helper's
+    /// own (never a stand-in made from a status pull). Out of ring, like the drifts they are paired with.
+    private var captureStarts: [Date] = []
+    private var helperStops: [Date] = []
+    /// The microphone's `firstFrames`, beside the system's above (#333 R5): the earlier of the two tracks' first
+    /// buffers is sample 0 of the recording, which is where transcript times count from.
+    private var micFirstFrames: [Date] = []
 
     /// Idempotency guards (fix round 1 item 1): `LiveDiagnosticsLog.merged(into:)` re-presents
     /// events the ring already evicted (read back from the live log) alongside events the ring
@@ -612,7 +645,11 @@ public struct CaptureDiagnostics: Sendable {
             driftRemediations.append(e.timestamp)
         }
         if e.kind == .firstFrames, e.detail["track"] == CaptureTrack.system.rawValue { systemFirstFrames.append(e.timestamp) }
-        if e.kind == .captureStart { firstCaptureStart = min(firstCaptureStart ?? e.timestamp, e.timestamp) }
+        if e.kind == .firstFrames, e.detail["track"] == CaptureTrack.mic.rawValue { micFirstFrames.append(e.timestamp) }
+        if e.kind == .captureStart {
+            firstCaptureStart = min(firstCaptureStart ?? e.timestamp, e.timestamp)
+            captureStarts.append(e.timestamp)
+        }
         if e.kind == .systemAudioPermissionDenied, Self.confirmedDenialStatuses.contains(e.detail["status"] ?? "") {
             lastConfirmedDenial = max(lastConfirmedDenial ?? e.timestamp, e.timestamp)
         }
@@ -625,6 +662,7 @@ public struct CaptureDiagnostics: Sendable {
             // A stand-in is the helper's last status pull, which can trail what it captured: a lower bound (#295).
             // Its helper's real stop replaces it, mark included.
             let standIn = e.detail["from"] == Self.standInSource
+            if !standIn { helperStops.append(e.timestamp) }
             var tracks: [String: TrackAccounting] = [:]
             for prefix in ["local", "remote"] {
                 var track = TrackAccounting(detail: e.detail, prefix: prefix)
@@ -642,17 +680,37 @@ public struct CaptureDiagnostics: Sendable {
     /// The remote side's rate drifts as windows (#308). A drift HEALED when the rebuild made to remediate it (the
     /// first remediation after it, before the next drift) delivered its first frames. Not healed otherwise: no
     /// rebuild (the remediation budget was spent), a rebuild that never delivered, or one the record never saw.
+    ///
+    /// A drift that did not heal ends at the capture stop (#333 R4): the user stopped before the rebuild's first
+    /// frames, or there was no rebuild. The wrong-rate audio is bounded all the same — the recording is over. Only
+    /// when the record shows it: the stop is the helper's own (a stand-in is a crashed helper's last status pull, and
+    /// says nothing about when capture ended), no later drift comes before it (that one claims the stop), and no
+    /// `captureStart` lies between (the stop would be another helper session's).
     public func remoteRateDrift() -> [RateDriftWindow] {
         let drifts = systemDrifts.sorted { $0.at < $1.at }
         let remediations = driftRemediations.sorted(), firsts = systemFirstFrames.sorted()
+        let stops = helperStops.sorted()
         return drifts.enumerated().map { i, drift in
             let next = i + 1 < drifts.count ? drifts[i + 1].at : .distantFuture
             let healedAt = remediations.first { $0 >= drift.at && $0 < next }
                 .flatMap { rebuild in firsts.first { $0 > rebuild } }
+            let stoppedAt = healedAt != nil ? nil : stops.first { $0 >= drift.at }.flatMap { stop in
+                stop < next && !captureStarts.contains { $0 > drift.at && $0 < stop } ? stop : nil
+            }
             return RateDriftWindow(detectedOffsetSeconds: firstCaptureStart.map { max(0, drift.at.timeIntervalSince($0)) },
                                    onsetWithinSeconds: drift.onsetWithin,
-                                   healedAfterSeconds: healedAt.map { $0.timeIntervalSince(drift.at) })
+                                   healedAfterSeconds: healedAt.map { $0.timeIntervalSince(drift.at) },
+                                   stoppedAfterSeconds: stoppedAt.map { $0.timeIntervalSince(drift.at) })
         }
+    }
+
+    /// Seconds from the first `captureStart` to the first buffer of either track (`CaptureProvenance`'s field of the
+    /// same name); nil when the record holds no start, or no `firstFrames` after it.
+    private var firstFramesAfterStartSeconds: Double? {
+        guard let start = firstCaptureStart,
+              let first = (systemFirstFrames + micFirstFrames).filter({ $0 >= start }).min()
+        else { return nil }
+        return first.timeIntervalSince(start)
     }
 
     /// What marks a `captureStop` as a stand-in (`detail["from"]`): made from a helper session's last status pull.
@@ -725,6 +783,9 @@ public struct CaptureDiagnostics: Sendable {
         driftRemediations.removeAll()
         systemFirstFrames.removeAll()
         firstCaptureStart = nil
+        captureStarts.removeAll()
+        helperStops.removeAll()
+        micFirstFrames.removeAll()
         countedKeys.removeAll()
         droppedKeys.removeAll()
     }
@@ -892,6 +953,9 @@ public struct CaptureDiagnostics: Sendable {
             localContentAnomalyCount: local.map { _ in contentAnomalyCount(track: "mic") },
             remoteContentAnomalyCount: remote.map { _ in contentAnomalyCount(track: "system") },
             remoteRateDrift: remote.map { _ in drifts },
+            captureStarts: captureStarts.count,
+            helperSessions: coverageOrder.count,
+            firstFramesAfterStartSeconds: firstFramesAfterStartSeconds,
             build: builds.isEmpty ? nil : builds.sorted().joined(separator: ",")
         )
     }

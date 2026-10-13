@@ -43,8 +43,11 @@ import Testing
         CaptureEvent(timestamp: base, origin: .helper, kind: .captureStart, severity: .info, detail: ["system_source": "coreAudioTap"])
     }
 
-    private func stop(_ t: TimeInterval, remote: TrackAccounting) -> CaptureEvent {
-        CaptureEvent(timestamp: at(t), origin: .helper, kind: .captureStop, severity: .info, detail: remote.asDetail(prefix: "remote"))
+    /// `standIn`: the stop `SessionEvidence` makes from a crashed helper's last status pull (#295), not the helper's own.
+    private func stop(_ t: TimeInterval, remote: TrackAccounting, standIn: Bool = false) -> CaptureEvent {
+        var detail = remote.asDetail(prefix: "remote")
+        if standIn { detail.merge(["helper_session": "h1", "from": CaptureDiagnostics.standInSource]) { _, new in new } }
+        return CaptureEvent(timestamp: at(t), origin: .helper, kind: .captureStop, severity: .info, detail: detail)
     }
 
     private func provenance(_ events: [CaptureEvent]) -> CaptureProvenance {
@@ -91,8 +94,10 @@ import Testing
         #expect(entry["affected_seconds_is_upper_bound"] as? Bool == true)
     }
 
+    /// Nothing in the record ends it: no rebuild's first frames, and no stop of the helper's own (#333 R4 — a crashed
+    /// helper's stand-in is not one).
     @Test func aDriftThatNeverHealedStaysCompromised() throws {
-        let p = provenance([start(), drift(3650), remediation(3650.01), stop(3657, remote: coverage())])
+        let p = provenance([start(), drift(3650), remediation(3650.01), stop(3657, remote: coverage(), standIn: true)])
         #expect(p.remoteStatus == "compromised")
         let entry = try #require(driftEntries(p).first)
         #expect(entry["healed"] as? Bool == false)
@@ -208,6 +213,132 @@ import Testing
         #expect(a.status(isTap: true, contentAnomalies: 1, healedDrifts: 1) == .degraded)
         #expect(a.status(isTap: true, contentAnomalies: 2, healedDrifts: 1) == .compromised)
         #expect(a.status(isTap: true, contentAnomalies: 0) == .healthy)
+    }
+
+    // MARK: - Cut short by Stop (#333 R4)
+
+    /// The 2026-10-13 shape: the output changed rate at hang-up, the remediation rebuild started, and the user
+    /// stopped before its first frames. The wrong-rate audio ends where the recording does.
+    @Test func aDriftCutShortByStopIsBoundedByTheStop() throws {
+        let p = provenance([start(), drift(3955, onsetWithin: "3.0"), remediation(3955.01), stop(3955.3, remote: coverage())])
+        #expect(p.remoteStatus == "degraded")
+        let window = try #require(p.remoteRateDrift?.first)
+        #expect(window.healedAfterSeconds == nil)
+        #expect(abs((window.stoppedAfterSeconds ?? -1) - 0.3) < 0.001)
+        let entry = try #require(driftEntries(p).first)
+        #expect(entry["healed"] as? Bool == false, "the record never says it healed")
+        #expect(entry["ended_by"] as? String == "stop")
+        #expect(entry["stopped_after_seconds"] as? Double == 0.3)
+        #expect(entry["offset_seconds"] as? Double == 3952)
+        #expect(entry["affected_seconds"] as? Double == 3.3)
+        #expect(entry["healed_after_seconds"] == nil)
+    }
+
+    @Test func aHealedDriftDoesNotSayHowItEnded() throws {
+        let entry = try #require(driftEntries(provenance(realCase)).first)
+        #expect(entry["ended_by"] == nil && entry["stopped_after_seconds"] == nil)
+    }
+
+    /// The remediation budget was spent: no rebuild at all. Still bounded by the stop — and then usually too long.
+    @Test func aDriftWithNoRemediationIsStopBoundedToo() throws {
+        let short = provenance([start(), drift(100, onsetWithin: "4.0"), stop(105, remote: coverage(expected: 105, delivered: 105))])
+        #expect(short.remoteStatus == "degraded")
+        #expect(try #require(driftEntries(short).first)["affected_seconds"] as? Double == 9)
+        let long = provenance([start(), drift(100, onsetWithin: "4.0"), stop(200, remote: coverage(expected: 200, delivered: 200))])
+        #expect(long.remoteStatus == "compromised")
+        let entry = try #require(driftEntries(long).first)
+        #expect(entry["ended_by"] as? String == "stop" && entry["affected_seconds"] as? Double == 104)
+    }
+
+    /// A stop-bounded window counts in the same sum as the healed ones.
+    @Test func theSumBoundCoversStopBoundedWindowsToo() {
+        func events(stopAt: TimeInterval) -> [CaptureEvent] {
+            [start(), drift(100, onsetWithin: "4.0"), remediation(100.01), firstFrames(103),
+             drift(600, onsetWithin: "4.0"), remediation(600.01), stop(stopAt, remote: coverage(expected: stopAt, delivered: stopAt))]
+        }
+        #expect(provenance(events(stopAt: 604)).remoteStatus == "degraded", "7 s + 8 s")
+        #expect(provenance(events(stopAt: 604.5)).remoteStatus == "compromised", "7 s + 8.5 s")
+        #expect(RateDriftWindow.healedWithinBound([RateDriftWindow(onsetWithinSeconds: 10, stoppedAfterSeconds: 5)]) == 1)
+        #expect(RateDriftWindow.healedWithinBound([RateDriftWindow(onsetWithinSeconds: 10, stoppedAfterSeconds: 5.1)]) == 0)
+    }
+
+    /// A capture that started again before the stop: the stop is another session's, not this drift's end.
+    @Test func aStopAfterANewCaptureStartDoesNotBoundADrift() throws {
+        let restart = CaptureEvent(timestamp: at(3956), origin: .helper, kind: .captureStart, severity: .info, detail: [:])
+        let p = provenance([start(), drift(3955, onsetWithin: "3.0"), remediation(3955.01), restart, stop(3957, remote: coverage())])
+        #expect(p.remoteStatus == "compromised")
+        #expect(try #require(driftEntries(p).first)["ended_by"] == nil)
+    }
+
+    /// Two drifts before one stop: the stop ends the later one. The earlier one has no end in the record.
+    @Test func aLaterDriftClaimsTheStop() {
+        let p = provenance([start(), drift(100, onsetWithin: "2.0"), drift(102, onsetWithin: "2.0"),
+                            stop(103, remote: coverage(expected: 103, delivered: 103))])
+        let entries = driftEntries(p)
+        #expect(entries.first?["ended_by"] == nil && entries.first?["affected_seconds"] == nil)
+        #expect(entries.last?["ended_by"] as? String == "stop")
+        #expect(p.remoteStatus == "compromised")
+    }
+
+    /// A rebuild that delivered is how it ended, whatever stop follows.
+    @Test func firstFramesBeatTheStop() throws {
+        let entry = try #require(driftEntries(provenance(realCase)).first)
+        #expect(entry["healed"] as? Bool == true && entry["healed_after_seconds"] as? Double == 3)
+    }
+
+    @Test func stopBoundedPairingDoesNotDependOnTheOrderEventsArrive() {
+        var d = CaptureDiagnostics()
+        for e in [stop(3955.3, remote: coverage()), start()] { d.record(e) }
+        d.merge([remediation(3955.01), drift(3955, onsetWithin: "3.0")])
+        #expect(d.makeProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil).remoteStatus == "degraded")
+    }
+
+    /// session.json written by #311 has none of the new keys; one written now keeps them.
+    @Test func windowsDecodeWithoutTheNewKeysAndRoundTripWithThem() throws {
+        let older = try JSONDecoder().decode(RateDriftWindow.self, from: Data(
+            #"{"detected_offset_seconds": 3650, "onset_within_seconds": 8.1, "healed_after_seconds": 3}"#.utf8))
+        #expect(older.stoppedAfterSeconds == nil && older.afterLastSpeech == nil && older.affectedSeconds == 11.1)
+        let p = provenance([start(), drift(3955, onsetWithin: "3.0"), remediation(3955.01), stop(3955.3, remote: coverage())])
+        let back = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(back.remoteRateDrift == p.remoteRateDrift && back.captureStarts == 1)
+        let before = try JSONDecoder().decode(CaptureProvenance.self, from: Data(
+            #"{"engine": "e", "route_changes": 0, "retries": 0, "recovered": false, "anomaly_count": 0}"#.utf8))
+        #expect(before.captureStarts == nil && before.helperSessions == nil && before.firstFramesAfterStartSeconds == nil)
+    }
+
+    /// What `TranscriptAssembler` needs to compare a window with the transcript (#333 R5): how many helper sessions
+    /// the coverage was tallied over, and how long after `captureStart` the first buffer of either track arrived.
+    @Test func theRecordKeepsTheHelperSessionsAndTheFirstFrameLatency() throws {
+        let p = provenance([start(), firstFrames(3.2, track: "mic"), firstFrames(3), drift(3955, onsetWithin: "3.0"),
+                            firstFrames(3956), stop(3960, remote: coverage())])
+        #expect(p.helperSessions == 1 && p.firstFramesAfterStartSeconds == 3)
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(p)) as? [String: Any])
+        #expect(json["helper_sessions"] as? Int == 1 && json["first_frames_after_start_seconds"] as? Double == 3)
+        #expect(json["capture_starts"] as? Int == 1)
+        let back = try JSONDecoder().decode(CaptureProvenance.self, from: JSONEncoder().encode(p))
+        #expect(back.helperSessions == 1 && back.firstFramesAfterStartSeconds == 3)
+        // The microphone's first buffer, when it came first.
+        #expect(provenance([start(), firstFrames(1, track: "mic"), firstFrames(3), stop(10, remote: coverage())]).firstFramesAfterStartSeconds == 1)
+        // No first frames in the record: unknown, never 0.
+        #expect(provenance([start(), stop(10, remote: coverage())]).firstFramesAfterStartSeconds == nil)
+        // A crashed helper's stand-in is a helper session of its own.
+        let two = provenance([start(), stop(5, remote: coverage(), standIn: true),
+                              CaptureEvent(timestamp: at(10), origin: .helper, kind: .captureStop, severity: .info,
+                                           detail: coverage().asDetail(prefix: "remote").merging(["helper_session": "h2"]) { $1 })])
+        #expect(two.helperSessions == 2 && two.captureStarts == 1)
+    }
+
+    /// #229: a helper's stand-in stop is replaced by its real stop when that arrives, never added to it — one helper
+    /// session, whichever of the two the record saw first.
+    @Test func aStandInReplacedByItsRealStopIsOneHelperSession() {
+        let real = CaptureEvent(timestamp: at(10), origin: .helper, kind: .captureStop, severity: .info,
+                                detail: coverage().asDetail(prefix: "remote").merging(["helper_session": "h1"]) { $1 })
+        let standIn = stop(5, remote: coverage(expected: 5, delivered: 5), standIn: true)   // also "h1"
+        for events in [[start(), standIn, real], [start(), real, standIn]] {
+            let p = provenance(events)
+            #expect(p.helperSessions == 1 && p.captureStarts == 1)
+            #expect(p.remoteCoverage?.deliveredSeconds == 3657, "the real stop's coverage, not the sum")
+        }
     }
 
     // MARK: - The helper's onset bound

@@ -43,10 +43,24 @@ public struct CaptureSideNote: Equatable, Sendable {
     /// At most this many seconds were captured at the wrong rate, summed over the side's `rate_drift` windows that
     /// state it (#308); nil when none does.
     public let wrongRateSeconds: Double?
+    /// Remote side only: the part of `exactZeroSeconds` nobody can vouch for (`exact_zero_unproven_seconds`, #333) —
+    /// zeros delivered while the tap's grant was not proven. nil when the transcript does not record it (an older
+    /// record, SCK): the verdict is then judged on the total, as before.
+    public let exactZeroUnprovenSeconds: Double?
+    /// One of the side's `rate_drift` windows ended at the capture stop, not at a rebuild's first frames (#333 R4):
+    /// the line must not say Parley recovered.
+    public let driftEndedByStop: Bool
+    /// The side is `degraded` only by drifts that ended at the Stop after its last speech
+    /// (`RateDriftWindow.unannounced`, #333 R5): recorded, not announced.
+    public let driftsUnannounced: Bool
 
     public init(status: String, deliveredSeconds: Double, expectedSeconds: Double,
                 exactZeroSeconds: Double? = nil, permissionDenied: Bool? = nil, anomalyCount: Int? = nil, exactZeroIsLowerBound: Bool = false,
-                coverageIncomplete: Bool = false, wrongRateSeconds: Double? = nil) {
+                coverageIncomplete: Bool = false, wrongRateSeconds: Double? = nil, exactZeroUnprovenSeconds: Double? = nil,
+                driftEndedByStop: Bool = false, driftsUnannounced: Bool = false) {
+        self.exactZeroUnprovenSeconds = exactZeroUnprovenSeconds
+        self.driftEndedByStop = driftEndedByStop
+        self.driftsUnannounced = driftsUnannounced
         self.wrongRateSeconds = wrongRateSeconds
         self.exactZeroIsLowerBound = exactZeroIsLowerBound
         self.coverageIncomplete = coverageIncomplete

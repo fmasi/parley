@@ -870,3 +870,21 @@ real call (WhatsApp, Meet or Zoom), on AirPods: a rebuild is what drops Bluetoot
 - [ ] **G-04 A revocation is still caught.** Run P-06 (revoked mid-call) after the other side has spoken.
   PASS: P-06's own conditions, unchanged: the audio keeps coming or the row appears within ~15 s, the alarm
   is up after the output switch, and switching the permission back on restores the audio by itself.
+- [ ] **G-05 Hang up, Stop within 2 s: no banner.** On AirPods, let the other side say their last words,
+  wait ~10 s in silence, hang up and press Stop within 2 s (the hang-up changes the output rate; Stop arrives
+  before the rebuild's first frames). Why 10 s: the window starts up to `onset_within_seconds` (~3 s) before
+  the hang-up, and the last word must end more than 1 s plus the first-frame latency before it (the earliest
+  `firstFrames` − `captureStart` in the `.diag.jsonl`: usually under a second, up to ~5 s). Check it on the
+  record: `offset_seconds` − the last remote segment's `end` is above that margin. PASS: the notice reads
+  "Transcription Complete", the summary has no
+  "Remote audio" line and no banner, and the transcript's `metadata.capture.remote` still reads
+  `status: "degraded"` with one `rate_drift` entry: `healed: false`, `ended_by: "stop"`,
+  `after_last_speech: true`, `affected_seconds` of a few seconds. `capture_provenance.quality_anomaly_count`
+  is still 1 and the `.diag.jsonl` is kept. If the other side was still talking at the hang-up, the entry
+  reads `after_last_speech: false` and the summary says "… recorded at the wrong rate before the recording
+  stopped", with the "brief capture glitch" notice: also a pass. If no `rateDrift` fired, repeat.
+- [ ] **G-06 Muted for minutes after speaking: no "uncertain" line.** The other side talks for a minute,
+  mutes for 5 minutes or more (over 10 % of the call), then talks again; Stop normally. PASS: the summary
+  has no "uncertain — … could not confirm the permission" line and no banner, and the notice reads
+  "Transcription Complete", not "… — remote audio uncertain"; `exact_zero_seconds` is about the muted time
+  and `exact_zero_unproven_seconds` only the few seconds before their first word.

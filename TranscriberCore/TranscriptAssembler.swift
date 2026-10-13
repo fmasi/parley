@@ -75,7 +75,8 @@ public enum TranscriptAssembler {
         // Capture provenance (#95): a compact, always-present stamp of how this recording was
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.
         if let provenance {
-            let provenanceDictionary = provenance.asMetadataDictionary()
+            let provenanceDictionary = answeringAfterLastSpeech(provenance, segments: segments, captureGaps: captureGaps)
+                .asMetadataDictionary()
             metadata["capture_provenance"] = provenanceDictionary
             // How much of each side was captured (§7.2 `metadata.capture.remote/local`). Taken from
             // the provenance dictionary so the status here is exactly the one stamped there,
@@ -166,6 +167,48 @@ public enum TranscriptAssembler {
             "metadata": metadata,
             "segments": segmentDicts,
         ]
+    }
+
+    /// Whether each drift the capture stop ended began after the remote side's last speech (#333 R5): such a drift
+    /// touched nothing anybody said, so it is recorded, not announced (`RateDriftWindow.unannounced`).
+    ///
+    /// Answered HERE because this is the one place that holds both the capture record and the transcript's segments,
+    /// and it is stamped into the record (`rate_drift[].after_last_speech`) rather than worked out by each reader: the
+    /// summary header, its banner and the completion notice then read one answer and cannot disagree, and the record
+    /// itself says why a `degraded` side was not announced.
+    ///
+    /// The two clocks: a drift's offset is wall-clock from the first `captureStart`; a segment's time counts from the
+    /// recording's sample 0, which is the first buffer of either track — later than the start by the first-frame
+    /// latency (up to ~5 s before any alarm fires). So a transcript time reads EARLY by that latency, and a last word
+    /// that really ended inside the window can read as before it (review round 1). The window is therefore judged in
+    /// the record's own clock: it must start more than `afterSpeechMarginSeconds` + that latency after the last word.
+    ///
+    /// Fail closed — a window is left unanswered, and so announced as #311 does, unless all of this holds:
+    /// - it ended at the Stop (R4). A drift a rebuild healed is mid-call: audio at the right rate followed it.
+    /// - the record is one helper session: one `captureStart`, one tallied helper (a helper that crashed before its
+    ///   start was drained leaves a stand-in stop and no start), no recovery and no gap. Past any of those the two
+    ///   clocks are apart by more than one latency. A `reconstructed` record is out too: its capture facts are the
+    ///   recovery run's, not the recording's.
+    /// - the record holds a `firstFrames`, so the latency is known. Unknown is never taken for 0.
+    /// - the remote side has a last segment with a known end. EVERY remote segment counts, a `filtered` one too: the
+    ///   wrong rate may be why it was filtered. A segment with no usable time could be anywhere.
+    static func answeringAfterLastSpeech(_ provenance: CaptureProvenance, segments: [LabeledSegment],
+                                         captureGaps: [CaptureGap]) -> CaptureProvenance {
+        guard var windows = provenance.remoteRateDrift, windows.contains(where: { $0.stoppedAfterSeconds != nil }),
+              provenance.captureStarts == 1, provenance.helperSessions == 1, !provenance.recovered, !provenance.reconstructed,
+              captureGaps.isEmpty,
+              let latency = provenance.firstFramesAfterStartSeconds, latency.isFinite, latency >= 0
+        else { return provenance }
+        let ends = segments.filter { $0.source != "local" }.map(\.end)
+        guard ends.allSatisfy(\.isFinite), let lastSpeech = ends.max() else { return provenance }
+        let margin = RateDriftWindow.afterSpeechMarginSeconds + latency
+        for i in windows.indices where windows[i].stoppedAfterSeconds != nil {
+            guard let start = windows[i].startOffsetSeconds else { continue }
+            windows[i].afterLastSpeech = start > lastSpeech + margin
+        }
+        var answered = provenance
+        answered.remoteRateDrift = windows
+        return answered
     }
 
     /// Whether a transcript JSON segment is flagged `filtered` (failed the VAD/quality gate),

@@ -64,7 +64,10 @@ enum SummaryPromptBuilder {
              uncertainSilence, localSilence, localPartialSilence, degraded, compromised, unknown,
              /// A healthy remote side that received only exact digital zeros (A-I2 ruling): information,
              /// never a failure claim.
-             onlyDigitalSilence
+             onlyDigitalSilence,
+             /// A `degraded` remote side whose every drift ended at the Stop after its last speech (#333 R5):
+             /// recorded, not announced — no header line, no banner. Never `healthy`: the record says `degraded`.
+             degradedUnannounced
     }
 
     /// `compromised` is split by WHY, because one word cannot cover them honestly: a shortfall is
@@ -81,6 +84,13 @@ enum SummaryPromptBuilder {
     /// permission on any sustained run of zeros, and one it can't confirm or finds denied is reported
     /// as a denial — a content anomaly, so the side would not be healthy. Healthy means granted: the
     /// owner's muted-remote case, one neutral line, never a failure word (A-I2 ruling).
+    ///
+    /// Which zeros (#333 R3): a call app renders exact zeros whenever the other side is quiet, so on a tap that has
+    /// delivered real audio they are silence, not a fault. Significance is judged on the zeros nobody can vouch for
+    /// (`exactZeroUnprovenSeconds`) when the record has them, and on the total when it does not (an older record: its
+    /// wording does not change). With the field, a `healthy` or `degraded` remote side is read too: significant
+    /// unproven zeros are "uncertain" whatever else the side is. Whether the WHOLE side was silence (the neutral line
+    /// above, "not captured" after a denial) is still read off the total.
     static func verdict(_ note: CaptureSideNote, isRemote: Bool) -> SideVerdict {
         switch TrackAccounting.Status(rawValue: note.status) {
         case .healthy:
@@ -88,19 +98,19 @@ enum SummaryPromptBuilder {
                note.deliveredSeconds - zeros < 1 {
                 return .onlyDigitalSilence
             }
-            return .healthy
+            return unprovenSilence(note, isRemote: isRemote) ?? .healthy
         // `idle` is a tap-only verdict (nothing played on this Mac); a mic is never idle.
         case .idle: return isRemote ? .idle : .healthy
         case .neverDelivered: return .notCaptured
-        case .degraded: return .degraded
+        case .degraded:
+            // Before the quiet rule (#333 R5): a drift nobody needs to hear about never hides silence nobody can vouch for.
+            if let silence = unprovenSilence(note, isRemote: isRemote) { return silence }
+            return isRemote && note.driftsUnannounced ? .degradedUnannounced : .degraded
         case nil: return .unknown
         case .compromised:
             if isSignificant(note.expectedSeconds - note.deliveredSeconds, of: note.expectedSeconds) { return .partlyCaptured }
-            if let zeros = clampedZeros(note), isSignificant(zeros, of: note.deliveredSeconds) {
-                if isRemote {
-                    guard note.permissionDenied == true else { return .uncertainSilence }
-                    return zeros < note.deliveredSeconds - 1 ? .permissionDeniedPartialSilence : .permissionDeniedSilence
-                }
+            if let zeros = judgedZeros(note, isRemote: isRemote), isSignificant(zeros, of: note.deliveredSeconds) {
+                if isRemote { return remoteSilence(note) }
                 // "Only digital silence" only when under a second of non-zero audio remains — a mic
                 // that died 5 minutes into an hour DID record the user for those 5 minutes.
                 return note.deliveredSeconds - zeros < 1 ? .localSilence : .localPartialSilence
@@ -109,16 +119,44 @@ enum SummaryPromptBuilder {
         }
     }
 
+    /// A remote side with significant silence: "uncertain" unless the denial was confirmed, and then "not captured"
+    /// only when under a second of real audio remains — read off the total, proven silence included.
+    private static func remoteSilence(_ note: CaptureSideNote) -> SideVerdict {
+        guard note.permissionDenied == true else { return .uncertainSilence }
+        let total = clampedZeros(note) ?? judgedZeros(note, isRemote: true) ?? 0
+        return total < note.deliveredSeconds - 1 ? .permissionDeniedPartialSilence : .permissionDeniedSilence
+    }
+
+    /// The verdict of a `healthy` or `degraded` remote side whose record separates unproven zeros and holds a
+    /// significant amount of them (#333 R3); nil otherwise — and always for a record without the field, where such a
+    /// side says what it said before. The rule is `TrackAccounting.uncertainSilenceSeconds`, which the completion
+    /// notice reads too.
+    private static func unprovenSilence(_ note: CaptureSideNote, isRemote: Bool) -> SideVerdict? {
+        guard isRemote, TrackAccounting.uncertainSilenceSeconds(
+            status: TrackAccounting.Status(rawValue: note.status), deliveredSeconds: note.deliveredSeconds,
+            exactZeroSeconds: note.exactZeroSeconds, unprovenSeconds: note.exactZeroUnprovenSeconds) != nil
+        else { return nil }
+        return remoteSilence(note)
+    }
+
     /// Exact-zero seconds, never more than what was delivered (corrupt counts can say otherwise).
     private static func clampedZeros(_ note: CaptureSideNote) -> Double? {
         guard let zeros = note.exactZeroSeconds else { return nil }
         return note.deliveredSeconds.isFinite ? min(zeros, note.deliveredSeconds) : zeros
     }
 
+    /// The zeros a verdict is judged on, and the number its line states (#333 R3): the remote side's unproven ones
+    /// when the record has them (never more than the total, or than what was delivered), the total otherwise. The
+    /// microphone has no such field: always the total.
+    private static func judgedZeros(_ note: CaptureSideNote, isRemote: Bool) -> Double? {
+        guard isRemote, let unproven = note.exactZeroUnprovenSeconds else { return clampedZeros(note) }
+        let ceiling = clampedZeros(note) ?? note.deliveredSeconds
+        return ceiling.isFinite ? min(unproven, ceiling) : unproven
+    }
+
     /// The same bar `TrackAccounting` uses for a coverage deficit: ≥ 15 s AND ≥ 10 % of the whole.
     private static func isSignificant(_ part: Double, of whole: Double) -> Bool {
-        part.isFinite && whole.isFinite && whole > 0
-            && part >= TrackAccounting.minimumDeficitSeconds && part / whole >= TrackAccounting.deficitRatio
+        TrackAccounting.isSignificant(part, of: whole)
     }
 
     private struct CaptureHeaderLine {
@@ -161,20 +199,27 @@ enum SummaryPromptBuilder {
         // lower bounds (final review R-M1, #295).
         let atLeast = note.coverageIncomplete ? "at least " : ""
         let amounts = "(\(atLeast)\(delivered) s delivered of \(atLeast)\(expected) s expected)"
-        let zeros = clampedZeros(note)
+        // A line that IS a verdict on silence (uncertain, the denial's, the microphone's) states the number it was
+        // judged on (#333 R3).
+        let zeros = judgedZeros(note, isRemote: isRemote)
         // A figure summed over measured and unmeasured sessions is only a lower bound (round 3 item 5).
-        let silence = (note.exactZeroIsLowerBound ? "at least " : "") + (zeros.map(seconds) ?? "?")
+        let atLeastZeros = note.exactZeroIsLowerBound ? "at least " : ""
+        let silence = atLeastZeros + (zeros.map(seconds) ?? "?")
         // What WAS delivered may itself be digital silence; "partly captured" or "compromised" must
-        // not hide how much.
-        let silenceSuffix = (zeros ?? 0).rounded() >= 1 && (zeros ?? 0).isFinite
-            ? "; \(silence) s of it was digital silence" : ""
+        // not hide how much. This is a fact about the record, so it is the TOTAL — and, when the record separates
+        // them, how much of it nobody can vouch for (review round 1: the unproven figure alone understated it).
+        let total = clampedZeros(note)
+        let unconfirmed = isRemote && note.exactZeroUnprovenSeconds != nil
+            ? ", \(zeros.map(seconds) ?? "?") s of which could not be confirmed" : ""
+        let silenceSuffix = (total ?? 0).rounded() >= 1 && (total ?? 0).isFinite
+            ? "; \(atLeastZeros)\(total.map(seconds) ?? "?") s of it was digital silence\(unconfirmed)" : ""
         // A confirmed denial on a side that was still (partly) captured is part of why.
         let permission = isRemote && note.permissionDenied == true
             ? "; system audio permission was not granted for part of the call" : ""
         let anomalies = note.anomalyCount.map { "\($0) capture \($0 == 1 ? "anomaly" : "anomalies") recorded" }
         let text: String
         switch verdict(note, isRemote: isRemote) {
-        case .healthy: return nil
+        case .healthy, .degradedUnannounced: return nil
         case .idle: return CaptureHeaderLine(text: "\(label): nothing was playing on this Mac (no remote side)", warrantsBanner: false)
         case .notCaptured: text = "\(label): not captured \(amounts)"
         case .partlyCaptured:
@@ -185,8 +230,11 @@ enum SummaryPromptBuilder {
             text = "\(label): not captured — system audio permission was not granted; \(silence) s of digital silence were recorded instead"
         case .permissionDeniedPartialSilence:
             // Not every silent second is attributed to the denial (R2b item 7, owner-level wording):
-            // some may be the other side being quiet.
-            text = "\(label): partly captured — \(silence) s of \(delivered) s was digital silence; system audio permission was not granted for part of the call"
+            // some may be the other side being quiet. When the record separates them (#333), the line says the whole
+            // silence it holds, then the part the denial can answer for — the unproven number alone understated it.
+            let afterLoss = note.exactZeroUnprovenSeconds != nil ? ", \(zeros.map(seconds) ?? "?") s of it after the permission was lost" : ""
+            let all = atLeastZeros + ((total ?? zeros).map(seconds) ?? "?")
+            text = "\(label): partly captured — \(all) s of \(delivered) s was digital silence\(afterLoss); system audio permission was not granted for part of the call"
         case .onlyDigitalSilence:
             return CaptureHeaderLine(text: "\(label): only digital silence was received (the other side may have been muted)", warrantsBanner: false)
         case .uncertainSilence:
@@ -198,7 +246,9 @@ enum SummaryPromptBuilder {
         case .degraded:
             // A rate drift healed in seconds (#308): stated, with how long, never as a compromised side.
             let span = note.wrongRateSeconds.map { "up to \(seconds($0)) s" } ?? "a few seconds"
-            text = "\(label): captured; \(span) recorded at the wrong rate before Parley recovered (\(anomalies ?? "anomaly count not recorded"))"
+            // A drift the Stop cut short did not heal (#333 R4): the recording ended, Parley recovered nothing.
+            let until = note.driftEndedByStop ? "the recording stopped" : "Parley recovered"
+            text = "\(label): captured; \(span) recorded at the wrong rate before \(until) (\(anomalies ?? "anomaly count not recorded"))"
         case .compromised:
             text = "\(label): captured, but compromised (\(anomalies ?? "anomaly count not recorded"))\(silenceSuffix)\(permission)"
         case .unknown: text = "\(label): capture status unknown (\(atLeast)\(delivered) s of \(atLeast)\(expected) s)"

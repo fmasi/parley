@@ -318,7 +318,12 @@ public enum MeetingSummarizer {
             anomalyCount: side["content_anomaly_count"] as? Int,
             exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true,
             coverageIncomplete: side["coverage_incomplete"] as? Bool == true,
-            wrongRateSeconds: wrongRateSeconds(side["rate_drift"])
+            wrongRateSeconds: wrongRateSeconds(side["rate_drift"]),
+            // The tap's field only (#333): the microphone's exact-zero wording never reads it.
+            exactZeroUnprovenSeconds: isRemote ? validSeconds(side["exact_zero_unproven_seconds"]) : nil,
+            driftEndedByStop: (side["rate_drift"] as? [[String: Any]] ?? [])
+                .contains { $0["ended_by"] as? String == RateDriftWindow.endedByStop },
+            driftsUnannounced: RateDriftWindow.unannounced(inSide: side) > 0
         )
     }
 
@@ -329,10 +334,7 @@ public enum MeetingSummarizer {
     }
 
     /// A seconds value a recording could have: finite, ≥ 0, under a century. nil otherwise.
-    private static func validSeconds(_ raw: Any?) -> Double? {
-        guard let value = raw as? Double, value.isFinite, value >= 0, value < 3_153_600_000 else { return nil }
-        return value
-    }
+    private static func validSeconds(_ raw: Any?) -> Double? { TrackAccounting.validSeconds(raw) }
 
     /// Determine the canonical recording-start date for the summary (#49).
     ///
