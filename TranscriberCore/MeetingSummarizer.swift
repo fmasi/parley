@@ -317,8 +317,15 @@ public enum MeetingSummarizer {
             // blame one side for the other's faults.
             anomalyCount: side["content_anomaly_count"] as? Int,
             exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true,
-            coverageIncomplete: side["coverage_incomplete"] as? Bool == true
+            coverageIncomplete: side["coverage_incomplete"] as? Bool == true,
+            wrongRateSeconds: wrongRateSeconds(side["rate_drift"])
         )
+    }
+
+    /// The sum of the `affected_seconds` a side's `rate_drift` windows state (#308); nil when none states one.
+    private static func wrongRateSeconds(_ raw: Any?) -> Double? {
+        let values = (raw as? [[String: Any]] ?? []).compactMap { validSeconds($0["affected_seconds"]) }
+        return values.isEmpty ? nil : values.reduce(0, +)
     }
 
     /// A seconds value a recording could have: finite, ≥ 0, under a century. nil otherwise.

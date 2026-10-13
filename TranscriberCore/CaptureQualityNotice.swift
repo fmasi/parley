@@ -23,7 +23,7 @@ public enum CaptureQualityNotice {
     private static let couldNotCheck = "Parley couldn't re-read the transcript to check it"
 
     /// Notification title for a completed transcription, with precedence unreadable > no speech > a side
-    /// not captured > a side partly captured > capture anomalies > processing problems > echo marked >
+    /// not captured > a side partly captured > a side briefly affected > capture anomalies > processing problems > echo marked >
     /// complete (§7.3).
     ///
     /// A transcript that could not be re-read leads: none of the others can be known, and
@@ -51,6 +51,8 @@ public enum CaptureQualityNotice {
         case (.neverDelivered?, _): return "Transcription Complete — the other side was not captured"
         case (_, .neverDelivered?): return "Transcription Complete — your microphone was not captured"
         case (.compromised?, _), (_, .compromised?): return "Transcription Complete — capture compromised"
+        // A drift healed in seconds (#308): said, but not as a compromised capture.
+        case (.degraded?, _), (_, .degraded?): return "Transcription Complete — brief capture glitch"
         default: break
         }
         if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
@@ -87,6 +89,7 @@ public enum CaptureQualityNotice {
             switch status {
             case .neverDelivered?: parts.append("\(name) not captured")
             case .compromised?: parts.append("\(name) partly captured")
+            case .degraded?: parts.append("\(name) briefly affected")
             default: break
             }
         }
@@ -100,11 +103,13 @@ public enum CaptureQualityNotice {
         return "\(fileName) — " + parts.joined(separator: "; ")
     }
 
-    /// A side's verdict worth saying: `neverDelivered` or `compromised`; nil otherwise (absent, unknown, idle, healthy).
+    /// A side's verdict worth saying: `neverDelivered`, `compromised` or `degraded`; nil otherwise (absent, unknown, idle,
+    /// healthy).
     private static func side(_ status: String?) -> TrackAccounting.Status? {
         switch status.flatMap(TrackAccounting.Status.init(rawValue:)) {
         case .neverDelivered?: return .neverDelivered
         case .compromised?: return .compromised
+        case .degraded?: return .degraded
         default: return nil
         }
     }

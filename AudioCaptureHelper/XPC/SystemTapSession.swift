@@ -866,8 +866,8 @@ final class SystemTapSession {
 
         // ONE lock acquisition for the WHOLE decision — the monitor's accumulate/judge/latch must
         // advance atomically, or a teardown landing mid-decision reopens the exact race this closes.
-        let verdict = stateLock.sync {
-            driftMonitor.record(frames: frames, declaredRate: declaredRate, hostNanos: hostNanos)
+        let (verdict, onsetWithin) = stateLock.sync {
+            (driftMonitor.record(frames: frames, declaredRate: declaredRate, hostNanos: hostNanos), driftMonitor.onsetWithinSeconds)
         }
 
         guard case .drift(let effectiveRate, let ratio) = verdict else { return }
@@ -886,6 +886,9 @@ final class SystemTapSession {
             "reason": "rate drift — output device changed rate under the tap",
             "declared": "\(Int(declaredRate))",
             "actual": "\(Int(effectiveRate))",
+            // How long before this event the drift can have begun, at the earliest (#308): the record's
+            // wrong-rate window starts there and ends at the rebuild's first frames.
+            "onset_within_seconds": onsetWithin.map { String(format: "%.1f", $0) } ?? "unknown",
         ])
 
         // Remediate, don't just narrate. Detection alone cost a real 24-minute meeting: the watchdog
@@ -913,7 +916,8 @@ final class SystemTapSession {
         )
         onEvent?(.restartInPlace, .warning, [
             "source": "system-tap",
-            "reason": "rate drift remediation",
+            // The record pairs this rebuild with its drift by this reason (#308).
+            "reason": CaptureDiagnostics.driftRemediationReason,
             "attempt": "\(attempt)",
         ])
         // Hops to configQueue internally — never blocks the audio queue we are on.
