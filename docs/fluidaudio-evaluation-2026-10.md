@@ -68,10 +68,9 @@ FluidAudio one, and has no measurement yet.
 | Cohere Transcribe (beta) | 14 incl. ja/zh/ko, language passed explicitly | enc 1.8 GB, 35 s per call | – | Heavy for an M1 Air; a 35 s window means more stitching. Low priority |
 | Streaming: EOU, Nemotron (EN + multilingual, `prompt_id` language hint, ~40 languages, local-path only), Unified streaming | – | – | – | Rejected by the no-streaming decision (§3.4) |
 
-Notes on the existing path that the bump changes (flagged for the device test in #337):
+Notes on the existing path that the bump changes (flagged for the device test in #337; the seam fixes #708 and #759 are already in 0.15.5):
 - 0.15.7 makes the v3 long-form path default to **no-mel, silence-aligned window starts** (#869);
-  0.15.6 adds a **seam-gap repair pass** for content dropped at chunk merges (#761), and 0.15.5
-  removes seam artifacts (#708, #759). Parley feeds up-to-30-minute files, so these are exactly the
+  0.15.6 adds a **seam-gap repair pass** for content dropped at chunk merges (#761). Parley feeds up-to-30-minute files, so these are exactly the
   paths it exercises. Compare word counts on a long chunk before and after.
 - 0.15.8: blank-decode recovery ladder (#910), punctuation ids from the loaded vocabulary (#906).
 - int8-linear encoder option for v3 (#872, issue #760: the 6-bit LUT "flips tokens on some
@@ -92,7 +91,7 @@ Notes on the existing path that the bump changes (flagged for the device test in
 ### 3.3 Custom vocabulary (CTC keyword spotting)
 
 - Works on v3 through a **separate CTC encoder** (Parakeet CTC 0.6B, ~64 MB extra memory,
-  ~26× RTFx for the rescoring pass in their docs; CTC head variants only exist for the 110M model).
+  ~26× real-time for the whole pipeline in their table; CTC head variants only exist for the 110M model).
   Rescoring runs on the transcript plus token timings, so it fits the offline chunk path, and
   FluidAudio recommends file-based use for best accuracy.
 - Reported 99.4 % dictionary recall. The over-firing knobs (per-term thresholds, taper, disabling
@@ -117,9 +116,9 @@ and is "fragile to clustering". That agrees with the 2026 decision (chunked offl
 
 | Component | Status | Fit |
 |---|---|---|
-| Offline pyannote community-1 + WeSpeaker + VBx (in use) | 0.16 fixed the inverted AHC threshold (`sqrt(2-2t)`), added constrained assignment; deterministic VBx via K-Means `n_init` (#735); `computeUnits` honoured (#743); zero-vote spans re-embedded (#751); speaker caps held against both cluster censuses (#891); cancellation propagated (#886); artifacts **pinned to an immutable model revision** (#939) | Keep. Determinism and pinned revisions help the provenance story. #337 covers the threshold change |
-| `OfflineDiarizerManager.prepare()` / `cluster()` split (#789) | Segmentation + embeddings cacheable, clustering rerun | **Re-detect** (#67): changing the stated count should only rerun clustering (rec. 4) |
-| `progressHandler` on `performCompleteDiarization` (#753, `progressCallback` in the docs) | Chunks processed / total | **#203** (re-detect shows only a spinner) and a long-call progress bar |
+| Offline pyannote community-1 + WeSpeaker + VBx (in use) | new since 0.15.5: 0.16 fixed the inverted AHC threshold (`sqrt(2-2t)`) and added constrained assignment; 0.15.7 holds speaker caps against both cluster censuses (#891) and propagates cancellation (#886); 0.15.8 **pins the artifacts to an immutable model revision** (#939). Already in 0.15.5: deterministic VBx via K-Means `n_init` (#735), `computeUnits` honoured (#743), zero-vote spans re-embedded (#751) | Keep. Determinism and pinned revisions help the provenance story. #337 covers the threshold change |
+| `OfflineDiarizerManager.prepare()` / `cluster()` split (#789, 0.15.6) | Segmentation + embeddings cacheable, clustering rerun | **Re-detect** (#67): changing the stated count should only rerun clustering (rec. 4) |
+| `progressHandler` on `performCompleteDiarization` (#753, already in 0.15.5; `progressCallback` in the docs) | Chunks processed / total | **#203** (re-detect shows only a spinner) and a long-call progress bar |
 | Nemotron 3 Diarization (0.17.0, 0.17.4) | up to 8 speakers, arrival-ordered, `offline` preset "highest accuracy" but **GPU-only** (ANE compiler limit), model weights **gated until NVIDIA's public release** at the time of the doc, licence OpenMDW-1.1 | Interesting only as an accuracy challenger on AMI; GPU use is a battery cost on an M1 Air. Benchmark later, not now |
 | Sortformer (4 speakers), LS-EEND (10) | streaming | Rejected (§3.4) |
 
@@ -136,9 +135,8 @@ this review adds the facts to #26.
 
 ### 3.7 VAD
 
-Silero v6.2.1 artifact (0.15.5, #734); FSMN-VAD backend beta (0.15.6); `VadManager` segmentation
-docs. Parley uses Silero as a quality signal. Nothing here changes a result; the v6.2.1 artifact
-arrives with the bump, so VadSpeechMap output may shift slightly (verify with the existing VAD tests).
+Silero v6.2.1 artifact (#734, already in 0.15.5); FSMN-VAD backend beta (0.15.6); `VadManager` segmentation
+docs. Parley uses Silero as a quality signal. Nothing here changes a result.
 
 ### 3.8 Enhancement: LocalVQE (AEC + noise suppression + dereverberation)
 
