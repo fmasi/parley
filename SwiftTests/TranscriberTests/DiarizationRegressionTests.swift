@@ -98,11 +98,16 @@ import Testing
         let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
         guard try await TestModels.ensureDiarization() else { return }
 
-        let broken = FluidAudioDiarizer(excludeOverlap: false)
+        // FluidAudio 0.16 (#802) fixed an inverted clustering threshold: the stock 0.6 used to cut
+        // the dendrogram at an effective 0.894 and now cuts at 0.6. At 0.6 the blended overlap
+        // embeddings still separate on this file (4 vs 4), so the failure mode only shows at the
+        // old effective cut. Measured on 0.17.7: thr 0.6-0.8 -> 4/4; thr 0.894 -> 4 (exclude) vs 1.
+        let legacyCut = 0.894
+        let broken = FluidAudioDiarizer(clusteringThreshold: legacyCut, excludeOverlap: false)
         let brokenResult = try await broken.diarize(audioPath: fixture, numSpeakers: nil)
         let brokenCount = Set(brokenResult.segments.map(\.speaker)).count
 
-        let correct = FluidAudioDiarizer(excludeOverlap: true)
+        let correct = FluidAudioDiarizer(clusteringThreshold: legacyCut, excludeOverlap: true)
         let correctResult = try await correct.diarize(audioPath: fixture, numSpeakers: nil)
         let correctCount = Set(correctResult.segments.map(\.speaker)).count
 
