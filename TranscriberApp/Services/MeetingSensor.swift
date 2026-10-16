@@ -237,7 +237,7 @@ final class MeetingSensor {
             if status == noErr {
                 listenedDevices.insert(device)
             } else {
-                logOnce(.device, "device listener add failed: \(status)")
+                logOnce(.device, "device listener add failed", status: status)
             }
         }
         for device in plan.remove {
@@ -266,7 +266,7 @@ final class MeetingSensor {
             if status == noErr {
                 listenedProcesses.insert(process)
             } else {
-                logOnce(.process, "process listener add failed: \(status)")
+                logOnce(.process, "process listener add failed", status: status)
             }
         }
         for process in plan.remove {
@@ -289,9 +289,9 @@ final class MeetingSensor {
         }
     }
 
-    private func logOnce(_ kind: AddFailure, _ message: String) {
+    private func logOnce(_ kind: AddFailure, _ what: StaticString, status: OSStatus) {
         guard loggedAddFailures.insert(kind).inserted else { return }
-        Logger.audio.error("Meeting sensor: \(message, privacy: .public)")
+        Logger.audio.error("Meeting sensor: \(what, privacy: .public) (OSStatus \(status, privacy: .public))")
     }
 
     /// Unregisters every listener held on `devices`, `processes` and the system object. MUST be reached
